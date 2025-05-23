@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"time"
 
@@ -117,23 +119,57 @@ func main() {
 		"git remote remove origin || true && " +
 		"git checkout -b main"
 	request := model.RolloutRequest{
-		ID:              "123",
-		TrajectoryID:    "test-trajectory",
-		ImageID:         "ubuntu:latest",
-		Commands:        []string{"echo", "Hello, World!"},
-		User:            "root",
-		WorkingDir:      "/testbed",
-		NetworkDisabled: false,
-		Timeout:         5 * time.Second,
+		ID:               "123",
+		TrajectoryID:     "test-trajectory",
+		ImageID:          "ubuntu:latest",
+		Command:          "apt-get -y update && apt-get install -y git",
+		User:             "root",
+		WorkingDir:       "/testbed",
+		NetworkDisabled:  false,
+		TimeoutInSeconds: 30,
 	}
 
 	log.Println("Sending request to queue...")
 	agent.PutRequestToQueue(request)
 	log.Println("Request sent to queue, waiting for response...")
 
-	response := agent.GetResponseFromQueue()
-	log.Println("Response received from queue")
-	fmt.Printf("Received response: %+v\n", response)
+	go func() {
+		for {
+			response := agent.GetResponseFromQueue()
+			writeResponseToFile(response)
+		}
+	}()
+	// log.Println("Response received from queue")
+	// fmt.Printf("Received response: %+v\n", response)
+	// write response to a file
+	time.Sleep(30 * time.Second) // Simulate some delay before sending the next request
+	request2 := model.RolloutRequest{
+		ID:               "1234",
+		TrajectoryID:     "test-trajectory",
+		ImageID:          "ubuntu:latest",
+		Command:          "ls -la",
+		User:             "root",
+		WorkingDir:       "/testbed",
+		NetworkDisabled:  false,
+		TimeoutInSeconds: 5,
+	}
+	agent.PutRequestToQueue(request2)
 
 	select {} // Block indefinitely
+}
+
+func writeResponseToFile(response model.RolloutResponse) {
+	responseJSON, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		log.Fatalf("Error converting response to JSON: %v", err)
+	}
+
+	// Write the response to a file
+	err = ioutil.WriteFile(fmt.Sprintf("response-%s.json", response.ID), responseJSON, 0644)
+	if err != nil {
+		log.Fatalf("Error writing response to file: %v", err)
+	}
+
+	log.Printf("Response saved to response.json: ID=%s, TrajectoryID=%s, ExitCode=%d",
+		response.ID, response.TrajectoryID, response.ExitCode)
 }
