@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -134,58 +135,54 @@ func (m *Manager) Start() {
 					m.trajectoryInstanceMap[req.TrajectoryID] = instanceDetails
 				}
 
-				// if req.RequestType == model.REQUEST_TYPE_GET_PATCH {
-				// 	m.logger.Info("Getting patch", zap.String("TrajectoryID", req.TrajectoryID))
-				// 	patch, returnCode, err := m.GetPatch(&instanceDetails)
-				// 	if err != nil {
-				// 		m.logger.Error("Failed to get patch", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
-				// 	}
-				// 	m.responseQueue <- model.RolloutResponse{
-				// 		ID:           req.ID,
-				// 		TrajectoryID: req.TrajectoryID,
-				// 		Patch:        patch,
-				// 		Error:        buildErrorResponseMessage(&req, err),
-				// 		ReturnReason: returnCode,
-				// 	}
-				// 	m.CleanupTrajectory(req.TrajectoryID)
-				// 	return // This is the end of a single trajectory request
-				// }
-
-				if req.RequestType == model.REQUEST_TYPE_GET_OUTPUT {
-					m.logger.Info("Getting output", zap.String("TrajectoryID", req.TrajectoryID))
-					output, err := m.GetOutput(&instanceDetails)
-					if err != nil {
-						m.logger.Error("Failed to get output", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
-						m.responseQueue <- model.RolloutResponse{
-							ID:           req.ID,
-							TrajectoryID: req.TrajectoryID,
-							Error:        buildErrorResponseMessage(&req, err),
-						}
-						return
-					}
+				if req.RequestType == model.REQUEST_TYPE_GET_PATCH {
+					m.logger.Info("Getting patch", zap.String("TrajectoryID", req.TrajectoryID))
+					patch := m.GetPatch(&instanceDetails)
 					m.responseQueue <- model.RolloutResponse{
 						ID:           req.ID,
 						TrajectoryID: req.TrajectoryID,
-						Output:       output,
+						Patch:        patch,
 					}
+					m.CleanupTrajectory(req.TrajectoryID)
+					return // This is the end of a single trajectory request
+				}
+
+				if req.RequestType == model.REQUEST_TYPE_GET_OUTPUT {
+					m.handlGetOutput(&instanceDetails, req)
 					return
 				}
 
 				// Run the command on the container (works for both new and existing containers)
 				err := m.sessions[instanceDetails.ContainerID].Execute(req.Command, req.TrajectoryID)
-				// m.responseQueue <- model.RolloutResponse{
-				// 	ID:           req.ID,
-				// 	TrajectoryID: req.TrajectoryID,
-				// 	Output:       result,
-				// 	Error:        buildErrorResponseMessage(&req, err),
-				// 	ExitCode:     returnCode,
-				// }
+				time.Sleep(time.Duration(req.TimeoutInSeconds) * time.Second)
+				m.handlGetOutput(&instanceDetails, req)
+
 				if err != nil {
 					m.logger.Error("Error running command", zap.Error(err))
 				}
 			}(request)
 		}
 	}()
+}
+
+func (m *Manager) handlGetOutput(instanceDetails *InstanceDetails, req model.RolloutRequest) {
+	m.logger.Info("Getting output", zap.String("TrajectoryID", req.TrajectoryID))
+	output, _, err := m.GetOutput(instanceDetails)
+	if err != nil {
+		m.logger.Error("Failed to get output", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
+		m.responseQueue <- model.RolloutResponse{
+			ID:           req.ID,
+			TrajectoryID: req.TrajectoryID,
+			Error:        buildErrorResponseMessage(&req, err),
+		}
+		return
+	}
+	m.responseQueue <- model.RolloutResponse{
+		ID:           req.ID,
+		TrajectoryID: req.TrajectoryID,
+		Output:       output,
+	}
+	return
 }
 
 func (m *Manager) StartContainer(ctx context.Context, instanceDetails *InstanceDetails) (string, error) {
@@ -302,11 +299,11 @@ func (s *ContainerShell) Execute(cmd, trajectoryID string) error {
 	return nil
 }
 
-func (m *Manager) GetOutput(instanceDetails *InstanceDetails) (string, error) {
+func (m *Manager) GetOutput(instanceDetails *InstanceDetails) (string, bool, error) {
 	logFilePath := getInstanceLogFilePath(instanceDetails)
 	output, err := os.ReadFile(logFilePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to read output file: %w", err)
+		return "", true, fmt.Errorf("failed to read output file: %w", err)
 	}
 	cleanOutput := CleanUseEmulator(output)
 	marker := m.sessions[instanceDetails.ContainerID].Marker
@@ -315,14 +312,21 @@ func (m *Manager) GetOutput(instanceDetails *InstanceDetails) (string, error) {
 	if lastCmdStartIndex != -1 {
 		cleanOutput = cleanOutput[lastCmdStartIndex+len(fmt.Sprintf("; echo %s", marker))+1:]
 	}
-	// Remove the marker command from the output
-	cleanOutput = strings.Replace(cleanOutput, fmt.Sprintf("%s\n", marker), "", 1)
-	return cleanOutput, nil
+	// Remove the markers from the output
+	commandFinished := strings.Contains(cleanOutput, marker)
+	cleanOutput = strings.ReplaceAll(cleanOutput, fmt.Sprintf("%s\n", marker), "")
+	return cleanOutput, commandFinished, nil
 }
 
-func (m *Manager) GetPatch(instanceDetails *InstanceDetails) error {
-	command := fmt.Sprintf("bash -c 'git diff %s'", instanceDetails.BaseCommit)
-	return m.sessions[instanceDetails.ContainerID].Execute(command, instanceDetails.ContainerName)
+func (m *Manager) GetPatch(instanceDetails *InstanceDetails) string {
+	command := fmt.Sprintf("bash -c 'git --no-pager diff %s'", instanceDetails.BaseCommit)
+	m.sessions[instanceDetails.ContainerID].Execute(command, instanceDetails.ContainerName)
+	time.Sleep(3 * time.Second)
+	patch, _, err := m.GetOutput(instanceDetails)
+	if err != nil {
+		return "Error getting patch, we encounter an error: " + err.Error()
+	}
+	return patch
 }
 
 func (m *Manager) CleanupTrajectory(trajectoryID string) error {

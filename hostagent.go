@@ -119,14 +119,14 @@ func main() {
 		"git remote remove origin || true && " +
 		"git checkout -b main"
 	request := model.RolloutRequest{
-		ID:               "123",
+		ID:               "1234",
 		TrajectoryID:     "test-trajectory",
 		ImageID:          "ubuntu:latest",
 		Command:          "apt-get -y update && apt-get -y install git",
 		User:             "root",
 		WorkingDir:       "/testbed",
 		NetworkDisabled:  false,
-		TimeoutInSeconds: 5,
+		TimeoutInSeconds: 20,
 		RequestType:      model.REQUEST_TYPE_RUN_COMMAND,
 	}
 
@@ -140,15 +140,66 @@ func main() {
 			writeResponseToFile(response)
 		}
 	}()
+	time.Sleep(30 * time.Second)
+	request = model.RolloutRequest{
+		ID:               "1235",
+		TrajectoryID:     "test-trajectory",
+		ImageID:          "ubuntu:latest",
+		Command:          "ls -la --color",
+		User:             "root",
+		WorkingDir:       "/testbed",
+		NetworkDisabled:  false,
+		TimeoutInSeconds: 5,
+		RequestType:      model.REQUEST_TYPE_RUN_COMMAND,
+	}
+	agent.PutRequestToQueue(request)
+
+	time.Sleep(10 * time.Second)
+	request = model.RolloutRequest{
+		ID:               "1236",
+		TrajectoryID:     "test-trajectory",
+		ImageID:          "ubuntu:latest",
+		Command:          "git clone https://github.com/nginx/nginx.git && cd nginx",
+		User:             "root",
+		WorkingDir:       "/testbed",
+		NetworkDisabled:  false,
+		TimeoutInSeconds: 5,
+		RequestType:      model.REQUEST_TYPE_RUN_COMMAND,
+	}
+	agent.PutRequestToQueue(request)
+
+	time.Sleep(5 * time.Second)
+	request = model.RolloutRequest{
+		ID:               "1237",
+		TrajectoryID:     "test-trajectory",
+		ImageID:          "ubuntu:latest",
+		Command:          "rm README.md",
+		User:             "root",
+		WorkingDir:       "/testbed",
+		NetworkDisabled:  false,
+		TimeoutInSeconds: 5,
+		RequestType:      model.REQUEST_TYPE_RUN_COMMAND,
+	}
+	agent.PutRequestToQueue(request)
+
+	time.Sleep(5 * time.Second)
+	request = model.RolloutRequest{
+		ID:               "1238",
+		TrajectoryID:     "test-trajectory",
+		ImageID:          "ubuntu:latest",
+		TimeoutInSeconds: 5,
+		RequestType:      model.REQUEST_TYPE_GET_PATCH,
+	}
+	agent.PutRequestToQueue(request)
+
 	// log.Println("Response received from queue")
 	// fmt.Printf("Received response: %+v\n", response)
 	// write response to a file
 	time.Sleep(5 * time.Second) // Simulate some delay before sending the next request
 	request2 := model.RolloutRequest{
-		ID:               "1234",
-		TrajectoryID:     "test-trajectory",
-		TimeoutInSeconds: 5,
-		RequestType:      model.REQUEST_TYPE_GET_OUTPUT,
+		ID:           "1239",
+		TrajectoryID: "test-trajectory",
+		RequestType:  model.REQUEST_TYPE_GET_OUTPUT,
 	}
 	agent.PutRequestToQueue(request2)
 
