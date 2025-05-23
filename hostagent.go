@@ -122,11 +122,12 @@ func main() {
 		ID:               "123",
 		TrajectoryID:     "test-trajectory",
 		ImageID:          "ubuntu:latest",
-		Command:          "apt-get -y update && apt-get install -y git",
+		Command:          "apt-get -y update && apt-get -y install git",
 		User:             "root",
 		WorkingDir:       "/testbed",
 		NetworkDisabled:  false,
-		TimeoutInSeconds: 30,
+		TimeoutInSeconds: 5,
+		RequestType:      model.REQUEST_TYPE_RUN_COMMAND,
 	}
 
 	log.Println("Sending request to queue...")
@@ -142,16 +143,12 @@ func main() {
 	// log.Println("Response received from queue")
 	// fmt.Printf("Received response: %+v\n", response)
 	// write response to a file
-	time.Sleep(30 * time.Second) // Simulate some delay before sending the next request
+	time.Sleep(5 * time.Second) // Simulate some delay before sending the next request
 	request2 := model.RolloutRequest{
 		ID:               "1234",
 		TrajectoryID:     "test-trajectory",
-		ImageID:          "ubuntu:latest",
-		Command:          "ls -la",
-		User:             "root",
-		WorkingDir:       "/testbed",
-		NetworkDisabled:  false,
 		TimeoutInSeconds: 5,
+		RequestType:      model.REQUEST_TYPE_GET_OUTPUT,
 	}
 	agent.PutRequestToQueue(request2)
 

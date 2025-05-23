@@ -7,8 +7,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strings"
-	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -16,7 +16,6 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/google/uuid"
 	"github.com/multiturn-rl-hostagent/model"
-	"github.com/multiturn-rl-hostagent/utils"
 	"go.uber.org/zap"
 )
 
@@ -48,6 +47,7 @@ type ContainerShell struct {
 	conn   net.Conn
 	reader *bufio.Reader
 	writer io.Writer
+	Marker string
 }
 
 // Manager handles Docker container operations
@@ -86,6 +86,7 @@ func buildInstanceDetails(request *model.RolloutRequest) InstanceDetails {
 	return InstanceDetails{
 		ImageID:                 request.ImageID,
 		User:                    request.User,
+		ContainerName:           request.TrajectoryID,
 		WorkingDir:              request.WorkingDir,
 		NetworkDisabled:         request.NetworkDisabled,
 		BaseCommit:              request.BaseCommit,
@@ -133,33 +134,52 @@ func (m *Manager) Start() {
 					m.trajectoryInstanceMap[req.TrajectoryID] = instanceDetails
 				}
 
-				if req.RequestType == model.REQUEST_TYPE_GET_PATCH {
-					m.logger.Info("Getting patch", zap.String("TrajectoryID", req.TrajectoryID))
-					patch, returnCode, err := m.GetPatch(&instanceDetails)
+				// if req.RequestType == model.REQUEST_TYPE_GET_PATCH {
+				// 	m.logger.Info("Getting patch", zap.String("TrajectoryID", req.TrajectoryID))
+				// 	patch, returnCode, err := m.GetPatch(&instanceDetails)
+				// 	if err != nil {
+				// 		m.logger.Error("Failed to get patch", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
+				// 	}
+				// 	m.responseQueue <- model.RolloutResponse{
+				// 		ID:           req.ID,
+				// 		TrajectoryID: req.TrajectoryID,
+				// 		Patch:        patch,
+				// 		Error:        buildErrorResponseMessage(&req, err),
+				// 		ReturnReason: returnCode,
+				// 	}
+				// 	m.CleanupTrajectory(req.TrajectoryID)
+				// 	return // This is the end of a single trajectory request
+				// }
+
+				if req.RequestType == model.REQUEST_TYPE_GET_OUTPUT {
+					m.logger.Info("Getting output", zap.String("TrajectoryID", req.TrajectoryID))
+					output, err := m.GetOutput(&instanceDetails)
 					if err != nil {
-						m.logger.Error("Failed to get patch", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
+						m.logger.Error("Failed to get output", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
+						m.responseQueue <- model.RolloutResponse{
+							ID:           req.ID,
+							TrajectoryID: req.TrajectoryID,
+							Error:        buildErrorResponseMessage(&req, err),
+						}
+						return
 					}
 					m.responseQueue <- model.RolloutResponse{
 						ID:           req.ID,
 						TrajectoryID: req.TrajectoryID,
-						Patch:        patch,
-						Error:        buildErrorResponseMessage(&req, err),
-						ReturnReason: returnCode,
+						Output:       output,
 					}
-					m.CleanupTrajectory(req.TrajectoryID)
-					return // This is the end of a single trajectory request
+					return
 				}
 
 				// Run the command on the container (works for both new and existing containers)
-				result, returnCode, err := m.sessions[instanceDetails.ContainerID].Execute(req.Command, time.Duration(req.TimeoutInSeconds)*time.Second)
-				result = utils.StripAnsi(result)
-				m.responseQueue <- model.RolloutResponse{
-					ID:           req.ID,
-					TrajectoryID: req.TrajectoryID,
-					Output:       result,
-					Error:        buildErrorResponseMessage(&req, err),
-					ExitCode:     returnCode,
-				}
+				err := m.sessions[instanceDetails.ContainerID].Execute(req.Command, req.TrajectoryID)
+				// m.responseQueue <- model.RolloutResponse{
+				// 	ID:           req.ID,
+				// 	TrajectoryID: req.TrajectoryID,
+				// 	Output:       result,
+				// 	Error:        buildErrorResponseMessage(&req, err),
+				// 	ExitCode:     returnCode,
+				// }
 				if err != nil {
 					m.logger.Error("Error running command", zap.Error(err))
 				}
@@ -221,8 +241,20 @@ func (m *Manager) StartContainer(ctx context.Context, instanceDetails *InstanceD
 		conn:   attachResp.Conn,
 		reader: bufio.NewReader(attachResp.Reader),
 		writer: attachResp.Conn,
+		Marker: fmt.Sprintf("__CMD_DONE__%s__", uuid.New().String()),
 	}
 	instanceDetails.ContainerID = resp.ID
+	f, err := os.Create(getInstanceLogFilePath(instanceDetails))
+	go func() {
+		defer func() {
+			f.Close()
+			fmt.Printf("Closed file for container %s\n", instanceDetails.ContainerID)
+		}()
+		_, err := io.Copy(f, attachResp.Reader)
+		if err != nil {
+			log.Printf("Error copying output: %v\n", err)
+		}
+	}()
 
 	m.sessions[instanceDetails.ContainerID] = session
 	m.logger.Info("Container started and shell session attached", zap.String("containerID", resp.ID))
@@ -230,68 +262,67 @@ func (m *Manager) StartContainer(ctx context.Context, instanceDetails *InstanceD
 	return resp.ID, nil
 }
 
-func (s *ContainerShell) ReadContainerOutput(marker string, timeout time.Duration) (string, int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	result := &strings.Builder{}
-	readDone := make(chan error, 1)
-
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := s.reader.Read(buf)
-			if err != nil {
-				readDone <- err
-				return
-			}
-			result.Write(buf[:n])
-
-			// Check for both input marker and exit status marker
-			if strings.Count(result.String(), marker) > 1 {
-				readDone <- nil
-				return
-			}
-		}
-	}()
-
-	select {
-	case err := <-readDone:
-		if err != nil {
-			fmt.Printf("Error reading command output: %v\n", err)
-			return result.String(), model.COMMAND_EXECUTION_ERROR, err
-		}
-	case <-ctx.Done():
-		return result.String(), model.COMMAND_EXECUTION_TIMEOUT, nil
-	}
-	return result.String(), model.COMMAND_EXECUTION_FINISH, nil
-
+func getInstanceLogFilePath(instanceDetails *InstanceDetails) string {
+	return fmt.Sprintf("./tmp/container-output-trajectory-%s.txt", instanceDetails.ContainerName)
 }
 
-func (s *ContainerShell) Execute(cmd string, timeout time.Duration) (string, int, error) {
-	markerUUID := uuid.New().String()
-	marker := fmt.Sprintf("__CMD_DONE__%s__", markerUUID)
+func EncodeInput(text string) []byte {
+	if strings.HasPrefix(text, "^") {
+		var result []byte
+		i := 0
+		for i < len(text) {
+			if text[i] == '^' {
+				i++
+				if i >= len(text) {
+					break
+				}
+				char := text[i]
+				if char >= 64 && char <= 127 {
+					result = append(result, char-64) // Ctrl+X => ASCII(X) - 64
+				}
+			} else {
+				result = append(result, text[i])
+			}
+			i++
+		}
+		return result
+	}
+	return []byte(text)
+}
+
+func (s *ContainerShell) Execute(cmd, trajectoryID string) error {
+	marker := s.Marker
 
 	fullCmd := fmt.Sprintf("%s ; echo %s", cmd, marker)
 
-	if _, err := s.writer.Write([]byte(fullCmd + "\n")); err != nil {
+	if _, err := s.writer.Write(EncodeInput(fullCmd + "\n")); err != nil {
 		log.Printf("Error writing command: %v\n", err)
-		return "", model.INTERNAL_ERROR, err
+		return fmt.Errorf("failed to write command: %w", err)
 	}
-	result, code, err := s.ReadContainerOutput(marker, timeout)
-	output := result[len(fullCmd):]
-	markerIndex := strings.Index(output, marker)
-	if markerIndex != -1 {
-		output = output[:markerIndex]
-	}
-
-	return output, code, err
+	return nil
 }
 
-func (m *Manager) GetPatch(instanceDetails *InstanceDetails) (string, int, error) {
-	command := fmt.Sprintf("bash -c 'git diff %s'", instanceDetails.BaseCommit)
-	return m.sessions[instanceDetails.ContainerID].Execute(command, 30*time.Second)
+func (m *Manager) GetOutput(instanceDetails *InstanceDetails) (string, error) {
+	logFilePath := getInstanceLogFilePath(instanceDetails)
+	output, err := os.ReadFile(logFilePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read output file: %w", err)
+	}
+	cleanOutput := CleanUseEmulator(output)
+	marker := m.sessions[instanceDetails.ContainerID].Marker
+	// Find the last occurrence of the marker command
+	lastCmdStartIndex := strings.LastIndex(cleanOutput, fmt.Sprintf("; echo %s", marker))
+	if lastCmdStartIndex != -1 {
+		cleanOutput = cleanOutput[lastCmdStartIndex+len(fmt.Sprintf("; echo %s", marker))+1:]
+	}
+	// Remove the marker command from the output
+	cleanOutput = strings.Replace(cleanOutput, fmt.Sprintf("%s\n", marker), "", 1)
+	return cleanOutput, nil
+}
 
+func (m *Manager) GetPatch(instanceDetails *InstanceDetails) error {
+	command := fmt.Sprintf("bash -c 'git diff %s'", instanceDetails.BaseCommit)
+	return m.sessions[instanceDetails.ContainerID].Execute(command, instanceDetails.ContainerName)
 }
 
 func (m *Manager) CleanupTrajectory(trajectoryID string) error {
