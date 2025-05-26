@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"os"
 	"time"
 
 	"github.com/multiturn-rl-hostagent/docker"
@@ -99,6 +100,8 @@ func (ha *HostAgent) GetResponseFromQueue() model.RolloutResponse {
 }
 
 func main() {
+	os.RemoveAll("./tmp")
+	os.Mkdir("./tmp", 0755)
 	log.Println("Initializing host agent...")
 	agent, err := NewHostAgent()
 	if err != nil {
@@ -118,21 +121,6 @@ func main() {
 		"git branch -D main master || true && " +
 		"git remote remove origin || true && " +
 		"git checkout -b main"
-	request := model.RolloutRequest{
-		ID:               "1234",
-		TrajectoryID:     "test-trajectory",
-		ImageID:          "ubuntu:latest",
-		Command:          "apt-get -y update && apt-get -y install git",
-		User:             "root",
-		WorkingDir:       "/testbed",
-		NetworkDisabled:  false,
-		TimeoutInSeconds: 20,
-		RequestType:      model.REQUEST_TYPE_RUN_COMMAND,
-	}
-
-	log.Println("Sending request to queue...")
-	agent.PutRequestToQueue(request)
-	log.Println("Request sent to queue, waiting for response...")
 
 	go func() {
 		for {
@@ -140,7 +128,40 @@ func main() {
 			writeResponseToFile(response)
 		}
 	}()
-	time.Sleep(30 * time.Second)
+
+	request := model.RolloutRequest{
+		ID:               "1233",
+		TrajectoryID:     "test-trajectory",
+		ImageID:          "ubuntu:latest",
+		Command:          "apt-get -y update && apt-get install -y git",
+		User:             "root",
+		WorkingDir:       "/testbed",
+		ShellPath:        "/bin/bash",
+		NetworkDisabled:  false,
+		TimeoutInSeconds: 5,
+		RequestType:      model.REQUEST_TYPE_RUN_COMMAND,
+	}
+
+	log.Println("Sending request to queue...")
+	agent.PutRequestToQueue(request)
+	time.Sleep(6 * time.Second)
+	request = model.RolloutRequest{
+		ID:               "1234",
+		TrajectoryID:     "test-trajectory",
+		ImageID:          "ubuntu:latest",
+		Command:          "^C",
+		User:             "root",
+		WorkingDir:       "/testbed",
+		NetworkDisabled:  false,
+		TimeoutInSeconds: 5,
+		RequestType:      model.REQUEST_TYPE_RUN_COMMAND,
+	}
+
+	log.Println("Sending request to queue...")
+	agent.PutRequestToQueue(request)
+
+	time.Sleep(6 * time.Second)
+	// time.Sleep(30 * time.Second)
 	request = model.RolloutRequest{
 		ID:               "1235",
 		TrajectoryID:     "test-trajectory",
@@ -196,12 +217,12 @@ func main() {
 	// fmt.Printf("Received response: %+v\n", response)
 	// write response to a file
 	time.Sleep(5 * time.Second) // Simulate some delay before sending the next request
-	request2 := model.RolloutRequest{
+	request = model.RolloutRequest{
 		ID:           "1239",
 		TrajectoryID: "test-trajectory",
 		RequestType:  model.REQUEST_TYPE_GET_OUTPUT,
 	}
-	agent.PutRequestToQueue(request2)
+	agent.PutRequestToQueue(request)
 
 	select {} // Block indefinitely
 }

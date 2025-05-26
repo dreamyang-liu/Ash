@@ -1,17 +1,17 @@
 package model
 
 type RolloutRequest struct {
-	ID                      string `json:"id"`                                   // Unique identifier for the rollout request
-	TrajectoryID            string `json:"trajectory"`                           // Associated trajectory ID
-	ImageID                 string `json:"image_id"`                             // Docker image ID
-	Command                 string `json:"commands,omitempty"`                   // Commands to execute in the container
-	TimeoutInSeconds        int    `json:"timeout_in_seconds,omitempty"`         // Command execution timeout
-	User                    string `json:"user,omitempty"`                       // User to run commands as
-	WorkingDir              string `json:"working_dir,omitempty"`                // Working directory inside the container
-	NetworkDisabled         bool   `json:"network_disabled,omitempty"`           // Container network mode
-	RequestType             uint8  `json:"request_type,omitempty"`               // Type of request (e.g., 0 for rollout, 1 for get_patch)
-	BaseCommit              string `json:"base_commit,omitempty"`                // Base commit for the rollout
-	EnvironmentSetupCommand string `json:"environment_setup_commands,omitempty"` // Commands to set up the environment
+	ID               string `json:"id"`                           // Unique identifier for the rollout request
+	TrajectoryID     string `json:"trajectory"`                   // Associated trajectory ID
+	ImageID          string `json:"image_id"`                     // Docker image ID
+	Command          string `json:"commands,omitempty"`           // Commands to execute in the container
+	TimeoutInSeconds int    `json:"timeout_in_seconds,omitempty"` // Command execution timeout
+	User             string `json:"user,omitempty"`               // User to run commands as
+	WorkingDir       string `json:"working_dir,omitempty"`        // Working directory inside the container
+	NetworkDisabled  bool   `json:"network_disabled,omitempty"`   // Container network mode
+	RequestType      uint8  `json:"request_type,omitempty"`       // Type of request (e.g., 0 for rollout, 1 for get_patch)
+	BaseCommit       string `json:"base_commit,omitempty"`        // Base commit for the rollout
+	ShellPath        string `json:"shell_path,omitempty"`         // Path to the shell executable
 }
 
 type RolloutResponse struct {

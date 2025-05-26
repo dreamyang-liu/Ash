@@ -22,16 +22,16 @@ import (
 
 // InstanceDetails represents options for creating a container
 type InstanceDetails struct {
-	ContainerID             string
-	ContainerName           string
-	ImageID                 string
-	Env                     []string
-	User                    string
-	WorkingDir              string
-	NetworkDisabled         bool
-	BaseCommit              string
-	EnvironmentSetupCommand string
-	Labels                  map[string]string
+	ContainerID     string
+	TrajectoryID    string
+	ImageID         string
+	Env             []string
+	ShellPath       string
+	User            string
+	WorkingDir      string
+	NetworkDisabled bool
+	BaseCommit      string
+	Labels          map[string]string
 }
 
 // ContainerStats represents resource usage statistics for a container
@@ -85,14 +85,14 @@ func NewManager(requestQueue chan model.RolloutRequest, responseQueue chan model
 
 func buildInstanceDetails(request *model.RolloutRequest) InstanceDetails {
 	return InstanceDetails{
-		ImageID:                 request.ImageID,
-		User:                    request.User,
-		ContainerName:           request.TrajectoryID,
-		WorkingDir:              request.WorkingDir,
-		NetworkDisabled:         request.NetworkDisabled,
-		BaseCommit:              request.BaseCommit,
-		EnvironmentSetupCommand: request.EnvironmentSetupCommand,
-		Labels:                  map[string]string{"trajectory": request.TrajectoryID, "managed-by": "hostagent"},
+		ImageID:         request.ImageID,
+		User:            request.User,
+		TrajectoryID:    request.TrajectoryID,
+		WorkingDir:      request.WorkingDir,
+		ShellPath:       request.ShellPath,
+		NetworkDisabled: request.NetworkDisabled,
+		BaseCommit:      request.BaseCommit,
+		Labels:          map[string]string{"trajectory": request.TrajectoryID, "managed-by": "hostagent"},
 	}
 }
 
@@ -199,10 +199,15 @@ func (m *Manager) StartContainer(ctx context.Context, instanceDetails *InstanceD
 	}
 
 	containerConfig := &container.Config{
-		Image:           instanceDetails.ImageID,
-		Env:             []string{"TERM=xterm", "LC_ALL=C.UTF-8"},
-		User:            instanceDetails.User,
-		Entrypoint:      []string{"/bin/bash"},
+		Image: instanceDetails.ImageID,
+		Env:   []string{"TERM=xterm", "LC_ALL=C.UTF-8"},
+		User:  instanceDetails.User,
+		Entrypoint: func() []string {
+			if instanceDetails.ShellPath == "" {
+				return []string{"/bin/bash"}
+			}
+			return []string{instanceDetails.ShellPath}
+		}(),
 		WorkingDir:      instanceDetails.WorkingDir,
 		Labels:          instanceDetails.Labels,
 		NetworkDisabled: instanceDetails.NetworkDisabled,
@@ -217,7 +222,7 @@ func (m *Manager) StartContainer(ctx context.Context, instanceDetails *InstanceD
 		NetworkMode: networkMode,
 	}
 
-	resp, err := m.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, instanceDetails.ContainerName)
+	resp, err := m.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, instanceDetails.TrajectoryID)
 	if err != nil {
 		return "", fmt.Errorf("failed to create container: %w", err)
 	}
@@ -260,38 +265,49 @@ func (m *Manager) StartContainer(ctx context.Context, instanceDetails *InstanceD
 }
 
 func getInstanceLogFilePath(instanceDetails *InstanceDetails) string {
-	return fmt.Sprintf("./tmp/container-output-trajectory-%s.txt", instanceDetails.ContainerName)
+	return fmt.Sprintf("./tmp/container-output-trajectory-%s.txt", instanceDetails.TrajectoryID)
 }
 
 func EncodeInput(text string) []byte {
-	if strings.HasPrefix(text, "^") {
-		var result []byte
-		i := 0
-		for i < len(text) {
-			if text[i] == '^' {
-				i++
-				if i >= len(text) {
-					break
-				}
-				char := text[i]
-				if char >= 64 && char <= 127 {
-					result = append(result, char-64) // Ctrl+X => ASCII(X) - 64
-				}
-			} else {
-				result = append(result, text[i])
-			}
-			i++
+	if len(text) == 2 && strings.HasPrefix(text, "^") {
+		ctrl := text[1]
+		if ctrl >= 64 && ctrl <= 95 {
+			return []byte{ctrl - 64} // Ctrl+X => ASCII(X) - 64
 		}
-		return result
 	}
-	return []byte(text)
+
+	var result []byte
+	i := 0
+	for i < len(text) {
+		if text[i] == '^' {
+			i++
+			if i >= len(text) {
+				break
+			}
+			char := text[i]
+			if char >= 64 && char <= 127 {
+				result = append(result, char-64)
+			}
+		} else {
+			result = append(result, text[i])
+		}
+		i++
+	}
+	return result
 }
 
 func (s *ContainerShell) Execute(cmd, trajectoryID string) error {
 	marker := s.Marker
 
-	fullCmd := fmt.Sprintf("%s ; echo %s", cmd, marker)
+	if len(cmd) == 2 && strings.HasPrefix(cmd, "^") {
+		if _, err := s.writer.Write(EncodeInput(cmd)); err != nil {
+			log.Printf("Error writing control command: %v\n", err)
+			return fmt.Errorf("failed to write control command: %w", err)
+		}
+		return nil
+	}
 
+	fullCmd := fmt.Sprintf("%s ; echo %s", cmd, marker)
 	if _, err := s.writer.Write(EncodeInput(fullCmd + "\n")); err != nil {
 		log.Printf("Error writing command: %v\n", err)
 		return fmt.Errorf("failed to write command: %w", err)
@@ -320,7 +336,7 @@ func (m *Manager) GetOutput(instanceDetails *InstanceDetails) (string, bool, err
 
 func (m *Manager) GetPatch(instanceDetails *InstanceDetails) string {
 	command := fmt.Sprintf("bash -c 'git --no-pager diff %s'", instanceDetails.BaseCommit)
-	m.sessions[instanceDetails.ContainerID].Execute(command, instanceDetails.ContainerName)
+	m.sessions[instanceDetails.ContainerID].Execute(command, instanceDetails.TrajectoryID)
 	time.Sleep(3 * time.Second)
 	patch, _, err := m.GetOutput(instanceDetails)
 	if err != nil {
