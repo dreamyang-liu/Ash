@@ -11,7 +11,18 @@ A sandbox daemon for managing Docker containers and provide interaction for Rein
 ## TODO
 - Test non-interactive command run (exec_run)
 
-## Example Usage
+## Get Started
+Build the hostagent
+```bash
+go build
+```
+
+Run the hostagent
+```bash
+./multiturn-rl-hostagent
+```
+
+## Example Test Usage
 ```bash
 python3 test_hostagent.py start
 python3 test_hostagent.py run "ls -al"
