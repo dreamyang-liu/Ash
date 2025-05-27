@@ -128,33 +128,7 @@ func (m *Manager) HandleStartSandbox(req model.RolloutRequestInput) error {
 
 func (m *Manager) HandleShutdownSandbox(req model.RolloutRequestInput) {
 	m.logger.Info("Shutting down container", zap.String("TrajectoryID", req.TrajectoryID))
-	instanceDetails, exists := m.trajectoryInstanceMap[req.TrajectoryID]
-	if !exists {
-		m.logger.Error("Instance not found", zap.String("TrajectoryID", req.TrajectoryID))
-		m.responseQueue <- model.RolloutResponse{
-			ID:           req.ID,
-			TrajectoryID: req.TrajectoryID,
-			Error:        "Instance not found",
-			ExitCode:     model.INTERNAL_ERROR,
-		}
-		return
-	}
-	timeout := 5
-	err := m.client.ContainerStop(context.Background(), instanceDetails.ContainerID, container.StopOptions{
-		Signal:  "SIGKILL",
-		Timeout: &timeout, // 5 seconds timeout
-	})
-	if err != nil {
-		m.logger.Error("Failed to stop container", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
-		m.responseQueue <- model.RolloutResponse{
-			ID:           req.ID,
-			TrajectoryID: req.TrajectoryID,
-			Error:        err.Error(),
-			ExitCode:     model.INTERNAL_ERROR,
-		}
-		return
-	}
-	delete(m.trajectoryInstanceMap, req.TrajectoryID)
+	m.CleanupTrajectory(req.TrajectoryID)
 }
 
 func (m *Manager) handleRunCommand(req model.RolloutRequestInput) {
@@ -459,7 +433,7 @@ func (m *Manager) CleanupTrajectory(trajectoryID string) error {
 // CleanupContainer stops and removes a container
 func (m *Manager) CleanupContainer(ctx context.Context, containerID string) error {
 	// Stop the container
-	timeout := int(0) // 30 seconds timeout
+	timeout := int(2) // 30 seconds timeout
 	if err := m.client.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout, Signal: "SIGKILL"}); err != nil {
 		return fmt.Errorf("failed to stop container: %w", err)
 	}
