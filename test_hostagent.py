@@ -157,9 +157,9 @@ def test_nginx_git():
     time.sleep(2)  # Wait for container to start
     
     # Step 3: Install a package
-    print("\n=== Running command: apt-get update -y && apt-get install -y curl ===")
+    print("\n=== Running command: apt-get update -y && apt-get install -y git ===")
     test_run_command("apt-get update -y && apt-get install -y git", "cmd-004", trajectory_id)
-    time.sleep(15)  # This will take longer
+    time.sleep(40)  # This will take longer
 
     test_get_output("cmd-004", trajectory_id)
     
@@ -168,8 +168,8 @@ def test_nginx_git():
     time.sleep(10)
 
     print("\n=== Running command: curl --version ===")
-    test_run_command("git --no-pager diff 5b8a5c08ce28639e788734b2528faad70baa113c", "cmd-005", trajectory_id)
-    time.sleep(2)
+    test_run_command("git --no-pager diff", "cmd-005", trajectory_id)
+    time.sleep(1)
 
     test_get_output("cmd-005", trajectory_id)
 
