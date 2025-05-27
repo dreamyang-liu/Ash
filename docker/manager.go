@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"os"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/google/uuid"
 	"github.com/multiturn-rl-hostagent/model"
+	"github.com/multiturn-rl-hostagent/utils"
 	"go.uber.org/zap"
 )
 
@@ -30,18 +30,7 @@ type InstanceDetails struct {
 	User            string
 	WorkingDir      string
 	NetworkDisabled bool
-	BaseCommit      string
 	Labels          map[string]string
-}
-
-// ContainerStats represents resource usage statistics for a container
-type ContainerStats struct {
-	ContainerID string
-	Name        string
-	CPUUsage    float64 // percentage
-	MemoryUsage float64 // percentage
-	MemoryUsed  uint64  // bytes
-	MemoryLimit uint64  // bytes
 }
 
 type ContainerShell struct {
@@ -56,133 +45,190 @@ type Manager struct {
 	client                *client.Client
 	sessions              map[string]*ContainerShell
 	logger                *zap.Logger
-	requestQueue          chan model.RolloutRequest
+	requestQueue          chan model.RolloutRequestInput
 	responseQueue         chan model.RolloutResponse
 	trajectoryInstanceMap map[string]InstanceDetails // Map of trajectory ID to instance details
 }
 
 // NewManager creates a new Docker manager
-func NewManager(requestQueue chan model.RolloutRequest, responseQueue chan model.RolloutResponse) (*Manager, error) {
+func NewManager(requestQueue chan model.RolloutRequestInput, responseQueue chan model.RolloutResponse) (*Manager, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Docker client: %w", err)
 	}
 
-	logger, err := zap.NewProduction()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create zap logger: %w", err)
-	}
-
 	return &Manager{
 		client:                cli,
 		sessions:              make(map[string]*ContainerShell),
-		logger:                logger,
+		logger:                utils.GetLogger(),
 		requestQueue:          requestQueue,
 		responseQueue:         responseQueue,
 		trajectoryInstanceMap: make(map[string]InstanceDetails),
 	}, nil
 }
 
-func buildInstanceDetails(request *model.RolloutRequest) InstanceDetails {
+func buildInstanceDetails(request *model.RolloutRequestInput) InstanceDetails {
 	return InstanceDetails{
-		ImageID:         request.ImageID,
-		User:            request.User,
+		ImageID:         request.StartSandboxInput.ImageID,
+		User:            request.StartSandboxInput.User,
 		TrajectoryID:    request.TrajectoryID,
-		WorkingDir:      request.WorkingDir,
-		ShellPath:       request.ShellPath,
-		NetworkDisabled: request.NetworkDisabled,
-		BaseCommit:      request.BaseCommit,
+		WorkingDir:      request.StartSandboxInput.WorkingDir,
+		ShellPath:       request.StartSandboxInput.ShellPath,
+		NetworkDisabled: request.StartSandboxInput.NetworkDisabled,
 		Labels:          map[string]string{"trajectory": request.TrajectoryID, "managed-by": "hostagent"},
 	}
 }
 
-func buildErrorResponseMessage(request *model.RolloutRequest, err error) string {
+func buildErrorResponseMessage(err error) string {
 	if err != nil {
-		return fmt.Sprintf("The execution of the command %q failed, the error message is: %s", request.Command, err.Error())
+		return fmt.Sprintf("Sandbox encounter an error, the error message is: %s", err.Error())
 	}
 	return ""
 }
 
 func (m *Manager) Start() {
-	m.logger.Info("Starting Docker Manager")
 	m.CleanupAllContainers(context.Background())
 	// Start a goroutine to handle incoming requests
 	go func() {
 		m.logger.Info("Listening for requests", zap.Int("queue_size", len(m.requestQueue)))
-		fmt.Print(m.requestQueue == nil)
 		for request := range m.requestQueue {
-			go func(req model.RolloutRequest) {
+			go func(req model.RolloutRequestInput) {
 				m.logger.Info("Received request", zap.String("ID", req.ID), zap.String("TrajectoryID", req.TrajectoryID))
-				// Check if container exists for this trajectory
-				instanceDetails, exists := m.trajectoryInstanceMap[req.TrajectoryID]
-
-				// If container doesn't exist, create one
-				if !exists {
-					m.logger.Info("Starting new container", zap.String("TrajectoryID", req.TrajectoryID))
-					var err error
-					instanceDetails = buildInstanceDetails(&req)
-					_, err = m.StartContainer(context.Background(), &instanceDetails)
-					if err != nil {
-						m.logger.Error("Failed to start container", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
-						m.responseQueue <- model.RolloutResponse{
-							ID:           req.ID,
-							TrajectoryID: req.TrajectoryID,
-							Error:        err.Error(),
-							ExitCode:     model.INSTANCE_START_ERROR,
-						}
-						return
-					}
-					m.trajectoryInstanceMap[req.TrajectoryID] = instanceDetails
-				}
-
-				if req.RequestType == model.REQUEST_TYPE_GET_PATCH {
-					m.logger.Info("Getting patch", zap.String("TrajectoryID", req.TrajectoryID))
-					patch := m.GetPatch(&instanceDetails)
-					m.responseQueue <- model.RolloutResponse{
-						ID:           req.ID,
-						TrajectoryID: req.TrajectoryID,
-						Patch:        patch,
-					}
-					m.CleanupTrajectory(req.TrajectoryID)
-					return // This is the end of a single trajectory request
-				}
-
-				if req.RequestType == model.REQUEST_TYPE_GET_OUTPUT {
-					m.handlGetOutput(&instanceDetails, req)
-					return
-				}
-
-				// Run the command on the container (works for both new and existing containers)
-				err := m.sessions[instanceDetails.ContainerID].Execute(req.Command, req.TrajectoryID)
-				time.Sleep(time.Duration(req.TimeoutInSeconds) * time.Second)
-				m.handlGetOutput(&instanceDetails, req)
-
-				if err != nil {
-					m.logger.Error("Error running command", zap.Error(err))
+				switch req.RequestType {
+				case model.REQUEST_TYPE_RUN_COMMAND:
+					m.logger.Info("Running command", zap.String("TrajectoryID", req.TrajectoryID), zap.String("Command", req.RunCommandInput.Command))
+					m.handleRunCommand(req)
+				default:
+					m.logger.Error("Unknown request type", zap.Uint8("RequestType", req.RequestType))
 				}
 			}(request)
 		}
 	}()
+	m.logger.Info("Docker Manager started")
 }
 
-func (m *Manager) handlGetOutput(instanceDetails *InstanceDetails, req model.RolloutRequest) {
+func (m *Manager) HandleStartSandbox(req model.RolloutRequestInput) error {
+	m.logger.Info("Starting new container", zap.String("TrajectoryID", req.TrajectoryID))
+	var err error
+	instanceDetails := buildInstanceDetails(&req)
+	_, err = m.StartContainer(context.Background(), &instanceDetails)
+	if err != nil {
+		m.logger.Error("Failed to start container", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
+		m.responseQueue <- model.RolloutResponse{
+			ID:           req.ID,
+			TrajectoryID: req.TrajectoryID,
+			Error:        err.Error(),
+			ExitCode:     model.INSTANCE_START_ERROR,
+		}
+		return fmt.Errorf("failed to start container: %w", err)
+	}
+	m.trajectoryInstanceMap[req.TrajectoryID] = instanceDetails
+	return nil
+}
+
+func (m *Manager) HandleShutdownSandbox(req model.RolloutRequestInput) {
+	m.logger.Info("Shutting down container", zap.String("TrajectoryID", req.TrajectoryID))
+	instanceDetails, exists := m.trajectoryInstanceMap[req.TrajectoryID]
+	if !exists {
+		m.logger.Error("Instance not found", zap.String("TrajectoryID", req.TrajectoryID))
+		m.responseQueue <- model.RolloutResponse{
+			ID:           req.ID,
+			TrajectoryID: req.TrajectoryID,
+			Error:        "Instance not found",
+			ExitCode:     model.INTERNAL_ERROR,
+		}
+		return
+	}
+	timeout := 5
+	err := m.client.ContainerStop(context.Background(), instanceDetails.ContainerID, container.StopOptions{
+		Signal:  "SIGKILL",
+		Timeout: &timeout, // 5 seconds timeout
+	})
+	if err != nil {
+		m.logger.Error("Failed to stop container", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
+		m.responseQueue <- model.RolloutResponse{
+			ID:           req.ID,
+			TrajectoryID: req.TrajectoryID,
+			Error:        err.Error(),
+			ExitCode:     model.INTERNAL_ERROR,
+		}
+		return
+	}
+	delete(m.trajectoryInstanceMap, req.TrajectoryID)
+}
+
+func (m *Manager) handleRunCommand(req model.RolloutRequestInput) {
+	m.logger.Info("Running command", zap.String("TrajectoryID", req.TrajectoryID))
+	instanceDetails, exists := m.trajectoryInstanceMap[req.TrajectoryID]
+	if !exists {
+		m.logger.Error("Instance not found", zap.String("TrajectoryID", req.TrajectoryID))
+		m.responseQueue <- model.RolloutResponse{
+			ID:           req.ID,
+			TrajectoryID: req.TrajectoryID,
+			Error:        "Instance not found",
+			ExitCode:     model.INTERNAL_ERROR,
+		}
+		return
+	}
+
+	if req.RunCommandInput.IsInteractive {
+		m.sessions[instanceDetails.ContainerID].Execute(req.RunCommandInput.Command, req.TrajectoryID)
+		time.Sleep(time.Duration(req.RunCommandInput.TimeoutInSeconds) * time.Second)
+		m.handleGetOutput(req, true)
+	} else {
+		go func() {
+			result, err := m.StartExecRunCommand(req.RunCommandInput.Command, &instanceDetails, instanceDetails.User, instanceDetails.WorkingDir, nil, false)
+			if err != nil {
+				m.logger.Error("Failed to run command", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
+				m.responseQueue <- model.RolloutResponse{
+					ID:           req.ID,
+					TrajectoryID: req.TrajectoryID,
+					Error:        buildErrorResponseMessage(err),
+				}
+				return
+			}
+			m.responseQueue <- model.RolloutResponse{
+				ID:           req.ID,
+				TrajectoryID: req.TrajectoryID,
+				Output:       string(result.Output),
+				ExitCode:     result.ExitCode,
+			}
+		}()
+	}
+}
+
+func (m *Manager) handleGetOutput(req model.RolloutRequestInput, async bool) (string, error) {
 	m.logger.Info("Getting output", zap.String("TrajectoryID", req.TrajectoryID))
-	output, _, err := m.GetOutput(instanceDetails)
+	instanceDetails, exists := m.trajectoryInstanceMap[req.TrajectoryID]
+	if !exists {
+		m.logger.Error("Instance not found", zap.String("TrajectoryID", req.TrajectoryID))
+		m.responseQueue <- model.RolloutResponse{
+			ID:           req.ID,
+			TrajectoryID: req.TrajectoryID,
+			Error:        "Instance not found",
+			ExitCode:     model.INTERNAL_ERROR,
+		}
+		return "", fmt.Errorf("instance not found")
+	}
+	output, _, err := m.GetOutput(instanceDetails.TrajectoryID)
 	if err != nil {
 		m.logger.Error("Failed to get output", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
 		m.responseQueue <- model.RolloutResponse{
 			ID:           req.ID,
 			TrajectoryID: req.TrajectoryID,
-			Error:        buildErrorResponseMessage(&req, err),
+			Error:        buildErrorResponseMessage(err),
 		}
-		return
+		return "", err
 	}
-	m.responseQueue <- model.RolloutResponse{
-		ID:           req.ID,
-		TrajectoryID: req.TrajectoryID,
-		Output:       output,
+	if async {
+		m.responseQueue <- model.RolloutResponse{
+			ID:           req.ID,
+			TrajectoryID: req.TrajectoryID,
+			Output:       output,
+		}
+		return "", nil
 	}
-	return
+	return output, nil
 }
 
 func (m *Manager) StartContainer(ctx context.Context, instanceDetails *InstanceDetails) (string, error) {
@@ -254,7 +300,7 @@ func (m *Manager) StartContainer(ctx context.Context, instanceDetails *InstanceD
 		}()
 		_, err := io.Copy(f, attachResp.Reader)
 		if err != nil {
-			log.Printf("Error copying output: %v\n", err)
+			utils.GetLogger().Error("Error copying output", zap.Error(err))
 		}
 	}()
 
@@ -262,6 +308,70 @@ func (m *Manager) StartContainer(ctx context.Context, instanceDetails *InstanceD
 	m.logger.Info("Container started and shell session attached", zap.String("containerID", resp.ID))
 
 	return resp.ID, nil
+}
+
+type ExecResult struct {
+	ExitCode int
+	Output   []byte
+}
+
+// StartExecRunCommand runs a command inside a container, similar to docker exec.
+// Only uses cmd, user, and workdir from the arguments.
+func (m *Manager) StartExecRunCommand(
+	cmd interface{},
+	instanceDetails *InstanceDetails,
+	user string,
+	workdir string,
+	env []string,
+	privileged bool,
+) (ExecResult, error) {
+	ctx := context.Background()
+	containerID := instanceDetails.ContainerID
+
+	// Prepare command
+	var cmdArr []string
+	switch v := cmd.(type) {
+	case string:
+		cmdArr = []string{"/bin/sh", "-c", v}
+	case []string:
+		cmdArr = v
+	default:
+		return ExecResult{}, fmt.Errorf("cmd must be string or []string")
+	}
+
+	execConfig := types.ExecConfig{
+		Cmd:          cmdArr,
+		User:         user,
+		WorkingDir:   workdir,
+		AttachStdout: true,
+		AttachStderr: true,
+		Tty:          false,
+		Env:          env,
+		Privileged:   privileged,
+	}
+
+	resp, err := m.client.ContainerExecCreate(ctx, containerID, execConfig)
+	if err != nil {
+		return ExecResult{}, fmt.Errorf("failed to create exec instance: %w", err)
+	}
+
+	attachResp, err := m.client.ContainerExecAttach(ctx, resp.ID, types.ExecStartCheck{Tty: false})
+	if err != nil {
+		return ExecResult{}, fmt.Errorf("failed to attach to exec instance: %w", err)
+	}
+	defer attachResp.Close()
+
+	output, err := io.ReadAll(attachResp.Reader)
+	if err != nil {
+		return ExecResult{}, fmt.Errorf("failed to read output: %w", err)
+	}
+
+	inspectResp, err := m.client.ContainerExecInspect(ctx, resp.ID)
+	if err != nil {
+		return ExecResult{}, fmt.Errorf("failed to inspect exec instance: %w", err)
+	}
+
+	return ExecResult{ExitCode: inspectResp.ExitCode, Output: output}, nil
 }
 
 func getInstanceLogFilePath(instanceDetails *InstanceDetails) string {
@@ -301,7 +411,7 @@ func (s *ContainerShell) Execute(cmd, trajectoryID string) error {
 
 	if len(cmd) == 2 && strings.HasPrefix(cmd, "^") {
 		if _, err := s.writer.Write(EncodeInput(cmd)); err != nil {
-			log.Printf("Error writing control command: %v\n", err)
+			utils.GetLogger().Error("Error writing control command", zap.Error(err))
 			return fmt.Errorf("failed to write control command: %w", err)
 		}
 		return nil
@@ -309,14 +419,19 @@ func (s *ContainerShell) Execute(cmd, trajectoryID string) error {
 
 	fullCmd := fmt.Sprintf("%s ; echo %s", cmd, marker)
 	if _, err := s.writer.Write(EncodeInput(fullCmd + "\n")); err != nil {
-		log.Printf("Error writing command: %v\n", err)
+		utils.GetLogger().Error("Error writing command", zap.Error(err))
 		return fmt.Errorf("failed to write command: %w", err)
 	}
 	return nil
 }
 
-func (m *Manager) GetOutput(instanceDetails *InstanceDetails) (string, bool, error) {
-	logFilePath := getInstanceLogFilePath(instanceDetails)
+func (m *Manager) GetOutput(trajectoryID string) (string, bool, error) {
+	instanceDetails, exists := m.trajectoryInstanceMap[trajectoryID]
+	if !exists {
+		return "", false, fmt.Errorf("instance not found")
+	}
+
+	logFilePath := getInstanceLogFilePath(&instanceDetails)
 	output, err := os.ReadFile(logFilePath)
 	if err != nil {
 		return "", true, fmt.Errorf("failed to read output file: %w", err)
@@ -332,17 +447,6 @@ func (m *Manager) GetOutput(instanceDetails *InstanceDetails) (string, bool, err
 	commandFinished := strings.Contains(cleanOutput, marker)
 	cleanOutput = strings.ReplaceAll(cleanOutput, fmt.Sprintf("%s\n", marker), "")
 	return cleanOutput, commandFinished, nil
-}
-
-func (m *Manager) GetPatch(instanceDetails *InstanceDetails) string {
-	command := fmt.Sprintf("bash -c 'git --no-pager diff %s'", instanceDetails.BaseCommit)
-	m.sessions[instanceDetails.ContainerID].Execute(command, instanceDetails.TrajectoryID)
-	time.Sleep(3 * time.Second)
-	patch, _, err := m.GetOutput(instanceDetails)
-	if err != nil {
-		return "Error getting patch, we encounter an error: " + err.Error()
-	}
-	return patch
 }
 
 func (m *Manager) CleanupTrajectory(trajectoryID string) error {

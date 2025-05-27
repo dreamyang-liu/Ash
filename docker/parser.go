@@ -64,7 +64,7 @@ func (s *ScrollBufferScreen) String() string {
 }
 
 func CleanUseEmulator(buf []byte) string {
-	screen := vt10x.New(vt10x.WithSize(150, 1000))
+	screen := vt10x.New(vt10x.WithSize(300, 1000))
 	_, err := screen.Write(buf)
 	if err != nil {
 		panic(err)
