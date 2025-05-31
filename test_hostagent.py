@@ -77,6 +77,24 @@ def test_run_command(cmd, request_id="cmd-001", trajectory_id="test-trajectory-1
     
     return make_request("run_command", payload)
 
+def test_exec_command(cmd, request_id="cmd-001", trajectory_id="test-trajectory-1"):
+    """Test running a command in the sandbox"""
+    payload = {
+        "id": request_id,
+        "trajectory": trajectory_id,
+        "request_type": 0,  # REQUEST_TYPE_RUN_COMMAND
+        "run_command_input": {
+            "command": cmd,
+            "working_dir": "/testbed",
+            "timeout_in_seconds": 3,
+            "network_disabled": False,
+            "shell_path": "/bin/bash",
+            "is_interactive": False
+        }
+    }
+    
+    return make_request("run_command", payload)
+
 
 def test_get_output(request_id="cmd-001", trajectory_id="test-trajectory-1"):
     """Test getting output from a command execution"""
@@ -197,6 +215,9 @@ def main():
             test_run_command(sys.argv[2], request_id)
             time.sleep(0.5)
             test_get_output(request_id)
+        elif action == "exec" and len(sys.argv) > 2:
+            request_id = f"cmd-{int(time.time())}"
+            test_exec_command(sys.argv[2], request_id)
         elif action == "output" and len(sys.argv) > 2:
             test_get_output(sys.argv[2])
         elif action == "shutdown":

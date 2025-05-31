@@ -168,7 +168,7 @@ func (m *Manager) HandleRunCommand(req model.RolloutRequestInput) (string, error
 		// 	Output:       string(result.Output),
 		// 	ExitCode:     result.ExitCode,
 		// }
-		return string(result.Output), nil
+		return CleanUseEmulator(result.Output), nil
 	}
 }
 
@@ -307,7 +307,7 @@ func (m *Manager) StartExecRunCommand(
 	var cmdArr []string
 	switch v := cmd.(type) {
 	case string:
-		cmdArr = []string{"/bin/sh", "-c", v}
+		cmdArr = []string{"/bin/bash", "-c", v}
 	case []string:
 		cmdArr = v
 	default:
@@ -320,7 +320,7 @@ func (m *Manager) StartExecRunCommand(
 		WorkingDir:   workdir,
 		AttachStdout: true,
 		AttachStderr: true,
-		Tty:          false,
+		Tty:          true,
 		Env:          env,
 		Privileged:   privileged,
 	}
