@@ -10,8 +10,6 @@ import (
 
 	"github.com/multiturn-rl-hostagent/docker"
 	"github.com/multiturn-rl-hostagent/model"
-	"github.com/multiturn-rl-hostagent/monitor"
-	"github.com/multiturn-rl-hostagent/queue"
 	"github.com/multiturn-rl-hostagent/utils"
 	"go.uber.org/zap"
 )
@@ -19,8 +17,6 @@ import (
 // HostAgent represents the main agent that manages Docker containers and monitors resources
 type HostAgent struct {
 	dockerManager *docker.Manager
-	hostMonitor   *monitor.HostMonitor
-	queueClient   *queue.RabbitMQClient
 	requestQueue  chan model.RolloutRequestInput
 	responseQueue chan model.RolloutResponse
 	ctx           context.Context
@@ -61,13 +57,6 @@ func NewHostAgent() (*HostAgent, error) {
 // InitHTTPServer sets up HTTP endpoints for the host agent
 func (ha *HostAgent) InitHTTPServer(addr string) error {
 	// Initialize host monitor if not already done
-	if ha.hostMonitor == nil {
-		var err error
-		ha.hostMonitor, err = monitor.NewHostMonitor()
-		if err != nil {
-			return fmt.Errorf("failed to initialize host monitor: %w", err)
-		}
-	}
 
 	http.HandleFunc("/start_sandbox", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -121,10 +110,13 @@ func (ha *HostAgent) InitHTTPServer(addr string) error {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
-
-		ha.PutRequestToQueue(req)
+		output, err := ha.dockerManager.HandleRunCommand(req)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to run command: %v", err), http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(map[string]string{"status": "command execution initiated"})
+		json.NewEncoder(w).Encode(map[string]string{"status": "command execution initiated", "output": output})
 	})
 
 	http.HandleFunc("/get_output", func(w http.ResponseWriter, r *http.Request) {
@@ -177,11 +169,6 @@ func (ha *HostAgent) Start() error {
 // Shutdown stops all agent operations
 func (ha *HostAgent) Shutdown() {
 	ha.cancel()
-
-	// Close RabbitMQ connection
-	if ha.queueClient != nil {
-		ha.queueClient.Close()
-	}
 
 	// Cleanup any running containers
 	if ha.dockerManager != nil {

@@ -88,22 +88,22 @@ func buildErrorResponseMessage(err error) string {
 
 func (m *Manager) Start() {
 	m.CleanupAllContainers(context.Background())
-	// Start a goroutine to handle incoming requests
-	go func() {
-		m.logger.Info("Listening for requests", zap.Int("queue_size", len(m.requestQueue)))
-		for request := range m.requestQueue {
-			go func(req model.RolloutRequestInput) {
-				m.logger.Info("Received request", zap.String("ID", req.ID), zap.String("TrajectoryID", req.TrajectoryID))
-				switch req.RequestType {
-				case model.REQUEST_TYPE_RUN_COMMAND:
-					m.logger.Info("Running command", zap.String("TrajectoryID", req.TrajectoryID), zap.String("Command", req.RunCommandInput.Command))
-					m.handleRunCommand(req)
-				default:
-					m.logger.Error("Unknown request type", zap.Uint8("RequestType", req.RequestType))
-				}
-			}(request)
-		}
-	}()
+	// // Start a goroutine to handle incoming requests
+	// go func() {
+	// 	m.logger.Info("Listening for requests", zap.Int("queue_size", len(m.requestQueue)))
+	// 	for request := range m.requestQueue {
+	// 		go func(req model.RolloutRequestInput) {
+	// 			m.logger.Info("Received request", zap.String("ID", req.ID), zap.String("TrajectoryID", req.TrajectoryID))
+	// 			switch req.RequestType {
+	// 			case model.REQUEST_TYPE_RUN_COMMAND:
+	// 				m.logger.Info("Running command", zap.String("TrajectoryID", req.TrajectoryID), zap.String("Command", req.RunCommandInput.Command))
+	// 				m.handleRunCommand(req)
+	// 			default:
+	// 				m.logger.Error("Unknown request type", zap.Uint8("RequestType", req.RequestType))
+	// 			}
+	// 		}(request)
+	// 	}
+	// }()
 	m.logger.Info("Docker Manager started")
 }
 
@@ -131,7 +131,7 @@ func (m *Manager) HandleShutdownSandbox(req model.RolloutRequestInput) {
 	m.CleanupTrajectory(req.TrajectoryID)
 }
 
-func (m *Manager) handleRunCommand(req model.RolloutRequestInput) {
+func (m *Manager) HandleRunCommand(req model.RolloutRequestInput) (string, error) {
 	m.logger.Info("Running command", zap.String("TrajectoryID", req.TrajectoryID))
 	instanceDetails, exists := m.trajectoryInstanceMap[req.TrajectoryID]
 	if !exists {
@@ -142,32 +142,31 @@ func (m *Manager) handleRunCommand(req model.RolloutRequestInput) {
 			Error:        "Instance not found",
 			ExitCode:     model.INTERNAL_ERROR,
 		}
-		return
+		return "", fmt.Errorf("instance not found")
 	}
 
 	if req.RunCommandInput.IsInteractive {
 		m.sessions[instanceDetails.ContainerID].Execute(req.RunCommandInput.Command, req.TrajectoryID)
 		time.Sleep(time.Duration(req.RunCommandInput.TimeoutInSeconds) * time.Second)
-		m.handleGetOutput(req, true)
+		return m.handleGetOutput(req, true)
 	} else {
-		go func() {
-			result, err := m.StartExecRunCommand(req.RunCommandInput.Command, &instanceDetails, instanceDetails.User, instanceDetails.WorkingDir, nil, false)
-			if err != nil {
-				m.logger.Error("Failed to run command", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
-				m.responseQueue <- model.RolloutResponse{
-					ID:           req.ID,
-					TrajectoryID: req.TrajectoryID,
-					Error:        buildErrorResponseMessage(err),
-				}
-				return
-			}
+		result, err := m.StartExecRunCommand(req.RunCommandInput.Command, &instanceDetails, instanceDetails.User, instanceDetails.WorkingDir, nil, false)
+		if err != nil {
+			m.logger.Error("Failed to run command", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
 			m.responseQueue <- model.RolloutResponse{
 				ID:           req.ID,
 				TrajectoryID: req.TrajectoryID,
-				Output:       string(result.Output),
-				ExitCode:     result.ExitCode,
+				Error:        buildErrorResponseMessage(err),
 			}
-		}()
+			return "", err
+		}
+		// m.responseQueue <- model.RolloutResponse{
+		// 	ID:           req.ID,
+		// 	TrajectoryID: req.TrajectoryID,
+		// 	Output:       string(result.Output),
+		// 	ExitCode:     result.ExitCode,
+		// }
+		return string(result.Output), nil
 	}
 }
 
@@ -200,7 +199,7 @@ func (m *Manager) handleGetOutput(req model.RolloutRequestInput, async bool) (st
 			TrajectoryID: req.TrajectoryID,
 			Output:       output,
 		}
-		return "", nil
+		return output, nil
 	}
 	return output, nil
 }
