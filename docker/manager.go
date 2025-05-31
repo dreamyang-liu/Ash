@@ -22,15 +22,16 @@ import (
 
 // InstanceDetails represents options for creating a container
 type InstanceDetails struct {
-	ContainerID     string
-	TrajectoryID    string
-	ImageID         string
-	Env             []string
-	ShellPath       string
-	User            string
-	WorkingDir      string
-	NetworkDisabled bool
-	Labels          map[string]string
+	ContainerID           string
+	TrajectoryID          string
+	ImageID               string
+	Env                   []string
+	ShellPath             string
+	User                  string
+	WorkingDir            string
+	NetworkDisabled       bool
+	Labels                map[string]string
+	LastestOutputPosition int
 }
 
 type ContainerShell struct {
@@ -47,7 +48,7 @@ type Manager struct {
 	logger                *zap.Logger
 	requestQueue          chan model.RolloutRequestInput
 	responseQueue         chan model.RolloutResponse
-	trajectoryInstanceMap map[string]InstanceDetails // Map of trajectory ID to instance details
+	trajectoryInstanceMap map[string]*InstanceDetails // Map of trajectory ID to instance details
 }
 
 // NewManager creates a new Docker manager
@@ -63,19 +64,20 @@ func NewManager(requestQueue chan model.RolloutRequestInput, responseQueue chan 
 		logger:                utils.GetLogger(),
 		requestQueue:          requestQueue,
 		responseQueue:         responseQueue,
-		trajectoryInstanceMap: make(map[string]InstanceDetails),
+		trajectoryInstanceMap: make(map[string]*InstanceDetails),
 	}, nil
 }
 
-func buildInstanceDetails(request *model.RolloutRequestInput) InstanceDetails {
-	return InstanceDetails{
-		ImageID:         request.StartSandboxInput.ImageID,
-		User:            request.StartSandboxInput.User,
-		TrajectoryID:    request.TrajectoryID,
-		WorkingDir:      request.StartSandboxInput.WorkingDir,
-		ShellPath:       request.StartSandboxInput.ShellPath,
-		NetworkDisabled: request.StartSandboxInput.NetworkDisabled,
-		Labels:          map[string]string{"trajectory": request.TrajectoryID, "managed-by": "hostagent"},
+func buildInstanceDetails(request *model.RolloutRequestInput) *InstanceDetails {
+	return &InstanceDetails{
+		ImageID:               request.StartSandboxInput.ImageID,
+		User:                  request.StartSandboxInput.User,
+		TrajectoryID:          request.TrajectoryID,
+		WorkingDir:            request.StartSandboxInput.WorkingDir,
+		ShellPath:             request.StartSandboxInput.ShellPath,
+		NetworkDisabled:       request.StartSandboxInput.NetworkDisabled,
+		Labels:                map[string]string{"trajectory": request.TrajectoryID, "managed-by": "hostagent"},
+		LastestOutputPosition: 0,
 	}
 }
 
@@ -111,7 +113,7 @@ func (m *Manager) HandleStartSandbox(req model.RolloutRequestInput) error {
 	m.logger.Info("Starting new container", zap.String("TrajectoryID", req.TrajectoryID))
 	var err error
 	instanceDetails := buildInstanceDetails(&req)
-	_, err = m.StartContainer(context.Background(), &instanceDetails)
+	_, err = m.StartContainer(context.Background(), instanceDetails)
 	if err != nil {
 		m.logger.Error("Failed to start container", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
 		m.responseQueue <- model.RolloutResponse{
@@ -150,7 +152,7 @@ func (m *Manager) HandleRunCommand(req model.RolloutRequestInput) (string, error
 		time.Sleep(time.Duration(req.RunCommandInput.TimeoutInSeconds) * time.Second)
 		return m.handleGetOutput(req, true)
 	} else {
-		result, err := m.StartExecRunCommand(req.RunCommandInput.Command, &instanceDetails, instanceDetails.User, instanceDetails.WorkingDir, nil, false)
+		result, err := m.StartExecRunCommand(req.RunCommandInput.Command, instanceDetails, instanceDetails.User, instanceDetails.WorkingDir, nil, false)
 		if err != nil {
 			m.logger.Error("Failed to run command", zap.String("TrajectoryID", req.TrajectoryID), zap.Error(err))
 			m.responseQueue <- model.RolloutResponse{
@@ -379,9 +381,12 @@ func EncodeInput(text string) []byte {
 	return result
 }
 
+var UserMarker = false
+
 func (s *ContainerShell) Execute(cmd, trajectoryID string) error {
 	marker := s.Marker
 
+	// Handle control character commands
 	if len(cmd) == 2 && strings.HasPrefix(cmd, "^") {
 		if _, err := s.writer.Write(EncodeInput(cmd)); err != nil {
 			utils.GetLogger().Error("Error writing control command", zap.Error(err))
@@ -390,7 +395,15 @@ func (s *ContainerShell) Execute(cmd, trajectoryID string) error {
 		return nil
 	}
 
-	fullCmd := fmt.Sprintf("%s ; echo %s", cmd, marker)
+	// Determine full command based on whether marker is used
+	var fullCmd string
+	if UserMarker {
+		fullCmd = fmt.Sprintf("%s ; echo %s", cmd, marker)
+	} else {
+		fullCmd = cmd
+	}
+
+	// Write the command to the container
 	if _, err := s.writer.Write(EncodeInput(fullCmd + "\n")); err != nil {
 		utils.GetLogger().Error("Error writing command", zap.Error(err))
 		return fmt.Errorf("failed to write command: %w", err)
@@ -404,21 +417,35 @@ func (m *Manager) GetOutput(trajectoryID string) (string, bool, error) {
 		return "", false, fmt.Errorf("instance not found")
 	}
 
-	logFilePath := getInstanceLogFilePath(&instanceDetails)
+	logFilePath := getInstanceLogFilePath(instanceDetails)
 	output, err := os.ReadFile(logFilePath)
 	if err != nil {
 		return "", true, fmt.Errorf("failed to read output file: %w", err)
 	}
-	cleanOutput := CleanUseEmulator(output)
-	marker := m.sessions[instanceDetails.ContainerID].Marker
-	// Find the last occurrence of the marker command
-	lastCmdStartIndex := strings.LastIndex(cleanOutput, fmt.Sprintf("; echo %s", marker))
-	if lastCmdStartIndex != -1 {
-		cleanOutput = cleanOutput[lastCmdStartIndex+len(fmt.Sprintf("; echo %s", marker))+1:]
+
+	cleanOutputAll := CleanUseEmulator(output)
+	cleanOutput := cleanOutputAll[instanceDetails.LastestOutputPosition:]
+	instanceDetails.LastestOutputPosition = len(cleanOutputAll)
+	m.logger.Debug("Output position updated", zap.Int("position", instanceDetails.LastestOutputPosition), zap.String("trajectoryID", trajectoryID))
+	commandFinished := true
+
+	// Handle marker-based output processing if enabled
+	if UserMarker {
+		marker := m.sessions[instanceDetails.ContainerID].Marker
+
+		// Find the last occurrence of the marker command
+		lastCmdStartIndex := strings.LastIndex(cleanOutput, fmt.Sprintf("; echo %s", marker))
+		if lastCmdStartIndex != -1 {
+			cleanOutput = cleanOutput[lastCmdStartIndex+len(fmt.Sprintf("; echo %s", marker))+1:]
+		}
+
+		// Check if command finished by looking for marker
+		commandFinished = strings.Contains(cleanOutput, marker)
+
+		// Remove the markers from the output
+		cleanOutput = strings.ReplaceAll(cleanOutput, fmt.Sprintf("%s\n", marker), "")
 	}
-	// Remove the markers from the output
-	commandFinished := strings.Contains(cleanOutput, marker)
-	cleanOutput = strings.ReplaceAll(cleanOutput, fmt.Sprintf("%s\n", marker), "")
+
 	return cleanOutput, commandFinished, nil
 }
 
