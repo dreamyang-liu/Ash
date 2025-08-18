@@ -1,0 +1,39 @@
+minikube kubectl -- -n apps logs -f -l app=spawner --all-containers --prefix --max-log-requests=20
+
+minikube kubectl -- apply -f rbac.yaml
+minikube kubectl -- apply -f infra.yaml
+minikube kubectl -- apply -f stateless-mcp.yaml
+
+minikube image build -t spawner:0.1 .
+minikube kubectl -- -n apps rollout restart deploy/spawner
+minikube kubectl -- -n apps rollout status deploy/spawner
+
+
+
+
+
+minikube kubectl -- -n apps port-forward svc/spawner 8080:80
+
+
+curl -X POST http://192.168.49.2:30774/spawn \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image": "nginx:1.27",
+    "ports": [{"container_port": 80}],
+    "expose": "LoadBalancer",
+    "env": {"HELLO": "world"}
+  }'
+
+
+# 滚动状态（快速看到是否 ProgressDeadlineExceeded）
+minikube kubectl -- -n $NS rollout status deploy/$DEP --timeout=30s
+
+# Deployment 条件 & 事件
+minikube kubectl -- -n $NS describe deploy/$DEP | sed -n '/Conditions:/,/Events:/p'
+minikube kubectl -- -n $NS describe deploy/$DEP | sed -n '/Events:/,$p'
+
+# 关联 ReplicaSet（新旧版本各多少副本）
+minikube kubectl -- -n $NS get rs -l app=$APP -o wide --sort-by=.metadata.creationTimestamp
+
+# Pod 概览（状态/READY/REASON）
+minikube kubectl -- -n $NS get pod -l app=$APP -o wide
