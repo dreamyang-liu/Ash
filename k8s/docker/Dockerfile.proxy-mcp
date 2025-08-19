@@ -1,0 +1,5 @@
+FROM python:3.13.7-slim
+RUN pip install fastmcp
+
+COPY proxy-mcp.py /app/proxy-mcp.py
+ENTRYPOINT ["python", "/app/proxy-mcp.py"]

@@ -1,0 +1,40 @@
+FROM ubuntu:24.04
+
+ENV locale-gen=en_US.UTF-8
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US:en
+ENV LC_ALL=en_US.UTF-8
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+        wget \
+        git \
+        vim \
+        nano \
+        ca-certificates \
+        unzip \
+        python3 \
+        python3-pip \
+        python3-venv \
+        software-properties-common \
+        htop \
+        net-tools \
+        iputils-ping \
+        locales && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY general-mcp.py /app/general-mcp.py
+
+# Use venv
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3 -m venv $VIRTUAL_ENV \
+ && $VIRTUAL_ENV/bin/pip install --upgrade pip \
+ && $VIRTUAL_ENV/bin/pip install --no-cache-dir fastmcp terminal-controller
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+EXPOSE 3000
+
+ENTRYPOINT ["python", "/app/general-mcp.py"]

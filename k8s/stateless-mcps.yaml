@@ -122,8 +122,8 @@ spec:
         image: timemagic/rl-mcp:proxy-mcp
         imagePullPolicy: IfNotPresent
         env:
-        - name: MCP_LIST
-          value: "fetcher-mcp.apps.svc.cluster.local,google-search-mcp.apps.svc.cluster.local"  
+        - name: MCP_ADDRS
+          value: "fetcher-mcp.apps.svc.cluster.local:3000/sse,google-search-mcp.apps.svc.cluster.local:3000/mcp"
         ports:
         - name: http
           containerPort: 3000

@@ -1,0 +1,3 @@
+FROM alpine:latest
+COPY gateway/k8s-gateway /k8s-gateway
+ENTRYPOINT ["/k8s-gateway"]

@@ -1,18 +1,31 @@
 minikube kubectl -- -n apps logs -f -l app=spawner --all-containers --prefix --max-log-requests=20
 
+
+minikube kubectl -- delete namespace apps
+
+
+cd control-plane
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
+cd ..
+cd gateway
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
+cd ..
+minikube image build -f Dockerfile.cp -t rl-sandbox-cp:0.1 .
+minikube image build -f Dockerfile.gateway -t rl-sandbox-gateway:0.1 .
+
 minikube kubectl -- apply -f rbac.yaml
 minikube kubectl -- apply -f infra.yaml
-minikube kubectl -- apply -f stateless-mcp.yaml
+minikube kubectl -- apply -f stateless-mcps.yaml
 
-minikube image build -t spawner:0.1 .
+
 minikube kubectl -- -n apps rollout restart deploy/spawner
 minikube kubectl -- -n apps rollout status deploy/spawner
 
 
 
-
-
-minikube kubectl -- -n apps port-forward svc/spawner 8080:80
+# CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
+# minikube image build -f Dockerfile.gateway -t rl-sandbox-gateway:0.1 .
+# minikube kubectl -- -n apps port-forward svc/spawner 8080:80
 
 
 curl -X POST http://192.168.49.2:30774/spawn \
@@ -37,3 +50,10 @@ minikube kubectl -- -n $NS get rs -l app=$APP -o wide --sort-by=.metadata.creati
 
 # Pod 概览（状态/READY/REASON）
 minikube kubectl -- -n $NS get pod -l app=$APP -o wide
+
+# cd gateway
+# CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
+# cd ..
+# minikube image build -f Dockerfile.gateway -t rl-sandbox-gateway:0.1 .
+# minikube kubectl -- -n apps rollout restart deploy/gateway
+# minikube kubectl -- -n apps rollout status deploy/gateway

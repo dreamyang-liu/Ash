@@ -377,7 +377,8 @@ async def main():
     from mcp.client.session_group import StreamableHttpParameters
     async with MCPClientStreamableHttp(
             params=StreamableHttpParameters(
-                url="http://localhost:8000/mcp",
+                url="http://192.168.49.2:30273/mcp",
+                headers={"X-MCP-Session-ID": "sandbox-7zcbpu91g5e3-405602a1-d72d-4b26-9b19-f32dd0dbbafa"}
             ),
             name="Streamable HTTP Python Server",
         ) as mcp_client:

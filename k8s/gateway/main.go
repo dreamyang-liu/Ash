@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -61,7 +60,7 @@ func loadCfg() *cfg {
 		log.Fatalf("bad ALLOWED_HOST_PATTERN: %v", err)
 	}
 	return &cfg{
-		ListenAddr:         getenv("LISTEN_ADDR", ":8080"),
+		ListenAddr:         getenv("LISTEN_ADDR", ":80"),
 		SessionHeader:      getenv("SESSION_HEADER", "X-MCP-Session-ID"),
 		RedisAddr:          getenv("REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword:      os.Getenv("REDIS_PASSWORD"),
@@ -79,38 +78,23 @@ var (
 	targetKey = &struct{}{} // context key
 )
 
-type routeJSON struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	UUID       string `json:"uuid"`
-	Status     string `json:"status"`
-	ExpireTime string `json:"expire_time"`
-}
+type SandboxStatus string
 
-func parseRouteValue(val string) (*url.URL, error) {
-	val = strings.TrimSpace(val)
-	if val == "" {
-		return nil, errors.New("empty route")
-	}
-	if strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") {
-		return url.Parse(val)
-	}
-	if strings.Contains(val, "://") {
+var ErrNotFound = errors.New("not found")
 
-		return url.Parse(val)
-	}
+const (
+	StatusStarting SandboxStatus = "starting"
+	StatusReady    SandboxStatus = "ready"
+	StatusFailed   SandboxStatus = "failed"
+	StatusStopped  SandboxStatus = "stopped"
+)
 
-	if (strings.HasPrefix(val, "{") && strings.HasSuffix(val, "}")) || strings.Contains(val, `"host"`) {
-		var r routeJSON
-		if err := json.Unmarshal([]byte(val), &r); err == nil {
-			return url.Parse(fmt.Sprintf("http://%s:%d/mcp", r.Host, r.Port))
-		}
-	}
-
-	if _, _, err := net.SplitHostPort(val); err == nil {
-		return url.Parse(fmt.Sprintf("%s://%s", cfgv.DefaultScheme, val))
-	}
-	return nil, fmt.Errorf("unrecognized route value: %q", val)
+type SandboxRecord struct {
+	UUID   string
+	IP     string
+	Port   int
+	Status SandboxStatus
+	MaxTTL time.Duration // 以秒为单位存储时，这里换算为 Duration
 }
 
 func clientIP(r *http.Request) string {
@@ -126,37 +110,32 @@ func clientIP(r *http.Request) string {
 }
 
 func lookupTarget(ctx context.Context, uuid string) (*url.URL, error) {
-	// key := cfgv.RedisKeyPrefix + uuid
+	key := cfgv.RedisKeyPrefix + uuid
 
-	// // 先 Get
-	// val, err := rdb.Get(ctx, key).Result()
-	// if err == nil {
-	// 	return parseRouteValue(val)
-	// }
-	// if err != redis.Nil {
-	// 	return nil, err
-	// }
+	m, err := rdb.HGetAll(ctx, key).Result()
+	if err != nil {
+		return nil, fmt.Errorf("redis HGETALL: %w", err)
+	}
+	// HGetAll 对不存在的 key 返回空 map，不是 redis.Nil
+	if len(m) == 0 {
+		return nil, ErrNotFound
+	}
 
-	// hm, err := rdb.HGetAll(ctx, key).Result()
-	// if err == nil && len(hm) > 0 {
-	// 	if rawURL := hm["url"]; rawURL != "" {
-	// 		return parseRouteValue(rawURL)
-	// 	}
-	// 	if host := hm["host"]; host != "" {
-	// 		port := hm["port"]
-	// 		if port == "" {
-	// 			port = "80"
-	// 		}
-	// 		scheme := hm["scheme"]
-	// 		if scheme == "" {
-	// 			scheme = cfgv.DefaultScheme
-	// 		}
-	// 		return url.Parse(fmt.Sprintf("%s://%s:%s%s", scheme, host, port, hm["path"]))
-	// 	}
-	// }
-	log.Printf("[redis] lookup %s not found", uuid)
-	return url.Parse("http://127.0.0.1:3000")
-	// return nil, redis.Nil
+	// 2) 解析各字段
+	var rec SandboxRecord
+	rec.IP = m["host"]
+	// rec.Status = SandboxStatus(m["status"])
+
+	// port
+	if p := m["port"]; p != "" {
+		port, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, fmt.Errorf("bad port %q: %w", p, err)
+		}
+		rec.Port = port
+	}
+	log.Printf("[lookup] UUID %s -> IP %s, Port %d", uuid, rec.IP, rec.Port)
+	return url.Parse(fmt.Sprintf("%s://%s:%d/mcp", cfgv.DefaultScheme, rec.IP, rec.Port))
 }
 
 func main() {
@@ -182,36 +161,75 @@ func main() {
 
 	proxy := &httputil.ReverseProxy{
 		Director: func(r *http.Request) {
-
+			// 取目标
 			u, _ := r.Context().Value(targetKey).(*url.URL)
 			if u == nil {
+				log.Printf("[director] no target URL in context (skip) method=%s path=%q", r.Method, r.URL.Path)
 				return
 			}
 
+			// 记录进入前信息
 			origHost := r.Host
+			origPath := r.URL.Path
+			origQuery := r.URL.RawQuery
+			xffBefore := r.Header.Get("X-Forwarded-For")
+
+			log.Printf("[director][before] method=%s origHost=%s path=%q rawQuery=%q xff=%q target=%s",
+				r.Method, origHost, origPath, origQuery, xffBefore, u.String())
+
+			// 设置 scheme/host（目标）
 			r.URL.Scheme = u.Scheme
 			r.URL.Host = u.Host
 
+			// 路径处理决策
+			decision := "noop"
 			if u.Path != "" && u.Path != "/" {
-
 				if !strings.HasPrefix(r.URL.Path, u.Path) {
-					r.URL.Path = singleJoin(u.Path, r.URL.Path)
+					newPath := singleJoin(u.Path, r.URL.Path)
+					decision = fmt.Sprintf("join(%q, %q) -> %q", u.Path, origPath, newPath)
+					r.URL.Path = newPath
+				} else {
+					decision = fmt.Sprintf("keep (already prefixed by %q)", u.Path)
 				}
+			} else {
+				decision = "skip (u.Path empty or /)"
 			}
+
+			// Host 头改为上游主机
 			r.Host = u.Host
 
+			// 维护 XFF
 			ip := clientIP(r)
-			if prior := r.Header.Get("X-Forwarded-For"); prior != "" {
-				r.Header.Set("X-Forwarded-For", prior+", "+ip)
+			if xffBefore != "" {
+				r.Header.Set("X-Forwarded-For", xffBefore+", "+ip)
 			} else {
 				r.Header.Set("X-Forwarded-For", ip)
 			}
 			r.Header.Set("X-Forwarded-Host", origHost)
+
+			log.Printf("[director][after]  forwardTo scheme=%s host=%s path=%q rawQuery=%q HostHdr=%s decision=%s xff=%q",
+				r.URL.Scheme, r.URL.Host, r.URL.Path, r.URL.RawQuery, r.Host, decision, r.Header.Get("X-Forwarded-For"))
 		},
+
 		Transport:     transport,
 		FlushInterval: 50 * time.Millisecond,
+
+		// 可选：记录上游响应状态与最终 URL
+		ModifyResponse: func(resp *http.Response) error {
+			// resp.Request.URL 是已经改写后的目标 URL
+			log.Printf("[proxy][resp] status=%d url=%s", resp.StatusCode, resp.Request.URL.String())
+			return nil
+		},
+
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("[proxy] upstream error: %v", err)
+			// r.Context() 里仍然能拿到目标
+			if u, _ := r.Context().Value(targetKey).(*url.URL); u != nil {
+				log.Printf("[proxy][error] upstream error: %v target=%s method=%s path=%q",
+					err, u.String(), r.Method, r.URL.Path)
+			} else {
+				log.Printf("[proxy][error] upstream error: %v (no target) method=%s path=%q",
+					err, r.Method, r.URL.Path)
+			}
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 		},
 	}
@@ -243,7 +261,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), cfgv.RedisLookupTimeout)
 		defer cancel()
 		u, err := lookupTarget(ctx, uuid)
-		log.Printf("[gateway] Host: %s", u.Host)
+		log.Printf("[gateway] Host: %s, err: %v", u.Host, err)
 		if err != nil {
 			if errors.Is(err, redis.Nil) {
 				http.Error(w, "route not found", http.StatusNotFound)
@@ -254,13 +272,14 @@ func main() {
 			return
 		}
 
-		host := u.Hostname()
-		if !cfgv.AllowedHostRegex.MatchString(host) {
-			http.Error(w, "forbidden target host", http.StatusForbidden)
-			return
-		}
+		// host := u.Hostname()
+		// if !cfgv.AllowedHostRegex.MatchString(host) {
+		// 	http.Error(w, "forbidden target host", http.StatusForbidden)
+		// 	return
+		// }
 
 		ctx = context.WithValue(r.Context(), targetKey, u)
+		log.Printf("[gateway] routing request: method=%s path=%q target=%s", r.Method, r.URL.Path, u.String())
 		proxy.ServeHTTP(w, r.WithContext(ctx))
 	})
 
