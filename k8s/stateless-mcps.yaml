@@ -4,10 +4,10 @@ metadata:
   name: google-search-mcp
   namespace: apps
 spec:
-  replicas: 3
+  replicas: 2
   selector:
     matchLabels:
-      app: google-search-mcp   # 修正：与 pod 模板一致
+      app: google-search-mcp
   template:
     metadata:
       labels:
@@ -22,11 +22,11 @@ spec:
           containerPort: 3000
         resources:
           requests:
-            cpu: "700m"
-            memory: "512Mi"
+            cpu: "400m"
+            memory: "256Mi"
           limits:
-            cpu: "1500m"
-            memory: "1Gi"
+            cpu: "800m"
+            memory: "512Mi"
 ---
 apiVersion: v1
 kind: Service
@@ -49,10 +49,10 @@ metadata:
   name: fetcher-mcp
   namespace: apps
 spec:
-  replicas: 3
+  replicas: 2
   selector:
     matchLabels:
-      app: fetcher-mcp   # 修正：与 pod 模板一致
+      app: fetcher-mcp
   template:
     metadata:
       labels:
@@ -70,19 +70,17 @@ spec:
           containerPort: 3000
         resources:
           requests:
-            cpu: "700m"
-            memory: "512Mi"
+            cpu: "400m"
+            memory: "256Mi"
           limits:
-            cpu: "1500m"
-            memory: "1Gi"
+            cpu: "800m"
+            memory: "512Mi"
         volumeMounts:
         - name: tmp-volume
           mountPath: /tmp
       volumes:
       - name: tmp-volume
-        hostPath:
-          path: /tmp
-          type: Directory
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -108,10 +106,10 @@ metadata:
   name: proxy-mcp
   namespace: apps
 spec:
-  replicas: 3
+  replicas: 2
   selector:
     matchLabels:
-      app: proxy-mcp   # 修正：与 pod 模板一致
+      app: proxy-mcp
   template:
     metadata:
       labels:
@@ -129,11 +127,11 @@ spec:
           containerPort: 3000
         resources:
           requests:
-            cpu: "700m"
-            memory: "512Mi"
+            cpu: "400m"
+            memory: "256Mi"
           limits:
-            cpu: "1500m"
-            memory: "1Gi"
+            cpu: "800m"
+            memory: "512Mi"
 ---
 apiVersion: v1
 kind: Service

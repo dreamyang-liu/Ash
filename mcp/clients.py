@@ -377,8 +377,8 @@ async def main():
     from mcp.client.session_group import StreamableHttpParameters
     async with MCPClientStreamableHttp(
             params=StreamableHttpParameters(
-                url="http://192.168.49.2:30273/mcp",
-                headers={"X-MCP-Session-ID": "sandbox-7zcbpu91g5e3-405602a1-d72d-4b26-9b19-f32dd0dbbafa"}
+                url="http://192.168.49.2:31996/mcp",
+                headers={"X-MCP-Session-ID": "sandbox-jj68m5fiuypr-47143dd7-8a3c-4104-a5ba-43f47af1af23"}
             ),
             name="Streamable HTTP Python Server",
         ) as mcp_client:
@@ -386,6 +386,15 @@ async def main():
         res = await mcp_client.list_tools()
         for tool in res:
             print(tool.name)
+
+        res = await mcp_client.call_tool("remote_google-search", {"query": "deepseek"})
+        for result in json.loads(res.content[0].text)['results']:
+            print(result)
+
+        res = await mcp_client.call_tool("terminal-controller_execute_command", {"command": "apt-get update && apt-get install python3"})
+        print(res)
+        # for line in json.loads(res.content[0].text)['stdout']:
+            # print(line)
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main())

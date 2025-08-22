@@ -10,32 +10,51 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"regexp"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-redis/redis/v8"
 )
 
-type cfg struct {
-	ListenAddr         string         // Listen address, default :8080
-	SessionHeader      string         // Request header to get UUID from, default X-MCP-Session-ID
-	RedisAddr          string         // 127.0.0.1:6379 or redis:6379
-	RedisPassword      string         // Optional
-	RedisDB            int            // Default 0
-	RedisKeyPrefix     string         // Route table key prefix, default mcp:route:
-	DefaultScheme      string         // Protocol to use when only host:port is given, default http
-	RedisLookupTimeout time.Duration  // Redis lookup timeout, default 300ms
-	AllowedHostRegex   *regexp.Regexp // Allowed target host regex (prevents SSRF), default only intranet/localhost
+// Common errors
+var (
+	ErrNotFound = errors.New("not found")
+)
+
+// Configuration structure
+type Config struct {
+	ListenAddr         string        // Listen address, default :80
+	SessionHeader      string        // Request header to get UUID from, default X-MCP-Session-ID
+	RedisAddr          string        // Redis address, default 127.0.0.1:6379
+	RedisPassword      string        // Redis password, optional
+	RedisDB            int           // Redis database, default 0
+	RedisKeyPrefix     string        // Route table key prefix, default sandbox:
+	DefaultScheme      string        // Protocol to use when only host:port is given, default http
+	RedisLookupTimeout time.Duration // Redis lookup timeout, default 300ms
+	ReadTimeout        time.Duration // HTTP server read timeout
+	WriteTimeout       time.Duration // HTTP server write timeout
+	IdleTimeout        time.Duration // HTTP server idle timeout
 }
 
+// SandboxRecord represents a sandbox record in Redis
+type SandboxRecord struct {
+	UUID   string
+	Host   string
+	Port   int
+	Status string
+}
+
+// Helper functions for environment variables
 func getenv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return def
 }
+
 func getenvInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -44,6 +63,7 @@ func getenvInt(key string, def int) int {
 	}
 	return def
 }
+
 func getenvDur(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
@@ -53,13 +73,9 @@ func getenvDur(key string, def time.Duration) time.Duration {
 	return def
 }
 
-func loadCfg() *cfg {
-	pat := getenv("ALLOWED_HOST_PATTERN", `^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|localhost$|127\.0\.0\.1$|\[::1\])`)
-	re, err := regexp.Compile(pat)
-	if err != nil {
-		log.Fatalf("bad ALLOWED_HOST_PATTERN: %v", err)
-	}
-	return &cfg{
+// Load configuration from environment variables
+func loadConfig() *Config {
+	return &Config{
 		ListenAddr:         getenv("LISTEN_ADDR", ":80"),
 		SessionHeader:      getenv("SESSION_HEADER", "X-MCP-Session-ID"),
 		RedisAddr:          getenv("REDIS_ADDR", "127.0.0.1:6379"),
@@ -68,34 +84,19 @@ func loadCfg() *cfg {
 		RedisKeyPrefix:     getenv("ROUTE_KEY_PREFIX", "sandbox:"),
 		DefaultScheme:      getenv("DEFAULT_SCHEME", "http"),
 		RedisLookupTimeout: getenvDur("REDIS_LOOKUP_TIMEOUT", 300*time.Millisecond),
-		AllowedHostRegex:   re,
+		ReadTimeout:        getenvDur("READ_TIMEOUT", 30*time.Second),
+		WriteTimeout:       getenvDur("WRITE_TIMEOUT", 30*time.Second),
+		IdleTimeout:        getenvDur("IDLE_TIMEOUT", 120*time.Second),
 	}
 }
 
 var (
 	rdb       *redis.Client
-	cfgv      *cfg
-	targetKey = &struct{}{} // context key
+	config    *Config
+	targetKey = &struct{}{} // context key for storing target URL
 )
 
-type SandboxStatus string
-
-var ErrNotFound = errors.New("not found")
-
-const (
-	StatusStarting SandboxStatus = "starting"
-	StatusReady    SandboxStatus = "ready"
-	StatusFailed   SandboxStatus = "failed"
-	StatusStopped  SandboxStatus = "stopped"
-)
-
-type SandboxRecord struct {
-	UUID   string
-	IP     string
-	Port   int
-	Status SandboxStatus
-	MaxTTL time.Duration // 以秒为单位存储时，这里换算为 Duration
-}
+// Get client IP from request
 
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
@@ -109,96 +110,115 @@ func clientIP(r *http.Request) string {
 	return h
 }
 
+// Look up target URL from Redis based on UUID
 func lookupTarget(ctx context.Context, uuid string) (*url.URL, error) {
-	key := cfgv.RedisKeyPrefix + uuid
+	key := config.RedisKeyPrefix + uuid
 
-	m, err := rdb.HGetAll(ctx, key).Result()
-	if err != nil {
-		return nil, fmt.Errorf("redis HGETALL: %w", err)
+	// Use Redis pipeline for efficiency
+	pipe := rdb.Pipeline()
+	getHostCmd := pipe.HGet(ctx, key, "host")
+	getPortCmd := pipe.HGet(ctx, key, "port")
+
+	// Execute pipeline
+	_, err := pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("redis pipeline error: %w", err)
 	}
-	// HGetAll 对不存在的 key 返回空 map，不是 redis.Nil
-	if len(m) == 0 {
+
+	// Get host
+	host, err := getHostCmd.Result()
+	if err == redis.Nil || host == "" {
 		return nil, ErrNotFound
 	}
 
-	// 2) 解析各字段
-	var rec SandboxRecord
-	rec.IP = m["host"]
-	// rec.Status = SandboxStatus(m["status"])
-
-	// port
-	if p := m["port"]; p != "" {
-		port, err := strconv.Atoi(p)
-		if err != nil {
-			return nil, fmt.Errorf("bad port %q: %w", p, err)
-		}
-		rec.Port = port
+	// Get port
+	portStr, err := getPortCmd.Result()
+	if err == redis.Nil || portStr == "" {
+		// Default to port 3000 if not specified
+		portStr = "3000"
 	}
-	log.Printf("[lookup] UUID %s -> IP %s, Port %d", uuid, rec.IP, rec.Port)
-	return url.Parse(fmt.Sprintf("%s://%s:%d/mcp", cfgv.DefaultScheme, rec.IP, rec.Port))
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid port %q: %w", portStr, err)
+	}
+
+	log.Printf("[lookup] UUID %s -> Host %s, Port %d", uuid, host, port)
+	return url.Parse(fmt.Sprintf("%s://%s:%d/mcp", config.DefaultScheme, host, port))
 }
 
 func main() {
-	cfgv = loadCfg()
-	log.Printf("[cfg] listen=%s sessionHeader=%s redis=%s db=%d prefix=%s defaultScheme=%s",
-		cfgv.ListenAddr, cfgv.SessionHeader, cfgv.RedisAddr, cfgv.RedisDB, cfgv.RedisKeyPrefix, cfgv.DefaultScheme)
+	// Load configuration
+	config = loadConfig()
+	log.Printf("[config] listen=%s sessionHeader=%s redis=%s db=%d prefix=%s defaultScheme=%s",
+		config.ListenAddr, config.SessionHeader, config.RedisAddr, config.RedisDB,
+		config.RedisKeyPrefix, config.DefaultScheme)
 
+	// Initialize Redis client
 	rdb = redis.NewClient(&redis.Options{
-		Addr:     cfgv.RedisAddr,
-		Password: cfgv.RedisPassword,
-		DB:       cfgv.RedisDB,
+		Addr:         config.RedisAddr,
+		Password:     config.RedisPassword,
+		DB:           config.RedisDB,
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
+		PoolSize:     10,
+		MinIdleConns: 5,
 	})
 
-	if err := rdb.Ping(context.Background()).Err(); err != nil {
+	// Test Redis connection
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Fatalf("redis ping failed: %v", err)
 	}
 
+	// Configure transport for reverse proxy
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = http.ProxyFromEnvironment
 	transport.MaxIdleConns = 256
 	transport.MaxIdleConnsPerHost = 128
 	transport.IdleConnTimeout = 90 * time.Second
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	transport.ExpectContinueTimeout = 1 * time.Second
+	transport.ResponseHeaderTimeout = 10 * time.Second
 
+	// Create reverse proxy
 	proxy := &httputil.ReverseProxy{
 		Director: func(r *http.Request) {
-			// 取目标
+			// Get target URL from context
 			u, _ := r.Context().Value(targetKey).(*url.URL)
 			if u == nil {
 				log.Printf("[director] no target URL in context (skip) method=%s path=%q", r.Method, r.URL.Path)
 				return
 			}
 
-			// 记录进入前信息
+			// Log original request details
 			origHost := r.Host
 			origPath := r.URL.Path
 			origQuery := r.URL.RawQuery
 			xffBefore := r.Header.Get("X-Forwarded-For")
 
-			log.Printf("[director][before] method=%s origHost=%s path=%q rawQuery=%q xff=%q target=%s",
-				r.Method, origHost, origPath, origQuery, xffBefore, u.String())
+			if os.Getenv("DEBUG") == "true" {
+				log.Printf("[director][before] method=%s origHost=%s path=%q rawQuery=%q xff=%q target=%s",
+					r.Method, origHost, origPath, origQuery, xffBefore, u.String())
+			}
 
-			// 设置 scheme/host（目标）
+			// Set scheme and host
 			r.URL.Scheme = u.Scheme
 			r.URL.Host = u.Host
 
-			// 路径处理决策
-			decision := "noop"
+			// Handle path joining
 			if u.Path != "" && u.Path != "/" {
 				if !strings.HasPrefix(r.URL.Path, u.Path) {
-					newPath := singleJoin(u.Path, r.URL.Path)
-					decision = fmt.Sprintf("join(%q, %q) -> %q", u.Path, origPath, newPath)
-					r.URL.Path = newPath
-				} else {
-					decision = fmt.Sprintf("keep (already prefixed by %q)", u.Path)
+					r.URL.Path = singleJoin(u.Path, r.URL.Path)
 				}
-			} else {
-				decision = "skip (u.Path empty or /)"
 			}
 
-			// Host 头改为上游主机
+			// Set host header to upstream host
 			r.Host = u.Host
 
-			// 维护 XFF
+			// Add X-Forwarded headers
 			ip := clientIP(r)
 			if xffBefore != "" {
 				r.Header.Set("X-Forwarded-For", xffBefore+", "+ip)
@@ -206,64 +226,89 @@ func main() {
 				r.Header.Set("X-Forwarded-For", ip)
 			}
 			r.Header.Set("X-Forwarded-Host", origHost)
+			r.Header.Set("X-Forwarded-Proto", "http") // Adjust if using HTTPS
 
-			log.Printf("[director][after]  forwardTo scheme=%s host=%s path=%q rawQuery=%q HostHdr=%s decision=%s xff=%q",
-				r.URL.Scheme, r.URL.Host, r.URL.Path, r.URL.RawQuery, r.Host, decision, r.Header.Get("X-Forwarded-For"))
+			if os.Getenv("DEBUG") == "true" {
+				log.Printf("[director][after] forwardTo=%s path=%q xff=%q",
+					u.String(), r.URL.Path, r.Header.Get("X-Forwarded-For"))
+			}
 		},
 
 		Transport:     transport,
 		FlushInterval: 50 * time.Millisecond,
 
-		// 可选：记录上游响应状态与最终 URL
+		// Log response status
 		ModifyResponse: func(resp *http.Response) error {
-			// resp.Request.URL 是已经改写后的目标 URL
-			log.Printf("[proxy][resp] status=%d url=%s", resp.StatusCode, resp.Request.URL.String())
+			if resp.StatusCode >= 400 || os.Getenv("DEBUG") == "true" {
+				log.Printf("[proxy][resp] status=%d url=%s", resp.StatusCode, resp.Request.URL.String())
+			}
 			return nil
 		},
 
+		// Handle errors
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			// r.Context() 里仍然能拿到目标
-			if u, _ := r.Context().Value(targetKey).(*url.URL); u != nil {
+			u, _ := r.Context().Value(targetKey).(*url.URL)
+			if u != nil {
 				log.Printf("[proxy][error] upstream error: %v target=%s method=%s path=%q",
 					err, u.String(), r.Method, r.URL.Path)
 			} else {
 				log.Printf("[proxy][error] upstream error: %v (no target) method=%s path=%q",
 					err, r.Method, r.URL.Path)
 			}
-			http.Error(w, "bad gateway", http.StatusBadGateway)
+
+			// Return appropriate error based on the type
+			if errors.Is(err, context.DeadlineExceeded) {
+				http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+			} else {
+				http.Error(w, "bad gateway", http.StatusBadGateway)
+			}
 		},
 	}
 
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	// Create HTTP mux
+	mux := http.NewServeMux()
+
+	// Health check endpoint
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	http.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 
+	// Readiness check endpoint
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
+
 		if err := rdb.Ping(ctx).Err(); err != nil {
-			http.Error(w, "redis not ready", http.StatusServiceUnavailable)
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("redis not ready"))
 			return
 		}
+
+		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready"))
 	})
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		uuid := strings.TrimSpace(r.Header.Get(cfgv.SessionHeader))
-		log.Printf("[gateway] Headers %s", uuid)
+	// Main handler for proxying requests
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Get UUID from header
+		uuid := strings.TrimSpace(r.Header.Get(config.SessionHeader))
 		if uuid == "" {
 			http.Error(w, "missing session header", http.StatusBadRequest)
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), cfgv.RedisLookupTimeout)
+		// Look up target with timeout
+		ctx, cancel := context.WithTimeout(r.Context(), config.RedisLookupTimeout)
 		defer cancel()
+
 		u, err := lookupTarget(ctx, uuid)
-		log.Printf("[gateway] Host: %s, err: %v", u.Host, err)
 		if err != nil {
-			if errors.Is(err, redis.Nil) {
+			if errors.Is(err, ErrNotFound) {
+				log.Printf("[gateway] UUID not found: %s", uuid)
 				http.Error(w, "route not found", http.StatusNotFound)
 				return
 			}
@@ -272,26 +317,49 @@ func main() {
 			return
 		}
 
-		// host := u.Hostname()
-		// if !cfgv.AllowedHostRegex.MatchString(host) {
-		// 	http.Error(w, "forbidden target host", http.StatusForbidden)
-		// 	return
-		// }
-
+		// Add target URL to context and proxy the request
 		ctx = context.WithValue(r.Context(), targetKey, u)
-		log.Printf("[gateway] routing request: method=%s path=%q target=%s", r.Method, r.URL.Path, u.String())
+		if os.Getenv("DEBUG") == "true" {
+			log.Printf("[gateway] routing request: method=%s path=%q target=%s", r.Method, r.URL.Path, u.String())
+		}
 		proxy.ServeHTTP(w, r.WithContext(ctx))
 	})
 
-	srv := &http.Server{
-		Addr:              cfgv.ListenAddr,
-		ReadHeaderTimeout: 30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+	// Create HTTP server with timeouts
+	srv := http.Server{
+		Addr:              config.ListenAddr,
+		Handler:           mux,
+		ReadTimeout:       config.ReadTimeout,
+		WriteTimeout:      config.WriteTimeout,
+		IdleTimeout:       config.IdleTimeout,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Printf("[gateway] listening on %s", cfgv.ListenAddr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("server error: %v", err)
+
+	// Start server in a goroutine
+	go func() {
+		log.Printf("[gateway] listening on %s", config.ListenAddr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("Shutting down server...")
+
+	// Create shutdown context with timeout
+	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Shutdown the server
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatalf("Server forced to shutdown: %v", err)
 	}
+
+	log.Println("Server exited properly")
 }
 
 func singleJoin(a, b string) string {

@@ -6,13 +6,13 @@ metadata:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: spawner
+  name: control-plane
   namespace: apps
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: spawner-role
+  name: control-plane-role
   namespace: apps
 rules:
   - apiGroups: [""]
@@ -25,13 +25,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: spawner-binding
+  name: control-plane-binding
   namespace: apps
 subjects:
   - kind: ServiceAccount
-    name: spawner
+    name: control-plane
     namespace: apps
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: spawner-role
+  name: control-plane-role

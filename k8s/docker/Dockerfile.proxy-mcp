@@ -1,5 +1,30 @@
-FROM python:3.13.7-slim
-RUN pip install fastmcp
+FROM python:3.13-slim AS builder
 
+# Create virtual environment
+ENV VIRTUAL_ENV=/opt/venv
+RUN python -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# Install dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir fastmcp
+
+FROM python:3.13-slim
+
+# Set locale
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+# Copy virtual environment from builder
+ENV VIRTUAL_ENV=/opt/venv
+COPY --from=builder $VIRTUAL_ENV $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+WORKDIR /app
 COPY proxy-mcp.py /app/proxy-mcp.py
+
+# Add healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD python -c "import http.client; conn = http.client.HTTPConnection('localhost', 3000); conn.request('GET', '/healthz'); response = conn.getresponse(); exit(0 if response.status == 200 else 1)"
+
 ENTRYPOINT ["python", "/app/proxy-mcp.py"]

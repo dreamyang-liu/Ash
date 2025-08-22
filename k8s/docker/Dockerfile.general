@@ -1,40 +1,40 @@
-FROM ubuntu:24.04
+FROM python:3.13-slim AS builder
 
-ENV locale-gen=en_US.UTF-8
-ENV LANG=en_US.UTF-8
-ENV LANGUAGE=en_US:en
-ENV LC_ALL=en_US.UTF-8
+# Create virtual environment
+ENV VIRTUAL_ENV=/opt/venv
+RUN python -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
+# Install dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir fastmcp terminal-controller
+
+FROM python:3.13-slim
+
+# Set locale
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+# Copy virtual environment from builder
+ENV VIRTUAL_ENV=/opt/venv
+COPY --from=builder $VIRTUAL_ENV $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# Install only essential runtime dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        build-essential \
-        curl \
-        wget \
-        git \
-        vim \
-        nano \
         ca-certificates \
-        unzip \
-        python3 \
-        python3-pip \
-        python3-venv \
-        software-properties-common \
-        htop \
-        net-tools \
-        iputils-ping \
-        locales && \
+        curl \
+        netcat-traditional && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY general-mcp.py /app/general-mcp.py
 
-# Use venv
-ENV VIRTUAL_ENV=/opt/venv
-RUN python3 -m venv $VIRTUAL_ENV \
- && $VIRTUAL_ENV/bin/pip install --upgrade pip \
- && $VIRTUAL_ENV/bin/pip install --no-cache-dir fastmcp terminal-controller
-ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-
 EXPOSE 3000
+
+# Add healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:3000/healthz || exit 1
 
 ENTRYPOINT ["python", "/app/general-mcp.py"]

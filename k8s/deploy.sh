@@ -1,15 +1,7 @@
-minikube kubectl -- -n apps logs -f -l app=spawner --all-containers --prefix --max-log-requests=20
-
 
 minikube kubectl -- delete namespace apps
 
 
-cd control-plane
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
-cd ..
-cd gateway
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
-cd ..
 minikube image build -f Dockerfile.cp -t rl-sandbox-cp:0.1 .
 minikube image build -f Dockerfile.gateway -t rl-sandbox-gateway:0.1 .
 
@@ -18,9 +10,12 @@ minikube kubectl -- apply -f infra.yaml
 minikube kubectl -- apply -f stateless-mcps.yaml
 
 
-minikube kubectl -- -n apps rollout restart deploy/spawner
-minikube kubectl -- -n apps rollout status deploy/spawner
+# minikube kubectl -- -n apps rollout restart deploy/spawner
+minikube kubectl -- -n apps rollout status deploy/gateway
+minikube kubectl -- -n apps rollout status deploy/control-plane
 
+minikube service control-plane -n apps --url
+minikube service gateway -n apps --url
 
 
 # CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
@@ -28,32 +23,34 @@ minikube kubectl -- -n apps rollout status deploy/spawner
 # minikube kubectl -- -n apps port-forward svc/spawner 8080:80
 
 
-curl -X POST http://192.168.49.2:30774/spawn \
-  -H "Content-Type: application/json" \
-  -d '{
-    "image": "nginx:1.27",
-    "ports": [{"container_port": 80}],
-    "expose": "LoadBalancer",
-    "env": {"HELLO": "world"}
-  }'
+# curl -X POST http://192.168.49.2:30774/spawn \
+#   -H "Content-Type: application/json" \
+#   -d '{
+#     "image": "nginx:1.27",
+#     "ports": [{"container_port": 80}],
+#     "expose": "LoadBalancer",
+#     "env": {"HELLO": "world"}
+#   }'
+# minikube kubectl -- -n apps logs -f -l app=spawner --all-containers --prefix --max-log-requests=20
 
 
-# 滚动状态（快速看到是否 ProgressDeadlineExceeded）
-minikube kubectl -- -n $NS rollout status deploy/$DEP --timeout=30s
 
-# Deployment 条件 & 事件
-minikube kubectl -- -n $NS describe deploy/$DEP | sed -n '/Conditions:/,/Events:/p'
-minikube kubectl -- -n $NS describe deploy/$DEP | sed -n '/Events:/,$p'
+# # 滚动状态（快速看到是否 ProgressDeadlineExceeded）
+# minikube kubectl -- -n $NS rollout status deploy/$DEP --timeout=30s
 
-# 关联 ReplicaSet（新旧版本各多少副本）
-minikube kubectl -- -n $NS get rs -l app=$APP -o wide --sort-by=.metadata.creationTimestamp
+# # Deployment 条件 & 事件
+# minikube kubectl -- -n $NS describe deploy/$DEP | sed -n '/Conditions:/,/Events:/p'
+# minikube kubectl -- -n $NS describe deploy/$DEP | sed -n '/Events:/,$p'
 
-# Pod 概览（状态/READY/REASON）
-minikube kubectl -- -n $NS get pod -l app=$APP -o wide
+# # 关联 ReplicaSet（新旧版本各多少副本）
+# minikube kubectl -- -n $NS get rs -l app=$APP -o wide --sort-by=.metadata.creationTimestamp
 
-# cd gateway
-# CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
-# cd ..
-# minikube image build -f Dockerfile.gateway -t rl-sandbox-gateway:0.1 .
-# minikube kubectl -- -n apps rollout restart deploy/gateway
-# minikube kubectl -- -n apps rollout status deploy/gateway
+# # Pod 概览（状态/READY/REASON）
+# minikube kubectl -- -n $NS get pod -l app=$APP -o wide
+
+# # cd gateway
+# # CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
+# # cd ..
+# # minikube image build -f Dockerfile.gateway -t rl-sandbox-gateway:0.1 .
+# # minikube kubectl -- -n apps rollout restart deploy/gateway
+# # minikube kubectl -- -n apps rollout status deploy/gateway
