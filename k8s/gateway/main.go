@@ -76,7 +76,7 @@ func getenvDur(key string, def time.Duration) time.Duration {
 // Load configuration from environment variables
 func loadConfig() *Config {
 	return &Config{
-		ListenAddr:         getenv("LISTEN_ADDR", ":80"),
+		ListenAddr:         getenv("LISTEN_ADDR", ":8080"),
 		SessionHeader:      getenv("SESSION_HEADER", "X-MCP-Session-ID"),
 		RedisAddr:          getenv("REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword:      os.Getenv("REDIS_PASSWORD"),

@@ -13,6 +13,8 @@ spec:
       labels:
         app: google-search-mcp
     spec:
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: infra
       containers:
       - name: google-search-mcp
         image: timemagic/rl-mcp:google-search
@@ -43,6 +45,8 @@ spec:
       labels:
         app: sandbox-fusion-mcp
     spec:
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: infra
       containers:
       - name: sandbox-fusion-mcp
         image: timemagic/rl-mcp:sandbox-fusion-mcp
@@ -106,6 +110,8 @@ spec:
       labels:
         app: fetcher-mcp
     spec:
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: infra
       containers:
       - name: fetcher-mcp
         image: timemagic/rl-mcp:fetcher-mcp
@@ -163,6 +169,8 @@ spec:
       labels:
         app: proxy-mcp
     spec:
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: infra
       containers:
       - name: proxy-mcp
         image: timemagic/rl-mcp:proxy-mcp

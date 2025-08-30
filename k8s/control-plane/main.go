@@ -503,7 +503,7 @@ func main() {
 	})
 	// Create HTTP server with graceful shutdown
 	srv := http.Server{
-		Addr:    ":80",
+		Addr:    ":8080",
 		Handler: r,
 	}
 
