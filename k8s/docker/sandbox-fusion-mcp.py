@@ -26,6 +26,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mcp-sandbox-fusion")
 
+import subprocess
+
+try:
+    process = subprocess.Popen(["sh", "-lc", "bash /root/sandbox/scripts/run.sh"], stderr=subprocess.PIPE, stdout=subprocess.PIPE, universal_newlines=True)
+except Exception as e:
+    logger.error(f"Failed to launch subprocess: {str(e)}")
+    sys.exit(1)
+
 # Set Sandbox Fusion API endpoint
 endpoint = os.environ.get("SANDBOX_FUSION_ENDPOINT", "http://localhost:8080")
 set_endpoint(endpoint)
