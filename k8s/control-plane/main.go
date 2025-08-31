@@ -216,7 +216,7 @@ func main() {
 		if name == "" {
 			name = fmt.Sprintf("sandbox-%s", randSuffix(12))
 		}
-		labels := map[string]string{"app": name, "from": "control-plane"}
+		labels := map[string]string{"app": name, "from": "control-plane", "type": "sandbox"}
 
 		// 1) Deployment
 		var envVars []corev1.EnvVar
@@ -448,6 +448,85 @@ func main() {
 		log.Printf("Spawn request completed with status: %s", status)
 
 		c.JSON(http.StatusOK, resp)
+	})
+
+	r.DELETE("/deprovision-all", func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Minute)
+		defer cancel()
+
+		clientset, err := getK8sClient()
+		if err != nil {
+			log.Printf("Failed to get k8s client: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to connect to Kubernetes"})
+			return
+		}
+
+		var succeeded []string
+		var failed []string
+
+		// Find all deployments created by control-plane with label type=sandbox
+		selector := "from=control-plane,type=sandbox"
+		deps, err := clientset.AppsV1().Deployments(config.Namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: selector,
+		})
+		if err != nil {
+			log.Printf("Failed to list deployments: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list deployments"})
+			return
+		}
+
+		for _, dep := range deps.Items {
+			name := dep.Name
+			namespace := dep.Namespace
+			id := fmt.Sprintf("%s/%s", namespace, name)
+
+			// Delete service
+			if err := clientset.CoreV1().Services(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+				// Log but continue
+				log.Printf("Failed to delete service %s: %v", id, err)
+			}
+
+			// Delete deployment
+			if err := clientset.AppsV1().Deployments(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+				log.Printf("Failed to delete deployment %s: %v", id, err)
+			}
+
+			// Remove associated Redis keys: sandbox:<name>-*
+			pattern := fmt.Sprintf("sandbox:%s-*", name)
+			iter := rdb.Scan(ctx, 0, pattern, 0).Iterator()
+			var redisDelErr bool
+			var anyDeleted bool
+			for iter.Next(ctx) {
+				key := iter.Val()
+				anyDeleted = true
+				if err := rdb.Del(ctx, key).Err(); err != nil {
+					log.Printf("Failed to delete Redis key %s for %s: %v", key, id, err)
+					redisDelErr = true
+				}
+			}
+			if err := iter.Err(); err != nil {
+				log.Printf("Error scanning Redis for pattern %s: %v", pattern, err)
+				redisDelErr = true
+			}
+			// If no matching redis key found, that's not a fatal error; still consider succeeded.
+			if redisDelErr {
+				failed = append(failed, id)
+			} else {
+				// Consider this resource successfully handled
+				succeeded = append(succeeded, id)
+				// If there were no redis keys but resource deletions succeeded, still success.
+				if !anyDeleted {
+					log.Printf("No Redis keys found for %s (pattern %s)", id, pattern)
+				}
+			}
+		}
+
+		log.Printf("Deprovision-all completed: succeeded=%d failed=%d", len(succeeded), len(failed))
+		c.JSON(http.StatusOK, gin.H{
+			"deleted": succeeded,
+			"failed":  failed,
+			"count":   len(succeeded),
+		})
 	})
 
 	r.DELETE("/deprovision/:uuid", func(c *gin.Context) {
