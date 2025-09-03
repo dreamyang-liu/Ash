@@ -114,11 +114,8 @@ spec:
         eks.amazonaws.com/nodegroup: infra
       containers:
       - name: fetcher-mcp
-        image: timemagic/rl-mcp:fetcher-mcp
+        image: timemagic/rl-mcp:fetch-mcp
         imagePullPolicy: IfNotPresent
-        env:
-        - name: NODE_ENV
-          value: "production"
         ports:
         - name: http
           containerPort: 3000
@@ -129,12 +126,6 @@ spec:
           limits:
             cpu: "800m"
             memory: "512Mi"
-        volumeMounts:
-        - name: tmp-volume
-          mountPath: /tmp
-      volumes:
-      - name: tmp-volume
-        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

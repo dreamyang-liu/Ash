@@ -84,8 +84,8 @@ func loadConfig() *Config {
 		RedisKeyPrefix:     getenv("ROUTE_KEY_PREFIX", "sandbox:"),
 		DefaultScheme:      getenv("DEFAULT_SCHEME", "http"),
 		RedisLookupTimeout: getenvDur("REDIS_LOOKUP_TIMEOUT", 300*time.Millisecond),
-		ReadTimeout:        getenvDur("READ_TIMEOUT", 30*time.Second),
-		WriteTimeout:       getenvDur("WRITE_TIMEOUT", 30*time.Second),
+		ReadTimeout:        getenvDur("READ_TIMEOUT", 900*time.Second),
+		WriteTimeout:       getenvDur("WRITE_TIMEOUT", 60*time.Second),
 		IdleTimeout:        getenvDur("IDLE_TIMEOUT", 120*time.Second),
 	}
 }
