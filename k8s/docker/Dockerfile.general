@@ -7,7 +7,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # Install dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir fastmcp terminal-controller
+    pip install --no-cache-dir fastmcp terminal-controller ddgs mcp[cli] mcp-server-fetch
 
 FROM python:3.13-slim
 
@@ -19,7 +19,8 @@ ENV LC_ALL=C.UTF-8
 ENV VIRTUAL_ENV=/opt/venv
 COPY --from=builder $VIRTUAL_ENV $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-
+COPY --from=docker.io/astral/uv:latest /uv /uvx /bin/
+COPY ddgs_mcp /ddgs_mcp
 # Install only essential runtime dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -32,9 +33,5 @@ WORKDIR /app
 COPY general-mcp.py /app/general-mcp.py
 
 EXPOSE 3000
-
-# Add healthcheck
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:3000/healthz || exit 1
 
 ENTRYPOINT ["python", "/app/general-mcp.py"]

@@ -1,42 +1,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: google-search-mcp
-  namespace: apps
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: google-search-mcp
-  template:
-    metadata:
-      labels:
-        app: google-search-mcp
-    spec:
-      nodeSelector:
-        eks.amazonaws.com/nodegroup: infra
-      containers:
-      - name: google-search-mcp
-        image: timemagic/rl-mcp:google-search
-        imagePullPolicy: IfNotPresent
-        ports:
-        - name: http
-          containerPort: 3000
-        resources:
-          requests:
-            cpu: "400m"
-            memory: "256Mi"
-          limits:
-            cpu: "800m"
-            memory: "512Mi"
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
   name: sandbox-fusion-mcp
   namespace: apps
 spec:
-  replicas: 2
+  replicas: 3
   selector:
     matchLabels:
       app: sandbox-fusion-mcp
@@ -46,7 +14,7 @@ spec:
         app: sandbox-fusion-mcp
     spec:
       nodeSelector:
-        eks.amazonaws.com/nodegroup: infra
+        eks.amazonaws.com/nodegroup: mcp-servers
       containers:
       - name: sandbox-fusion-mcp
         image: timemagic/rl-mcp:sandbox-fusion-mcp
@@ -71,124 +39,6 @@ spec:
   type: ClusterIP
   selector:
     app: sandbox-fusion-mcp
-  ports:
-  - name: http
-    port: 3000
-    targetPort: 3000
-  sessionAffinity: ClientIP
-  sessionAffinityConfig:
-    clientIP:
-      timeoutSeconds: 10800
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: google-search-mcp
-  namespace: apps
-spec:
-  type: ClusterIP
-  selector:
-    app: google-search-mcp
-  ports:
-  - name: http
-    port: 3000
-    targetPort: 3000
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: fetcher-mcp
-  namespace: apps
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: fetcher-mcp
-  template:
-    metadata:
-      labels:
-        app: fetcher-mcp
-    spec:
-      nodeSelector:
-        eks.amazonaws.com/nodegroup: infra
-      containers:
-      - name: fetcher-mcp
-        image: timemagic/rl-mcp:fetch-mcp
-        imagePullPolicy: IfNotPresent
-        ports:
-        - name: http
-          containerPort: 3000
-        resources:
-          requests:
-            cpu: "400m"
-            memory: "256Mi"
-          limits:
-            cpu: "800m"
-            memory: "512Mi"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: fetcher-mcp
-  namespace: apps
-spec:
-  type: ClusterIP
-  selector:
-    app: fetcher-mcp
-  ports:
-  - name: http
-    port: 3000
-    targetPort: 3000
-  sessionAffinity: ClientIP
-  sessionAffinityConfig:
-    clientIP:
-      timeoutSeconds: 10800
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: proxy-mcp
-  namespace: apps
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: proxy-mcp
-  template:
-    metadata:
-      labels:
-        app: proxy-mcp
-    spec:
-      nodeSelector:
-        eks.amazonaws.com/nodegroup: infra
-      containers:
-      - name: proxy-mcp
-        image: timemagic/rl-mcp:proxy-mcp
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: MCP_ADDRS
-          value: "fetcher-mcp.apps.svc.cluster.local:3000/sse,google-search-mcp.apps.svc.cluster.local:3000/mcp,sandbox-fusion-mcp.apps.svc.cluster.local:3000/mcp"
-        ports:
-        - name: http
-          containerPort: 3000
-        resources:
-          requests:
-            cpu: "400m"
-            memory: "256Mi"
-          limits:
-            cpu: "800m"
-            memory: "512Mi"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: proxy-mcp
-  namespace: apps
-spec:
-  type: NodePort
-  selector:
-    app: proxy-mcp
   ports:
   - name: http
     port: 3000

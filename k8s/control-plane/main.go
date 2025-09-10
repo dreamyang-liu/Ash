@@ -242,6 +242,9 @@ func main() {
 		podSpec := corev1.PodSpec{
 			Containers:         []corev1.Container{container},
 			ServiceAccountName: "control-plane",
+			NodeSelector: map[string]string{
+				"eks.amazonaws.com/nodegroup": "sandbox",
+			},
 		}
 		dep := &appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{

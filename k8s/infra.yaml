@@ -4,7 +4,7 @@ metadata:
   name: control-plane
   namespace: apps
 spec:
-  replicas: 2
+  replicas: 3
   selector:
     matchLabels:
       app: control-plane
@@ -33,11 +33,11 @@ spec:
         - containerPort: 8080
         resources:
           requests:
-            cpu: "300m"
-            memory: "256Mi"
+            cpu: "1000m"
+            memory: "1256Mi"
           limits:
-            cpu: "800m"
-            memory: "512Mi"
+            cpu: "2800m"
+            memory: "1512Mi"
 ---
 apiVersion: v1
 kind: Service
@@ -58,7 +58,7 @@ metadata:
   name: gateway
   namespace: apps
 spec:
-  replicas: 2
+  replicas: 3
   selector:
     matchLabels:
       app: gateway
@@ -82,11 +82,11 @@ spec:
         - containerPort: 8080
         resources:
           requests:
-            cpu: "300m"
-            memory: "256Mi"
+            cpu: "1000m"
+            memory: "1512Mi"
           limits:
-            cpu: "800m"
-            memory: "512Mi"
+            cpu: "2000m"
+            memory: "2512Mi"
         readinessProbe:
           httpGet:
             path: /healthz
@@ -100,10 +100,10 @@ spec:
         command: ['sh', '-c', 'until nc -z redis.apps.svc.cluster.local 6379; do echo waiting for redis; sleep 2; done;']
         resources:
           requests:
-            cpu: "50m"
+            cpu: "250m"
             memory: "32Mi"
           limits:
-            cpu: "100m"
+            cpu: "500m"
             memory: "64Mi"
 ---
 apiVersion: v1
