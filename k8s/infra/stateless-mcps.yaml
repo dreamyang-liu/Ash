@@ -4,7 +4,7 @@ metadata:
   name: sandbox-fusion-mcp
   namespace: apps
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: sandbox-fusion-mcp
@@ -14,7 +14,7 @@ spec:
         app: sandbox-fusion-mcp
     spec:
       nodeSelector:
-        eks.amazonaws.com/nodegroup: mcp-servers
+        eks.amazonaws.com/nodegroup: infra
       containers:
       - name: sandbox-fusion-mcp
         image: timemagic/rl-mcp:sandbox-fusion-mcp
@@ -24,11 +24,11 @@ spec:
           containerPort: 3000
         resources:
           requests:
-            cpu: "1500m"
-            memory: "1Gi"
+            cpu: "10000m"
+            memory: "32Gi"
           limits:
-            cpu: "2000m"
-            memory: "1512Mi"
+            cpu: "15000m"
+            memory: "64Gi"
 ---
 apiVersion: v1
 kind: Service

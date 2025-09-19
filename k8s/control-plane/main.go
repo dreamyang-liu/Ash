@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
@@ -34,12 +35,23 @@ type Port struct {
 }
 
 type SpawnReq struct {
-	Image    string            `json:"image" binding:"required"`
-	Name     string            `json:"name"`
-	Ports    []Port            `json:"ports"`
-	Expose   string            `json:"expose" binding:"required"`
-	Replicas int               `json:"replicas" binding:"required"`
-	Env      map[string]string `json:"env"`
+	Image     string            `json:"image" binding:"required"`
+	Name      string            `json:"name"`
+	Ports     []Port            `json:"ports"`
+	Expose    string            `json:"expose" binding:"required"`
+	Replicas  int               `json:"replicas" binding:"required"`
+	Env       map[string]string `json:"env"`
+	Resources ResourceReq       `json:"resources"`
+}
+
+type ResourceReq struct {
+	Requests ResourceSpec `json:"requests"`
+	Limits   ResourceSpec `json:"limits"`
+}
+
+type ResourceSpec struct {
+	CPU    string `json:"cpu"`
+	Memory string `json:"memory"`
 }
 
 type SpawnResp struct {
@@ -239,6 +251,34 @@ func main() {
 			Ports: containerPorts,
 			Env:   envVars,
 		}
+
+		// Add resource limits and requests if specified
+		if req.Resources.Requests.CPU != "" || req.Resources.Requests.Memory != "" ||
+			req.Resources.Limits.CPU != "" || req.Resources.Limits.Memory != "" {
+
+			container.Resources = corev1.ResourceRequirements{}
+
+			if req.Resources.Requests.CPU != "" || req.Resources.Requests.Memory != "" {
+				container.Resources.Requests = corev1.ResourceList{}
+				if req.Resources.Requests.CPU != "" {
+					container.Resources.Requests[corev1.ResourceCPU] = resource.MustParse(req.Resources.Requests.CPU)
+				}
+				if req.Resources.Requests.Memory != "" {
+					container.Resources.Requests[corev1.ResourceMemory] = resource.MustParse(req.Resources.Requests.Memory)
+				}
+			}
+
+			if req.Resources.Limits.CPU != "" || req.Resources.Limits.Memory != "" {
+				container.Resources.Limits = corev1.ResourceList{}
+				if req.Resources.Limits.CPU != "" {
+					container.Resources.Limits[corev1.ResourceCPU] = resource.MustParse(req.Resources.Limits.CPU)
+				}
+				if req.Resources.Limits.Memory != "" {
+					container.Resources.Limits[corev1.ResourceMemory] = resource.MustParse(req.Resources.Limits.Memory)
+				}
+			}
+		}
+
 		podSpec := corev1.PodSpec{
 			Containers:         []corev1.Container{container},
 			ServiceAccountName: "control-plane",

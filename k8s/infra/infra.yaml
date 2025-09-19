@@ -45,7 +45,7 @@ metadata:
   name: control-plane
   namespace: apps
 spec:
-  type: NodePort
+  type: LoadBalancer
   selector:
     app: control-plane
   ports:
@@ -58,7 +58,7 @@ metadata:
   name: gateway
   namespace: apps
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: gateway
@@ -82,11 +82,11 @@ spec:
         - containerPort: 8080
         resources:
           requests:
-            cpu: "1000m"
-            memory: "1512Mi"
+            cpu: "8000m"
+            memory: "16384Mi"
           limits:
-            cpu: "2000m"
-            memory: "2512Mi"
+            cpu: "10000m"
+            memory: "16384Mi"
         readinessProbe:
           httpGet:
             path: /healthz
@@ -112,7 +112,7 @@ metadata:
   name: gateway
   namespace: apps
 spec:
-  type: NodePort
+  type: LoadBalancer
   selector:
     app: gateway
   ports:
@@ -166,8 +166,8 @@ spec:
         ports:
         - containerPort: 6379
         resources:
-          requests: { cpu: "150m", memory: "256Mi" }
-          limits:   { cpu: "500m", memory: "512Mi" }
+          requests: { cpu: "3550m", memory: "1256Mi" }
+          limits:   { cpu: "5000m", memory: "1512Mi" }
         livenessProbe:
           tcpSocket: { port: 6379 }
           initialDelaySeconds: 5
