@@ -27,7 +27,7 @@ def get_config():
 
 def main():
     config = get_config()
-    proxy = FastMCP.as_proxy(config, name="General MCP Proxy")
+    proxy = FastMCP.as_proxy(config, name="General Sandbox MCP Proxy")
     proxy.run(transport="streamable-http", host="0.0.0.0", port=3000)
 
 if __name__ == "__main__":

@@ -30,8 +30,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY general-mcp.py /app/general-mcp.py
+COPY main.py /app/main.py
 
 EXPOSE 3000
 
-ENTRYPOINT ["python", "/app/general-mcp.py"]
+ENTRYPOINT ["python", "/app/main.py"]

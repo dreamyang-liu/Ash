@@ -1,9 +1,0 @@
-FROM volcengine/sandbox-fusion:server-20250609
-
-RUN conda create -n mcp python=3.12 -y
-RUN /root/miniconda3/envs/mcp/bin/pip install fastmcp sandbox-fusion typing_extensions asyncio
-
-WORKDIR /mcp
-COPY sandbox-fusion-mcp.py /mcp
-
-ENTRYPOINT ["/root/miniconda3/envs/mcp/bin/python", "/mcp/sandbox-fusion-mcp.py"]
