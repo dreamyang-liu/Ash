@@ -1,0 +1,185 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-plane
+  namespace: apps
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: control-plane
+  template:
+    metadata:
+      labels:
+        app: control-plane
+    spec:
+      serviceAccountName: control-plane
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+      - name: control-plane
+        image: rl-sandbox-cp:0.1
+        imagePullPolicy: Never
+        env:
+        - name: TARGET_NAMESPACE
+          value: "apps"
+        - name: REDIS_HOST
+          value: "redis.apps.svc.cluster.local"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_DB
+          value: "0"
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: "1000m"
+            memory: "1256Mi"
+          limits:
+            cpu: "2800m"
+            memory: "1512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane
+  namespace: apps
+spec:
+  type: LoadBalancer
+  selector:
+    app: control-plane
+  ports:
+  - port: 80
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+      - name: gateway
+        image: rl-sandbox-gateway:0.1
+        imagePullPolicy: Never
+        env:
+        - name: REDIS_ADDR
+          value: "redis.apps.svc.cluster.local:6379"
+        - name: REDIS_DB
+          value: "0"
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: "800m"
+            memory: "4096Mi"
+          limits:
+            cpu: "1000m"
+            memory: "8192Mi"
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      # Wait for redis to be ready before starting gateway
+      initContainers:
+      - name: wait-for-redis
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nc -z redis.apps.svc.cluster.local 6379; do echo waiting for redis; sleep 2; done;']
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "32Mi"
+          limits:
+            cpu: "500m"
+            memory: "64Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: apps
+spec:
+  type: LoadBalancer
+  selector:
+    app: gateway
+  ports:
+  - port: 80
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: apps
+  labels: { app: redis }
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: apps
+  labels: { app: redis }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: redis }
+  template:
+    metadata:
+      labels: { app: redis }
+    spec:
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        imagePullPolicy: IfNotPresent
+        args: [
+          "redis-server",
+          "--appendonly", "yes",
+          "--save", "900", "1",
+          "--protected-mode", "no",
+          "--maxmemory", "400mb",
+          "--maxmemory-policy", "allkeys-lru",
+          "--tcp-keepalive", "60"
+        ]
+        ports:
+        - containerPort: 6379
+        resources:
+          requests: { cpu: "3550m", memory: "1256Mi" }
+          limits:   { cpu: "5000m", memory: "1512Mi" }
+        livenessProbe:
+          tcpSocket: { port: 6379 }
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          tcpSocket: { port: 6379 }
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+      volumes:
+      - name: redis-data
+        emptyDir: {}

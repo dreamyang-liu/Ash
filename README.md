@@ -96,9 +96,17 @@ This will build:
 1. The control plane and gateway containers
 2. The sandbox environment containers
 
-### Deployment
+### Local Deployment with Minikube
 
-To deploy the infrastructure:
+For a local development setup using Minikube:
+
+```
+make all-local
+```
+
+### Standard Deployment
+
+For deployment to a standard Kubernetes cluster:
 
 ```bash
 cd k8s-config

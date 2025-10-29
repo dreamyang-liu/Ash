@@ -35,13 +35,14 @@ type Port struct {
 }
 
 type SpawnReq struct {
-	Image     string            `json:"image" binding:"required"`
-	Name      string            `json:"name"`
-	Ports     []Port            `json:"ports"`
-	Expose    string            `json:"expose" binding:"required"`
-	Replicas  int               `json:"replicas" binding:"required"`
-	Env       map[string]string `json:"env"`
-	Resources ResourceReq       `json:"resources"`
+	Image        string            `json:"image" binding:"required"`
+	Name         string            `json:"name"`
+	Ports        []Port            `json:"ports"`
+	Expose       string            `json:"expose" binding:"required"`
+	Replicas     int               `json:"replicas" binding:"required"`
+	Env          map[string]string `json:"env"`
+	Resources    ResourceReq       `json:"resources"`
+	NodeSelector map[string]string `json:"node_selector"`
 }
 
 type ResourceReq struct {
@@ -279,12 +280,18 @@ func main() {
 			}
 		}
 
+		// Use client-provided node selector, or default if not provided
+		nodeSelector := req.NodeSelector
+		if nodeSelector == nil {
+			nodeSelector = map[string]string{
+				"kubernetes.io/os": "linux",
+			}
+		}
+
 		podSpec := corev1.PodSpec{
 			Containers:         []corev1.Container{container},
 			ServiceAccountName: "control-plane",
-			NodeSelector: map[string]string{
-				"eks.amazonaws.com/nodegroup": "sandbox",
-			},
+			NodeSelector:       nodeSelector,
 		}
 		dep := &appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{

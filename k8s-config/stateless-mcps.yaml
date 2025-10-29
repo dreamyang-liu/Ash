@@ -4,7 +4,7 @@ metadata:
   name: sandbox-fusion-mcp
   namespace: apps
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: sandbox-fusion-mcp
