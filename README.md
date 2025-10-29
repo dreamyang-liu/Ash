@@ -1,10 +1,16 @@
-# RL-Sandbox
+# StationHive
 
-RL-Sandbox is a Kubernetes-based environment for creating and managing isolated sandboxed environments for reinforcement learning applications. It provides a scalable infrastructure for deploying, managing, and accessing sandbox environments via a unified gateway.
+StationHive is a scalable workstation cluster for LLM Agents & RL Rollouts. It provides a Kubernetes-based infrastructure for creating, managing, and accessing isolated sandbox environments through a unified gateway.
 
 ## Overview
 
-RL-Sandbox is designed to create isolated, ephemeral environments that can be used for training reinforcement learning models, testing algorithms, or running experiments. The architecture consists of the following key components:
+StationHive is designed to create isolated, ephemeral workstation environments that can be used for:
+- LLM agent operations with tool access
+- Reinforcement learning training and rollouts
+- Algorithm experimentation and testing
+- Scalable AI workloads
+
+The architecture consists of the following key components:
 
 - **Control Plane**: Manages the lifecycle of sandbox environments (creation, monitoring, deletion)
 - **Gateway**: Routes requests to the appropriate sandbox based on session identifiers
@@ -32,18 +38,22 @@ RL-Sandbox is designed to create isolated, ephemeral environments that can be us
 │       ├── go.mod          # Go module definition
 │       ├── go.sum          # Go dependencies
 │       └── main.go         # Gateway implementation
-└── sandbox-recipe/         # Sandbox environment definitions
-    ├── Makefile            # Recipe-specific makefile
-    └── general/            # General-purpose sandbox
-        ├── Dockerfile      # Container definition
-        ├── main.py         # Main entry point
-        └── ddgs_mcp/       # DuckDuckGo search MCP implementation
-            ├── .gitignore
-            ├── .python-version
-            ├── main.py     # DDGS MCP implementation
-            ├── pyproject.toml
-            ├── README.md
-            └── uv.lock
+├── sandbox-recipe/         # Sandbox environment definitions
+│   ├── Makefile            # Recipe-specific makefile
+│   └── general/            # General-purpose sandbox
+│       ├── Dockerfile      # Container definition
+│       ├── main.py         # Main entry point
+│       └── ddgs_mcp/       # DuckDuckGo search MCP implementation
+│           ├── .gitignore
+│           ├── .python-version
+│           ├── main.py     # DDGS MCP implementation
+│           ├── pyproject.toml
+│           ├── README.md
+│           └── uv.lock
+└── example/                # Example scripts
+    ├── spawn_sandbox.py    # Script to create sandbox environments
+    ├── deprovision_sandbox.py # Script to clean up sandbox environments
+    └── mcp_example.py      # Example MCP usage
 ```
 
 ## Components
@@ -70,10 +80,12 @@ The gateway serves as the entry point for all requests to sandbox environments:
 
 ### MCP (Model Context Protocol) Servers
 
-MCP servers provide tools and resources to the sandbox environments:
+MCP servers provide tools and resources to the sandbox environments, enabling LLM agents to access external capabilities:
 
 - **sandbox-fusion-mcp**: A specialized MCP server for fusion operations
 - **ddgs_mcp**: Provides search capabilities using DuckDuckGo search API
+- **terminal-controller**: Enables terminal access and command execution
+- **fetch**: Provides web content fetching capabilities
 
 ## Setup and Deployment
 
@@ -100,8 +112,32 @@ This will build:
 
 For a local development setup using Minikube:
 
-```
+```bash
 make all-local
+```
+
+This single command will:
+1. Start Minikube with LoadBalancer support (via MetalLB)
+2. Build all necessary Docker images directly in the Minikube environment
+3. Apply modified configuration files adapted for local development
+4. Deploy all components to your local Minikube cluster
+
+After deployment, you can access the services using:
+
+```bash
+# Get URLs for accessing services
+minikube service control-plane -n apps --url
+minikube service gateway -n apps --url
+```
+
+Alternatively, use port-forwarding for local access:
+
+```bash
+# Forward the control-plane service to localhost:8080
+minikube kubectl -- -n apps port-forward svc/control-plane 8080:80
+
+# In another terminal, forward the gateway service to localhost:8081
+minikube kubectl -- -n apps port-forward svc/gateway 8081:80
 ```
 
 ### Standard Deployment
@@ -140,6 +176,20 @@ curl -X POST http://localhost:8080/spawn \
 
 The response will include a UUID that can be used to access the sandbox environment.
 
+#### Using the Python Example Script
+
+The repository includes a Python script for creating sandboxes:
+
+```bash
+# Run the spawn script
+python example/spawn_sandbox.py
+```
+
+This script will:
+1. Automatically retrieve the control-plane service URL from Minikube
+2. Send a request to create a new sandbox with the general-purpose image
+3. Print the response, including the UUID needed to access the sandbox
+
 ### Accessing a Sandbox Environment
 
 To access the sandbox environment, send requests to the gateway with the session UUID:
@@ -147,6 +197,24 @@ To access the sandbox environment, send requests to the gateway with the session
 ```bash
 curl -H "X-MCP-Session-ID: <uuid>" http://gateway-endpoint/path
 ```
+
+### Using MCP Tools in a Sandbox
+
+The `example/mcp_example.py` script demonstrates how to use MCP tools in a sandbox:
+
+```bash
+# Update the UUID in the script first
+nano example/mcp_example.py  # Edit the UUID from your spawn response
+
+# Run the MCP example
+python example/mcp_example.py
+```
+
+This example will:
+1. Connect to the sandbox through the gateway using the specified UUID
+2. List all available tools provided by the MCP servers
+3. Execute a terminal command (`ls`) in the sandbox
+4. Display the results
 
 ### Cleaning Up
 
@@ -160,6 +228,13 @@ To deprovision a specific sandbox:
 
 ```bash
 curl -X DELETE http://localhost:8080/deprovision/<uuid>
+```
+
+You can also use the included Python script for cleanup:
+
+```bash
+# Clean up all sandboxes
+python example/deprovision_sandbox.py
 ```
 
 ## MCP Servers
