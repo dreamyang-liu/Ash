@@ -1,6 +1,6 @@
-# StationHive
+# AWSHive
 
-StationHive is a scalable workstation cluster for LLM Agents & RL Rollouts. It provides a Kubernetes-based infrastructure for creating, managing, and accessing isolated sandbox environments through a unified gateway.
+AWSHive(Agent Workstation Hive) is a scalable workstation cluster for LLM Agents & RL Rollouts. It provides a Kubernetes-based infrastructure for creating, managing, and accessing isolated sandbox environments through a unified gateway.
 
 ## Overview
 
