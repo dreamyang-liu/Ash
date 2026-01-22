@@ -34,6 +34,7 @@ type Config struct {
 	RedisKeyPrefix     string        // Route table key prefix, default sandbox:
 	DefaultScheme      string        // Protocol to use when only host:port is given, default http
 	RedisLookupTimeout time.Duration // Redis lookup timeout, default 300ms
+	RequestTimeout     time.Duration // Per-request timeout, default 3 minutes
 	ReadTimeout        time.Duration // HTTP server read timeout
 	WriteTimeout       time.Duration // HTTP server write timeout
 	IdleTimeout        time.Duration // HTTP server idle timeout
@@ -84,9 +85,10 @@ func loadConfig() *Config {
 		RedisKeyPrefix:     getenv("ROUTE_KEY_PREFIX", "sandbox:"),
 		DefaultScheme:      getenv("DEFAULT_SCHEME", "http"),
 		RedisLookupTimeout: getenvDur("REDIS_LOOKUP_TIMEOUT", 300*time.Millisecond),
-		ReadTimeout:        getenvDur("READ_TIMEOUT", 900*time.Second),
-		WriteTimeout:       getenvDur("WRITE_TIMEOUT", 60*time.Second),
-		IdleTimeout:        getenvDur("IDLE_TIMEOUT", 120*time.Second),
+		RequestTimeout:     getenvDur("REQUEST_TIMEOUT", 3*time.Minute),
+		ReadTimeout:        getenvDur("READ_TIMEOUT", 4*time.Minute),
+		WriteTimeout:       getenvDur("WRITE_TIMEOUT", 4*time.Minute),
+		IdleTimeout:        getenvDur("IDLE_TIMEOUT", 2*time.Minute),
 	}
 }
 
@@ -181,7 +183,7 @@ func main() {
 	transport.IdleConnTimeout = 90 * time.Second
 	transport.TLSHandshakeTimeout = 10 * time.Second
 	transport.ExpectContinueTimeout = 1 * time.Second
-	transport.ResponseHeaderTimeout = 10 * time.Second
+	transport.ResponseHeaderTimeout = 4 * time.Minute // Allow upstream to process before responding
 
 	// Create reverse proxy
 	proxy := &httputil.ReverseProxy{
@@ -302,10 +304,10 @@ func main() {
 		}
 
 		// Look up target with timeout
-		ctx, cancel := context.WithTimeout(r.Context(), config.RedisLookupTimeout)
-		defer cancel()
+		lookupCtx, lookupCancel := context.WithTimeout(r.Context(), config.RedisLookupTimeout)
+		defer lookupCancel()
 
-		u, err := lookupTarget(ctx, uuid)
+		u, err := lookupTarget(lookupCtx, uuid)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
 				log.Printf("[gateway] UUID not found: %s", uuid)
@@ -317,12 +319,16 @@ func main() {
 			return
 		}
 
+		// Create request context with timeout - cancels upstream request after timeout
+		reqCtx, reqCancel := context.WithTimeout(r.Context(), config.RequestTimeout)
+		defer reqCancel()
+
 		// Add target URL to context and proxy the request
-		ctx = context.WithValue(r.Context(), targetKey, u)
+		reqCtx = context.WithValue(reqCtx, targetKey, u)
 		if os.Getenv("DEBUG") == "true" {
-			log.Printf("[gateway] routing request: method=%s path=%q target=%s", r.Method, r.URL.Path, u.String())
+			log.Printf("[gateway] routing request: method=%s path=%q target=%s timeout=%s", r.Method, r.URL.Path, u.String(), config.RequestTimeout)
 		}
-		proxy.ServeHTTP(w, r.WithContext(ctx))
+		proxy.ServeHTTP(w, r.WithContext(reqCtx))
 	})
 
 	// Create HTTP server with timeouts
@@ -357,6 +363,11 @@ func main() {
 	// Shutdown the server
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatalf("Server forced to shutdown: %v", err)
+	}
+
+	// Close Redis connection
+	if err := rdb.Close(); err != nil {
+		log.Printf("Error closing Redis connection: %v", err)
 	}
 
 	log.Println("Server exited properly")
