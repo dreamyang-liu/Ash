@@ -101,7 +101,7 @@ func getEnvInt(key string, defaultVal int) int {
 // LoadConfig loads configuration from environment variables
 func LoadConfig() *Config {
 	return &Config{
-		Namespace:          getEnv("TARGET_NAMESPACE", "awshive"),
+		Namespace:          getEnv("TARGET_NAMESPACE", "ash"),
 		WaitDeployReadySec: getEnvInt("WAIT_DEPLOY_READY_SEC", 120),
 		WaitSvcIPSec:       getEnvInt("WAIT_SVC_IP_SEC", 120),
 		RedisHost:          getEnv("REDIS_HOST", "localhost"),
@@ -234,12 +234,31 @@ func main() {
 			containerPorts = append(containerPorts, corev1.ContainerPort{ContainerPort: 80})
 		}
 
-		// Create container with probes
+		// Determine the probe port (first container port, default 3000)
+		probePort := 3000
+		if len(containerPorts) > 0 {
+			probePort = int(containerPorts[0].ContainerPort)
+		}
+
+		// Create container with readiness probe
+		// The probe checks if MCP server is listening on the port
 		container := corev1.Container{
 			Name:  "sandbox",
 			Image: req.Image,
 			Ports: containerPorts,
 			Env:   envVars,
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					TCPSocket: &corev1.TCPSocketAction{
+						Port: intstrFromInt(probePort),
+					},
+				},
+				InitialDelaySeconds: 2,
+				PeriodSeconds:       3,
+				TimeoutSeconds:      1,
+				SuccessThreshold:    1,
+				FailureThreshold:    10,
+			},
 		}
 
 		// Add resource limits and requests if specified

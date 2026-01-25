@@ -1,9 +1,9 @@
 # =============================================================================
-# AWSHive Infrastructure - AWS EKS Configuration
+# Ash Infrastructure - AWS EKS Configuration
 # =============================================================================
 # Prerequisites:
 #   - EKS cluster with nodegroup labeled: eks.amazonaws.com/nodegroup=infra
-#   - Namespace 'awshive' exists
+#   - Namespace 'ash' exists
 #   - ServiceAccount 'control-plane' exists with proper RBAC
 #
 # Usage:
@@ -16,17 +16,17 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: awshive-config
-  namespace: awshive
+  name: ash-config
+  namespace: ash
   labels:
-    app.kubernetes.io/name: awshive
-    app.kubernetes.io/part-of: awshive
+    app.kubernetes.io/name: ash
+    app.kubernetes.io/part-of: ash
 data:
-  TARGET_NAMESPACE: "awshive"
-  REDIS_HOST: "redis.awshive.svc.cluster.local"
+  TARGET_NAMESPACE: "ash"
+  REDIS_HOST: "redis.ash.svc.cluster.local"
   REDIS_PORT: "6379"
   REDIS_DB: "0"
-  REDIS_ADDR: "redis.awshive.svc.cluster.local:6379"
+  REDIS_ADDR: "redis.ash.svc.cluster.local:6379"
   # Gateway timeout settings (Go duration format: "5m", "300s", etc.)
   REQUEST_TIMEOUT: "5m"      # Per-request timeout
   READ_TIMEOUT: "6m"         # HTTP server read timeout (must be > REQUEST_TIMEOUT)
@@ -41,12 +41,12 @@ apiVersion: v1
 kind: Service
 metadata:
   name: redis
-  namespace: awshive
+  namespace: ash
   labels:
     app: redis
     app.kubernetes.io/name: redis
     app.kubernetes.io/component: state-store
-    app.kubernetes.io/part-of: awshive
+    app.kubernetes.io/part-of: ash
 spec:
   type: ClusterIP
   selector:
@@ -60,12 +60,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: redis
-  namespace: awshive
+  namespace: ash
   labels:
     app: redis
     app.kubernetes.io/name: redis
     app.kubernetes.io/component: state-store
-    app.kubernetes.io/part-of: awshive
+    app.kubernetes.io/part-of: ash
 spec:
   replicas: 1
   strategy:
@@ -79,7 +79,7 @@ spec:
         app: redis
         app.kubernetes.io/name: redis
         app.kubernetes.io/component: state-store
-        app.kubernetes.io/part-of: awshive
+        app.kubernetes.io/part-of: ash
     spec:
       nodeSelector:
         eks.amazonaws.com/nodegroup: infra
@@ -163,10 +163,10 @@ spec:
 # kind: PersistentVolumeClaim
 # metadata:
 #   name: redis-data-pvc
-#   namespace: awshive
+#   namespace: ash
 #   labels:
 #     app.kubernetes.io/name: redis
-#     app.kubernetes.io/part-of: awshive
+#     app.kubernetes.io/part-of: ash
 # spec:
 #   accessModes:
 #     - ReadWriteOnce
@@ -183,12 +183,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: control-plane
-  namespace: awshive
+  namespace: ash
   labels:
     app: control-plane
     app.kubernetes.io/name: control-plane
     app.kubernetes.io/component: lifecycle-manager
-    app.kubernetes.io/part-of: awshive
+    app.kubernetes.io/part-of: ash
 spec:
   replicas: 3
   strategy:
@@ -205,7 +205,7 @@ spec:
         app: control-plane
         app.kubernetes.io/name: control-plane
         app.kubernetes.io/component: lifecycle-manager
-        app.kubernetes.io/part-of: awshive
+        app.kubernetes.io/part-of: ash
     spec:
       serviceAccountName: control-plane
       nodeSelector:
@@ -232,8 +232,8 @@ spec:
             - sh
             - -c
             - |
-              echo "Waiting for Redis at redis.awshive.svc.cluster.local:6379..."
-              until nc -z redis.awshive.svc.cluster.local 6379; do
+              echo "Waiting for Redis at redis.ash.svc.cluster.local:6379..."
+              until nc -z redis.ash.svc.cluster.local 6379; do
                 echo "Redis not ready, retrying in 2s..."
                 sleep 2
               done
@@ -253,11 +253,11 @@ spec:
               memory: "64Mi"
       containers:
         - name: control-plane
-          image: timemagic/rl-mcp:rl-sandbox-cp-0.1
+          image: timemagic/ash:control-plane-0.1
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
-                name: awshive-config
+                name: ash-config
           ports:
             - containerPort: 8080
               name: http
@@ -296,12 +296,12 @@ apiVersion: v1
 kind: Service
 metadata:
   name: control-plane
-  namespace: awshive
+  namespace: ash
   labels:
     app: control-plane
     app.kubernetes.io/name: control-plane
     app.kubernetes.io/component: lifecycle-manager
-    app.kubernetes.io/part-of: awshive
+    app.kubernetes.io/part-of: ash
 spec:
   type: LoadBalancer
   selector:
@@ -319,12 +319,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: gateway
-  namespace: awshive
+  namespace: ash
   labels:
     app: gateway
     app.kubernetes.io/name: gateway
     app.kubernetes.io/component: api-gateway
-    app.kubernetes.io/part-of: awshive
+    app.kubernetes.io/part-of: ash
 spec:
   replicas: 2
   strategy:
@@ -341,7 +341,7 @@ spec:
         app: gateway
         app.kubernetes.io/name: gateway
         app.kubernetes.io/component: api-gateway
-        app.kubernetes.io/part-of: awshive
+        app.kubernetes.io/part-of: ash
     spec:
       nodeSelector:
         eks.amazonaws.com/nodegroup: infra
@@ -366,8 +366,8 @@ spec:
             - sh
             - -c
             - |
-              echo "Waiting for Redis at redis.awshive.svc.cluster.local:6379..."
-              until nc -z redis.awshive.svc.cluster.local 6379; do
+              echo "Waiting for Redis at redis.ash.svc.cluster.local:6379..."
+              until nc -z redis.ash.svc.cluster.local 6379; do
                 echo "Redis not ready, retrying in 2s..."
                 sleep 2
               done
@@ -387,11 +387,11 @@ spec:
               memory: "64Mi"
       containers:
         - name: gateway
-          image: timemagic/rl-mcp:rl-sandbox-gateway-0.1
+          image: timemagic/ash:gateway-0.1
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
-                name: awshive-config
+                name: ash-config
           ports:
             - containerPort: 8080
               name: http
@@ -430,12 +430,12 @@ apiVersion: v1
 kind: Service
 metadata:
   name: gateway
-  namespace: awshive
+  namespace: ash
   labels:
     app: gateway
     app.kubernetes.io/name: gateway
     app.kubernetes.io/component: api-gateway
-    app.kubernetes.io/part-of: awshive
+    app.kubernetes.io/part-of: ash
   annotations:
     # EKS/ALB annotations - 5 minute connection timeout
     service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: "300"
@@ -456,10 +456,10 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: control-plane-pdb
-  namespace: awshive
+  namespace: ash
   labels:
     app.kubernetes.io/name: control-plane
-    app.kubernetes.io/part-of: awshive
+    app.kubernetes.io/part-of: ash
 spec:
   minAvailable: 2
   selector:
@@ -470,10 +470,10 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: gateway-pdb
-  namespace: awshive
+  namespace: ash
   labels:
     app.kubernetes.io/name: gateway
-    app.kubernetes.io/part-of: awshive
+    app.kubernetes.io/part-of: ash
 spec:
   minAvailable: 1
   selector:
@@ -484,10 +484,10 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: redis-pdb
-  namespace: awshive
+  namespace: ash
   labels:
     app.kubernetes.io/name: redis
-    app.kubernetes.io/part-of: awshive
+    app.kubernetes.io/part-of: ash
 spec:
   minAvailable: 1
   selector:

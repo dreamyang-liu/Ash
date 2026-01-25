@@ -1,274 +1,372 @@
-# AWSHive
+<p align="center">
+  <img src="logo.svg" alt="Ash Logo" width="280">
+</p>
 
-AWSHive(Agent Workstation Hive) is a scalable workstation cluster for LLM Agents & RL Rollouts. It provides a Kubernetes-based infrastructure for creating, managing, and accessing isolated sandbox environments through a unified gateway.
+<h1 align="center">Ash</h1>
+<p align="center"><em>Agent Sandbox Hive</em></p>
 
-## Overview
+<p align="center">
+  <strong>Scalable sandbox cluster for LLM Agents and Agent RL Rollouts</strong>
+</p>
 
-StationHive is designed to create isolated, ephemeral workstation environments that can be used for:
-- LLM agent operations with tool access
-- Reinforcement learning training and rollouts
-- Algorithm experimentation and testing
-- Scalable AI workloads
+<p align="center">
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#architecture">Architecture</a> •
+  <a href="#deployment">Deployment</a> •
+  <a href="#configuration">Configuration</a>
+</p>
 
-The architecture consists of the following key components:
+<p align="center">
+  <img src="https://img.shields.io/badge/Go-00ADD8?style=flat&logo=go&logoColor=white" alt="Go">
+  <img src="https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/Kubernetes-326CE5?style=flat&logo=kubernetes&logoColor=white" alt="Kubernetes">
+  <img src="https://img.shields.io/badge/MCP-FF6B00?style=flat" alt="MCP">
+</p>
 
-- **Control Plane**: Manages the lifecycle of sandbox environments (creation, monitoring, deletion)
-- **Gateway**: Routes requests to the appropriate sandbox based on session identifiers
-- **MCP (Model Context Protocol) Servers**: Provides tools and resources for the sandboxed environments
+---
+
+Ash provides **on-demand, isolated Kubernetes-based sandbox environments** for AI agents. Agents connect via [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) to execute code, browse the web, and run tools safely. Spawn thousands of sandboxes dynamically with automatic routing, resource limits, and lifecycle management.
+
+<br>
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+**Isolated Execution**
+
+Each agent gets its own container with resource limits, network isolation, and automatic cleanup.
+
+</td>
+<td width="33%" valign="top">
+
+**MCP Native**
+
+First-class support for Model Context Protocol. Plug in terminal, web fetch, search, and custom tools.
+
+</td>
+<td width="33%" valign="top">
+
+**Scale to Thousands**
+
+Dynamic provisioning on Kubernetes. Auto-routing via Redis. Works on EKS, GKE, or local.
+
+</td>
+</tr>
+</table>
+
+<br>
+
+## Quick Start
+
+> If you don't have an existing Kubernetes cluster, see [Deployment](#deployment) first.
+
+### Basic Usage
+
+```python
+import asyncio
+from client.client import SandboxClient
+
+async def main():
+    client = SandboxClient()
+
+    # Spawn a sandbox
+    sandbox = client.spawn()
+    print(f"Sandbox ready: {sandbox.uuid}")
+
+    # Connect via MCP and use tools
+    async with client.connect() as mcp:
+        # List available tools
+        tools = await mcp.list_tools()
+        print(f"Tools: {[t.name for t in tools]}")
+
+        # Execute a shell command
+        result = await mcp.call_tool(
+            "terminal-controller_execute_command",
+            {"command": "ls -la"}
+        )
+        print(result.content[0].text)
+
+    # Cleanup
+    client.destroy()
+
+asyncio.run(main())
+```
+
+See [client/demo.py](./client/demo.py) for a complete example.
+
+<br>
+
+### Using MCP Tools
+
+```python
+async with client.connect() as mcp:
+    # Terminal - execute commands
+    await mcp.call_tool("terminal-controller_execute_command", {
+        "command": "python --version"
+    })
+
+    # Fetch - get web content
+    await mcp.call_tool("fetch_fetch", {
+        "url": "https://example.com"
+    })
+
+    # Search - web search
+    await mcp.call_tool("ddgs_search_mcp_search", {
+        "query": "python asyncio tutorial",
+        "max_results": 5
+    })
+```
+
+<br>
+
+### Available MCP Tools
+
+The default image `timemagic/rl-mcp:general-1.7` includes:
+
+| Tool | Description |
+|:-----|:------------|
+| `terminal-controller` | Execute shell commands in the sandbox |
+| `fetch` | Fetch web content from URLs |
+| `ddgs_search` | Web search via DuckDuckGo |
+
+**Bring your own tools** — provide a custom image with your MCP server. See [sandbox-recipe/](./sandbox-recipe/) for examples.
+
+<br>
+
+---
+
+## Architecture
+
+```
+                                 ┌──────────────────────────────────────────────────────────┐
+                                 │                      Kubernetes                          │
+┌─────────┐                      │                                                          │
+│         │   POST /spawn        │  ┌───────────────┐          ┌───────────────────┐        │
+│  Agent  │─────────────────────▶│  │ Control Plane │─────────▶│    Sandbox Pod    │        │
+│         │                      │  └───────┬───────┘  Create  │  ┌─────────────┐  │        │
+└────┬────┘                      │          │                  │  │  FastMCP    │  │        │
+     │                           │          │ Store route      │  │  Server     │  │        │
+     │                           │          ▼                  │  └─────────────┘  │        │
+     │                           │  ┌───────────────┐          └────────▲──────────┘        │
+     │                           │  │     Redis     │                   │                   │
+     │                           │  │               │                   │                   │
+     │                           │  └───────▲───────┘                   │                   │
+     │   MCP + X-Session-ID      │          │ Lookup                    │ Proxy             │
+     │                           │  ┌───────┴───────┐                   │                   │
+     └──────────────────────────▶│  │    Gateway    │───────────────────┘                   │
+                                 │  └───────────────┘                                       │
+                                 └──────────────────────────────────────────────────────────┘
+```
+
+<br>
+
+### Components
+
+| Component | Language | Description |
+|:----------|:---------|:------------|
+| **Control Plane** | Go | REST API for spawning/destroying sandbox pods |
+| **Gateway** | Go | Routes MCP requests using `X-Session-ID` header |
+| **Sandbox** | Python | Isolated container running FastMCP server |
+| **Redis** | — | Session → sandbox routing table |
+
+<br>
+
+---
+
+## Deployment
+
+### Prerequisites
+
+- Kubernetes cluster (EKS, GKE, or Minikube)
+- `kubectl` configured
+- Docker (for custom images)
+
+<br>
+
+### AWS EKS
+
+<details>
+<summary><strong>1. Create EKS Nodegroups</strong></summary>
+
+```bash
+# Infrastructure nodegroup (control-plane, gateway, redis)
+eksctl create nodegroup \
+  --cluster your-cluster \
+  --name infra \
+  --node-type m5.large \
+  --nodes 3 \
+  --node-labels "eks.amazonaws.com/nodegroup=infra"
+
+# Sandbox nodegroup (where sandbox pods run)
+eksctl create nodegroup \
+  --cluster your-cluster \
+  --name sandbox \
+  --node-type m5.xlarge \
+  --nodes-min 0 \
+  --nodes-max 100 \
+  --node-labels "eks.amazonaws.com/nodegroup=sandbox"
+```
+
+</details>
+
+<details>
+<summary><strong>2. Build Images (Optional)</strong></summary>
+
+Skip if using pre-built images.
+
+```bash
+cd k8s-scaffold
+make build
+
+docker push timemagic/ash:control-plane-0.1
+docker push timemagic/ash:gateway-0.1
+```
+
+</details>
+
+<details>
+<summary><strong>3. Deploy to Kubernetes</strong></summary>
+
+```bash
+cd k8s-config
+
+# Create namespace and RBAC
+kubectl apply -f rbac.yaml
+
+# Deploy infrastructure
+kubectl apply -f infra.yaml
+
+# Wait for ready
+kubectl -n ash rollout status deploy/redis
+kubectl -n ash rollout status deploy/control-plane
+kubectl -n ash rollout status deploy/gateway
+```
+
+</details>
+
+<details>
+<summary><strong>4. Get Service URLs</strong></summary>
+
+```bash
+kubectl -n ash get svc control-plane gateway
+
+# Example output:
+# NAME            TYPE           EXTERNAL-IP                              PORT(S)
+# control-plane   LoadBalancer   abc123.us-west-2.elb.amazonaws.com       80:31234/TCP
+# gateway         LoadBalancer   xyz789.us-west-2.elb.amazonaws.com       80:31235/TCP
+```
+
+</details>
+
+<details>
+<summary><strong>5. Configure Client</strong></summary>
+
+```python
+from client.client import SandboxClient, SandboxConfig
+
+config = SandboxConfig(
+    control_plane_url="http://abc123.us-west-2.elb.amazonaws.com",
+    gateway_url="http://xyz789.us-west-2.elb.amazonaws.com",
+    node_selector={"eks.amazonaws.com/nodegroup": "sandbox"},
+)
+
+client = SandboxClient(config)
+sandbox = client.spawn()
+```
+
+</details>
+
+<br>
+
+### Local (Minikube)
+
+```bash
+# Start minikube and deploy everything
+make all-local
+
+# Get service URLs
+minikube service control-plane -n ash --url
+minikube service gateway -n ash --url
+```
+
+<br>
+
+---
+
+## Configuration
+
+### SandboxConfig
+
+```python
+from client.client import SandboxClient, SandboxConfig, ResourceReq, ResourceSpec
+
+config = SandboxConfig(
+    control_plane_url="http://control-plane:80",
+    gateway_url="http://gateway:80",
+    image="sandbox:general-0.1",
+    ports=[3000],
+    env={"DEBUG": "true", "API_KEY": "..."},
+    resources=ResourceReq(
+        requests=ResourceSpec(cpu="100m", memory="256Mi"),
+        limits=ResourceSpec(cpu="500m", memory="512Mi"),
+    ),
+    node_selector={"gpu": "true"},
+    spawn_timeout=300,
+    mcp_timeout=60,
+)
+```
+
+<br>
+
+### Options Reference
+
+| Option | Default | Description |
+|:-------|:--------|:------------|
+| `control_plane_url` | — | Control plane endpoint |
+| `gateway_url` | — | Gateway endpoint for MCP |
+| `image` | `timemagic/rl-mcp:general-1.7` | Sandbox container image |
+| `ports` | `[3000]` | Ports to expose |
+| `env` | `{}` | Environment variables |
+| `resources` | `None` | CPU/memory requests & limits |
+| `node_selector` | `{}` | Kubernetes node selector |
+| `spawn_timeout` | `300` | Spawn timeout (seconds) |
+| `mcp_timeout` | `60` | MCP call timeout (seconds) |
+
+<br>
+
+### Node Scheduling
+
+```python
+# GPU nodes
+node_selector={"gpu": "true"}
+
+# Specific EKS nodegroup
+node_selector={"eks.amazonaws.com/nodegroup": "sandbox"}
+
+# Specific instance type
+node_selector={"node.kubernetes.io/instance-type": "m5.large"}
+```
+
+<br>
+
+---
 
 ## Repository Structure
 
 ```
-├── Makefile                # Root makefile to build all components
-├── k8s-config/             # Kubernetes configuration files
-│   ├── deploy.sh           # Deployment script
-│   ├── infra.yaml          # Infrastructure configuration
-│   ├── Makefile            # Config-specific makefile
-│   ├── rbac.yaml           # Role-based access control configuration
-│   └── stateless-mcps.yaml # Stateless MCP services configuration
-├── k8s-scaffold/           # Core infrastructure components
-│   ├── Makefile            # Scaffold-specific makefile
-│   ├── control-plane/      # Control plane service
-│   │   ├── Dockerfile      # Container definition
-│   │   ├── go.mod          # Go module definition
-│   │   ├── go.sum          # Go dependencies
-│   │   └── main.go         # Control plane implementation
-│   └── gateway/            # API gateway service
-│       ├── Dockerfile      # Container definition
-│       ├── go.mod          # Go module definition
-│       ├── go.sum          # Go dependencies
-│       └── main.go         # Gateway implementation
-├── sandbox-recipe/         # Sandbox environment definitions
-│   ├── Makefile            # Recipe-specific makefile
-│   └── general/            # General-purpose sandbox
-│       ├── Dockerfile      # Container definition
-│       ├── main.py         # Main entry point
-│       └── ddgs_mcp/       # DuckDuckGo search MCP implementation
-│           ├── .gitignore
-│           ├── .python-version
-│           ├── main.py     # DDGS MCP implementation
-│           ├── pyproject.toml
-│           ├── README.md
-│           └── uv.lock
-└── example/                # Example scripts
-    ├── spawn_sandbox.py    # Script to create sandbox environments
-    ├── deprovision_sandbox.py # Script to clean up sandbox environments
-    └── mcp_example.py      # Example MCP usage
+ash/
+├── client/           # Python client library
+├── example/          # Usage examples
+├── k8s-scaffold/     # Control plane & gateway (Go)
+├── k8s-config/       # Kubernetes manifests
+└── sandbox-recipe/   # Sandbox container images
 ```
 
-## Components
+<br>
 
-### Control Plane
+---
 
-The control plane is responsible for:
-
-- Creating and managing sandbox environments
-- Allocating resources based on requests
-- Monitoring the health of sandbox environments
-- Cleaning up environments when they expire or are no longer needed
-
-The control plane exposes a REST API for creating, managing, and deprovisioning sandbox environments.
-
-### Gateway
-
-The gateway serves as the entry point for all requests to sandbox environments:
-
-- Routes requests to the appropriate sandbox based on session headers
-- Handles authentication and authorization
-- Provides load balancing and failover capabilities
-- Manages session affinity
-
-### MCP (Model Context Protocol) Servers
-
-MCP servers provide tools and resources to the sandbox environments, enabling LLM agents to access external capabilities:
-
-- **sandbox-fusion-mcp**: A specialized MCP server for fusion operations
-- **ddgs_mcp**: Provides search capabilities using DuckDuckGo search API
-- **terminal-controller**: Enables terminal access and command execution
-- **fetch**: Provides web content fetching capabilities
-
-## Setup and Deployment
-
-### Prerequisites
-
-- Kubernetes cluster (Minikube for local development)
-- Docker
-- Go 1.x
-- Python 3.x
-
-### Building Components
-
-To build all components:
-
-```bash
-make
-```
-
-This will build:
-1. The control plane and gateway containers
-2. The sandbox environment containers
-
-### Local Deployment with Minikube
-
-For a local development setup using Minikube:
-
-```bash
-make all-local
-```
-
-This single command will:
-1. Start Minikube with LoadBalancer support (via MetalLB)
-2. Build all necessary Docker images directly in the Minikube environment
-3. Apply modified configuration files adapted for local development
-4. Deploy all components to your local Minikube cluster
-
-After deployment, you can access the services using:
-
-```bash
-# Get URLs for accessing services
-minikube service control-plane -n apps --url
-minikube service gateway -n apps --url
-```
-
-Alternatively, use port-forwarding for local access:
-
-```bash
-# Forward the control-plane service to localhost:8080
-minikube kubectl -- -n apps port-forward svc/control-plane 8080:80
-
-# In another terminal, forward the gateway service to localhost:8081
-minikube kubectl -- -n apps port-forward svc/gateway 8081:80
-```
-
-### Standard Deployment
-
-For deployment to a standard Kubernetes cluster:
-
-```bash
-cd k8s-config
-./deploy.sh
-```
-
-This will:
-1. Create the necessary Kubernetes namespace
-2. Apply RBAC configurations
-3. Deploy Redis for state management
-4. Deploy the control plane and gateway services
-5. Deploy the stateless MCP servers
-
-## Using the Sandbox
-
-### Creating a Sandbox Environment
-
-To create a new sandbox environment, send a POST request to the control plane:
-
-```bash
-curl -X POST http://localhost:8080/spawn \
-  -H "Content-Type: application/json" \
-  -d '{
-    "image": "sandbox-general",
-    "ports": [{"container_port": 3000}],
-    "expose": "LoadBalancer",
-    "env": {"PARAM1": "value1"},
-    "replicas": 1
-  }'
-```
-
-The response will include a UUID that can be used to access the sandbox environment.
-
-#### Using the Python Example Script
-
-The repository includes a Python script for creating sandboxes:
-
-```bash
-# Run the spawn script
-python example/spawn_sandbox.py
-```
-
-This script will:
-1. Automatically retrieve the control-plane service URL from Minikube
-2. Send a request to create a new sandbox with the general-purpose image
-3. Print the response, including the UUID needed to access the sandbox
-
-### Accessing a Sandbox Environment
-
-To access the sandbox environment, send requests to the gateway with the session UUID:
-
-```bash
-curl -H "X-MCP-Session-ID: <uuid>" http://gateway-endpoint/path
-```
-
-### Using MCP Tools in a Sandbox
-
-The `example/mcp_example.py` script demonstrates how to use MCP tools in a sandbox:
-
-```bash
-# Update the UUID in the script first
-nano example/mcp_example.py  # Edit the UUID from your spawn response
-
-# Run the MCP example
-python example/mcp_example.py
-```
-
-This example will:
-1. Connect to the sandbox through the gateway using the specified UUID
-2. List all available tools provided by the MCP servers
-3. Execute a terminal command (`ls`) in the sandbox
-4. Display the results
-
-### Cleaning Up
-
-To deprovision all sandbox environments:
-
-```bash
-curl -X DELETE http://localhost:8080/deprovision-all
-```
-
-To deprovision a specific sandbox:
-
-```bash
-curl -X DELETE http://localhost:8080/deprovision/<uuid>
-```
-
-You can also use the included Python script for cleanup:
-
-```bash
-# Clean up all sandboxes
-python example/deprovision_sandbox.py
-```
-
-## MCP Servers
-
-### DDGS Search MCP
-
-The DDGS MCP provides search capabilities with the following tools:
-
-- `search`: General web search with configurable parameters
-- `search_images`: Image search with filtering options
-- `search_videos`: Video search with duration and resolution filters
-- `search_news`: News search for current events
-- `search_books`: Book search using Anna's Archive digital library
-
-## Configuration
-
-Configuration is primarily done through environment variables. Key configuration options include:
-
-### Control Plane
-
-- `TARGET_NAMESPACE`: Kubernetes namespace for sandbox deployments (default: "apps")
-- `REDIS_HOST`: Redis host for state management
-- `REDIS_PORT`: Redis port
-- `REDIS_DB`: Redis database index
-- `SANDBOX_MAX_TTL_SEC`: Maximum TTL for sandbox environments in seconds
-
-### Gateway
-
-- `LISTEN_ADDR`: Gateway listen address (default: ":8080")
-- `SESSION_HEADER`: Header for session identification (default: "X-MCP-Session-ID")
-- `REDIS_ADDR`: Redis address for route table lookups
-- `REDIS_DB`: Redis database index
-- `REDIS_KEY_PREFIX`: Prefix for Redis keys (default: "sandbox:")
-
-## License
-
-[Include license information here]
+<p align="center">
+  <sub>Built for scalable AI agent infrastructure</sub>
+</p>
