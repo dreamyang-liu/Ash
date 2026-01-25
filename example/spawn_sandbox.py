@@ -3,7 +3,7 @@ import subprocess
 
 # Get the control-plane service URL from minikube
 result = subprocess.run(
-    ["minikube", "service", "control-plane", "-n", "apps", "--url"],
+    ["minikube", "service", "control-plane", "-n", "awshive", "--url"],
     capture_output=True,
     text=True,
     check=True

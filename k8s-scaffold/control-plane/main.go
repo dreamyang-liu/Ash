@@ -76,7 +76,6 @@ type Config struct {
 	RedisHost          string
 	RedisPort          int
 	RedisDB            int
-	SandboxMaxTTLSec   int64
 	ServiceAccountName string
 }
 
@@ -99,27 +98,15 @@ func getEnvInt(key string, defaultVal int) int {
 	return defaultVal
 }
 
-// getEnvInt64 returns the environment variable as int64 or a default
-func getEnvInt64(key string, defaultVal int64) int64 {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			return n
-		}
-		log.Printf("Warning: invalid integer value for %s: %s, using default %d", key, v, defaultVal)
-	}
-	return defaultVal
-}
-
 // LoadConfig loads configuration from environment variables
 func LoadConfig() *Config {
 	return &Config{
-		Namespace:          getEnv("TARGET_NAMESPACE", "apps"),
+		Namespace:          getEnv("TARGET_NAMESPACE", "awshive"),
 		WaitDeployReadySec: getEnvInt("WAIT_DEPLOY_READY_SEC", 120),
 		WaitSvcIPSec:       getEnvInt("WAIT_SVC_IP_SEC", 120),
 		RedisHost:          getEnv("REDIS_HOST", "localhost"),
 		RedisPort:          getEnvInt("REDIS_PORT", 6379),
 		RedisDB:            getEnvInt("REDIS_DB", 0),
-		SandboxMaxTTLSec:   getEnvInt64("SANDBOX_MAX_TTL_SEC", 3600),
 		ServiceAccountName: getEnv("SERVICE_ACCOUNT_NAME", "default"),
 	}
 }
@@ -424,21 +411,17 @@ func main() {
 			sandboxPort = svcPorts[0]
 		}
 
-		expireTime := time.Now().Unix() + config.SandboxMaxTTLSec
-
 		// Create Redis record with pipeline for efficiency
 		record := map[string]interface{}{
-			"uuid":        sandboxUUID,
-			"host":        fmt.Sprintf("%s.%s.svc.cluster.local", name, config.Namespace),
-			"port":        sandboxPort,
-			"status":      sandboxStatus,
-			"expire_time": expireTime,
+			"uuid":   sandboxUUID,
+			"host":   fmt.Sprintf("%s.%s.svc.cluster.local", name, config.Namespace),
+			"port":   sandboxPort,
+			"status": sandboxStatus,
 		}
 
 		key := fmt.Sprintf("sandbox:%s", sandboxUUID)
 		pipe := rdb.Pipeline()
 		pipe.HSet(ctx, key, record)
-		pipe.Expire(ctx, key, time.Duration(config.SandboxMaxTTLSec)*time.Second)
 
 		if _, err := pipe.Exec(ctx); err != nil {
 			log.Printf("Failed to save sandbox record to Redis: %v", err)

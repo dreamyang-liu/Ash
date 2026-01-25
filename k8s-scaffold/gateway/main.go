@@ -27,7 +27,7 @@ var (
 // Configuration structure
 type Config struct {
 	ListenAddr         string        // Listen address, default :80
-	SessionHeader      string        // Request header to get UUID from, default X-MCP-Session-ID
+	SessionHeader      string        // Request header to get UUID from, default X-Session-ID
 	RedisAddr          string        // Redis address, default 127.0.0.1:6379
 	RedisPassword      string        // Redis password, optional
 	RedisDB            int           // Redis database, default 0
@@ -78,7 +78,7 @@ func getenvDur(key string, def time.Duration) time.Duration {
 func loadConfig() *Config {
 	return &Config{
 		ListenAddr:         getenv("LISTEN_ADDR", ":8080"),
-		SessionHeader:      getenv("SESSION_HEADER", "X-MCP-Session-ID"),
+		SessionHeader:      getenv("SESSION_HEADER", "X-Session-ID"),
 		RedisAddr:          getenv("REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword:      os.Getenv("REDIS_PASSWORD"),
 		RedisDB:            getenvInt("REDIS_DB", 0),

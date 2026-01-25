@@ -4,7 +4,7 @@ from fastmcp import Client
 
 # Get the gateway service URL from minikube
 result = subprocess.run(
-    ["minikube", "service", "gateway", "-n", "apps", "--url"],
+    ["minikube", "service", "gateway", "-n", "awshive", "--url"],
     capture_output=True,
     text=True,
     check=True
@@ -18,7 +18,7 @@ def get_mcp_client(sandbox_gateway, sandbox_uuid: str):
             "sandbox": {
                 "transport": "http",
                 "url": f"{sandbox_gateway}/mcp",
-                "headers": {"X-MCP-Session-ID": sandbox_uuid},
+                "headers": {"X-Session-ID": sandbox_uuid},
             }
         },
     }

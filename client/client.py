@@ -333,7 +333,7 @@ class SandboxClient:
                 "sandbox": {
                     "transport": "http",
                     "url": f"{self.config.gateway_url}/mcp",
-                    "headers": {"X-MCP-Session-ID": uuid},
+                    "headers": {"X-Session-ID": uuid},
                 }
             },
         }

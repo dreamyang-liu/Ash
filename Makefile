@@ -16,8 +16,8 @@ apply-config-local: build-image-local start-minikube
 		minikube kubectl -- apply -f rbac.yaml && \
 		minikube kubectl -- apply -f infra-local.yaml && \
 		minikube kubectl -- apply -f stateless-mcps.yaml && \
-		minikube kubectl -- -n apps rollout status deploy/gateway && \
-		minikube kubectl -- -n apps rollout status deploy/control-plane
+		minikube kubectl -- -n awshive rollout status deploy/gateway && \
+		minikube kubectl -- -n awshive rollout status deploy/control-plane
 
 start-minikube:
 	minikube start

@@ -1,5 +1,5 @@
 
-minikube kubectl -- delete namespace apps
+minikube kubectl -- delete namespace awshive
 
 
 
@@ -14,17 +14,17 @@ minikube kubectl -- apply -f infra.yaml
 minikube kubectl -- apply -f stateless-mcps.yaml
 
 
-# minikube kubectl -- -n apps rollout restart deploy/spawner
-minikube kubectl -- -n apps rollout status deploy/gateway
-minikube kubectl -- -n apps rollout status deploy/control-plane
+# minikube kubectl -- -n awshive rollout restart deploy/spawner
+minikube kubectl -- -n awshive rollout status deploy/gateway
+minikube kubectl -- -n awshive rollout status deploy/control-plane
 
-minikube service control-plane -n apps --url
-minikube service gateway -n apps --url
-minikube service proxy-mcp -n apps --url
+minikube service control-plane -n awshive --url
+minikube service gateway -n awshive --url
+minikube service proxy-mcp -n awshive --url
 
 # CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
 # minikube image build -f Dockerfile.gateway -t rl-sandbox-gateway:0.1 .
-# minikube kubectl -- -n apps port-forward svc/spawner 8080:80
+# minikube kubectl -- -n awshive port-forward svc/spawner 8080:80
 
 
 curl -X POST http://localhost:8080/spawn \
@@ -36,7 +36,7 @@ curl -X POST http://localhost:8080/spawn \
     "env": {"HELLO": "world"},
     "replicas": 1
   }'
-# minikube kubectl -- -n apps logs -f -l app=spawner --all-containers --prefix --max-log-requests=20
+# minikube kubectl -- -n awshive logs -f -l app=spawner --all-containers --prefix --max-log-requests=20
 
 
 
@@ -57,5 +57,5 @@ curl -X POST http://localhost:8080/spawn \
 # # CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
 # # cd ..
 # # minikube image build -f Dockerfile.gateway -t rl-sandbox-gateway:0.1 .
-# # minikube kubectl -- -n apps rollout restart deploy/gateway
-# # minikube kubectl -- -n apps rollout status deploy/gateway
+# # minikube kubectl -- -n awshive rollout restart deploy/gateway
+# # minikube kubectl -- -n awshive rollout status deploy/gateway
