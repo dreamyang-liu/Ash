@@ -2,7 +2,7 @@
 Benchmark example - Measures sandbox spawn and MCP connection times.
 
 Usage:
-    python -m client.benchmark
+    python -m client.demo
 """
 import asyncio
 import logging
@@ -21,11 +21,11 @@ async def demo():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
-    # Create config with custom node selector
+    # Create config (reusable for multiple clients)
     config = SandboxConfig(
-        control_plane_url: str = "http://192.168.49.2:31786"
-        gateway_url: str = "http://192.168.49.2:3177"
-        # node_selector={"eks.amazonaws.com/nodegroup": "sandbox"},
+        control_plane_url="http://192.168.49.2:31786",
+        gateway_url="http://192.168.49.2:31770",
+        mcp_timeout=180,
     )
 
     # Use context manager for automatic cleanup
@@ -64,7 +64,7 @@ async def demo():
 
             result = await mcp.call_tool(
                 "terminal-controller_execute_command",
-                {"command": "echo 'Hello from sandbox!'"}
+                {"command": "sleep 60 && echo 'Hello from sandbox!'", "timeout": 61}
             )
             logger.info(f"Command result: {result.content[0].text if result.content else result}")
 

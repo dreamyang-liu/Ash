@@ -1,5 +1,5 @@
 """
-Sandbox Client - Spin up, destroy, and connect to sandboxes for agent_loop.py
+Sandbox Client - Spin up, destroy, and connect to sandboxes.
 
 Control Plane API Reference (from Go server):
   POST /spawn              - Create new sandbox
@@ -14,7 +14,6 @@ import logging
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import Optional, Dict, List, Callable, TypeVar, Any
-from fastmcp import Client
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -105,7 +104,7 @@ def retry(
 
 
 # =============================================================================
-# Configuration - All configurable parameters
+# Resource Configuration
 # =============================================================================
 
 @dataclass
@@ -122,65 +121,68 @@ class ResourceReq:
     limits: ResourceSpec = field(default_factory=ResourceSpec)
 
 
+# =============================================================================
+# Sandbox Configuration
+# =============================================================================
+
 @dataclass
 class SandboxConfig:
     """
-    All configurable parameters for sandbox management.
+    Configuration for sandbox client and containers.
 
-    Control Plane URLs:
-        control_plane_url: URL of the control plane that manages K8s deployments
-        gateway_url: URL of the MCP gateway for sandbox connections
+    One config = one sandbox. Create multiple clients with the same config
+    to manage multiple sandboxes. Different configs can connect to different
+    clusters.
 
-    Container Settings:
-        image: Docker image to use for sandbox containers
-        ports: List of container ports to expose (default: [3000])
-
-    Resource Limits:
+    Attributes:
+        control_plane_url: URL of the control plane API
+        gateway_url: URL of the MCP gateway
+        image: Docker image for sandbox containers
+        ports: Container ports to expose (default: [3000] for FastMCP)
+        env: Environment variables to pass to the container
         resources: CPU/Memory requests and limits
-
-    Node Selection:
-        node_selector: K8s node selector labels
-
-    Environment:
-        env: Environment variables to pass to container
-
-    Timeouts:
-        spawn_timeout: Timeout for spawn requests (seconds)
-        destroy_timeout: Timeout for destroy requests (seconds)
+        node_selector: Kubernetes node selector labels
+        timeout: Timeout for spawn/destroy operations (seconds)
         mcp_timeout: Timeout for MCP client operations (seconds)
 
-    Note:
-        - Service type is always ClusterIP (internal only)
-        - Replicas is always 1 (single instance per sandbox)
+    Example:
+        # Basic config
+        config = SandboxConfig(
+            control_plane_url="http://control-plane:80",
+            gateway_url="http://gateway:80",
+        )
+
+        # Full config with resources
+        config = SandboxConfig(
+            control_plane_url="http://control-plane:80",
+            gateway_url="http://gateway:80",
+            image="custom-sandbox:latest",
+            env={"DEBUG": "true", "API_KEY": "..."},
+            resources=ResourceReq(
+                requests=ResourceSpec(cpu="100m", memory="256Mi"),
+                limits=ResourceSpec(cpu="500m", memory="512Mi"),
+            ),
+            node_selector={"gpu": "true"},
+        )
+
+        # Multi-cluster: use different configs
+        config_us = SandboxConfig(control_plane_url="http://us-cluster:80", ...)
+        config_eu = SandboxConfig(control_plane_url="http://eu-cluster:80", ...)
     """
-
-
-    # # Control plane URLs
+    # Connection URLs
     control_plane_url: str = ""
     gateway_url: str = ""
 
     # Container settings
     image: str = "timemagic/rl-mcp:general-1.7"
     ports: List[int] = field(default_factory=lambda: [3000])
-
-    # Resource limits (optional)
+    env: Dict[str, str] = field(default_factory=dict)
     resources: ResourceReq = field(default_factory=ResourceReq)
-
-    # Node selection (optional)
     node_selector: Dict[str, str] = field(default_factory=dict)
 
-    # Environment variables (optional)
-    env: Dict[str, str] = field(default_factory=dict)
-
     # Timeouts
-    spawn_timeout: int = 300  # 5 minutes (control plane waits up to 120s for deploy ready)
-    destroy_timeout: int = 30
+    timeout: int = 300
     mcp_timeout: int = 180
-
-    # Wait for ready settings (usually not needed since control-plane waits for readiness probe)
-    wait_for_ready: bool = False  # Control-plane now waits for pod readiness probe
-    wait_for_ready_timeout: int = 120  # Additional wait time if status is "starting"
-    wait_for_ready_interval: float = 2.0  # Initial polling interval (uses exponential backoff)
 
 
 # =============================================================================
@@ -197,52 +199,38 @@ class Sandbox:
         name: Deployment name
         namespace: K8s namespace
         status: "Ready" or "Starting"
-        service_type: Always "ClusterIP" (internal only)
-        cluster_ip: Internal cluster IP
         host: Internal DNS name ({name}.{namespace}.svc.cluster.local)
         ports: Service ports
-        message: Additional status message
     """
     uuid: str
     name: str
     namespace: str
     status: str
-    service_type: str
-    cluster_ip: str = ""
     host: str = ""
-    external_ip: str = ""
-    external_hostname: str = ""
     ports: List[int] = field(default_factory=list)
-    node_ports: List[int] = field(default_factory=list)
     message: str = ""
-    config: SandboxConfig = field(default_factory=SandboxConfig)
-    raw_response: dict = field(default_factory=dict)
+    _gateway_url: str = field(default="", repr=False)
 
     @property
     def mcp_url(self) -> str:
-        return f"{self.config.gateway_url}/mcp"
-    
+        """MCP endpoint URL for this sandbox."""
+        return f"{self._gateway_url}/mcp" if self._gateway_url else ""
+
     @property
     def is_ready(self) -> bool:
         return self.status.lower() == "ready"
 
     @classmethod
-    def from_response(cls, data: dict, config: SandboxConfig) -> "Sandbox":
+    def from_response(cls, data: dict, gateway_url: str = "") -> "Sandbox":
         return cls(
             uuid=data.get("uuid", ""),
             name=data.get("name", ""),
             namespace=data.get("namespace", ""),
             status=data.get("status", ""),
-            service_type=data.get("service_type", ""),
-            cluster_ip=data.get("cluster_ip", ""),
             host=data.get("host", ""),
-            external_ip=data.get("external_ip", ""),
-            external_hostname=data.get("external_hostname", ""),
             ports=data.get("ports", []),
-            node_ports=data.get("node_ports", []),
             message=data.get("message", ""),
-            config=config,
-            raw_response=data,
+            _gateway_url=gateway_url,
         )
 
     def __repr__(self) -> str:
@@ -255,33 +243,43 @@ class Sandbox:
 
 class SandboxClient:
     """
-    Client for managing sandbox lifecycle and MCP connections.
+    Client for managing a single sandbox lifecycle and MCP connection.
 
-    Supports context manager for automatic cleanup:
-        with SandboxClient() as client:
+    One client manages one sandbox. For multiple sandboxes, create multiple
+    clients (with the same or different configs).
+
+    Args:
+        config: SandboxConfig with connection URLs and container settings
+
+    Example:
+        # Single sandbox with context manager (auto-cleanup)
+        config = SandboxConfig(
+            control_plane_url="http://control-plane:80",
+            gateway_url="http://gateway:80",
+        )
+
+        with SandboxClient(config) as client:
             sandbox = client.spawn()
             mcp = client.connect()
             async with mcp:
                 tools = await mcp.list_tools()
         # Sandbox automatically destroyed on exit
 
-    Or manual usage:
-        client = SandboxClient()
-        sandbox = client.spawn()
+        # Multiple sandboxes (reuse config)
+        clients = [SandboxClient(config) for _ in range(10)]
+        sandboxes = [c.spawn() for c in clients]
 
-        mcp = client.connect(sandbox.uuid)
-        async with mcp:
-            tools = await mcp.list_tools()
-            result = await mcp.call_tool("tool_name", {"arg": "value"})
-
-        client.destroy(sandbox.uuid)
-        client.close()  # Close HTTP session
+        # Multi-cluster
+        config_a = SandboxConfig(control_plane_url="http://cluster-a:80", ...)
+        config_b = SandboxConfig(control_plane_url="http://cluster-b:80", ...)
+        client_a = SandboxClient(config_a)
+        client_b = SandboxClient(config_b)
     """
 
     def __init__(self, config: Optional[SandboxConfig] = None):
         self.config = config or SandboxConfig()
-        self._mcp_client: Optional[Client] = None
-        self._current_sandbox: Optional[Sandbox] = None
+        self._mcp_client = None
+        self._sandbox: Optional[Sandbox] = None
         self._session = requests.Session()
         self._session.headers.update({"Content-Type": "application/json"})
 
@@ -293,15 +291,15 @@ class SandboxClient:
 
     def close(self) -> None:
         """Close the client and cleanup resources."""
-        if self._current_sandbox:
+        if self._sandbox:
             try:
-                self.destroy(self._current_sandbox.uuid)
+                self.destroy()
             except Exception as e:
                 logger.warning(f"Failed to destroy sandbox on close: {e}")
         self._session.close()
 
     def __repr__(self) -> str:
-        sandbox_info = f", sandbox={self._current_sandbox.uuid!r}" if self._current_sandbox else ""
+        sandbox_info = f", sandbox={self._sandbox.uuid!r}" if self._sandbox else ""
         return f"SandboxClient(control_plane={self.config.control_plane_url!r}{sandbox_info})"
 
     def health_check(self) -> bool:
@@ -331,7 +329,7 @@ class SandboxClient:
     @retry(max_attempts=3, initial_delay=2.0)
     def spawn(self, name: Optional[str] = None) -> Sandbox:
         """
-        Spin up a new sandbox container.
+        Spawn a new sandbox container using the client's config.
 
         Args:
             name: Optional custom name (auto-generated if not provided)
@@ -341,18 +339,12 @@ class SandboxClient:
 
         Raises:
             SandboxSpawnError: If spawn fails after retries
-            SandboxTimeoutError: If wait_for_ready is True and sandbox doesn't
-                become ready within wait_for_ready_timeout seconds
-
-        Note:
-            The control-plane now waits for the pod's readiness probe before
-            returning "Ready" status. The wait_for_ready option is disabled by
-            default since it's no longer needed.
+            SandboxTimeoutError: If spawn times out
         """
         url = f"{self.config.control_plane_url}/spawn"
 
         # Build request matching Go SpawnReq struct
-        data = {
+        data: Dict[str, Any] = {
             "image": self.config.image,
             "ports": [{"container_port": p} for p in self.config.ports],
         }
@@ -367,95 +359,45 @@ class SandboxClient:
             data["node_selector"] = self.config.node_selector
 
         # Add resources if specified
-        resources = {}
+        resources_dict: Dict[str, Any] = {}
         if self.config.resources.requests.cpu or self.config.resources.requests.memory:
-            resources["requests"] = {}
+            resources_dict["requests"] = {}
             if self.config.resources.requests.cpu:
-                resources["requests"]["cpu"] = self.config.resources.requests.cpu
+                resources_dict["requests"]["cpu"] = self.config.resources.requests.cpu
             if self.config.resources.requests.memory:
-                resources["requests"]["memory"] = self.config.resources.requests.memory
+                resources_dict["requests"]["memory"] = self.config.resources.requests.memory
 
         if self.config.resources.limits.cpu or self.config.resources.limits.memory:
-            resources["limits"] = {}
+            resources_dict["limits"] = {}
             if self.config.resources.limits.cpu:
-                resources["limits"]["cpu"] = self.config.resources.limits.cpu
+                resources_dict["limits"]["cpu"] = self.config.resources.limits.cpu
             if self.config.resources.limits.memory:
-                resources["limits"]["memory"] = self.config.resources.limits.memory
+                resources_dict["limits"]["memory"] = self.config.resources.limits.memory
 
-        if resources:
-            data["resources"] = resources
+        if resources_dict:
+            data["resources"] = resources_dict
 
         try:
-            response = self._session.post(
-                url,
-                json=data,
-                timeout=self.config.spawn_timeout
-            )
+            response = self._session.post(url, json=data, timeout=self.config.timeout)
             response.raise_for_status()
         except requests.exceptions.Timeout as e:
-            raise SandboxTimeoutError(f"Spawn request timed out after {self.config.spawn_timeout}s") from e
+            raise SandboxTimeoutError(f"Spawn request timed out after {self.config.timeout}s") from e
         except requests.exceptions.HTTPError as e:
             raise SandboxSpawnError(f"Spawn failed: {e.response.text if e.response else e}") from e
 
         result = response.json()
-        sandbox = Sandbox.from_response(result, self.config)
-        self._current_sandbox = sandbox
+        self._sandbox = Sandbox.from_response(result, self.config.gateway_url)
 
-        logger.info(f"Sandbox spawned: {sandbox.uuid} (status: {sandbox.status})")
-        if sandbox.message:
-            logger.debug(f"Spawn message: {sandbox.message}")
+        logger.info(f"Sandbox spawned: {self._sandbox.uuid} (status: {self._sandbox.status})")
+        if self._sandbox.message:
+            logger.debug(f"Spawn message: {self._sandbox.message}")
 
-        # Wait for MCP server to be ready if enabled
-        # Note: K8s "Ready" status only means deployment has replicas, not that MCP is listening
-        if self.config.wait_for_ready:
-            sandbox = self._wait_for_ready(sandbox)
-
-        return sandbox
-
-    def _wait_for_ready(self, sandbox: Sandbox) -> Sandbox:
-        """
-        Wait for sandbox to be ready.
-
-        Note: With the readiness probe on sandbox pods, the control-plane now
-        waits for the pod to be ready before returning. This method is kept
-        for backward compatibility but is disabled by default.
-        """
-        # If already ready, return immediately
-        if sandbox.is_ready:
-            return sandbox
-
-        logger.info(f"Waiting for sandbox {sandbox.uuid} to be ready...")
-        logger.debug(f"Status: {sandbox.status} (control-plane returned before pod was ready)")
-
-        # Since control-plane returns early only if deployment timed out,
-        # we just wait a bit and hope it becomes ready
-        deadline = time.time() + self.config.wait_for_ready_timeout
-        interval = self.config.wait_for_ready_interval
-        max_interval = 10.0
-
-        while time.time() < deadline:
-            remaining = deadline - time.time()
-            sleep_time = min(interval, remaining, max_interval)
-            if sleep_time <= 0:
-                break
-
-            logger.debug(f"Waiting {sleep_time:.1f}s...")
-            time.sleep(sleep_time)
-            interval = min(interval * 1.5, max_interval)
-
-        # We can't actually verify readiness without the gateway endpoint,
-        # so we just assume it's ready after waiting
-        sandbox.status = "ready"
-        logger.info(f"Sandbox {sandbox.uuid} assumed ready after waiting")
-        return sandbox
+        return self._sandbox
 
     @retry(max_attempts=3, initial_delay=1.0)
-    def destroy(self, sandbox_uuid: Optional[str] = None) -> dict:
+    def destroy(self) -> dict:
         """
-        Destroy a sandbox container.
-
-        Args:
-            sandbox_uuid: UUID to destroy (uses current sandbox if not provided)
+        Destroy the client's sandbox.
 
         Returns:
             Response dict with message and uuid
@@ -463,25 +405,22 @@ class SandboxClient:
         Raises:
             SandboxDestroyError: If destroy fails after retries
         """
-        uuid = sandbox_uuid or (self._current_sandbox.uuid if self._current_sandbox else None)
-        if not uuid:
-            raise ValueError("No sandbox UUID provided and no current sandbox")
+        if not self._sandbox:
+            raise ValueError("No sandbox to destroy - call spawn() first")
 
-        # API uses DELETE /deprovision/:uuid
-        url = f"{self.config.control_plane_url}/deprovision/{uuid}"
+        url = f"{self.config.control_plane_url}/deprovision/{self._sandbox.uuid}"
 
         try:
-            response = self._session.delete(url, timeout=self.config.destroy_timeout)
+            response = self._session.delete(url, timeout=30)
             response.raise_for_status()
         except requests.exceptions.Timeout as e:
-            raise SandboxTimeoutError(f"Destroy request timed out after {self.config.destroy_timeout}s") from e
+            raise SandboxTimeoutError("Destroy request timed out") from e
         except requests.exceptions.HTTPError as e:
             raise SandboxDestroyError(f"Destroy failed: {e.response.text if e.response else e}") from e
 
         result = response.json()
-
-        if self._current_sandbox and self._current_sandbox.uuid == uuid:
-            self._current_sandbox = None
+        uuid = self._sandbox.uuid
+        self._sandbox = None
 
         logger.info(f"Sandbox destroyed: {uuid}")
         return result
@@ -489,7 +428,7 @@ class SandboxClient:
     @retry(max_attempts=2, initial_delay=2.0)
     def destroy_all(self) -> dict:
         """
-        Destroy all sandboxes created by control plane.
+        Destroy all sandboxes in the namespace (use with caution).
 
         Returns:
             Response dict with deleted list, failed list, and count
@@ -508,7 +447,7 @@ class SandboxClient:
             raise SandboxDestroyError(f"Destroy all failed: {e.response.text if e.response else e}") from e
 
         result = response.json()
-        self._current_sandbox = None
+        self._sandbox = None
 
         count = result.get('count', 0)
         logger.info(f"Destroyed {count} sandboxes")
@@ -517,26 +456,33 @@ class SandboxClient:
 
         return result
 
-    def connect(self, sandbox_uuid: Optional[str] = None) -> Client:
+    def connect(self):
         """
-        Get an MCP client connected to a sandbox.
-        
-        Args:
-            sandbox_uuid: UUID to connect to (uses current sandbox if not provided)
-        
+        Get an MCP client connected to this client's sandbox.
+
         Returns:
             FastMCP Client configured for the sandbox
+
+        Raises:
+            ValueError: If no sandbox has been spawned
+
+        Example:
+            mcp = client.connect()
+            async with mcp:
+                tools = await mcp.list_tools()
+                result = await mcp.call_tool("tool_name", {"arg": "value"})
         """
-        uuid = sandbox_uuid or (self._current_sandbox.uuid if self._current_sandbox else None)
-        if not uuid:
-            raise ValueError("No sandbox UUID provided and no current sandbox")
-        
+        from fastmcp import Client
+
+        if not self._sandbox:
+            raise ValueError("No sandbox to connect to - call spawn() first")
+
         mcp_config = {
             "mcpServers": {
                 "sandbox": {
                     "transport": "http",
                     "url": f"{self.config.gateway_url}/mcp",
-                    "headers": {"X-Session-ID": uuid},
+                    "headers": {"X-Session-ID": self._sandbox.uuid},
                 }
             },
         }
@@ -544,5 +490,6 @@ class SandboxClient:
         return self._mcp_client
 
     @property
-    def current_sandbox(self) -> Optional[Sandbox]:
-        return self._current_sandbox
+    def sandbox(self) -> Optional[Sandbox]:
+        """The client's sandbox, if spawned."""
+        return self._sandbox
