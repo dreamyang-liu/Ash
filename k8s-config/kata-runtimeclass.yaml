@@ -1,0 +1,78 @@
+# =============================================================================
+# Kata Containers RuntimeClass Configuration
+# =============================================================================
+# This file defines RuntimeClasses for running sandboxes with Kata Containers,
+# providing VM-level isolation using microVMs (Firecracker or Cloud Hypervisor).
+#
+# Prerequisites:
+#   - Kata Containers installed on your K8s cluster
+#   - containerd configured with Kata runtime handlers
+#
+# Installation:
+#   # For EKS with Kata:
+#   kubectl apply -f https://raw.githubusercontent.com/kata-containers/kata-containers/main/tools/packaging/kata-deploy/kata-rbac/base/kata-rbac.yaml
+#   kubectl apply -f https://raw.githubusercontent.com/kata-containers/kata-containers/main/tools/packaging/kata-deploy/kata-deploy/base/kata-deploy.yaml
+#
+#   # Wait for kata-deploy to complete
+#   kubectl -n kube-system wait --for=condition=Ready pod -l name=kata-deploy --timeout=300s
+#
+# Usage:
+#   kubectl apply -f kata-runtimeclass.yaml
+# =============================================================================
+
+---
+# RuntimeClass for Kata with Firecracker (recommended for lightweight sandboxes)
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-fc
+  labels:
+    app.kubernetes.io/name: kata-containers
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/part-of: ash
+handler: kata-fc
+overhead:
+  podFixed:
+    memory: "160Mi"
+    cpu: "250m"
+scheduling:
+  nodeSelector:
+    katacontainers.io/kata-runtime: "true"
+
+---
+# RuntimeClass for Kata with Cloud Hypervisor (more features, slightly heavier)
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-clh
+  labels:
+    app.kubernetes.io/name: kata-containers
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/part-of: ash
+handler: kata-clh
+overhead:
+  podFixed:
+    memory: "180Mi"
+    cpu: "250m"
+scheduling:
+  nodeSelector:
+    katacontainers.io/kata-runtime: "true"
+
+---
+# RuntimeClass for Kata with QEMU (maximum compatibility)
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-qemu
+  labels:
+    app.kubernetes.io/name: kata-containers
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/part-of: ash
+handler: kata-qemu
+overhead:
+  podFixed:
+    memory: "256Mi"
+    cpu: "250m"
+scheduling:
+  nodeSelector:
+    katacontainers.io/kata-runtime: "true"

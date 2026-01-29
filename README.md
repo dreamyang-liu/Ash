@@ -21,12 +21,15 @@
   <img src="https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Kubernetes-326CE5?style=flat&logo=kubernetes&logoColor=white" alt="Kubernetes">
   <img src="https://img.shields.io/badge/MCP-FF6B00?style=flat" alt="MCP">
+  <img src="https://img.shields.io/badge/Kata_Containers-FFA500?style=flat" alt="Kata Containers">
   <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License">
 </p>
 
 ---
 
 Ash provides **on-demand, isolated Kubernetes-based sandbox environments** for AI agents. Agents connect via [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) to execute code, browse the web, and run tools safely. Spawn thousands of sandboxes dynamically with automatic routing, resource limits, and lifecycle management.
+
+> **🔥 Kata Containers Branch**: This branch adds support for [Kata Containers](https://katacontainers.io/) to run sandboxes in lightweight microVMs (Firecracker/Cloud Hypervisor) for VM-level isolation. See [docs/kata-containers.md](docs/kata-containers.md) for details.
 
 <br>
 

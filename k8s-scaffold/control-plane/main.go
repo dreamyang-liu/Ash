@@ -35,12 +35,13 @@ type Port struct {
 }
 
 type SpawnReq struct {
-	Image        string            `json:"image" binding:"required"`
-	Name         string            `json:"name"`
-	Ports        []Port            `json:"ports"`
-	Env          map[string]string `json:"env"`
-	Resources    ResourceReq       `json:"resources"`
-	NodeSelector map[string]string `json:"node_selector"`
+	Image         string            `json:"image" binding:"required"`
+	Name          string            `json:"name"`
+	Ports         []Port            `json:"ports"`
+	Env           map[string]string `json:"env"`
+	Resources     ResourceReq       `json:"resources"`
+	NodeSelector  map[string]string `json:"node_selector"`
+	RuntimeClass  string            `json:"runtime_class"`  // Kata runtime: "kata-fc", "kata-clh", "kata-qemu", or empty for default
 }
 
 type ResourceReq struct {
@@ -320,6 +321,21 @@ func main() {
 			Containers:         []corev1.Container{container},
 			ServiceAccountName: config.ServiceAccountName,
 			NodeSelector:       nodeSelector,
+		}
+
+		// Add RuntimeClass for Kata Containers if specified
+		// Supported values: "kata-fc" (Firecracker), "kata-clh" (Cloud Hypervisor), "kata-qemu"
+		if req.RuntimeClass != "" {
+			podSpec.RuntimeClassName = &req.RuntimeClass
+			log.Printf("Using RuntimeClass: %s for sandbox %s", req.RuntimeClass, name)
+			
+			// When using Kata, also add node selector for Kata-enabled nodes
+			if nodeSelector == nil {
+				nodeSelector = make(map[string]string)
+			}
+			// Kata-deploy labels nodes with this label
+			nodeSelector["katacontainers.io/kata-runtime"] = "true"
+			podSpec.NodeSelector = nodeSelector
 		}
 		dep := &appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{

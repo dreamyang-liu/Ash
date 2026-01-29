@@ -179,6 +179,7 @@ class SandboxConfig:
     env: Dict[str, str] = field(default_factory=dict)
     resources: ResourceReq = field(default_factory=ResourceReq)
     node_selector: Dict[str, str] = field(default_factory=dict)
+    runtime_class: str = ""  # Kata runtime: "kata-fc", "kata-clh", "kata-qemu", or empty for default
 
     # Timeouts
     timeout: int = 300
@@ -376,6 +377,10 @@ class SandboxClient:
 
         if resources_dict:
             data["resources"] = resources_dict
+
+        # Add runtime_class for Kata Containers if specified
+        if self.config.runtime_class:
+            data["runtime_class"] = self.config.runtime_class
 
         try:
             response = self._session.post(url, json=data, timeout=self.config.timeout)
