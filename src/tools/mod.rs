@@ -24,7 +24,7 @@ pub use terminal::{TerminalRunAsyncTool, TerminalGetOutputTool, TerminalKillTool
 pub use mcp_mount::{McpInstallTool, McpMountTool, McpUnmountTool, McpListTool, McpCallTool};
 pub use filesystem::{FsListDirTool, FsMkdirTool, FsRemoveTool, FsMoveTool, FsCopyTool, FsStatTool, FsWriteTool};
 pub use utils::{FindFilesTool, TreeTool, DiffFilesTool, PatchApplyTool, HttpFetchTool, FileInfoTool, UndoTool};
-pub use events::{EventsSubscribeTool, EventsPollTool, EventsPushTool, ToolRegisterTool, ToolListCustomTool, ToolCallCustomTool, ToolRemoveCustomTool};
+pub use events::{EventsSubscribeTool, EventsPollTool, EventsPushTool, ToolRegisterTool, ToolListCustomTool, ToolCallCustomTool, ToolRemoveCustomTool, ToolViewCustomTool};
 
 use crate::Tool;
 
@@ -89,6 +89,7 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(ToolListCustomTool),
         Box::new(ToolCallCustomTool),
         Box::new(ToolRemoveCustomTool),
+        Box::new(ToolViewCustomTool),
     ]
 }
 

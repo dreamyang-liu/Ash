@@ -391,6 +391,8 @@ enum CustomToolOp {
     },
     /// List custom tools
     List,
+    /// View a custom tool's script
+    View { name: String },
     /// Call a custom tool
     Call {
         name: String,
@@ -669,6 +671,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 CustomToolOp::List => {
                     tools::ToolListCustomTool.execute(serde_json::json!({})).await
+                }
+                CustomToolOp::View { name } => {
+                    tools::ToolViewCustomTool.execute(serde_json::json!({"name": name})).await
                 }
                 CustomToolOp::Call { name, args } => {
                     let arguments: serde_json::Value = serde_json::from_str(&args).unwrap_or(serde_json::json!({}));

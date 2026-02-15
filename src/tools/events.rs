@@ -1,12 +1,14 @@
 //! Events system - bidirectional LLM-environment interaction
-//! Custom tools - LLM can register and call custom tools
+//! Custom tools - LLM can register and call custom tools (file-based)
 
 use crate::{BoxFuture, Tool, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
+use tokio::fs;
 use lazy_static::lazy_static;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use tokio::process::Command;
 
@@ -22,41 +24,26 @@ pub struct Event {
 }
 
 struct EventSystem {
-    /// Pending events queue
     queue: VecDeque<Event>,
-    /// Subscribed event kinds
     subscriptions: HashSet<String>,
-    /// Event counter for IDs
     counter: u64,
 }
 
 impl EventSystem {
     fn new() -> Self {
-        Self {
-            queue: VecDeque::new(),
-            subscriptions: HashSet::new(),
-            counter: 0,
-        }
+        Self { queue: VecDeque::new(), subscriptions: HashSet::new(), counter: 0 }
     }
 
     fn subscribe(&mut self, kinds: Vec<String>) {
-        for k in kinds {
-            self.subscriptions.insert(k);
-        }
+        for k in kinds { self.subscriptions.insert(k); }
     }
 
     fn unsubscribe(&mut self, kinds: Vec<String>) {
-        for k in kinds {
-            self.subscriptions.remove(&k);
-        }
+        for k in kinds { self.subscriptions.remove(&k); }
     }
 
     fn push(&mut self, kind: &str, source: &str, data: Value) {
-        // Only push if subscribed (or if subscriptions is empty = subscribe all)
-        if !self.subscriptions.is_empty() && !self.subscriptions.contains(kind) {
-            return;
-        }
-        
+        if !self.subscriptions.is_empty() && !self.subscriptions.contains(kind) { return; }
         self.counter += 1;
         self.queue.push_back(Event {
             id: format!("evt_{}", self.counter),
@@ -65,21 +52,13 @@ impl EventSystem {
             data,
             timestamp: Utc::now(),
         });
-        
-        // Keep bounded
-        while self.queue.len() > 100 {
-            self.queue.pop_front();
-        }
+        while self.queue.len() > 100 { self.queue.pop_front(); }
     }
 
     fn poll(&mut self, limit: usize) -> Vec<Event> {
         let mut events = Vec::new();
         for _ in 0..limit {
-            if let Some(e) = self.queue.pop_front() {
-                events.push(e);
-            } else {
-                break;
-            }
+            if let Some(e) = self.queue.pop_front() { events.push(e); } else { break; }
         }
         events
     }
@@ -93,50 +72,112 @@ lazy_static! {
     static ref EVENTS: Mutex<EventSystem> = Mutex::new(EventSystem::new());
 }
 
-/// Push an event (called by other tools)
 pub async fn push_event(kind: &str, source: &str, data: Value) {
     EVENTS.lock().await.push(kind, source, data);
 }
 
-// ==================== Custom Tools System ====================
+// ==================== Custom Tools (File-Based) ====================
+
+fn tools_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("ash")
+        .join("custom_tools")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CustomTool {
+pub struct CustomToolMeta {
     pub name: String,
     pub description: String,
-    pub script: String,
     pub schema: Value,
     pub created_at: DateTime<Utc>,
 }
 
-struct CustomToolRegistry {
-    tools: HashMap<String, CustomTool>,
+async fn ensure_tools_dir() -> anyhow::Result<PathBuf> {
+    let dir = tools_dir();
+    fs::create_dir_all(&dir).await?;
+    Ok(dir)
 }
 
-impl CustomToolRegistry {
-    fn new() -> Self {
-        Self { tools: HashMap::new() }
+async fn save_custom_tool(name: &str, description: &str, script: &str, schema: &Value) -> anyhow::Result<()> {
+    let dir = ensure_tools_dir().await?;
+    
+    // Save script file
+    let script_path = dir.join(format!("{}.sh", name));
+    fs::write(&script_path, script).await?;
+    
+    // Make executable on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).await?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).await?;
     }
-
-    fn register(&mut self, tool: CustomTool) {
-        self.tools.insert(tool.name.clone(), tool);
-    }
-
-    fn remove(&mut self, name: &str) -> bool {
-        self.tools.remove(name).is_some()
-    }
-
-    fn get(&self, name: &str) -> Option<&CustomTool> {
-        self.tools.get(name)
-    }
-
-    fn list(&self) -> Vec<&CustomTool> {
-        self.tools.values().collect()
-    }
+    
+    // Save metadata
+    let meta = CustomToolMeta {
+        name: name.to_string(),
+        description: description.to_string(),
+        schema: schema.clone(),
+        created_at: Utc::now(),
+    };
+    let meta_path = dir.join(format!("{}.json", name));
+    fs::write(&meta_path, serde_json::to_string_pretty(&meta)?).await?;
+    
+    Ok(())
 }
 
-lazy_static! {
-    static ref CUSTOM_TOOLS: Mutex<CustomToolRegistry> = Mutex::new(CustomToolRegistry::new());
+async fn load_custom_tool(name: &str) -> anyhow::Result<(CustomToolMeta, String)> {
+    let dir = tools_dir();
+    
+    let meta_path = dir.join(format!("{}.json", name));
+    let meta_content = fs::read_to_string(&meta_path).await?;
+    let meta: CustomToolMeta = serde_json::from_str(&meta_content)?;
+    
+    let script_path = dir.join(format!("{}.sh", name));
+    let script = fs::read_to_string(&script_path).await?;
+    
+    Ok((meta, script))
+}
+
+async fn list_custom_tools() -> anyhow::Result<Vec<CustomToolMeta>> {
+    let dir = tools_dir();
+    if !dir.exists() { return Ok(vec![]); }
+    
+    let mut tools = Vec::new();
+    let mut entries = fs::read_dir(&dir).await?;
+    
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().map(|e| e == "json").unwrap_or(false) {
+            if let Ok(content) = fs::read_to_string(&path).await {
+                if let Ok(meta) = serde_json::from_str::<CustomToolMeta>(&content) {
+                    tools.push(meta);
+                }
+            }
+        }
+    }
+    
+    Ok(tools)
+}
+
+async fn remove_custom_tool(name: &str) -> anyhow::Result<bool> {
+    let dir = tools_dir();
+    let script_path = dir.join(format!("{}.sh", name));
+    let meta_path = dir.join(format!("{}.json", name));
+    
+    let mut removed = false;
+    if fs::metadata(&script_path).await.is_ok() {
+        fs::remove_file(&script_path).await?;
+        removed = true;
+    }
+    if fs::metadata(&meta_path).await.is_ok() {
+        fs::remove_file(&meta_path).await?;
+        removed = true;
+    }
+    
+    Ok(removed)
 }
 
 // ==================== Event Tools ====================
@@ -151,16 +192,8 @@ impl Tool for EventsSubscribeTool {
         json!({
             "type": "object",
             "properties": {
-                "events": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Event types to subscribe to"
-                },
-                "unsubscribe": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "Unsubscribe instead of subscribe"
-                }
+                "events": {"type": "array", "items": {"type": "string"}, "description": "Event types to subscribe to"},
+                "unsubscribe": {"type": "boolean", "default": false, "description": "Unsubscribe instead"}
             },
             "required": ["events"]
         })
@@ -169,11 +202,7 @@ impl Tool for EventsSubscribeTool {
     fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
             #[derive(Deserialize)]
-            struct Args {
-                events: Vec<String>,
-                #[serde(default)]
-                unsubscribe: bool,
-            }
+            struct Args { events: Vec<String>, #[serde(default)] unsubscribe: bool }
             
             let args: Args = match serde_json::from_value(args) {
                 Ok(a) => a,
@@ -202,7 +231,7 @@ impl Tool for EventsPollTool {
         json!({
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "default": 10, "description": "Max events to return"},
+                "limit": {"type": "integer", "default": 10},
                 "peek": {"type": "boolean", "default": false, "description": "Peek without removing"}
             }
         })
@@ -211,22 +240,13 @@ impl Tool for EventsPollTool {
     fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
             #[derive(Deserialize)]
-            struct Args {
-                #[serde(default = "default_limit")]
-                limit: usize,
-                #[serde(default)]
-                peek: bool,
-            }
+            struct Args { #[serde(default = "default_limit")] limit: usize, #[serde(default)] peek: bool }
             fn default_limit() -> usize { 10 }
             
             let args: Args = serde_json::from_value(args).unwrap_or(Args { limit: 10, peek: false });
             
             let mut sys = EVENTS.lock().await;
-            let events = if args.peek {
-                sys.peek(args.limit)
-            } else {
-                sys.poll(args.limit)
-            };
+            let events = if args.peek { sys.peek(args.limit) } else { sys.poll(args.limit) };
             
             if events.is_empty() {
                 ToolResult::ok("No pending events".to_string())
@@ -248,8 +268,8 @@ impl Tool for EventsPushTool {
             "type": "object",
             "properties": {
                 "kind": {"type": "string", "description": "Event type"},
-                "source": {"type": "string", "description": "Event source"},
-                "data": {"type": "object", "description": "Event data"}
+                "source": {"type": "string", "default": "llm"},
+                "data": {"type": "object"}
             },
             "required": ["kind"]
         })
@@ -258,14 +278,8 @@ impl Tool for EventsPushTool {
     fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
             #[derive(Deserialize)]
-            struct Args {
-                kind: String,
-                #[serde(default = "default_source")]
-                source: String,
-                #[serde(default)]
-                data: Value,
-            }
-            fn default_source() -> String { "llm".to_string() }
+            struct Args { kind: String, #[serde(default = "default_src")] source: String, #[serde(default)] data: Value }
+            fn default_src() -> String { "llm".to_string() }
             
             let args: Args = match serde_json::from_value(args) {
                 Ok(a) => a,
@@ -278,26 +292,22 @@ impl Tool for EventsPushTool {
     }
 }
 
-// ==================== Custom Tool Tools ====================
+// ==================== Custom Tool Tools (File-Based) ====================
 
 pub struct ToolRegisterTool;
 
 impl Tool for ToolRegisterTool {
     fn name(&self) -> &'static str { "tool_register" }
-    fn description(&self) -> &'static str { "Register a custom tool with script and manual" }
+    fn description(&self) -> &'static str { "Register a custom tool (creates script file in ~/.local/share/ash/custom_tools/)" }
     
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Tool name (unique identifier)"},
+                "name": {"type": "string", "description": "Tool name (becomes <name>.sh)"},
                 "description": {"type": "string", "description": "What the tool does"},
-                "script": {"type": "string", "description": "Shell script to execute (use $ARG_name for arguments)"},
-                "schema": {
-                    "type": "object",
-                    "description": "JSON schema for arguments",
-                    "default": {}
-                }
+                "script": {"type": "string", "description": "Shell script content (use $ARG_xxx for arguments, or $1 $2 positional)"},
+                "schema": {"type": "object", "description": "JSON schema for arguments", "default": {}}
             },
             "required": ["name", "description", "script"]
         })
@@ -306,31 +316,20 @@ impl Tool for ToolRegisterTool {
     fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
             #[derive(Deserialize)]
-            struct Args {
-                name: String,
-                description: String,
-                script: String,
-                #[serde(default)]
-                schema: Value,
-            }
+            struct Args { name: String, description: String, script: String, #[serde(default)] schema: Value }
             
             let args: Args = match serde_json::from_value(args) {
                 Ok(a) => a,
                 Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
             };
             
-            let tool = CustomTool {
-                name: args.name.clone(),
-                description: args.description,
-                script: args.script,
-                schema: args.schema,
-                created_at: Utc::now(),
-            };
-            
-            let mut registry = CUSTOM_TOOLS.lock().await;
-            registry.register(tool);
-            
-            ToolResult::ok(format!("Registered custom tool: {}", args.name))
+            match save_custom_tool(&args.name, &args.description, &args.script, &args.schema).await {
+                Ok(_) => {
+                    let path = tools_dir().join(format!("{}.sh", args.name));
+                    ToolResult::ok(format!("Registered: {} ({})", args.name, path.display()))
+                }
+                Err(e) => ToolResult::err(format!("Failed to register: {e}")),
+            }
         })
     }
 }
@@ -347,24 +346,21 @@ impl Tool for ToolListCustomTool {
     
     fn execute(&self, _args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
-            let registry = CUSTOM_TOOLS.lock().await;
-            let tools = registry.list();
-            
-            if tools.is_empty() {
-                return ToolResult::ok("No custom tools registered".to_string());
-            }
-            
-            let mut out = String::from("Custom tools:\n");
-            for tool in tools {
-                out.push_str(&format!("\n## {}\n", tool.name));
-                out.push_str(&format!("Description: {}\n", tool.description));
-                out.push_str(&format!("Script: {}\n", tool.script));
-                if !tool.schema.is_null() {
-                    out.push_str(&format!("Schema: {}\n", serde_json::to_string(&tool.schema).unwrap()));
+            match list_custom_tools().await {
+                Ok(tools) if tools.is_empty() => {
+                    ToolResult::ok(format!("No custom tools. Dir: {}", tools_dir().display()))
                 }
+                Ok(tools) => {
+                    let mut out = format!("Custom tools ({}):\n", tools_dir().display());
+                    for tool in tools {
+                        out.push_str(&format!("\n## {}\n", tool.name));
+                        out.push_str(&format!("Description: {}\n", tool.description));
+                        out.push_str(&format!("Script: {}.sh\n", tool.name));
+                    }
+                    ToolResult::ok(out)
+                }
+                Err(e) => ToolResult::err(format!("Failed to list: {e}")),
             }
-            
-            ToolResult::ok(out)
         })
     }
 }
@@ -380,7 +376,7 @@ impl Tool for ToolCallCustomTool {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Custom tool name"},
-                "arguments": {"type": "object", "description": "Arguments to pass (available as $ARG_key in script)"}
+                "arguments": {"type": "object", "description": "Arguments (available as $ARG_key in script)"}
             },
             "required": ["name"]
         })
@@ -389,48 +385,41 @@ impl Tool for ToolCallCustomTool {
     fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
             #[derive(Deserialize)]
-            struct Args {
-                name: String,
-                #[serde(default)]
-                arguments: HashMap<String, Value>,
-            }
+            struct Args { name: String, #[serde(default)] arguments: HashMap<String, Value> }
             
             let args: Args = match serde_json::from_value(args) {
                 Ok(a) => a,
                 Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
             };
             
-            let registry = CUSTOM_TOOLS.lock().await;
-            let tool = match registry.get(&args.name) {
-                Some(t) => t.clone(),
-                None => return ToolResult::err(format!("Custom tool '{}' not found", args.name)),
+            // Load tool from file
+            let (meta, script) = match load_custom_tool(&args.name).await {
+                Ok(t) => t,
+                Err(e) => return ToolResult::err(format!("Tool '{}' not found: {e}", args.name)),
             };
-            drop(registry);
             
-            // Build script with argument substitution
-            let mut script = tool.script.clone();
+            // Build environment with ARG_xxx variables
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(&script);
+            
             for (key, value) in &args.arguments {
                 let value_str = match value {
                     Value::String(s) => s.clone(),
                     v => v.to_string(),
                 };
-                script = script.replace(&format!("$ARG_{}", key), &value_str);
+                cmd.env(format!("ARG_{}", key), &value_str);
             }
             
-            // Execute script
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg(&script)
-                .output()
-                .await;
+            // Execute
+            let output = cmd.output().await;
             
             match output {
                 Ok(o) => {
                     let stdout = String::from_utf8_lossy(&o.stdout);
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     
-                    // Push event for completion
                     push_event("custom_tool_complete", &args.name, json!({
+                        "tool": args.name,
                         "success": o.status.success(),
                         "exit_code": o.status.code()
                     })).await;
@@ -456,9 +445,7 @@ impl Tool for ToolRemoveCustomTool {
     fn schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Tool name to remove"}
-            },
+            "properties": { "name": {"type": "string", "description": "Tool name to remove"} },
             "required": ["name"]
         })
     }
@@ -473,11 +460,50 @@ impl Tool for ToolRemoveCustomTool {
                 Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
             };
             
-            let mut registry = CUSTOM_TOOLS.lock().await;
-            if registry.remove(&args.name) {
-                ToolResult::ok(format!("Removed custom tool: {}", args.name))
-            } else {
-                ToolResult::err(format!("Custom tool '{}' not found", args.name))
+            match remove_custom_tool(&args.name).await {
+                Ok(true) => ToolResult::ok(format!("Removed: {}", args.name)),
+                Ok(false) => ToolResult::err(format!("Tool '{}' not found", args.name)),
+                Err(e) => ToolResult::err(format!("Failed to remove: {e}")),
+            }
+        })
+    }
+}
+
+pub struct ToolViewCustomTool;
+
+impl Tool for ToolViewCustomTool {
+    fn name(&self) -> &'static str { "tool_view_custom" }
+    fn description(&self) -> &'static str { "View a custom tool's script content" }
+    
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "name": {"type": "string", "description": "Tool name"} },
+            "required": ["name"]
+        })
+    }
+    
+    fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
+        Box::pin(async move {
+            #[derive(Deserialize)]
+            struct Args { name: String }
+            
+            let args: Args = match serde_json::from_value(args) {
+                Ok(a) => a,
+                Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
+            };
+            
+            match load_custom_tool(&args.name).await {
+                Ok((meta, script)) => {
+                    let out = format!(
+                        "# {}\n# {}\n# Schema: {}\n\n{}",
+                        meta.name, meta.description, 
+                        serde_json::to_string(&meta.schema).unwrap_or_default(),
+                        script
+                    );
+                    ToolResult::ok(out)
+                }
+                Err(e) => ToolResult::err(format!("Tool '{}' not found: {e}", args.name)),
             }
         })
     }
