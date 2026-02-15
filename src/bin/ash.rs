@@ -379,25 +379,24 @@ enum EventsOp {
 
 #[derive(Subcommand)]
 enum CustomToolOp {
-    /// Register a custom tool
-    Register {
+    /// Create a custom tool script
+    Create {
         name: String,
         #[arg(short, long)]
-        description: String,
-        #[arg(short, long)]
         script: String,
-        #[arg(long, default_value = "{}")]
-        schema: String,
+        #[arg(short, long, default_value = "sh")]
+        lang: String,
     },
     /// List custom tools
     List,
     /// View a custom tool's script
     View { name: String },
-    /// Call a custom tool
-    Call {
+    /// Run a custom tool
+    Run {
         name: String,
-        #[arg(short, long, default_value = "{}")]
-        args: String,
+        /// Positional arguments
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
     },
     /// Remove a custom tool
     Remove { name: String },
@@ -663,10 +662,9 @@ async fn main() -> anyhow::Result<()> {
         
         Commands::CustomTool { op } => {
             match op {
-                CustomToolOp::Register { name, description, script, schema } => {
-                    let schema_val: serde_json::Value = serde_json::from_str(&schema).unwrap_or(serde_json::json!({}));
+                CustomToolOp::Create { name, script, lang } => {
                     tools::ToolRegisterTool.execute(serde_json::json!({
-                        "name": name, "description": description, "script": script, "schema": schema_val
+                        "name": name, "script": script, "lang": lang
                     })).await
                 }
                 CustomToolOp::List => {
@@ -675,10 +673,9 @@ async fn main() -> anyhow::Result<()> {
                 CustomToolOp::View { name } => {
                     tools::ToolViewCustomTool.execute(serde_json::json!({"name": name})).await
                 }
-                CustomToolOp::Call { name, args } => {
-                    let arguments: serde_json::Value = serde_json::from_str(&args).unwrap_or(serde_json::json!({}));
+                CustomToolOp::Run { name, args } => {
                     tools::ToolCallCustomTool.execute(serde_json::json!({
-                        "name": name, "arguments": arguments
+                        "name": name, "args": args
                     })).await
                 }
                 CustomToolOp::Remove { name } => {

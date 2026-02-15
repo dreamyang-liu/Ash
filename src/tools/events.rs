@@ -1,5 +1,5 @@
 //! Events system - bidirectional LLM-environment interaction
-//! Custom tools - LLM can register and call custom tools (file-based, multi-language)
+//! Custom tools - simple scripts in a folder (CLI-style)
 
 use crate::{BoxFuture, Tool, ToolResult};
 use serde::{Deserialize, Serialize};
@@ -76,65 +76,47 @@ pub async fn push_event(kind: &str, source: &str, data: Value) {
     EVENTS.lock().await.push(kind, source, data);
 }
 
-// ==================== Custom Tools (File-Based, Multi-Language) ====================
+// ==================== Custom Tools (Simple Scripts) ====================
+// Just scripts in a folder. Description from first comment line.
+// Format: # DESC: description here
 
 fn tools_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("ash")
-        .join("custom_tools")
+        .join("tools")  // simpler name
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CustomToolMeta {
-    pub name: String,
-    pub description: String,
-    pub schema: Value,
-    pub lang: String,  // "sh", "python", "node", etc.
-    pub created_at: DateTime<Utc>,
+#[derive(Debug, Clone)]
+struct ScriptTool {
+    name: String,
+    description: String,
+    lang: String,  // "sh" or "python"
+    path: PathBuf,
 }
 
-/// Detect language from script content or explicit lang parameter
-fn detect_lang(script: &str, explicit_lang: Option<&str>) -> String {
-    if let Some(lang) = explicit_lang {
-        return lang.to_string();
-    }
-    
-    // Check shebang
-    if let Some(first_line) = script.lines().next() {
-        if first_line.starts_with("#!") {
-            if first_line.contains("python") { return "python".to_string(); }
-            if first_line.contains("node") { return "node".to_string(); }
-            if first_line.contains("ruby") { return "ruby".to_string(); }
-            if first_line.contains("perl") { return "perl".to_string(); }
+/// Extract description from script's first comment line
+fn extract_description(content: &str) -> String {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("# DESC:") {
+            return trimmed.strip_prefix("# DESC:").unwrap_or("").trim().to_string();
         }
+        if trimmed.starts_with("#!") { continue; }  // skip shebang
+        if trimmed.starts_with('#') {
+            // First comment line is description
+            return trimmed.strip_prefix('#').unwrap_or("").trim().to_string();
+        }
+        if !trimmed.is_empty() { break; }  // non-comment, non-empty line
     }
-    
-    // Check content patterns
-    if script.contains("def ") && script.contains(":") { return "python".to_string(); }
-    if script.contains("import ") && script.contains("from ") { return "python".to_string(); }
-    if script.contains("const ") || script.contains("function ") { return "node".to_string(); }
-    
-    "sh".to_string()
+    "No description".to_string()
 }
 
-fn get_extension(lang: &str) -> &'static str {
-    match lang {
-        "python" | "py" => "py",
-        "node" | "js" | "javascript" => "js",
-        "ruby" | "rb" => "rb",
-        "perl" | "pl" => "pl",
+fn detect_lang_from_ext(path: &PathBuf) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("py") => "python",
+        Some("sh") | Some("bash") => "sh",
         _ => "sh",
-    }
-}
-
-fn get_interpreter(lang: &str) -> (&'static str, Vec<&'static str>) {
-    match lang {
-        "python" | "py" => ("python3", vec![]),
-        "node" | "js" | "javascript" => ("node", vec![]),
-        "ruby" | "rb" => ("ruby", vec![]),
-        "perl" | "pl" => ("perl", vec![]),
-        _ => ("sh", vec!["-c"]),
     }
 }
 
@@ -144,56 +126,7 @@ async fn ensure_tools_dir() -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
-async fn save_custom_tool(name: &str, description: &str, script: &str, schema: &Value, lang: Option<&str>) -> anyhow::Result<String> {
-    let dir = ensure_tools_dir().await?;
-    
-    let detected_lang = detect_lang(script, lang);
-    let ext = get_extension(&detected_lang);
-    
-    // Save script file
-    let script_path = dir.join(format!("{}.{}", name, ext));
-    fs::write(&script_path, script).await?;
-    
-    // Make executable on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&script_path).await?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).await?;
-    }
-    
-    // Save metadata
-    let meta = CustomToolMeta {
-        name: name.to_string(),
-        description: description.to_string(),
-        schema: schema.clone(),
-        lang: detected_lang.clone(),
-        created_at: Utc::now(),
-    };
-    let meta_path = dir.join(format!("{}.json", name));
-    fs::write(&meta_path, serde_json::to_string_pretty(&meta)?).await?;
-    
-    Ok(detected_lang)
-}
-
-async fn load_custom_tool(name: &str) -> anyhow::Result<(CustomToolMeta, String, PathBuf)> {
-    let dir = tools_dir();
-    
-    // Load metadata
-    let meta_path = dir.join(format!("{}.json", name));
-    let meta_content = fs::read_to_string(&meta_path).await?;
-    let meta: CustomToolMeta = serde_json::from_str(&meta_content)?;
-    
-    // Find script file
-    let ext = get_extension(&meta.lang);
-    let script_path = dir.join(format!("{}.{}", name, ext));
-    let script = fs::read_to_string(&script_path).await?;
-    
-    Ok((meta, script, script_path))
-}
-
-async fn list_custom_tools() -> anyhow::Result<Vec<CustomToolMeta>> {
+async fn list_scripts() -> anyhow::Result<Vec<ScriptTool>> {
     let dir = tools_dir();
     if !dir.exists() { return Ok(vec![]); }
     
@@ -202,39 +135,48 @@ async fn list_custom_tools() -> anyhow::Result<Vec<CustomToolMeta>> {
     
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.extension().map(|e| e == "json").unwrap_or(false) {
-            if let Ok(content) = fs::read_to_string(&path).await {
-                if let Ok(meta) = serde_json::from_str::<CustomToolMeta>(&content) {
-                    tools.push(meta);
-                }
-            }
+        if !path.is_file() { continue; }
+        
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext != "sh" && ext != "py" && ext != "bash" { continue; }
+        
+        let name = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        
+        if let Ok(content) = fs::read_to_string(&path).await {
+            tools.push(ScriptTool {
+                name,
+                description: extract_description(&content),
+                lang: detect_lang_from_ext(&path).to_string(),
+                path,
+            });
         }
     }
     
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(tools)
 }
 
-async fn remove_custom_tool(name: &str) -> anyhow::Result<bool> {
+async fn find_script(name: &str) -> anyhow::Result<ScriptTool> {
     let dir = tools_dir();
     
-    // Load meta to get extension
-    let meta_path = dir.join(format!("{}.json", name));
-    let mut removed = false;
-    
-    if let Ok(content) = fs::read_to_string(&meta_path).await {
-        if let Ok(meta) = serde_json::from_str::<CustomToolMeta>(&content) {
-            let ext = get_extension(&meta.lang);
-            let script_path = dir.join(format!("{}.{}", name, ext));
-            if fs::metadata(&script_path).await.is_ok() {
-                fs::remove_file(&script_path).await?;
-                removed = true;
-            }
+    // Try .sh first, then .py
+    for ext in &["sh", "py"] {
+        let path = dir.join(format!("{}.{}", name, ext));
+        if path.exists() {
+            let content = fs::read_to_string(&path).await?;
+            return Ok(ScriptTool {
+                name: name.to_string(),
+                description: extract_description(&content),
+                lang: detect_lang_from_ext(&path).to_string(),
+                path,
+            });
         }
-        fs::remove_file(&meta_path).await?;
-        removed = true;
     }
     
-    Ok(removed)
+    anyhow::bail!("Tool not found: {}", name)
 }
 
 // ==================== Event Tools ====================
@@ -249,7 +191,7 @@ impl Tool for EventsSubscribeTool {
         json!({
             "type": "object",
             "properties": {
-                "events": {"type": "array", "items": {"type": "string"}, "description": "Event types to subscribe to"},
+                "events": {"type": "array", "items": {"type": "string"}},
                 "unsubscribe": {"type": "boolean", "default": false}
             },
             "required": ["events"]
@@ -349,25 +291,23 @@ impl Tool for EventsPushTool {
     }
 }
 
-// ==================== Custom Tool Tools ====================
+// ==================== Custom Tool Tools (Simple CLI Style) ====================
 
 pub struct ToolRegisterTool;
 
 impl Tool for ToolRegisterTool {
-    fn name(&self) -> &'static str { "tool_register" }
-    fn description(&self) -> &'static str { "Register a custom tool (sh/python/node/ruby - auto-detected or specify lang)" }
+    fn name(&self) -> &'static str { "tool_create" }  // renamed: create script
+    fn description(&self) -> &'static str { "Create a custom tool script (.sh or .py)" }
     
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Tool name"},
-                "description": {"type": "string", "description": "What the tool does"},
-                "script": {"type": "string", "description": "Script content (use $ARG_xxx or os.environ['ARG_xxx'] for arguments)"},
-                "lang": {"type": "string", "description": "Language: sh, python, node, ruby (auto-detected if omitted)"},
-                "schema": {"type": "object", "description": "JSON schema for arguments", "default": {}}
+                "name": {"type": "string", "description": "Tool name (becomes <name>.sh or <name>.py)"},
+                "script": {"type": "string", "description": "Script content (first # comment = description)"},
+                "lang": {"type": "string", "enum": ["sh", "python"], "default": "sh"}
             },
-            "required": ["name", "description", "script"]
+            "required": ["name", "script"]
         })
     }
     
@@ -376,25 +316,41 @@ impl Tool for ToolRegisterTool {
             #[derive(Deserialize)]
             struct Args { 
                 name: String, 
-                description: String, 
                 script: String, 
-                lang: Option<String>,
-                #[serde(default)] schema: Value 
+                #[serde(default = "default_lang")] lang: String,
             }
+            fn default_lang() -> String { "sh".to_string() }
             
             let args: Args = match serde_json::from_value(args) {
                 Ok(a) => a,
                 Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
             };
             
-            match save_custom_tool(&args.name, &args.description, &args.script, &args.schema, args.lang.as_deref()).await {
-                Ok(lang) => {
-                    let ext = get_extension(&lang);
-                    let path = tools_dir().join(format!("{}.{}", args.name, ext));
-                    ToolResult::ok(format!("Registered: {} [{}] ({})", args.name, lang, path.display()))
-                }
-                Err(e) => ToolResult::err(format!("Failed: {e}")),
+            let dir = match ensure_tools_dir().await {
+                Ok(d) => d,
+                Err(e) => return ToolResult::err(format!("Failed to create dir: {e}")),
+            };
+            
+            let ext = if args.lang == "python" || args.lang == "py" { "py" } else { "sh" };
+            let path = dir.join(format!("{}.{}", args.name, ext));
+            
+            if let Err(e) = fs::write(&path, &args.script).await {
+                return ToolResult::err(format!("Write failed: {e}"));
             }
+            
+            // Make executable
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = fs::metadata(&path).await {
+                    let mut perms = meta.permissions();
+                    perms.set_mode(0o755);
+                    let _ = fs::set_permissions(&path, perms).await;
+                }
+            }
+            
+            let desc = extract_description(&args.script);
+            ToolResult::ok(format!("Created: {} [{}]\n{}\nPath: {}", args.name, ext, desc, path.display()))
         })
     }
 }
@@ -402,24 +358,21 @@ impl Tool for ToolRegisterTool {
 pub struct ToolListCustomTool;
 
 impl Tool for ToolListCustomTool {
-    fn name(&self) -> &'static str { "tool_list_custom" }
-    fn description(&self) -> &'static str { "List all registered custom tools" }
+    fn name(&self) -> &'static str { "tool_list" }  // renamed
+    fn description(&self) -> &'static str { "List custom tool scripts" }
     
     fn schema(&self) -> Value { json!({"type": "object", "properties": {}}) }
     
     fn execute(&self, _args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
-            match list_custom_tools().await {
+            match list_scripts().await {
                 Ok(tools) if tools.is_empty() => {
-                    ToolResult::ok(format!("No custom tools. Dir: {}", tools_dir().display()))
+                    ToolResult::ok(format!("No tools. Dir: {}", tools_dir().display()))
                 }
                 Ok(tools) => {
-                    let mut out = format!("Custom tools ({}):\n", tools_dir().display());
-                    for tool in tools {
-                        let ext = get_extension(&tool.lang);
-                        out.push_str(&format!("\n## {} [{}]\n", tool.name, tool.lang));
-                        out.push_str(&format!("Description: {}\n", tool.description));
-                        out.push_str(&format!("Script: {}.{}\n", tool.name, ext));
+                    let mut out = format!("Tools ({}):\n", tools_dir().display());
+                    for t in tools {
+                        out.push_str(&format!("\n  {} [{}] - {}", t.name, t.lang, t.description));
                     }
                     ToolResult::ok(out)
                 }
@@ -432,15 +385,16 @@ impl Tool for ToolListCustomTool {
 pub struct ToolCallCustomTool;
 
 impl Tool for ToolCallCustomTool {
-    fn name(&self) -> &'static str { "tool_call_custom" }
-    fn description(&self) -> &'static str { "Call a registered custom tool" }
+    fn name(&self) -> &'static str { "tool_run" }  // renamed
+    fn description(&self) -> &'static str { "Run a custom tool script" }
     
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "name": {"type": "string"},
-                "arguments": {"type": "object", "description": "Arguments (available as ARG_xxx env vars)"}
+                "name": {"type": "string", "description": "Tool name"},
+                "args": {"type": "array", "items": {"type": "string"}, "description": "Positional arguments"},
+                "env": {"type": "object", "description": "Environment variables"}
             },
             "required": ["name"]
         })
@@ -449,55 +403,51 @@ impl Tool for ToolCallCustomTool {
     fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
             #[derive(Deserialize)]
-            struct Args { name: String, #[serde(default)] arguments: HashMap<String, Value> }
+            struct Args { 
+                name: String, 
+                #[serde(default)] args: Vec<String>,
+                #[serde(default)] env: HashMap<String, String>,
+            }
             
             let args: Args = match serde_json::from_value(args) {
                 Ok(a) => a,
                 Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
             };
             
-            // Load tool
-            let (meta, _script, script_path) = match load_custom_tool(&args.name).await {
+            let tool = match find_script(&args.name).await {
                 Ok(t) => t,
-                Err(e) => return ToolResult::err(format!("Tool '{}' not found: {e}", args.name)),
+                Err(e) => return ToolResult::err(e.to_string()),
             };
             
-            // Build command based on language
-            let (interpreter, interp_args) = get_interpreter(&meta.lang);
-            let mut cmd = Command::new(interpreter);
+            // Build command
+            let mut cmd = if tool.lang == "python" {
+                let mut c = Command::new("python3");
+                c.arg(&tool.path);
+                c
+            } else {
+                let mut c = Command::new("sh");
+                c.arg(&tool.path);
+                c
+            };
             
-            for arg in interp_args {
+            // Add positional args
+            for arg in &args.args {
                 cmd.arg(arg);
             }
             
-            // For sh -c, pass script content; for others, pass script path
-            if meta.lang == "sh" {
-                let script_content = fs::read_to_string(&script_path).await.unwrap_or_default();
-                cmd.arg(&script_content);
-            } else {
-                cmd.arg(&script_path);
-            }
-            
-            // Set ARG_xxx environment variables
-            for (key, value) in &args.arguments {
-                let value_str = match value {
-                    Value::String(s) => s.clone(),
-                    v => v.to_string(),
-                };
-                cmd.env(format!("ARG_{}", key), &value_str);
+            // Add env vars
+            for (k, v) in &args.env {
+                cmd.env(k, v);
             }
             
             // Execute
-            let output = cmd.output().await;
-            
-            match output {
+            match cmd.output().await {
                 Ok(o) => {
                     let stdout = String::from_utf8_lossy(&o.stdout);
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     
-                    push_event("custom_tool_complete", &args.name, json!({
+                    push_event("tool_complete", &args.name, json!({
                         "tool": args.name,
-                        "lang": meta.lang,
                         "success": o.status.success(),
                         "exit_code": o.status.code()
                     })).await;
@@ -505,10 +455,15 @@ impl Tool for ToolCallCustomTool {
                     if o.status.success() {
                         ToolResult::ok(stdout.to_string())
                     } else {
-                        ToolResult::err(format!("{}\n{}", stdout, stderr))
+                        let mut out = stdout.to_string();
+                        if !stderr.is_empty() {
+                            out.push_str("\n[stderr]\n");
+                            out.push_str(&stderr);
+                        }
+                        ToolResult::err(out)
                     }
                 }
-                Err(e) => ToolResult::err(format!("Failed to execute: {e}")),
+                Err(e) => ToolResult::err(format!("Exec failed: {e}")),
             }
         })
     }
@@ -517,8 +472,8 @@ impl Tool for ToolCallCustomTool {
 pub struct ToolRemoveCustomTool;
 
 impl Tool for ToolRemoveCustomTool {
-    fn name(&self) -> &'static str { "tool_remove_custom" }
-    fn description(&self) -> &'static str { "Remove a registered custom tool" }
+    fn name(&self) -> &'static str { "tool_remove" }  // renamed
+    fn description(&self) -> &'static str { "Remove a custom tool script" }
     
     fn schema(&self) -> Value {
         json!({
@@ -538,11 +493,16 @@ impl Tool for ToolRemoveCustomTool {
                 Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
             };
             
-            match remove_custom_tool(&args.name).await {
-                Ok(true) => ToolResult::ok(format!("Removed: {}", args.name)),
-                Ok(false) => ToolResult::err(format!("Tool '{}' not found", args.name)),
-                Err(e) => ToolResult::err(format!("Failed: {e}")),
+            let tool = match find_script(&args.name).await {
+                Ok(t) => t,
+                Err(e) => return ToolResult::err(e.to_string()),
+            };
+            
+            if let Err(e) = fs::remove_file(&tool.path).await {
+                return ToolResult::err(format!("Remove failed: {e}"));
             }
+            
+            ToolResult::ok(format!("Removed: {}", args.name))
         })
     }
 }
@@ -550,8 +510,8 @@ impl Tool for ToolRemoveCustomTool {
 pub struct ToolViewCustomTool;
 
 impl Tool for ToolViewCustomTool {
-    fn name(&self) -> &'static str { "tool_view_custom" }
-    fn description(&self) -> &'static str { "View a custom tool's script content" }
+    fn name(&self) -> &'static str { "tool_view" }  // renamed
+    fn description(&self) -> &'static str { "View a custom tool's script" }
     
     fn schema(&self) -> Value {
         json!({
@@ -571,18 +531,17 @@ impl Tool for ToolViewCustomTool {
                 Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
             };
             
-            match load_custom_tool(&args.name).await {
-                Ok((meta, script, path)) => {
-                    let out = format!(
-                        "# {} [{}]\n# {}\n# Path: {}\n# Schema: {}\n\n{}",
-                        meta.name, meta.lang, meta.description,
-                        path.display(),
-                        serde_json::to_string(&meta.schema).unwrap_or_default(),
-                        script
-                    );
-                    ToolResult::ok(out)
+            let tool = match find_script(&args.name).await {
+                Ok(t) => t,
+                Err(e) => return ToolResult::err(e.to_string()),
+            };
+            
+            match fs::read_to_string(&tool.path).await {
+                Ok(content) => {
+                    let header = format!("# {} [{}]\n# {}\n\n", tool.name, tool.lang, tool.path.display());
+                    ToolResult::ok(header + &content)
                 }
-                Err(e) => ToolResult::err(format!("Tool '{}' not found: {e}", args.name)),
+                Err(e) => ToolResult::err(format!("Read failed: {e}")),
             }
         })
     }
