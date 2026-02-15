@@ -1,7 +1,6 @@
 //! Edit tool - str_replace, insert, create
 
 use crate::{BoxFuture, Tool, ToolResult};
-use crate::backend::ExecOptions;
 use crate::tools::session;
 use serde::Deserialize;
 use serde_json::Value;

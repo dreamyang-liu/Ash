@@ -2,12 +2,13 @@
 //!
 //! Provides tools over MCP protocol (JSON-RPC over stdio or HTTP)
 
-use ash::{Tool, ToolResult};
 use ash::tools;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
 
 #[derive(Parser)]
 #[command(name = "ash-mcp")]
@@ -30,6 +31,7 @@ enum Transport {
 
 #[derive(Deserialize)]
 struct JsonRpcRequest {
+    #[allow(dead_code)]
     jsonrpc: String,
     id: Option<Value>,
     method: String,
@@ -59,8 +61,8 @@ fn main() -> anyhow::Result<()> {
     match cli.transport {
         Transport::Stdio => run_stdio(),
         Transport::Http => {
-            eprintln!("HTTP transport not yet implemented");
-            std::process::exit(1);
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(run_http(cli.port))
         }
     }
 }
@@ -98,6 +100,87 @@ fn run_stdio() -> anyhow::Result<()> {
         stdout.flush()?;
     }
     
+    Ok(())
+}
+
+async fn run_http(port: u16) -> anyhow::Result<()> {
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = TcpListener::bind(&addr).await?;
+    eprintln!("MCP HTTP server listening on {}", addr);
+
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        tokio::spawn(async move {
+            if let Err(e) = handle_http(stream).await {
+                eprintln!("Connection from {peer}: {e}");
+            }
+        });
+    }
+}
+
+async fn handle_http(stream: tokio::net::TcpStream) -> anyhow::Result<()> {
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    // Read request line
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line).await?;
+
+    // Read headers
+    let mut content_length: usize = 0;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        if line.trim().is_empty() {
+            break;
+        }
+        let lower = line.to_lowercase();
+        if lower.starts_with("content-length:") {
+            content_length = line.split(':').nth(1)
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+        }
+    }
+
+    // Health check for GET requests (used by wait_for_mcp probing)
+    if request_line.starts_with("GET") {
+        let body = r#"{"status":"ok"}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(), body
+        );
+        writer.write_all(resp.as_bytes()).await?;
+        return Ok(());
+    }
+
+    // Read body
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body).await?;
+    }
+    let body_str = String::from_utf8_lossy(&body);
+
+    // Parse and handle JSON-RPC
+    let response = match serde_json::from_str::<JsonRpcRequest>(&body_str) {
+        Ok(request) => handle_request(request).await,
+        Err(e) => JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Value::Null,
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32700,
+                message: format!("Parse error: {e}"),
+            }),
+        },
+    };
+
+    let response_body = serde_json::to_string(&response)?;
+    let http_resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+        response_body.len(), response_body
+    );
+    writer.write_all(http_resp.as_bytes()).await?;
+
     Ok(())
 }
 

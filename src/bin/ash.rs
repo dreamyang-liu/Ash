@@ -3,7 +3,7 @@
 use ash::{Tool, ToolResult};
 use ash::tools;
 use clap::{Parser, Subcommand};
-use serde_json::Value;
+
 use std::collections::HashMap;
 
 #[derive(Parser)]
@@ -116,9 +116,25 @@ enum Commands {
         #[arg(long)]
         list: bool,
     },
-    
+
+    // ==================== Filesystem ====================
+
+    /// Filesystem operations
+    Fs {
+        #[command(subcommand)]
+        op: FsOp,
+    },
+
+    // ==================== Buffer ====================
+
+    /// Buffer management
+    Buffer {
+        #[command(subcommand)]
+        op: BufferOp,
+    },
+
     // ==================== Shell ====================
-    
+
     /// Execute shell command (sync)
     Run {
         command: String,
@@ -210,14 +226,6 @@ enum Commands {
     Session {
         #[command(subcommand)]
         op: SessionOp,
-    },
-    
-    // ==================== MCP ====================
-    
-    /// MCP server management
-    Mcp {
-        #[command(subcommand)]
-        op: McpOp,
     },
     
     // ==================== Config ====================
@@ -326,26 +334,123 @@ enum SessionOp {
         #[arg(long)]
         node_selector: Vec<String>,
     },
+    /// Get session details
+    Info { session_id: String },
     List,
     Destroy { session_id: String },
+    /// Switch session backend
+    Switch {
+        session_id: String,
+        /// Target backend (docker or k8s)
+        backend: String,
+    },
 }
 
 #[derive(Subcommand)]
-enum McpOp {
-    /// Install MCP (npm:, pip:, uvx:, command:)
-    Install { name: String, source: String },
-    /// Mount installed MCP
-    Mount { name: String },
-    /// Unmount MCP
-    Unmount { name: String },
-    /// List MCPs
+enum FsOp {
+    /// List directory contents
+    Ls { path: String },
+    /// Get file/directory metadata
+    Stat { path: String },
+    /// Write content to file
+    Write {
+        path: String,
+        content: String,
+    },
+    /// Create directory
+    Mkdir {
+        path: String,
+        #[arg(long, default_value = "true")]
+        recursive: bool,
+    },
+    /// Remove file or directory
+    Rm {
+        path: String,
+        #[arg(short, long)]
+        recursive: bool,
+    },
+    /// Move/rename file or directory
+    Mv {
+        from: String,
+        to: String,
+    },
+    /// Copy file or directory
+    Cp {
+        from: String,
+        to: String,
+        #[arg(short, long)]
+        recursive: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum BufferOp {
+    /// Read lines from a buffer
+    Read {
+        #[arg(short, long, default_value = "main")]
+        name: String,
+        #[arg(long)]
+        start: Option<usize>,
+        #[arg(long)]
+        end: Option<usize>,
+    },
+    /// Write content to a buffer
+    Write {
+        #[arg(short, long, default_value = "main")]
+        name: String,
+        content: String,
+        #[arg(long)]
+        at_line: Option<usize>,
+        #[arg(long)]
+        append: bool,
+    },
+    /// Delete lines from a buffer
+    Delete {
+        #[arg(short, long, default_value = "main")]
+        name: String,
+        #[arg(long)]
+        start: usize,
+        #[arg(long)]
+        end: usize,
+    },
+    /// Replace lines in a buffer
+    Replace {
+        #[arg(short, long, default_value = "main")]
+        name: String,
+        #[arg(long)]
+        start: usize,
+        #[arg(long)]
+        end: usize,
+        content: String,
+    },
+    /// List all buffers
     List,
-    /// Call tool on mounted MCP
-    Call {
-        mcp: String,
-        tool: String,
-        #[arg(long, default_value = "{}")]
-        args: String,
+    /// Clear a buffer or all buffers
+    Clear {
+        #[arg(short, long)]
+        name: Option<String>,
+    },
+    /// Copy buffer range to clipboard
+    ToClip {
+        #[arg(short, long, default_value = "main")]
+        buffer: String,
+        #[arg(long)]
+        start: Option<usize>,
+        #[arg(long)]
+        end: Option<usize>,
+        /// Clip name
+        clip_name: String,
+    },
+    /// Paste clipboard into buffer
+    FromClip {
+        /// Clip name to paste from
+        clip_name: String,
+        #[arg(short, long, default_value = "main")]
+        buffer: String,
+        #[arg(long)]
+        at_line: Option<usize>,
+        #[arg(long)]
+        append: bool,
     },
 }
 
@@ -487,7 +592,78 @@ async fn main() -> anyhow::Result<()> {
         Commands::Undo { path, list } => {
             tools::UndoTool.execute(serde_json::json!({"path": path, "list": list})).await
         }
-        
+
+        // ==================== Filesystem ====================
+
+        Commands::Fs { op } => {
+            match op {
+                FsOp::Ls { path } => {
+                    tools::FsListDirTool.execute(serde_json::json!({"path": path})).await
+                }
+                FsOp::Stat { path } => {
+                    tools::FsStatTool.execute(serde_json::json!({"path": path})).await
+                }
+                FsOp::Write { path, content } => {
+                    tools::FsWriteTool.execute(serde_json::json!({"path": path, "content": content})).await
+                }
+                FsOp::Mkdir { path, recursive } => {
+                    tools::FsMkdirTool.execute(serde_json::json!({"path": path, "recursive": recursive})).await
+                }
+                FsOp::Rm { path, recursive } => {
+                    tools::FsRemoveTool.execute(serde_json::json!({"path": path, "recursive": recursive})).await
+                }
+                FsOp::Mv { from, to } => {
+                    tools::FsMoveTool.execute(serde_json::json!({"from": from, "to": to})).await
+                }
+                FsOp::Cp { from, to, recursive } => {
+                    tools::FsCopyTool.execute(serde_json::json!({"from": from, "to": to, "recursive": recursive})).await
+                }
+            }
+        }
+
+        // ==================== Buffer ====================
+
+        Commands::Buffer { op } => {
+            match op {
+                BufferOp::Read { name, start, end } => {
+                    tools::BufferReadTool.execute(serde_json::json!({
+                        "name": name, "start_line": start, "end_line": end
+                    })).await
+                }
+                BufferOp::Write { name, content, at_line, append } => {
+                    tools::BufferWriteTool.execute(serde_json::json!({
+                        "name": name, "content": content, "at_line": at_line, "append": append
+                    })).await
+                }
+                BufferOp::Delete { name, start, end } => {
+                    tools::BufferDeleteTool.execute(serde_json::json!({
+                        "name": name, "start_line": start, "end_line": end
+                    })).await
+                }
+                BufferOp::Replace { name, start, end, content } => {
+                    tools::BufferReplaceTool.execute(serde_json::json!({
+                        "name": name, "start_line": start, "end_line": end, "content": content
+                    })).await
+                }
+                BufferOp::List => {
+                    tools::BufferListTool.execute(serde_json::json!({})).await
+                }
+                BufferOp::Clear { name } => {
+                    tools::BufferClearTool.execute(serde_json::json!({"name": name})).await
+                }
+                BufferOp::ToClip { buffer, start, end, clip_name } => {
+                    tools::BufferToClipTool.execute(serde_json::json!({
+                        "buffer": buffer, "start_line": start, "end_line": end, "clip_name": clip_name
+                    })).await
+                }
+                BufferOp::FromClip { clip_name, buffer, at_line, append } => {
+                    tools::ClipToBufferTool.execute(serde_json::json!({
+                        "clip_name": clip_name, "buffer": buffer, "at_line": at_line, "append": append
+                    })).await
+                }
+            }
+        }
+
         // ==================== Shell ====================
         
         Commands::Run { command, timeout, tail } => {
@@ -588,32 +764,15 @@ async fn main() -> anyhow::Result<()> {
                     
                     tools::SessionCreateTool.execute(args).await
                 }
+                SessionOp::Info { session_id } => {
+                    tools::SessionInfoTool.execute(serde_json::json!({"session_id": session_id})).await
+                }
                 SessionOp::List => tools::SessionListTool.execute(serde_json::json!({})).await,
                 SessionOp::Destroy { session_id } => {
                     tools::SessionDestroyTool.execute(serde_json::json!({"session_id": session_id})).await
                 }
-            }
-        }
-        
-        // ==================== MCP ====================
-        
-        Commands::Mcp { op } => {
-            match op {
-                McpOp::Install { name, source } => {
-                    tools::McpInstallTool.execute(serde_json::json!({"name": name, "source": source})).await
-                }
-                McpOp::Mount { name } => {
-                    tools::McpMountTool.execute(serde_json::json!({"name": name})).await
-                }
-                McpOp::Unmount { name } => {
-                    tools::McpUnmountTool.execute(serde_json::json!({"name": name})).await
-                }
-                McpOp::List => {
-                    tools::McpListTool.execute(serde_json::json!({})).await
-                }
-                McpOp::Call { mcp, tool, args } => {
-                    let arguments: serde_json::Value = serde_json::from_str(&args).unwrap_or(serde_json::json!({}));
-                    tools::McpCallTool.execute(serde_json::json!({"mcp": mcp, "tool": tool, "arguments": arguments})).await
+                SessionOp::Switch { session_id, backend } => {
+                    tools::BackendSwitchTool.execute(serde_json::json!({"session_id": session_id, "backend": backend})).await
                 }
             }
         }

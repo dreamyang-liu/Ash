@@ -9,7 +9,7 @@ pub mod clip;
 pub mod buffer;
 pub mod session;
 pub mod terminal;
-pub mod mcp_mount;
+
 pub mod filesystem;
 pub mod utils;
 pub mod events;
@@ -23,7 +23,7 @@ pub use clip::{ClipTool, PasteTool, ClipsTool, ClearClipsTool};
 pub use buffer::{BufferReadTool, BufferWriteTool, BufferDeleteTool, BufferReplaceTool, BufferListTool, BufferClearTool, BufferToClipTool, ClipToBufferTool};
 pub use session::{SessionCreateTool, SessionListTool, SessionDestroyTool, SessionInfoTool, BackendSwitchTool, BackendStatusTool};
 pub use terminal::{TerminalRunAsyncTool, TerminalGetOutputTool, TerminalKillTool, TerminalListTool, TerminalRemoveTool};
-pub use mcp_mount::{McpInstallTool, McpMountTool, McpUnmountTool, McpListTool, McpCallTool};
+
 pub use filesystem::{FsListDirTool, FsMkdirTool, FsRemoveTool, FsMoveTool, FsCopyTool, FsStatTool, FsWriteTool};
 pub use utils::{FindFilesTool, TreeTool, DiffFilesTool, PatchApplyTool, HttpFetchTool, FileInfoTool, UndoTool};
 pub use events::{EventsSubscribeTool, EventsPollTool, EventsPushTool, ToolRegisterTool, ToolListCustomTool, ToolCallCustomTool, ToolRemoveCustomTool, ToolViewCustomTool};
@@ -80,12 +80,7 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(SessionInfoTool),
         Box::new(BackendSwitchTool),
         Box::new(BackendStatusTool),
-        // MCP mount
-        Box::new(McpInstallTool),
-        Box::new(McpMountTool),
-        Box::new(McpUnmountTool),
-        Box::new(McpListTool),
-        Box::new(McpCallTool),
+
         // Utils
         Box::new(FindFilesTool),
         Box::new(TreeTool),

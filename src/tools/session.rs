@@ -5,7 +5,7 @@
 //! - Sessions are identified by UUID, backend is tracked per session
 //! - Operations route to the correct backend automatically
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;

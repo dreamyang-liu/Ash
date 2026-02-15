@@ -28,12 +28,15 @@ use super::{
 /// MCP server port inside container
 const MCP_PORT: u16 = 3000;
 
+/// ash-mcp release download URL
+const ASH_RELEASE_URL: &str = "https://github.com/dreamyang-liu/Ash/releases/download/dev/ash-linux-x86_64.tar.gz";
+
 /// Docker backend configuration
 #[derive(Debug, Clone)]
 pub struct DockerConfig {
     /// Docker socket path (default: auto-detect)
     pub socket_path: Option<String>,
-    /// Default image for containers (must have ash-mcp server)
+    /// Default image for containers (ash-mcp is auto-installed at startup)
     pub default_image: String,
     /// Container name prefix
     pub name_prefix: String,
@@ -61,8 +64,7 @@ impl Default for DockerConfig {
         
         Self {
             socket_path,
-            // Default image should have ash-mcp server
-            default_image: "timemagic/rl-mcp:general-1.7".to_string(),
+            default_image: "ubuntu:24.04".to_string(),
             name_prefix: "ash-".to_string(),
             labels: {
                 let mut m = HashMap::new();
@@ -301,14 +303,22 @@ impl Backend for DockerBackend {
             );
         }
         
-        // Container config - run ash-mcp server
+        // Container config - download ash-mcp and run it
+        let bootstrap_script = format!(
+            "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1; \
+             curl -fsSL {} | tar xz -C /tmp && \
+             mv /tmp/ash-linux-x86_64 /usr/local/bin/ash && \
+             mv /tmp/ash-linux-x86_64-mcp /usr/local/bin/ash-mcp && \
+             chmod +x /usr/local/bin/ash /usr/local/bin/ash-mcp && \
+             ash-mcp --transport http --port {}",
+            ASH_RELEASE_URL, MCP_PORT,
+        );
         let config = Config {
             image: Some(image.to_string()),
             labels: Some(labels),
             env: if env.is_empty() { None } else { Some(env) },
             working_dir: options.working_dir.clone(),
-            // Run ash-mcp server
-            cmd: Some(vec!["ash-mcp".to_string(), "--http".to_string(), format!("--port={}", MCP_PORT)]),
+            cmd: Some(vec!["sh".to_string(), "-c".to_string(), bootstrap_script]),
             exposed_ports: Some(exposed_ports),
             host_config: Some(bollard::service::HostConfig {
                 port_bindings: Some(port_bindings),
@@ -374,8 +384,8 @@ impl Backend for DockerBackend {
             created_at: chrono::Utc::now(),
         };
         
-        // Wait for MCP server to be ready
-        self.wait_for_mcp(&session, 30).await?;
+        // Wait for MCP server to be ready (longer timeout for bootstrap download)
+        self.wait_for_mcp(&session, 120).await?;
         
         // Cache session
         {
