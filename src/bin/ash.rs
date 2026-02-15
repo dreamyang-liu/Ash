@@ -230,6 +230,23 @@ enum Commands {
         gateway_url: Option<String>,
     },
     
+    // ==================== Events ====================
+    
+    /// Events management
+    Events {
+        #[command(subcommand)]
+        op: EventsOp,
+    },
+    
+    // ==================== Custom Tools ====================
+    
+    /// Custom tools management
+    #[command(name = "custom-tool")]
+    CustomTool {
+        #[command(subcommand)]
+        op: CustomToolOp,
+    },
+    
     /// List all available tools
     Tools,
 }
@@ -330,6 +347,58 @@ enum McpOp {
         #[arg(long, default_value = "{}")]
         args: String,
     },
+}
+
+#[derive(Subcommand)]
+enum EventsOp {
+    /// Subscribe to event types
+    Subscribe {
+        /// Event types (process_complete, file_change, error, custom)
+        events: Vec<String>,
+        /// Unsubscribe instead
+        #[arg(short, long)]
+        unsubscribe: bool,
+    },
+    /// Poll pending events
+    Poll {
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+        /// Peek without removing
+        #[arg(long)]
+        peek: bool,
+    },
+    /// Push a custom event
+    Push {
+        kind: String,
+        #[arg(short, long, default_value = "llm")]
+        source: String,
+        #[arg(short, long, default_value = "{}")]
+        data: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CustomToolOp {
+    /// Register a custom tool
+    Register {
+        name: String,
+        #[arg(short, long)]
+        description: String,
+        #[arg(short, long)]
+        script: String,
+        #[arg(long, default_value = "{}")]
+        schema: String,
+    },
+    /// List custom tools
+    List,
+    /// Call a custom tool
+    Call {
+        name: String,
+        #[arg(short, long, default_value = "{}")]
+        args: String,
+    },
+    /// Remove a custom tool
+    Remove { name: String },
 }
 
 fn parse_key_value(items: &[String]) -> HashMap<String, String> {
@@ -563,6 +632,54 @@ async fn main() -> anyhow::Result<()> {
             tools::session::set_config(new_config.clone()).await;
             return Ok(println!("Updated config:\ncontrol_plane_url: {}\ngateway_url: {}", 
                 new_config.control_plane_url, new_config.gateway_url));
+        }
+        
+        // ==================== Events ====================
+        
+        Commands::Events { op } => {
+            match op {
+                EventsOp::Subscribe { events, unsubscribe } => {
+                    tools::EventsSubscribeTool.execute(serde_json::json!({
+                        "events": events, "unsubscribe": unsubscribe
+                    })).await
+                }
+                EventsOp::Poll { limit, peek } => {
+                    tools::EventsPollTool.execute(serde_json::json!({
+                        "limit": limit, "peek": peek
+                    })).await
+                }
+                EventsOp::Push { kind, source, data } => {
+                    let data_val: serde_json::Value = serde_json::from_str(&data).unwrap_or(serde_json::json!({}));
+                    tools::EventsPushTool.execute(serde_json::json!({
+                        "kind": kind, "source": source, "data": data_val
+                    })).await
+                }
+            }
+        }
+        
+        // ==================== Custom Tools ====================
+        
+        Commands::CustomTool { op } => {
+            match op {
+                CustomToolOp::Register { name, description, script, schema } => {
+                    let schema_val: serde_json::Value = serde_json::from_str(&schema).unwrap_or(serde_json::json!({}));
+                    tools::ToolRegisterTool.execute(serde_json::json!({
+                        "name": name, "description": description, "script": script, "schema": schema_val
+                    })).await
+                }
+                CustomToolOp::List => {
+                    tools::ToolListCustomTool.execute(serde_json::json!({})).await
+                }
+                CustomToolOp::Call { name, args } => {
+                    let arguments: serde_json::Value = serde_json::from_str(&args).unwrap_or(serde_json::json!({}));
+                    tools::ToolCallCustomTool.execute(serde_json::json!({
+                        "name": name, "arguments": arguments
+                    })).await
+                }
+                CustomToolOp::Remove { name } => {
+                    tools::ToolRemoveCustomTool.execute(serde_json::json!({"name": name})).await
+                }
+            }
         }
         
         Commands::Tools => {

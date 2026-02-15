@@ -11,6 +11,7 @@ pub mod terminal;
 pub mod mcp_mount;
 pub mod filesystem;
 pub mod utils;
+pub mod events;
 
 pub use view::ViewTool;
 pub use grep::GrepTool;
@@ -23,6 +24,7 @@ pub use terminal::{TerminalRunAsyncTool, TerminalGetOutputTool, TerminalKillTool
 pub use mcp_mount::{McpInstallTool, McpMountTool, McpUnmountTool, McpListTool, McpCallTool};
 pub use filesystem::{FsListDirTool, FsMkdirTool, FsRemoveTool, FsMoveTool, FsCopyTool, FsStatTool, FsWriteTool};
 pub use utils::{FindFilesTool, TreeTool, DiffFilesTool, PatchApplyTool, HttpFetchTool, FileInfoTool, UndoTool};
+pub use events::{EventsSubscribeTool, EventsPollTool, EventsPushTool, ToolRegisterTool, ToolListCustomTool, ToolCallCustomTool, ToolRemoveCustomTool};
 
 use crate::Tool;
 
@@ -78,6 +80,15 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(HttpFetchTool),
         Box::new(FileInfoTool),
         Box::new(UndoTool),
+        // Events
+        Box::new(EventsSubscribeTool),
+        Box::new(EventsPollTool),
+        Box::new(EventsPushTool),
+        // Custom tools
+        Box::new(ToolRegisterTool),
+        Box::new(ToolListCustomTool),
+        Box::new(ToolCallCustomTool),
+        Box::new(ToolRemoveCustomTool),
     ]
 }
 
