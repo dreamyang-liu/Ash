@@ -23,14 +23,15 @@ async fn call_mcp_tool(session_id: &str, tool_name: &str, args: Value) -> ToolRe
     }
 }
 
-// --- Git Status ---
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct GitStatusArgs {
-    #[serde(default)]
-    pub short: bool,
-    #[serde(default)]
-    pub session_id: Option<String>,
+async fn run_git(mut cmd: Command) -> ToolResult {
+    match cmd.output().await {
+        Ok(o) if o.status.success() => ToolResult::ok(String::from_utf8_lossy(&o.stdout).to_string()),
+        Ok(o) => ToolResult::err(format!("{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))),
+        Err(e) => ToolResult::err(format!("git failed: {e}")),
+    }
 }
+
+// ==================== git_status ====================
 
 pub struct GitStatusTool;
 
@@ -48,10 +49,16 @@ impl Tool for GitStatusTool {
     }
     fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
-            let args: GitStatusArgs = serde_json::from_value(args.clone()).unwrap_or_default();
+            #[derive(Deserialize, Default)]
+            struct Args {
+                #[serde(default)]
+                short: bool,
+                session_id: Option<String>,
+            }
+            let args: Args = serde_json::from_value(args.clone()).unwrap_or_default();
             
-            if let Some(session_id) = &args.session_id {
-                return call_mcp_tool(session_id, "git_status", serde_json::json!({"short": args.short})).await;
+            if let Some(sid) = &args.session_id {
+                return call_mcp_tool(sid, "git_status", serde_json::json!({"short": args.short})).await;
             }
             
             let mut cmd = Command::new("git");
@@ -62,16 +69,7 @@ impl Tool for GitStatusTool {
     }
 }
 
-// --- Git Diff ---
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct GitDiffArgs {
-    #[serde(default)]
-    pub staged: bool,
-    #[serde(default)]
-    pub paths: Vec<String>,
-    #[serde(default)]
-    pub session_id: Option<String>,
-}
+// ==================== git_diff ====================
 
 pub struct GitDiffTool;
 
@@ -90,12 +88,19 @@ impl Tool for GitDiffTool {
     }
     fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
-            let args: GitDiffArgs = serde_json::from_value(args.clone()).unwrap_or_default();
+            #[derive(Deserialize, Default)]
+            struct Args {
+                #[serde(default)]
+                staged: bool,
+                #[serde(default)]
+                paths: Vec<String>,
+                session_id: Option<String>,
+            }
+            let args: Args = serde_json::from_value(args.clone()).unwrap_or_default();
             
-            if let Some(session_id) = &args.session_id {
-                return call_mcp_tool(session_id, "git_diff", serde_json::json!({
-                    "staged": args.staged,
-                    "paths": args.paths
+            if let Some(sid) = &args.session_id {
+                return call_mcp_tool(sid, "git_diff", serde_json::json!({
+                    "staged": args.staged, "paths": args.paths
                 })).await;
             }
             
@@ -108,18 +113,7 @@ impl Tool for GitDiffTool {
     }
 }
 
-// --- Git Log ---
-#[derive(Debug, Clone, Deserialize)]
-pub struct GitLogArgs {
-    #[serde(default = "default_count")]
-    pub count: usize,
-    #[serde(default)]
-    pub oneline: bool,
-    #[serde(default)]
-    pub session_id: Option<String>,
-}
-
-fn default_count() -> usize { 10 }
+// ==================== git_log ====================
 
 pub struct GitLogTool;
 
@@ -138,13 +132,22 @@ impl Tool for GitLogTool {
     }
     fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
-            let args: GitLogArgs = serde_json::from_value(args.clone())
-                .unwrap_or(GitLogArgs { count: 10, oneline: false, session_id: None });
+            #[derive(Deserialize)]
+            struct Args {
+                #[serde(default = "default_count")]
+                count: usize,
+                #[serde(default)]
+                oneline: bool,
+                session_id: Option<String>,
+            }
+            fn default_count() -> usize { 10 }
             
-            if let Some(session_id) = &args.session_id {
-                return call_mcp_tool(session_id, "git_log", serde_json::json!({
-                    "count": args.count,
-                    "oneline": args.oneline
+            let args: Args = serde_json::from_value(args.clone())
+                .unwrap_or(Args { count: 10, oneline: false, session_id: None });
+            
+            if let Some(sid) = &args.session_id {
+                return call_mcp_tool(sid, "git_log", serde_json::json!({
+                    "count": args.count, "oneline": args.oneline
                 })).await;
             }
             
@@ -156,10 +159,101 @@ impl Tool for GitLogTool {
     }
 }
 
-async fn run_git(mut cmd: Command) -> ToolResult {
-    match cmd.output().await {
-        Ok(o) if o.status.success() => ToolResult::ok(String::from_utf8_lossy(&o.stdout).to_string()),
-        Ok(o) => ToolResult::err(format!("{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))),
-        Err(e) => ToolResult::err(format!("git failed: {e}")),
+// ==================== git_add ====================
+
+pub struct GitAddTool;
+
+impl Tool for GitAddTool {
+    fn name(&self) -> &'static str { "git_add" }
+    fn description(&self) -> &'static str { "Git add (stage files)" }
+    fn schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "Files to stage"},
+                "all": {"type": "boolean", "default": false, "description": "Stage all changes (-A)"},
+                "session_id": {"type": "string", "description": "Execute in session sandbox"}
+            }
+        })
+    }
+    fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
+        Box::pin(async move {
+            #[derive(Deserialize, Default)]
+            struct Args {
+                #[serde(default)]
+                paths: Vec<String>,
+                #[serde(default)]
+                all: bool,
+                session_id: Option<String>,
+            }
+            let args: Args = serde_json::from_value(args.clone()).unwrap_or_default();
+            
+            if let Some(sid) = &args.session_id {
+                return call_mcp_tool(sid, "git_add", serde_json::json!({
+                    "paths": args.paths, "all": args.all
+                })).await;
+            }
+            
+            let mut cmd = Command::new("git");
+            cmd.arg("add");
+            
+            if args.all {
+                cmd.arg("-A");
+            } else if args.paths.is_empty() {
+                return ToolResult::err("Specify paths or use all=true".to_string());
+            } else {
+                for p in &args.paths { cmd.arg(p); }
+            }
+            
+            run_git(cmd).await
+        })
+    }
+}
+
+// ==================== git_commit ====================
+
+pub struct GitCommitTool;
+
+impl Tool for GitCommitTool {
+    fn name(&self) -> &'static str { "git_commit" }
+    fn description(&self) -> &'static str { "Git commit" }
+    fn schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "Commit message"},
+                "all": {"type": "boolean", "default": false, "description": "Stage all and commit (-a)"},
+                "session_id": {"type": "string", "description": "Execute in session sandbox"}
+            },
+            "required": ["message"]
+        })
+    }
+    fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
+        Box::pin(async move {
+            #[derive(Deserialize)]
+            struct Args {
+                message: String,
+                #[serde(default)]
+                all: bool,
+                session_id: Option<String>,
+            }
+            let args: Args = match serde_json::from_value(args.clone()) {
+                Ok(a) => a,
+                Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
+            };
+            
+            if let Some(sid) = &args.session_id {
+                return call_mcp_tool(sid, "git_commit", serde_json::json!({
+                    "message": args.message, "all": args.all
+                })).await;
+            }
+            
+            let mut cmd = Command::new("git");
+            cmd.arg("commit");
+            if args.all { cmd.arg("-a"); }
+            cmd.arg("-m").arg(&args.message);
+            
+            run_git(cmd).await
+        })
     }
 }
