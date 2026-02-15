@@ -67,6 +67,9 @@ enum Commands {
         /// Timeout in seconds
         #[arg(short, long, default_value = "300")]
         timeout: u64,
+        /// Only return last N lines of output
+        #[arg(long)]
+        tail: Option<usize>,
     },
     
     /// Git status
@@ -282,11 +285,12 @@ async fn main() -> anyhow::Result<()> {
             tools::EditTool.execute(args).await
         }
         
-        Commands::Run { command, timeout } => {
+        Commands::Run { command, timeout, tail } => {
             tools::ShellTool.execute(serde_json::json!({
                 "command": command,
                 "timeout_secs": timeout,
-                "session_id": session_id
+                "session_id": session_id,
+                "tail_lines": tail
             })).await
         }
         
