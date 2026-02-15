@@ -9,6 +9,7 @@ pub mod clip;
 pub mod buffer;
 pub mod session;
 pub mod terminal;
+pub mod outline;
 
 pub mod filesystem;
 pub mod utils;
@@ -23,6 +24,7 @@ pub use clip::{ClipTool, PasteTool, ClipsTool, ClearClipsTool};
 pub use buffer::{BufferReadTool, BufferWriteTool, BufferDeleteTool, BufferReplaceTool, BufferListTool, BufferClearTool, BufferToClipTool, ClipToBufferTool};
 pub use session::{SessionCreateTool, SessionListTool, SessionDestroyTool, SessionInfoTool, BackendSwitchTool, BackendStatusTool};
 pub use terminal::{TerminalRunAsyncTool, TerminalGetOutputTool, TerminalKillTool, TerminalListTool, TerminalRemoveTool};
+pub use outline::OutlineTool;
 
 pub use filesystem::{FsListDirTool, FsMkdirTool, FsRemoveTool, FsMoveTool, FsCopyTool, FsStatTool, FsWriteTool};
 pub use utils::{FindFilesTool, TreeTool, DiffFilesTool, PatchApplyTool, HttpFetchTool, FileInfoTool, UndoTool};
@@ -37,6 +39,7 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(ViewTool),
         Box::new(GrepTool),
         Box::new(EditTool),
+        Box::new(OutlineTool),
         // File write
         Box::new(FsWriteTool),
         Box::new(FsListDirTool),

@@ -152,6 +152,11 @@ enum Commands {
         list: bool,
     },
 
+    /// Show code outline (classes, functions, methods)
+    Outline {
+        file_path: String,
+    },
+
     // ==================== Filesystem ====================
 
     /// Filesystem operations
@@ -648,6 +653,10 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Undo { path, list } => {
             exec_tool(&tools::UndoTool, serde_json::json!({"path": path, "list": list}), &session_id).await
+        }
+
+        Commands::Outline { file_path } => {
+            exec_tool(&tools::OutlineTool, serde_json::json!({"file_path": file_path}), &session_id).await
         }
 
         // ==================== Filesystem ====================

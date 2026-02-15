@@ -36,6 +36,18 @@ tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
 uuid = { version = "1.0", features = ["v4"] }
 
+# Tree-sitter for code outline
+tree-sitter = "0.24"
+tree-sitter-python = "0.23"
+tree-sitter-rust = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-bash = "0.23"
+
 [dev-dependencies]
 tempfile = "3.10"
 
