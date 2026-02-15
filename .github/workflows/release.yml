@@ -93,6 +93,7 @@ jobs:
             -e CARGO_TERM_COLOR=always \
             ${{ matrix.docker_image }} bash -c '
               set -e
+              export DEBIAN_FRONTEND=noninteractive
 
               # Fix apt sources for EOL releases
               apt-get update 2>/dev/null || {
