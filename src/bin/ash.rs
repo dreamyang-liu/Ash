@@ -28,6 +28,8 @@ enum OutputFormat { Text, Json }
 
 #[derive(Subcommand)]
 enum Commands {
+    // ==================== File Operations ====================
+    
     /// Read file with line numbers
     View {
         file_path: String,
@@ -54,6 +56,69 @@ enum Commands {
         op: EditOp,
     },
     
+    /// Find files by name pattern
+    Find {
+        /// Glob pattern (e.g., *.py, test_*)
+        pattern: String,
+        #[arg(default_value = ".")]
+        path: String,
+        #[arg(short, long)]
+        max_depth: Option<usize>,
+        #[arg(short, long, default_value = "100")]
+        limit: usize,
+    },
+    
+    /// Show directory tree
+    Tree {
+        #[arg(default_value = ".")]
+        path: String,
+        #[arg(short, long, default_value = "3")]
+        max_depth: usize,
+        #[arg(long)]
+        show_hidden: bool,
+    },
+    
+    /// Compare two files
+    Diff {
+        file1: String,
+        file2: String,
+        #[arg(short, long, default_value = "3")]
+        context: usize,
+    },
+    
+    /// Apply unified diff patch
+    Patch {
+        /// Patch content (or use stdin)
+        patch: String,
+        #[arg(short, long)]
+        path: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    
+    /// Get file type and info
+    FileInfo {
+        path: String,
+    },
+    
+    /// HTTP GET request
+    Fetch {
+        url: String,
+        #[arg(short, long, default_value = "30")]
+        timeout: u64,
+    },
+    
+    /// Undo last file edit
+    Undo {
+        /// Specific file to undo
+        path: Option<String>,
+        /// List undo history
+        #[arg(long)]
+        list: bool,
+    },
+    
+    // ==================== Shell ====================
+    
     /// Execute shell command (sync)
     Run {
         command: String,
@@ -68,6 +133,8 @@ enum Commands {
         #[command(subcommand)]
         op: TerminalOp,
     },
+    
+    // ==================== Git ====================
     
     /// Git status
     #[command(name = "git-status")]
@@ -93,6 +160,29 @@ enum Commands {
         oneline: bool,
     },
     
+    /// Git add (stage files)
+    #[command(name = "git-add")]
+    GitAdd {
+        /// Files to stage
+        paths: Vec<String>,
+        /// Stage all changes (-A)
+        #[arg(short, long)]
+        all: bool,
+    },
+    
+    /// Git commit
+    #[command(name = "git-commit")]
+    GitCommit {
+        /// Commit message
+        #[arg(short, long)]
+        message: String,
+        /// Stage all and commit (-a)
+        #[arg(short, long)]
+        all: bool,
+    },
+    
+    // ==================== Clipboard ====================
+    
     /// Save to clipboard
     Clip {
         content: Option<String>,
@@ -114,17 +204,23 @@ enum Commands {
     #[command(name = "clips-clear")]
     ClipsClear { name: Option<String> },
     
+    // ==================== Session/Sandbox ====================
+    
     /// Session/sandbox management
     Session {
         #[command(subcommand)]
         op: SessionOp,
     },
     
+    // ==================== MCP ====================
+    
     /// MCP server management
     Mcp {
         #[command(subcommand)]
         op: McpOp,
     },
+    
+    // ==================== Config ====================
     
     /// Configure endpoints
     Config {
@@ -220,10 +316,7 @@ enum SessionOp {
 #[derive(Subcommand)]
 enum McpOp {
     /// Install MCP (npm:, pip:, uvx:, command:)
-    Install {
-        name: String,
-        source: String,
-    },
+    Install { name: String, source: String },
     /// Mount installed MCP
     Mount { name: String },
     /// Unmount MCP
@@ -243,11 +336,7 @@ fn parse_key_value(items: &[String]) -> HashMap<String, String> {
     items.iter()
         .filter_map(|s| {
             let parts: Vec<&str> = s.splitn(2, '=').collect();
-            if parts.len() == 2 {
-                Some((parts[0].to_string(), parts[1].to_string()))
-            } else {
-                None
-            }
+            if parts.len() == 2 { Some((parts[0].to_string(), parts[1].to_string())) } else { None }
         })
         .collect()
 }
@@ -258,6 +347,8 @@ async fn main() -> anyhow::Result<()> {
     let session_id = cli.session.clone();
     
     let result = match cli.command {
+        // ==================== File Operations ====================
+        
         Commands::View { file_path, offset, limit } => {
             tools::ViewTool.execute(serde_json::json!({
                 "file_path": file_path, "offset": offset, "limit": limit, "session_id": session_id
@@ -289,6 +380,46 @@ async fn main() -> anyhow::Result<()> {
             tools::EditTool.execute(args).await
         }
         
+        Commands::Find { pattern, path, max_depth, limit } => {
+            tools::FindFilesTool.execute(serde_json::json!({
+                "pattern": pattern, "path": path, "max_depth": max_depth, "limit": limit
+            })).await
+        }
+        
+        Commands::Tree { path, max_depth, show_hidden } => {
+            tools::TreeTool.execute(serde_json::json!({
+                "path": path, "max_depth": max_depth, "show_hidden": show_hidden
+            })).await
+        }
+        
+        Commands::Diff { file1, file2, context } => {
+            tools::DiffFilesTool.execute(serde_json::json!({
+                "file1": file1, "file2": file2, "context": context
+            })).await
+        }
+        
+        Commands::Patch { patch, path, dry_run } => {
+            tools::PatchApplyTool.execute(serde_json::json!({
+                "patch": patch, "path": path, "dry_run": dry_run
+            })).await
+        }
+        
+        Commands::FileInfo { path } => {
+            tools::FileInfoTool.execute(serde_json::json!({"path": path})).await
+        }
+        
+        Commands::Fetch { url, timeout } => {
+            tools::HttpFetchTool.execute(serde_json::json!({
+                "url": url, "timeout_secs": timeout
+            })).await
+        }
+        
+        Commands::Undo { path, list } => {
+            tools::UndoTool.execute(serde_json::json!({"path": path, "list": list})).await
+        }
+        
+        // ==================== Shell ====================
+        
         Commands::Run { command, timeout, tail } => {
             tools::ShellTool.execute(serde_json::json!({
                 "command": command, "timeout_secs": timeout, "session_id": session_id, "tail_lines": tail
@@ -304,9 +435,7 @@ async fn main() -> anyhow::Result<()> {
                     })).await
                 }
                 TerminalOp::Output { handle, tail } => {
-                    tools::TerminalGetOutputTool.execute(serde_json::json!({
-                        "handle": handle, "tail": tail
-                    })).await
+                    tools::TerminalGetOutputTool.execute(serde_json::json!({"handle": handle, "tail": tail})).await
                 }
                 TerminalOp::Kill { handle } => {
                     tools::TerminalKillTool.execute(serde_json::json!({"handle": handle})).await
@@ -320,6 +449,8 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         
+        // ==================== Git ====================
+        
         Commands::GitStatus { short } => {
             tools::GitStatusTool.execute(serde_json::json!({"short": short, "session_id": session_id})).await
         }
@@ -331,6 +462,16 @@ async fn main() -> anyhow::Result<()> {
         Commands::GitLog { count, oneline } => {
             tools::GitLogTool.execute(serde_json::json!({"count": count, "oneline": oneline, "session_id": session_id})).await
         }
+        
+        Commands::GitAdd { paths, all } => {
+            tools::GitAddTool.execute(serde_json::json!({"paths": paths, "all": all, "session_id": session_id})).await
+        }
+        
+        Commands::GitCommit { message, all } => {
+            tools::GitCommitTool.execute(serde_json::json!({"message": message, "all": all, "session_id": session_id})).await
+        }
+        
+        // ==================== Clipboard ====================
         
         Commands::Clip { content, file, name, source } => {
             tools::ClipTool.execute(serde_json::json!({"content": content, "file": file, "name": name, "source": source})).await
@@ -347,6 +488,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::ClipsClear { name } => {
             tools::ClearClipsTool.execute(serde_json::json!({"name": name})).await
         }
+        
+        // ==================== Session ====================
         
         Commands::Session { op } => {
             match op {
@@ -382,6 +525,8 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         
+        // ==================== MCP ====================
+        
         Commands::Mcp { op } => {
             match op {
                 McpOp::Install { name, source } => {
@@ -402,6 +547,8 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        
+        // ==================== Config ====================
         
         Commands::Config { control_plane_url, gateway_url } => {
             let config = tools::session::get_config().await;
