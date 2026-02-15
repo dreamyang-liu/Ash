@@ -24,7 +24,7 @@ fn handle_store_path() -> std::path::PathBuf {
 }
 
 /// Load handle → session_id mapping from disk
-fn load_handle_map() -> HashMap<String, String> {
+pub fn load_handle_map() -> HashMap<String, String> {
     let path = handle_store_path();
     std::fs::read_to_string(&path)
         .ok()
@@ -58,14 +58,6 @@ fn remove_handle(handle: &str) {
     save_handle_map(&map);
 }
 
-/// Get all unique session IDs that have handles
-fn all_tracked_sessions() -> Vec<String> {
-    let map = load_handle_map();
-    let mut sessions: Vec<String> = map.values().cloned().collect();
-    sessions.sort();
-    sessions.dedup();
-    sessions
-}
 
 /// Extract text from MCP call_tool result
 fn mcp_result_to_tool_result(result: Value) -> ToolResult {
@@ -259,6 +251,14 @@ impl ProcessRegistry {
 
 lazy_static! {
     static ref REGISTRY: Mutex<ProcessRegistry> = Mutex::new(ProcessRegistry::new());
+}
+
+/// Get (running, completed) counts of local async processes
+pub async fn local_process_counts() -> (usize, usize) {
+    let registry = REGISTRY.lock().await;
+    let list = registry.list();
+    let running = list.iter().filter(|(_, _, _, r)| *r).count();
+    (running, list.len() - running)
 }
 
 // ==================== Tools ====================
@@ -464,29 +464,56 @@ impl Tool for TerminalListTool {
             {
                 let registry = REGISTRY.lock().await;
                 let list = registry.list();
-                for (id, cmd, started, running) in list {
-                    let status = if running { "running" } else { "complete" };
-                    out.push_str(&format!("{} [{}] {} ({})\n", id, status, cmd, started));
+                if !list.is_empty() {
+                    out.push_str("Local:\n");
+                    for (id, cmd, started, running) in list {
+                        let status = if running { "running" } else { "complete" };
+                        out.push_str(&format!("  {} [{}] {} ({})\n", id, status, cmd, started));
+                    }
                 }
             }
 
-            // Session processes (from persisted handle map)
-            for sid in all_tracked_sessions() {
-                match session::call_tool_in_session(&sid, "terminal_list", serde_json::json!({})).await {
-                    Ok(result) => {
-                        let text = result.get("content")
-                            .and_then(|c| c.as_array())
-                            .and_then(|arr| arr.first())
-                            .and_then(|c| c.get("text"))
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("");
-                        if !text.is_empty() && text != "No async processes" {
-                            out.push_str(&format!("[session {}]\n", &sid[..12]));
-                            out.push_str(text);
-                            if !text.ends_with('\n') { out.push('\n'); }
-                        }
+            // Tracked handles (from persisted handle map)
+            let handle_map = load_handle_map();
+            if !handle_map.is_empty() {
+                // Group handles by session
+                let mut by_session: HashMap<String, Vec<String>> = HashMap::new();
+                for (handle, sid) in &handle_map {
+                    by_session.entry(sid.clone()).or_default().push(handle.clone());
+                }
+
+                for (sid, handles) in &by_session {
+                    let short_id = if sid.len() > 12 { &sid[..12] } else { sid };
+                    out.push_str(&format!("Session {}:\n", short_id));
+
+                    // Try to get live status from session
+                    let live_info = session::call_tool_in_session(sid, "terminal_list", serde_json::json!({})).await.ok()
+                        .and_then(|result| {
+                            result.get("content")
+                                .and_then(|c| c.as_array())
+                                .and_then(|arr| arr.first())
+                                .and_then(|c| c.get("text"))
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
+                        });
+
+                    for handle in handles {
+                        let short_handle = if handle.len() > 8 { &handle[..8] } else { handle };
+                        // Check if live info contains this handle
+                        let status = match &live_info {
+                            Some(text) if text.contains(handle) => {
+                                if text.contains(&format!("{} [running]", handle)) {
+                                    "running"
+                                } else if text.contains(&format!("{} [complete]", handle)) {
+                                    "complete"
+                                } else {
+                                    "tracked"
+                                }
+                            }
+                            _ => "tracked",
+                        };
+                        out.push_str(&format!("  {} [{}]\n", short_handle, status));
                     }
-                    Err(_) => {} // Session may be gone
                 }
             }
 

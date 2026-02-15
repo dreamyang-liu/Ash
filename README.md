@@ -33,6 +33,40 @@ Ash supports two backends for running sandboxes:
                     └──────────────────┘
 ```
 
+### Daemon Mode (Optional)
+
+The optional daemon process maintains persistent backend connections and stateful resources across CLI invocations.
+
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   ash CLI   │────▶│   ash daemon     │────▶│   Docker/K8s    │
+│  (thin      │     │   (long-lived)   │     │   Backends      │
+│   client)   │ UDS │                  │     │                 │
+└─────────────┘     │  BackendManager  │     └─────────────────┘
+                    │  ProcessRegistry │
+                    │  EventSystem     │
+                    └──────────────────┘
+```
+
+Without daemon, the CLI falls back to direct execution (same as before).
+
+```bash
+# Start daemon
+ash daemon start
+
+# Check status
+ash daemon status
+
+# Stop daemon
+ash daemon stop
+```
+
+**What the daemon provides:**
+- Persistent connections to Docker/K8s backends (faster session operations)
+- Async process tracking survives across CLI invocations
+- Event queue persists (process completion notifications work)
+- Cached health checks (`ash info` responds instantly)
+
 ## Quick Start
 
 ```bash
@@ -579,6 +613,17 @@ ash-mcp --transport http --port 8080
 | `--output text\|json` | Output format |
 | `-h, --help` | Show help |
 | `-V, --version` | Show version |
+
+### Daemon
+
+| Command | Description |
+|---------|-------------|
+| `ash daemon start` | Start daemon (detaches to background) |
+| `ash daemon start --foreground` | Start daemon in foreground |
+| `ash daemon stop` | Stop the daemon |
+| `ash daemon status` | Check if daemon is running |
+
+Files: `~/.ash/daemon.sock` (Unix socket), `~/.ash/daemon.pid` (PID file)
 
 ---
 
