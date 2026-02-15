@@ -318,6 +318,10 @@ impl Backend for K8sBackend {
         }
     }
     
+    async fn call_tool(&self, session_id: &str, tool_name: &str, args: Value) -> Result<Value, BackendError> {
+        self.mcp_call(session_id, tool_name, args).await
+    }
+
     async fn health_check(&self) -> Result<(), BackendError> {
         let url = format!("{}/health", self.config.control_plane_url);
         

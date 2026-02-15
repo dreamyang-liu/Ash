@@ -1,6 +1,7 @@
 //! Async terminal/process management tools
 
 use crate::{BoxFuture, Tool, ToolResult};
+use crate::tools::session;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -11,6 +12,76 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use lazy_static::lazy_static;
 use uuid::Uuid;
+
+// ==================== Persistent handle → session_id mapping ====================
+
+/// Path to the handle store file
+fn handle_store_path() -> std::path::PathBuf {
+    let dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".ash");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("handles.json")
+}
+
+/// Load handle → session_id mapping from disk
+fn load_handle_map() -> HashMap<String, String> {
+    let path = handle_store_path();
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Save handle → session_id mapping to disk
+fn save_handle_map(map: &HashMap<String, String>) {
+    let path = handle_store_path();
+    let _ = std::fs::write(&path, serde_json::to_string(map).unwrap_or_default());
+}
+
+/// Record that a handle belongs to a session
+fn record_handle(handle: &str, session_id: &str) {
+    let mut map = load_handle_map();
+    map.insert(handle.to_string(), session_id.to_string());
+    save_handle_map(&map);
+}
+
+/// Look up which session owns a handle
+fn lookup_handle_session(handle: &str) -> Option<String> {
+    let map = load_handle_map();
+    map.get(handle).cloned()
+}
+
+/// Remove a handle from the store
+fn remove_handle(handle: &str) {
+    let mut map = load_handle_map();
+    map.remove(handle);
+    save_handle_map(&map);
+}
+
+/// Get all unique session IDs that have handles
+fn all_tracked_sessions() -> Vec<String> {
+    let map = load_handle_map();
+    let mut sessions: Vec<String> = map.values().cloned().collect();
+    sessions.sort();
+    sessions.dedup();
+    sessions
+}
+
+/// Extract text from MCP call_tool result
+fn mcp_result_to_tool_result(result: Value) -> ToolResult {
+    let is_error = result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
+    let text = result.get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    if is_error {
+        ToolResult::err(text.to_string())
+    } else {
+        ToolResult::ok(text.to_string())
+    }
+}
 
 /// Process output information
 #[derive(Debug, Clone, Serialize)]
@@ -217,13 +288,38 @@ impl Tool for TerminalRunAsyncTool {
                 command: String,
                 working_dir: Option<String>,
                 env: Option<HashMap<String, String>>,
+                session_id: Option<String>,
             }
-            
-            let args: Args = match serde_json::from_value(args) {
+
+            let args: Args = match serde_json::from_value(args.clone()) {
                 Ok(a) => a,
                 Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
             };
-            
+
+            if let Some(ref sid) = args.session_id {
+                let mut remote_args = serde_json::json!({"command": args.command});
+                if let Some(ref dir) = args.working_dir { remote_args["working_dir"] = serde_json::json!(dir); }
+                if let Some(ref env) = args.env { remote_args["env"] = serde_json::json!(env); }
+                return match session::call_tool_in_session(sid, "terminal_run_async", remote_args).await {
+                    Ok(result) => {
+                        // Persist handle → session_id so later commands auto-resolve
+                        let text = result.get("content")
+                            .and_then(|c| c.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|c| c.get("text"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+                        if let Ok(obj) = serde_json::from_str::<Value>(text) {
+                            if let Some(handle) = obj.get("handle").and_then(|h| h.as_str()) {
+                                record_handle(handle, sid);
+                            }
+                        }
+                        mcp_result_to_tool_result(result)
+                    }
+                    Err(e) => ToolResult::err(format!("Session error: {e}")),
+                };
+            }
+
             let mut registry = REGISTRY.lock().await;
             match registry.start(&args.command, args.working_dir.as_deref(), args.env).await {
                 Ok(id) => ToolResult::ok(serde_json::json!({"handle": id}).to_string()),
@@ -256,13 +352,26 @@ impl Tool for TerminalGetOutputTool {
             struct Args {
                 handle: String,
                 tail: Option<usize>,
+                session_id: Option<String>,
             }
-            
-            let args: Args = match serde_json::from_value(args) {
+
+            let args: Args = match serde_json::from_value(args.clone()) {
                 Ok(a) => a,
                 Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
             };
-            
+
+            // Auto-resolve session from persisted handle map
+            let sid = args.session_id.or_else(|| lookup_handle_session(&args.handle));
+
+            if let Some(ref sid) = sid {
+                let mut remote_args = serde_json::json!({"handle": args.handle});
+                if let Some(tail) = args.tail { remote_args["tail"] = serde_json::json!(tail); }
+                return match session::call_tool_in_session(sid, "terminal_get_output", remote_args).await {
+                    Ok(result) => mcp_result_to_tool_result(result),
+                    Err(e) => ToolResult::err(format!("Session error: {e}")),
+                };
+            }
+
             let registry = REGISTRY.lock().await;
             match registry.get_output(&args.handle, args.tail).await {
                 Some(output) => ToolResult::ok(serde_json::to_string_pretty(&output).unwrap()),
@@ -277,27 +386,41 @@ pub struct TerminalKillTool;
 impl Tool for TerminalKillTool {
     fn name(&self) -> &'static str { "terminal_kill" }
     fn description(&self) -> &'static str { "Kill an async process by handle" }
-    
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "handle": {"type": "string", "description": "Process handle"}
+                "handle": {"type": "string", "description": "Process handle"},
+                "session_id": {"type": "string", "description": "Route to session sandbox"}
             },
             "required": ["handle"]
         })
     }
-    
+
     fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
             #[derive(Deserialize)]
-            struct Args { handle: String }
-            
-            let args: Args = match serde_json::from_value(args) {
+            struct Args {
+                handle: String,
+                session_id: Option<String>,
+            }
+
+            let args: Args = match serde_json::from_value(args.clone()) {
                 Ok(a) => a,
                 Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
             };
-            
+
+            let sid = args.session_id.or_else(|| lookup_handle_session(&args.handle));
+
+            if let Some(ref sid) = sid {
+                let remote_args = serde_json::json!({"handle": args.handle});
+                return match session::call_tool_in_session(sid, "terminal_kill", remote_args).await {
+                    Ok(result) => mcp_result_to_tool_result(result),
+                    Err(e) => ToolResult::err(format!("Session error: {e}")),
+                };
+            }
+
             let registry = REGISTRY.lock().await;
             if registry.kill(&args.handle).await {
                 ToolResult::ok("Process killed".to_string())
@@ -313,24 +436,62 @@ pub struct TerminalListTool;
 impl Tool for TerminalListTool {
     fn name(&self) -> &'static str { "terminal_list" }
     fn description(&self) -> &'static str { "List all tracked async processes" }
-    
+
     fn schema(&self) -> Value {
-        serde_json::json!({"type": "object", "properties": {}})
-    }
-    
-    fn execute(&self, _args: Value) -> BoxFuture<'_, ToolResult> {
-        Box::pin(async move {
-            let registry = REGISTRY.lock().await;
-            let list = registry.list();
-            
-            if list.is_empty() {
-                return ToolResult::ok("No async processes".to_string());
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Route to session sandbox"}
             }
-            
+        })
+    }
+
+    fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
+        Box::pin(async move {
+            let session_id = args.get("session_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+            // If explicit session, only list that session
+            if let Some(ref sid) = session_id {
+                return match session::call_tool_in_session(sid, "terminal_list", serde_json::json!({})).await {
+                    Ok(result) => mcp_result_to_tool_result(result),
+                    Err(e) => ToolResult::err(format!("Session error: {e}")),
+                };
+            }
+
             let mut out = String::new();
-            for (id, cmd, started, running) in list {
-                let status = if running { "running" } else { "complete" };
-                out.push_str(&format!("{} [{}] {} ({})\n", id, status, cmd, started));
+
+            // Local processes
+            {
+                let registry = REGISTRY.lock().await;
+                let list = registry.list();
+                for (id, cmd, started, running) in list {
+                    let status = if running { "running" } else { "complete" };
+                    out.push_str(&format!("{} [{}] {} ({})\n", id, status, cmd, started));
+                }
+            }
+
+            // Session processes (from persisted handle map)
+            for sid in all_tracked_sessions() {
+                match session::call_tool_in_session(&sid, "terminal_list", serde_json::json!({})).await {
+                    Ok(result) => {
+                        let text = result.get("content")
+                            .and_then(|c| c.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|c| c.get("text"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+                        if !text.is_empty() && text != "No async processes" {
+                            out.push_str(&format!("[session {}]\n", &sid[..12]));
+                            out.push_str(text);
+                            if !text.ends_with('\n') { out.push('\n'); }
+                        }
+                    }
+                    Err(_) => {} // Session may be gone
+                }
+            }
+
+            if out.is_empty() {
+                return ToolResult::ok("No async processes".to_string());
             }
             ToolResult::ok(out)
         })
@@ -342,27 +503,44 @@ pub struct TerminalRemoveTool;
 impl Tool for TerminalRemoveTool {
     fn name(&self) -> &'static str { "terminal_remove" }
     fn description(&self) -> &'static str { "Remove a completed process from tracking" }
-    
+
     fn schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "handle": {"type": "string", "description": "Process handle"}
+                "handle": {"type": "string", "description": "Process handle"},
+                "session_id": {"type": "string", "description": "Route to session sandbox"}
             },
             "required": ["handle"]
         })
     }
-    
+
     fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
             #[derive(Deserialize)]
-            struct Args { handle: String }
-            
-            let args: Args = match serde_json::from_value(args) {
+            struct Args {
+                handle: String,
+                session_id: Option<String>,
+            }
+
+            let args: Args = match serde_json::from_value(args.clone()) {
                 Ok(a) => a,
                 Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
             };
-            
+
+            let sid = args.session_id.or_else(|| lookup_handle_session(&args.handle));
+
+            if let Some(ref sid) = sid {
+                let remote_args = serde_json::json!({"handle": args.handle});
+                let result = match session::call_tool_in_session(sid, "terminal_remove", remote_args).await {
+                    Ok(result) => mcp_result_to_tool_result(result),
+                    Err(e) => ToolResult::err(format!("Session error: {e}")),
+                };
+                // Clean up persisted mapping
+                remove_handle(&args.handle);
+                return result;
+            }
+
             let mut registry = REGISTRY.lock().await;
             if registry.remove(&args.handle) {
                 ToolResult::ok("Removed".to_string())

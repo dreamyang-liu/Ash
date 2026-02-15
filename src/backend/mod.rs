@@ -163,6 +163,9 @@ pub trait Backend: Send + Sync {
     /// Write file to session
     async fn write_file(&self, session_id: &str, path: &str, content: &str) -> Result<(), BackendError>;
     
+    /// Call any MCP tool in session (generic pass-through)
+    async fn call_tool(&self, session_id: &str, tool_name: &str, args: serde_json::Value) -> Result<serde_json::Value, BackendError>;
+
     /// Check if backend is available
     async fn health_check(&self) -> Result<(), BackendError>;
 }

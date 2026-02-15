@@ -185,6 +185,12 @@ impl BackendManager {
         backend.write_file(session_id, path, content).await
     }
     
+    /// Call any MCP tool in session (generic pass-through)
+    pub async fn call_tool(&self, session_id: &str, tool_name: &str, args: Value) -> Result<Value, BackendError> {
+        let backend = self.get_backend(session_id).await?;
+        backend.call_tool(session_id, tool_name, args).await
+    }
+
     /// Check backend health
     pub async fn health_check(&self, backend: BackendType) -> Result<(), BackendError> {
         let backend = self.get_backend_by_type(backend)?;
@@ -548,6 +554,12 @@ pub async fn read_file_in_session(session_id: &str, path: &str) -> Result<String
 pub async fn write_file_in_session(session_id: &str, path: &str, content: &str) -> Result<(), BackendError> {
     let manager = BACKEND_MANAGER.read().await;
     manager.write_file(session_id, path, content).await
+}
+
+/// Call any MCP tool in session (generic pass-through for terminal, etc.)
+pub async fn call_tool_in_session(session_id: &str, tool_name: &str, args: Value) -> Result<Value, BackendError> {
+    let manager = BACKEND_MANAGER.read().await;
+    manager.call_tool(session_id, tool_name, args).await
 }
 
 /// Get session by ID

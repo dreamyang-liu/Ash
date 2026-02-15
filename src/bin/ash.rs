@@ -3,8 +3,35 @@
 use ash::{Tool, ToolResult};
 use ash::tools;
 use clap::{Parser, Subcommand};
+use serde_json::Value;
 
 use std::collections::HashMap;
+
+/// Execute a tool locally or route through session MCP
+async fn exec_tool(tool: &dyn Tool, args: Value, session_id: &Option<String>) -> ToolResult {
+    if let Some(ref sid) = session_id {
+        match tools::session::call_tool_in_session(sid, tool.name(), args).await {
+            Ok(result) => {
+                let is_error = result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
+                let text = result.get("content")
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|c| c.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if is_error {
+                    ToolResult { success: false, output: text.clone(), error: Some(text) }
+                } else {
+                    ToolResult::ok(text)
+                }
+            }
+            Err(e) => ToolResult::err(format!("Session error: {e}")),
+        }
+    } else {
+        tool.execute(args).await
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "ash")]
@@ -523,21 +550,21 @@ async fn main() -> anyhow::Result<()> {
     
     let result = match cli.command {
         // ==================== File Operations ====================
-        
+
         Commands::View { file_path, offset, limit } => {
-            tools::ViewTool.execute(serde_json::json!({
-                "file_path": file_path, "offset": offset, "limit": limit, "session_id": session_id
-            })).await
+            exec_tool(&tools::ViewTool, serde_json::json!({
+                "file_path": file_path, "offset": offset, "limit": limit
+            }), &session_id).await
         }
-        
+
         Commands::Grep { pattern, path, include, limit } => {
-            tools::GrepTool.execute(serde_json::json!({
-                "pattern": pattern, "path": path, "include": include, "limit": limit, "session_id": session_id
-            })).await
+            exec_tool(&tools::GrepTool, serde_json::json!({
+                "pattern": pattern, "path": path, "include": include, "limit": limit
+            }), &session_id).await
         }
-        
+
         Commands::Edit { op } => {
-            let mut args = match op {
+            let args = match op {
                 EditOp::View { path, start, end } => serde_json::json!({
                     "command": "view", "path": path, "view_range": [start, end]
                 }),
@@ -551,46 +578,45 @@ async fn main() -> anyhow::Result<()> {
                     "command": "create", "path": path, "file_text": content
                 }),
             };
-            if let Some(sid) = &session_id { args["session_id"] = serde_json::json!(sid); }
-            tools::EditTool.execute(args).await
+            exec_tool(&tools::EditTool, args, &session_id).await
         }
-        
+
         Commands::Find { pattern, path, max_depth, limit } => {
-            tools::FindFilesTool.execute(serde_json::json!({
+            exec_tool(&tools::FindFilesTool, serde_json::json!({
                 "pattern": pattern, "path": path, "max_depth": max_depth, "limit": limit
-            })).await
+            }), &session_id).await
         }
-        
+
         Commands::Tree { path, max_depth, show_hidden } => {
-            tools::TreeTool.execute(serde_json::json!({
+            exec_tool(&tools::TreeTool, serde_json::json!({
                 "path": path, "max_depth": max_depth, "show_hidden": show_hidden
-            })).await
+            }), &session_id).await
         }
-        
+
         Commands::Diff { file1, file2, context } => {
-            tools::DiffFilesTool.execute(serde_json::json!({
+            exec_tool(&tools::DiffFilesTool, serde_json::json!({
                 "file1": file1, "file2": file2, "context": context
-            })).await
+            }), &session_id).await
         }
-        
+
         Commands::Patch { patch, path, dry_run } => {
-            tools::PatchApplyTool.execute(serde_json::json!({
+            exec_tool(&tools::PatchApplyTool, serde_json::json!({
                 "patch": patch, "path": path, "dry_run": dry_run
-            })).await
+            }), &session_id).await
         }
-        
+
         Commands::FileInfo { path } => {
-            tools::FileInfoTool.execute(serde_json::json!({"path": path})).await
+            exec_tool(&tools::FileInfoTool, serde_json::json!({"path": path}), &session_id).await
         }
-        
+
         Commands::Fetch { url, timeout } => {
-            tools::HttpFetchTool.execute(serde_json::json!({
+            exec_tool(&tools::HttpFetchTool, serde_json::json!({
                 "url": url, "timeout_secs": timeout
-            })).await
+            }), &session_id).await
         }
-        
+
         Commands::Undo { path, list } => {
-            tools::UndoTool.execute(serde_json::json!({"path": path, "list": list})).await
+            exec_tool(&tools::UndoTool, serde_json::json!({"path": path, "list": list}), &session_id).await
         }
 
         // ==================== Filesystem ====================
@@ -598,25 +624,25 @@ async fn main() -> anyhow::Result<()> {
         Commands::Fs { op } => {
             match op {
                 FsOp::Ls { path } => {
-                    tools::FsListDirTool.execute(serde_json::json!({"path": path})).await
+                    exec_tool(&tools::FsListDirTool, serde_json::json!({"path": path}), &session_id).await
                 }
                 FsOp::Stat { path } => {
-                    tools::FsStatTool.execute(serde_json::json!({"path": path})).await
+                    exec_tool(&tools::FsStatTool, serde_json::json!({"path": path}), &session_id).await
                 }
                 FsOp::Write { path, content } => {
-                    tools::FsWriteTool.execute(serde_json::json!({"path": path, "content": content})).await
+                    exec_tool(&tools::FsWriteTool, serde_json::json!({"path": path, "content": content}), &session_id).await
                 }
                 FsOp::Mkdir { path, recursive } => {
-                    tools::FsMkdirTool.execute(serde_json::json!({"path": path, "recursive": recursive})).await
+                    exec_tool(&tools::FsMkdirTool, serde_json::json!({"path": path, "recursive": recursive}), &session_id).await
                 }
                 FsOp::Rm { path, recursive } => {
-                    tools::FsRemoveTool.execute(serde_json::json!({"path": path, "recursive": recursive})).await
+                    exec_tool(&tools::FsRemoveTool, serde_json::json!({"path": path, "recursive": recursive}), &session_id).await
                 }
                 FsOp::Mv { from, to } => {
-                    tools::FsMoveTool.execute(serde_json::json!({"from": from, "to": to})).await
+                    exec_tool(&tools::FsMoveTool, serde_json::json!({"from": from, "to": to}), &session_id).await
                 }
                 FsOp::Cp { from, to, recursive } => {
-                    tools::FsCopyTool.execute(serde_json::json!({"from": from, "to": to, "recursive": recursive})).await
+                    exec_tool(&tools::FsCopyTool, serde_json::json!({"from": from, "to": to, "recursive": recursive}), &session_id).await
                 }
             }
         }
@@ -626,117 +652,118 @@ async fn main() -> anyhow::Result<()> {
         Commands::Buffer { op } => {
             match op {
                 BufferOp::Read { name, start, end } => {
-                    tools::BufferReadTool.execute(serde_json::json!({
+                    exec_tool(&tools::BufferReadTool, serde_json::json!({
                         "name": name, "start_line": start, "end_line": end
-                    })).await
+                    }), &session_id).await
                 }
                 BufferOp::Write { name, content, at_line, append } => {
-                    tools::BufferWriteTool.execute(serde_json::json!({
+                    exec_tool(&tools::BufferWriteTool, serde_json::json!({
                         "name": name, "content": content, "at_line": at_line, "append": append
-                    })).await
+                    }), &session_id).await
                 }
                 BufferOp::Delete { name, start, end } => {
-                    tools::BufferDeleteTool.execute(serde_json::json!({
+                    exec_tool(&tools::BufferDeleteTool, serde_json::json!({
                         "name": name, "start_line": start, "end_line": end
-                    })).await
+                    }), &session_id).await
                 }
                 BufferOp::Replace { name, start, end, content } => {
-                    tools::BufferReplaceTool.execute(serde_json::json!({
+                    exec_tool(&tools::BufferReplaceTool, serde_json::json!({
                         "name": name, "start_line": start, "end_line": end, "content": content
-                    })).await
+                    }), &session_id).await
                 }
                 BufferOp::List => {
-                    tools::BufferListTool.execute(serde_json::json!({})).await
+                    exec_tool(&tools::BufferListTool, serde_json::json!({}), &session_id).await
                 }
                 BufferOp::Clear { name } => {
-                    tools::BufferClearTool.execute(serde_json::json!({"name": name})).await
+                    exec_tool(&tools::BufferClearTool, serde_json::json!({"name": name}), &session_id).await
                 }
                 BufferOp::ToClip { buffer, start, end, clip_name } => {
-                    tools::BufferToClipTool.execute(serde_json::json!({
+                    exec_tool(&tools::BufferToClipTool, serde_json::json!({
                         "buffer": buffer, "start_line": start, "end_line": end, "clip_name": clip_name
-                    })).await
+                    }), &session_id).await
                 }
                 BufferOp::FromClip { clip_name, buffer, at_line, append } => {
-                    tools::ClipToBufferTool.execute(serde_json::json!({
+                    exec_tool(&tools::ClipToBufferTool, serde_json::json!({
                         "clip_name": clip_name, "buffer": buffer, "at_line": at_line, "append": append
-                    })).await
+                    }), &session_id).await
                 }
             }
         }
 
         // ==================== Shell ====================
-        
+
         Commands::Run { command, timeout, tail } => {
-            tools::ShellTool.execute(serde_json::json!({
-                "command": command, "timeout_secs": timeout, "session_id": session_id, "tail_lines": tail
-            })).await
+            exec_tool(&tools::ShellTool, serde_json::json!({
+                "command": command, "timeout_secs": timeout, "tail_lines": tail
+            }), &session_id).await
         }
-        
+
         Commands::Terminal { op } => {
+            // Terminal tools have special handle persistence, keep their own routing
             match op {
                 TerminalOp::Start { command, workdir, env } => {
                     let env_map = parse_key_value(&env);
                     tools::TerminalRunAsyncTool.execute(serde_json::json!({
-                        "command": command, "working_dir": workdir, "env": env_map
+                        "command": command, "working_dir": workdir, "env": env_map, "session_id": session_id
                     })).await
                 }
                 TerminalOp::Output { handle, tail } => {
-                    tools::TerminalGetOutputTool.execute(serde_json::json!({"handle": handle, "tail": tail})).await
+                    tools::TerminalGetOutputTool.execute(serde_json::json!({"handle": handle, "tail": tail, "session_id": session_id})).await
                 }
                 TerminalOp::Kill { handle } => {
-                    tools::TerminalKillTool.execute(serde_json::json!({"handle": handle})).await
+                    tools::TerminalKillTool.execute(serde_json::json!({"handle": handle, "session_id": session_id})).await
                 }
                 TerminalOp::List => {
-                    tools::TerminalListTool.execute(serde_json::json!({})).await
+                    tools::TerminalListTool.execute(serde_json::json!({"session_id": session_id})).await
                 }
                 TerminalOp::Remove { handle } => {
-                    tools::TerminalRemoveTool.execute(serde_json::json!({"handle": handle})).await
+                    tools::TerminalRemoveTool.execute(serde_json::json!({"handle": handle, "session_id": session_id})).await
                 }
             }
         }
-        
+
         // ==================== Git ====================
-        
+
         Commands::GitStatus { short } => {
-            tools::GitStatusTool.execute(serde_json::json!({"short": short, "session_id": session_id})).await
+            exec_tool(&tools::GitStatusTool, serde_json::json!({"short": short}), &session_id).await
         }
-        
+
         Commands::GitDiff { staged, paths } => {
-            tools::GitDiffTool.execute(serde_json::json!({"staged": staged, "paths": paths, "session_id": session_id})).await
+            exec_tool(&tools::GitDiffTool, serde_json::json!({"staged": staged, "paths": paths}), &session_id).await
         }
-        
+
         Commands::GitLog { count, oneline } => {
-            tools::GitLogTool.execute(serde_json::json!({"count": count, "oneline": oneline, "session_id": session_id})).await
+            exec_tool(&tools::GitLogTool, serde_json::json!({"count": count, "oneline": oneline}), &session_id).await
         }
-        
+
         Commands::GitAdd { paths, all } => {
-            tools::GitAddTool.execute(serde_json::json!({"paths": paths, "all": all, "session_id": session_id})).await
+            exec_tool(&tools::GitAddTool, serde_json::json!({"paths": paths, "all": all}), &session_id).await
         }
-        
+
         Commands::GitCommit { message, all } => {
-            tools::GitCommitTool.execute(serde_json::json!({"message": message, "all": all, "session_id": session_id})).await
+            exec_tool(&tools::GitCommitTool, serde_json::json!({"message": message, "all": all}), &session_id).await
         }
-        
+
         // ==================== Clipboard ====================
-        
+
         Commands::Clip { content, file, name, source } => {
-            tools::ClipTool.execute(serde_json::json!({"content": content, "file": file, "name": name, "source": source})).await
+            exec_tool(&tools::ClipTool, serde_json::json!({"content": content, "file": file, "name": name, "source": source}), &session_id).await
         }
-        
+
         Commands::Paste { name } => {
-            tools::PasteTool.execute(serde_json::json!({"name": name})).await
+            exec_tool(&tools::PasteTool, serde_json::json!({"name": name}), &session_id).await
         }
-        
+
         Commands::Clips => {
-            tools::ClipsTool.execute(serde_json::json!({})).await
+            exec_tool(&tools::ClipsTool, serde_json::json!({}), &session_id).await
         }
-        
+
         Commands::ClipsClear { name } => {
-            tools::ClearClipsTool.execute(serde_json::json!({"name": name})).await
+            exec_tool(&tools::ClearClipsTool, serde_json::json!({"name": name}), &session_id).await
         }
-        
-        // ==================== Session ====================
-        
+
+        // ==================== Session (always local) ====================
+
         Commands::Session { op } => {
             match op {
                 SessionOp::Create { name, image, port, env, cpu_request, cpu_limit, memory_request, memory_limit, node_selector } => {

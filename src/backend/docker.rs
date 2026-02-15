@@ -305,7 +305,8 @@ impl Backend for DockerBackend {
         
         // Container config - download ash-mcp and run it
         let bootstrap_script = format!(
-            "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1; \
+            "export DEBIAN_FRONTEND=noninteractive; \
+             apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1; \
              curl -fsSL {} | tar xz -C /tmp && \
              mv /tmp/ash-linux-x86_64 /usr/local/bin/ash && \
              mv /tmp/ash-linux-x86_64-mcp /usr/local/bin/ash-mcp && \
@@ -438,7 +439,7 @@ impl Backend for DockerBackend {
                 let id = c.id.unwrap_or_default();
                 let name = c.names.and_then(|n| n.first().cloned()).unwrap_or_default();
                 let image = c.image.unwrap_or_default();
-                let status = c.status.unwrap_or_default();
+                let status = c.state.unwrap_or_default();
                 
                 // Extract port mappings
                 let ports: Vec<PortMapping> = c.ports
@@ -503,10 +504,14 @@ impl Backend for DockerBackend {
     }
     
     async fn exec(&self, session_id: &str, command: &str, options: ExecOptions) -> Result<ExecResult, BackendError> {
-        let session = {
+        let session = match {
             let sessions = self.sessions.read().await;
             sessions.get(session_id).cloned()
-        }.ok_or_else(|| BackendError::NotFound(session_id.to_string()))?;
+        } {
+            Some(s) => s,
+            None => self.get(session_id).await?
+                .ok_or_else(|| BackendError::NotFound(session_id.to_string()))?,
+        };
         
         let mut args = serde_json::json!({
             "command": command,
@@ -544,10 +549,14 @@ impl Backend for DockerBackend {
     }
     
     async fn read_file(&self, session_id: &str, path: &str) -> Result<String, BackendError> {
-        let session = {
+        let session = match {
             let sessions = self.sessions.read().await;
             sessions.get(session_id).cloned()
-        }.ok_or_else(|| BackendError::NotFound(session_id.to_string()))?;
+        } {
+            Some(s) => s,
+            None => self.get(session_id).await?
+                .ok_or_else(|| BackendError::NotFound(session_id.to_string()))?,
+        };
         
         let args = serde_json::json!({
             "file_path": path,
@@ -567,10 +576,14 @@ impl Backend for DockerBackend {
     }
     
     async fn write_file(&self, session_id: &str, path: &str, content: &str) -> Result<(), BackendError> {
-        let session = {
+        let session = match {
             let sessions = self.sessions.read().await;
             sessions.get(session_id).cloned()
-        }.ok_or_else(|| BackendError::NotFound(session_id.to_string()))?;
+        } {
+            Some(s) => s,
+            None => self.get(session_id).await?
+                .ok_or_else(|| BackendError::NotFound(session_id.to_string()))?,
+        };
         
         let args = serde_json::json!({
             "command": "create",
@@ -593,6 +606,18 @@ impl Backend for DockerBackend {
         }
     }
     
+    async fn call_tool(&self, session_id: &str, tool_name: &str, args: Value) -> Result<Value, BackendError> {
+        let session = match {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).cloned()
+        } {
+            Some(s) => s,
+            None => self.get(session_id).await?
+                .ok_or_else(|| BackendError::NotFound(session_id.to_string()))?,
+        };
+        self.mcp_call(&session, tool_name, args).await
+    }
+
     async fn health_check(&self) -> Result<(), BackendError> {
         self.docker
             .ping()
