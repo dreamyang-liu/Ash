@@ -346,6 +346,9 @@ enum TerminalOp {
         workdir: Option<String>,
         #[arg(short, long)]
         env: Vec<String>,
+        /// Command to revert changes (empty string = no state change, omit = cannot revert)
+        #[arg(long)]
+        revert: Option<String>,
     },
     /// Get output from handle
     Output {
@@ -740,10 +743,11 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Terminal { op } => {
             let (tool_name, args): (&str, Value) = match op {
-                TerminalOp::Start { command, workdir, env } => {
+                TerminalOp::Start { command, workdir, env, revert } => {
                     let env_map = parse_key_value(&env);
                     ("terminal_run_async", serde_json::json!({
-                        "command": command, "working_dir": workdir, "env": env_map, "session_id": session_id
+                        "command": command, "working_dir": workdir, "env": env_map, 
+                        "revert_command": revert, "session_id": session_id
                     }))
                 }
                 TerminalOp::Output { handle, tail } => {

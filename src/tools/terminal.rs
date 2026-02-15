@@ -90,6 +90,7 @@ struct AsyncProcess {
     stderr_lines: Arc<Mutex<Vec<String>>>,
     exit_code: Arc<Mutex<Option<i32>>>,
     command: String,
+    revert_command: Option<String>, // None = cannot revert, Some("") = no state change
     started_at: chrono::DateTime<chrono::Utc>,
     // Keep child for kill
     child: Arc<Mutex<Option<Child>>>,
@@ -105,7 +106,7 @@ impl ProcessRegistry {
         Self { processes: HashMap::new() }
     }
 
-    async fn start(&mut self, command: &str, working_dir: Option<&str>, env: Option<HashMap<String, String>>) -> anyhow::Result<String> {
+    async fn start(&mut self, command: &str, working_dir: Option<&str>, env: Option<HashMap<String, String>>, revert_command: Option<String>) -> anyhow::Result<String> {
         let id = Uuid::new_v4().to_string();
         
         let mut cmd = Command::new("sh");
@@ -186,6 +187,7 @@ impl ProcessRegistry {
             stderr_lines,
             exit_code,
             command: command.to_string(),
+            revert_command,
             started_at: chrono::Utc::now(),
             child: child_arc,
         };
@@ -237,15 +239,19 @@ impl ProcessRegistry {
         false
     }
 
-    fn list(&self) -> Vec<(String, String, String, bool)> {
+    fn list(&self) -> Vec<(String, String, String, bool, Option<String>)> {
         self.processes.iter().map(|(id, p)| {
             let running = p.exit_code.try_lock().map(|e| e.is_none()).unwrap_or(true);
-            (id.clone(), p.command.clone(), p.started_at.to_rfc3339(), running)
+            (id.clone(), p.command.clone(), p.started_at.to_rfc3339(), running, p.revert_command.clone())
         }).collect()
     }
 
     fn remove(&mut self, id: &str) -> bool {
         self.processes.remove(id).is_some()
+    }
+
+    fn get_revert_command(&self, id: &str) -> Option<Option<String>> {
+        self.processes.get(id).map(|p| p.revert_command.clone())
     }
 }
 
@@ -257,7 +263,7 @@ lazy_static! {
 pub async fn local_process_counts() -> (usize, usize) {
     let registry = REGISTRY.lock().await;
     let list = registry.list();
-    let running = list.iter().filter(|(_, _, _, r)| *r).count();
+    let running = list.iter().filter(|(_, _, _, r, _)| *r).count();
     (running, list.len() - running)
 }
 
@@ -275,7 +281,11 @@ impl Tool for TerminalRunAsyncTool {
             "properties": {
                 "command": {"type": "string", "description": "Shell command to run"},
                 "working_dir": {"type": "string", "description": "Working directory"},
-                "env": {"type": "object", "description": "Environment variables"}
+                "env": {"type": "object", "description": "Environment variables"},
+                "revert_command": {
+                    "type": ["string", "null"],
+                    "description": "Command to revert this command's changes. Empty string = no state change, null = cannot revert"
+                }
             },
             "required": ["command"]
         })
@@ -288,6 +298,7 @@ impl Tool for TerminalRunAsyncTool {
                 command: String,
                 working_dir: Option<String>,
                 env: Option<HashMap<String, String>>,
+                revert_command: Option<String>,
                 session_id: Option<String>,
             }
 
@@ -300,6 +311,7 @@ impl Tool for TerminalRunAsyncTool {
                 let mut remote_args = serde_json::json!({"command": args.command});
                 if let Some(ref dir) = args.working_dir { remote_args["working_dir"] = serde_json::json!(dir); }
                 if let Some(ref env) = args.env { remote_args["env"] = serde_json::json!(env); }
+                if let Some(ref revert) = args.revert_command { remote_args["revert_command"] = serde_json::json!(revert); }
                 return match session::call_tool_in_session(sid, "terminal_run_async", remote_args).await {
                     Ok(result) => {
                         // Persist handle → session_id so later commands auto-resolve
@@ -321,7 +333,7 @@ impl Tool for TerminalRunAsyncTool {
             }
 
             let mut registry = REGISTRY.lock().await;
-            match registry.start(&args.command, args.working_dir.as_deref(), args.env).await {
+            match registry.start(&args.command, args.working_dir.as_deref(), args.env, args.revert_command).await {
                 Ok(id) => ToolResult::ok(serde_json::json!({"handle": id}).to_string()),
                 Err(e) => ToolResult::err(e.to_string()),
             }
@@ -466,9 +478,14 @@ impl Tool for TerminalListTool {
                 let list = registry.list();
                 if !list.is_empty() {
                     out.push_str("Local:\n");
-                    for (id, cmd, started, running) in list {
+                    for (id, cmd, started, running, revert) in list {
                         let status = if running { "running" } else { "complete" };
-                        out.push_str(&format!("  {} [{}] {} ({})\n", id, status, cmd, started));
+                        let revert_info = match &revert {
+                            Some(s) if s.is_empty() => " [no state change]",
+                            Some(_) => " [revertible]",
+                            None => " [non-revertible]",
+                        };
+                        out.push_str(&format!("  {} [{}]{} {} ({})\n", id, status, revert_info, cmd, started));
                     }
                 }
             }
