@@ -91,14 +91,29 @@ impl ProcessRegistry {
             });
         }
 
-        // Spawn exit watcher
+        // Spawn exit watcher - push event when done
         let exit_clone = exit_code.clone();
         let child_arc = Arc::new(Mutex::new(Some(child)));
         let child_clone = child_arc.clone();
+        let id_for_event = id.clone();
+        let cmd_for_event = command.to_string();
         tokio::spawn(async move {
             if let Some(ref mut c) = *child_clone.lock().await {
                 if let Ok(status) = c.wait().await {
-                    *exit_clone.lock().await = status.code().or(Some(-1));
+                    let code = status.code().or(Some(-1));
+                    *exit_clone.lock().await = code;
+                    
+                    // Push event when process completes
+                    crate::tools::events::push_event(
+                        "process_complete",
+                        &id_for_event,
+                        serde_json::json!({
+                            "handle": id_for_event,
+                            "command": cmd_for_event,
+                            "exit_code": code,
+                            "success": code == Some(0)
+                        })
+                    ).await;
                 }
             }
         });

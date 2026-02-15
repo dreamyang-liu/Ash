@@ -131,10 +131,20 @@ async fn str_replace(path: &str, old: &str, new: &str) -> ToolResult {
     let count = content.matches(old).count();
     if count == 0 { return ToolResult::err("No match found for old_str"); }
     if count > 1 { return ToolResult::err(format!("Multiple matches ({count}). old_str must be unique.")); }
+    
+    // Save undo state before modifying
+    let _ = crate::tools::utils::save_undo_state(path).await;
+    
     let new_content = content.replace(old, new);
     if let Err(e) = fs::write(path, &new_content).await {
         return ToolResult::err(format!("Write failed: {e}"));
     }
+    
+    // Push file_change event
+    crate::tools::events::push_event("file_change", path, serde_json::json!({
+        "path": path, "operation": "str_replace"
+    })).await;
+    
     ToolResult::ok("Replaced successfully")
 }
 
@@ -143,6 +153,10 @@ async fn insert_at(path: &str, line: i64, text: &str) -> ToolResult {
         Ok(c) => c,
         Err(e) => return ToolResult::err(format!("Read failed: {e}")),
     };
+    
+    // Save undo state
+    let _ = crate::tools::utils::save_undo_state(path).await;
+    
     let mut lines: Vec<&str> = content.lines().collect();
     let idx = if line <= 0 { 0 } else { (line as usize).min(lines.len()) };
     for (i, new_line) in text.lines().enumerate() {
@@ -151,6 +165,12 @@ async fn insert_at(path: &str, line: i64, text: &str) -> ToolResult {
     if let Err(e) = fs::write(path, lines.join("\n")).await {
         return ToolResult::err(format!("Write failed: {e}"));
     }
+    
+    // Push file_change event
+    crate::tools::events::push_event("file_change", path, serde_json::json!({
+        "path": path, "operation": "insert", "line": line
+    })).await;
+    
     ToolResult::ok(format!("Inserted at line {}", line))
 }
 
@@ -164,5 +184,11 @@ async fn create_file(path: &str, content: &str) -> ToolResult {
     if let Err(e) = fs::write(path, content).await {
         return ToolResult::err(format!("Create failed: {e}"));
     }
+    
+    // Push file_change event
+    crate::tools::events::push_event("file_change", path, serde_json::json!({
+        "path": path, "operation": "create"
+    })).await;
+    
     ToolResult::ok(format!("Created: {path}"))
 }
