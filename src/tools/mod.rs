@@ -9,6 +9,7 @@ pub mod clip;
 pub mod session;
 pub mod terminal;
 pub mod mcp_mount;
+pub mod filesystem;
 
 pub use view::ViewTool;
 pub use grep::GrepTool;
@@ -19,6 +20,7 @@ pub use clip::{ClipTool, PasteTool, ClipsTool, ClearClipsTool};
 pub use session::{SessionCreateTool, SessionListTool, SessionDestroyTool};
 pub use terminal::{TerminalRunAsyncTool, TerminalGetOutputTool, TerminalKillTool, TerminalListTool, TerminalRemoveTool};
 pub use mcp_mount::{McpInstallTool, McpMountTool, McpUnmountTool, McpListTool, McpCallTool};
+pub use filesystem::{FsListDirTool, FsMkdirTool, FsRemoveTool, FsMoveTool, FsCopyTool, FsStatTool, FsWriteTool};
 
 use crate::Tool;
 
@@ -56,6 +58,14 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(McpUnmountTool),
         Box::new(McpListTool),
         Box::new(McpCallTool),
+        // Filesystem
+        Box::new(FsListDirTool),
+        Box::new(FsMkdirTool),
+        Box::new(FsRemoveTool),
+        Box::new(FsMoveTool),
+        Box::new(FsCopyTool),
+        Box::new(FsStatTool),
+        Box::new(FsWriteTool),
     ]
 }
 
