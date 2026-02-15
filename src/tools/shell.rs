@@ -1,6 +1,7 @@
-//! Shell tool - local or via MCP Gateway
+//! Shell tool - local or via session backend
 
 use crate::{BoxFuture, Tool, ToolResult};
+use crate::backend::ExecOptions;
 use crate::tools::session;
 use serde::Deserialize;
 use serde_json::Value;
@@ -12,12 +13,15 @@ pub struct ShellArgs {
     pub command: String,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
-    /// Session ID - if provided, executes via MCP Gateway in that sandbox
+    /// Session ID - if provided, executes in that sandbox
     #[serde(default)]
     pub session_id: Option<String>,
     /// Only return the last N lines of output
     #[serde(default)]
     pub tail_lines: Option<usize>,
+    /// Working directory
+    #[serde(default)]
+    pub working_dir: Option<String>,
 }
 
 fn default_timeout() -> u64 { 300 }
@@ -49,8 +53,9 @@ impl Tool for ShellTool {
             "properties": {
                 "command": {"type": "string", "description": "Shell command"},
                 "timeout_secs": {"type": "integer", "default": 300},
-                "session_id": {"type": "string", "description": "Execute in this session's sandbox via MCP"},
-                "tail_lines": {"type": "integer", "description": "Only return the last N lines of output"}
+                "session_id": {"type": "string", "description": "Execute in this session's sandbox"},
+                "tail_lines": {"type": "integer", "description": "Only return the last N lines of output"},
+                "working_dir": {"type": "string", "description": "Working directory"}
             },
             "required": ["command"]
         })
@@ -63,45 +68,47 @@ impl Tool for ShellTool {
                 Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
             };
             
-            // If session_id provided, route through MCP Gateway
+            // If session_id provided, route through backend
             if let Some(session_id) = &args.session_id {
-                let mcp_args = serde_json::json!({
-                    "command": args.command,
-                    "timeout_secs": args.timeout_secs,
-                    "tail_lines": args.tail_lines,
-                });
+                let options = ExecOptions {
+                    working_dir: args.working_dir,
+                    timeout_secs: Some(args.timeout_secs),
+                    ..Default::default()
+                };
                 
-                match session::call_tool_in_session(session_id, "shell", mcp_args).await {
+                match session::exec_in_session(session_id, &args.command, options).await {
                     Ok(result) => {
-                        let content = result.get("content")
-                            .and_then(|c| c.as_array())
-                            .and_then(|arr| arr.first())
-                            .and_then(|c| c.get("text"))
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("");
-                        let is_error = result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
+                        let mut output = result.output();
                         
-                        // Apply tail locally too in case remote didn't
-                        let output = if let Some(n) = args.tail_lines {
-                            tail_output(content, n)
-                        } else {
-                            content.to_string()
-                        };
+                        // Apply tail if requested
+                        if let Some(n) = args.tail_lines {
+                            output = tail_output(&output, n);
+                        }
                         
-                        if is_error {
-                            ToolResult::err(output)
-                        } else {
+                        if result.success() {
                             ToolResult::ok(output)
+                        } else {
+                            ToolResult { 
+                                success: false, 
+                                output, 
+                                error: Some(format!("Exit: {}", result.exit_code)) 
+                            }
                         }
                     }
-                    Err(e) => ToolResult::err(e),
+                    Err(e) => ToolResult::err(format!("Exec failed: {e}")),
                 }
             } else {
                 // Local execution
                 let timeout = Duration::from_secs(args.timeout_secs);
-                let result = tokio::time::timeout(timeout, 
-                    Command::new("sh").arg("-c").arg(&args.command).output()
-                ).await;
+                
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(&args.command);
+                
+                if let Some(ref dir) = args.working_dir {
+                    cmd.current_dir(dir);
+                }
+                
+                let result = tokio::time::timeout(timeout, cmd.output()).await;
                 
                 match result {
                     Ok(Ok(output)) => {

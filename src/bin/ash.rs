@@ -621,18 +621,25 @@ async fn main() -> anyhow::Result<()> {
         // ==================== Config ====================
         
         Commands::Config { control_plane_url, gateway_url } => {
-            let config = tools::session::get_config().await;
+            // Show current backend status instead of old config
             if control_plane_url.is_none() && gateway_url.is_none() {
-                return Ok(println!("control_plane_url: {}\ngateway_url: {}", config.control_plane_url, config.gateway_url));
+                tools::BackendStatusTool.execute(serde_json::json!({})).await
+            } else {
+                // Configure K8s backend with new URLs
+                use ash::backend::K8sConfig;
+                let config = K8sConfig {
+                    control_plane_url: control_plane_url.unwrap_or_else(|| {
+                        std::env::var("ASH_CONTROL_PLANE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string())
+                    }),
+                    gateway_url: gateway_url.unwrap_or_else(|| {
+                        std::env::var("ASH_GATEWAY_URL").unwrap_or_else(|_| "http://localhost:8081".to_string())
+                    }),
+                    ..Default::default()
+                };
+                tools::session::configure_k8s(config.clone()).await;
+                ToolResult::ok(format!("Updated K8s config:\ncontrol_plane_url: {}\ngateway_url: {}", 
+                    config.control_plane_url, config.gateway_url))
             }
-            let new_config = tools::session::ClientConfig {
-                control_plane_url: control_plane_url.unwrap_or(config.control_plane_url),
-                gateway_url: gateway_url.unwrap_or(config.gateway_url),
-                ..config
-            };
-            tools::session::set_config(new_config.clone()).await;
-            return Ok(println!("Updated config:\ncontrol_plane_url: {}\ngateway_url: {}", 
-                new_config.control_plane_url, new_config.gateway_url));
         }
         
         // ==================== Events ====================

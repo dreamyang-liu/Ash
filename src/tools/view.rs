@@ -12,7 +12,7 @@ pub struct ViewArgs {
     pub offset: usize,
     #[serde(default = "default_limit")]
     pub limit: usize,
-    /// Execute in session sandbox via MCP
+    /// Execute in session sandbox
     #[serde(default)]
     pub session_id: Option<String>,
 }
@@ -51,42 +51,33 @@ impl Tool for ViewTool {
             
             // Route to session if provided
             if let Some(session_id) = &args.session_id {
-                let mcp_args = serde_json::json!({
-                    "file_path": args.file_path,
-                    "offset": args.offset,
-                    "limit": args.limit,
-                });
-                return call_mcp_tool(session_id, "read_file", mcp_args).await;
-            }
-            
-            // Local execution
-            match read_file_with_lines(&args.file_path, args.offset, args.limit).await {
-                Ok(content) => ToolResult::ok(content),
-                Err(e) => ToolResult::err(e),
+                match session::read_file_in_session(&session_id, &args.file_path).await {
+                    Ok(content) => {
+                        let formatted = format_with_lines(&content, args.offset, args.limit);
+                        ToolResult::ok(formatted)
+                    }
+                    Err(e) => ToolResult::err(format!("{e}")),
+                }
+            } else {
+                // Local execution
+                match read_file_with_lines(&args.file_path, args.offset, args.limit).await {
+                    Ok(content) => ToolResult::ok(content),
+                    Err(e) => ToolResult::err(e),
+                }
             }
         })
     }
 }
 
-async fn call_mcp_tool(session_id: &str, tool_name: &str, args: Value) -> ToolResult {
-    match session::call_tool_in_session(session_id, tool_name, args).await {
-        Ok(result) => {
-            let content = result.get("content")
-                .and_then(|c| c.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|c| c.get("text"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
-            let is_error = result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
-            
-            if is_error {
-                ToolResult::err(content.to_string())
-            } else {
-                ToolResult::ok(content.to_string())
-            }
-        }
-        Err(e) => ToolResult::err(e),
-    }
+/// Format content with line numbers, applying offset and limit
+fn format_with_lines(content: &str, offset: usize, limit: usize) -> String {
+    content.lines()
+        .enumerate()
+        .skip(offset.saturating_sub(1))
+        .take(limit)
+        .map(|(i, line)| format!("{:>6} | {}", i + 1, &line[..line.len().min(500)]))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn read_file_with_lines(path: &str, offset: usize, limit: usize) -> Result<String, String> {

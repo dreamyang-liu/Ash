@@ -1,6 +1,7 @@
 //! Edit tool - str_replace, insert, create
 
 use crate::{BoxFuture, Tool, ToolResult};
+use crate::backend::ExecOptions;
 use crate::tools::session;
 use serde::Deserialize;
 use serde_json::Value;
@@ -26,7 +27,7 @@ pub struct EditArgs {
     // create
     #[serde(default)]
     pub file_text: Option<String>,
-    /// Execute in session sandbox via MCP
+    /// Execute in session sandbox
     #[serde(default)]
     pub session_id: Option<String>,
 }
@@ -64,17 +65,7 @@ impl Tool for EditTool {
             
             // Route to session if provided
             if let Some(session_id) = &args.session_id {
-                let mut mcp_args = serde_json::json!({
-                    "command": args.command,
-                    "path": args.path,
-                });
-                if let Some(v) = &args.view_range { mcp_args["view_range"] = serde_json::json!(v); }
-                if let Some(v) = &args.old_str { mcp_args["old_str"] = serde_json::json!(v); }
-                if let Some(v) = &args.new_str { mcp_args["new_str"] = serde_json::json!(v); }
-                if let Some(v) = &args.insert_line { mcp_args["insert_line"] = serde_json::json!(v); }
-                if let Some(v) = &args.insert_text { mcp_args["insert_text"] = serde_json::json!(v); }
-                if let Some(v) = &args.file_text { mcp_args["file_text"] = serde_json::json!(v); }
-                return call_mcp_tool(session_id, "text_editor", mcp_args).await;
+                return execute_in_session(&session_id, &args).await;
             }
             
             // Local execution
@@ -89,19 +80,75 @@ impl Tool for EditTool {
     }
 }
 
-async fn call_mcp_tool(session_id: &str, tool_name: &str, args: Value) -> ToolResult {
-    match session::call_tool_in_session(session_id, tool_name, args).await {
-        Ok(result) => {
-            let content = result.get("content")
-                .and_then(|c| c.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|c| c.get("text"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
-            let is_error = result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
-            if is_error { ToolResult::err(content.to_string()) } else { ToolResult::ok(content.to_string()) }
+async fn execute_in_session(session_id: &str, args: &EditArgs) -> ToolResult {
+    match args.command.as_str() {
+        "view" => {
+            // Read file and format with view_range
+            match session::read_file_in_session(session_id, &args.path).await {
+                Ok(content) => {
+                    let lines: Vec<&str> = content.lines().collect();
+                    let (start, end) = match &args.view_range {
+                        Some(r) if r.len() >= 2 => ((r[0].max(1) - 1) as usize, if r[1] == -1 { lines.len() } else { r[1] as usize }),
+                        Some(r) if r.len() == 1 => ((r[0].max(1) - 1) as usize, lines.len()),
+                        _ => (0, lines.len()),
+                    };
+                    let result: Vec<String> = lines[start..end.min(lines.len())]
+                        .iter().enumerate()
+                        .map(|(i, l)| format!("{:>6} | {}", start + i + 1, l))
+                        .collect();
+                    ToolResult::ok(result.join("\n"))
+                }
+                Err(e) => ToolResult::err(format!("{e}")),
+            }
         }
-        Err(e) => ToolResult::err(e),
+        "str_replace" => {
+            // Read, replace, write back
+            let old = args.old_str.as_deref().unwrap_or("");
+            let new = args.new_str.as_deref().unwrap_or("");
+            
+            let content = match session::read_file_in_session(session_id, &args.path).await {
+                Ok(c) => c,
+                Err(e) => return ToolResult::err(format!("{e}")),
+            };
+            
+            let count = content.matches(old).count();
+            if count == 0 { return ToolResult::err("No match found for old_str"); }
+            if count > 1 { return ToolResult::err(format!("Multiple matches ({count}). old_str must be unique.")); }
+            
+            let new_content = content.replace(old, new);
+            match session::write_file_in_session(session_id, &args.path, &new_content).await {
+                Ok(()) => ToolResult::ok("Replaced successfully"),
+                Err(e) => ToolResult::err(format!("{e}")),
+            }
+        }
+        "insert" => {
+            let line = args.insert_line.unwrap_or(0);
+            let text = args.insert_text.as_deref().unwrap_or("");
+            
+            let content = match session::read_file_in_session(session_id, &args.path).await {
+                Ok(c) => c,
+                Err(e) => return ToolResult::err(format!("{e}")),
+            };
+            
+            let mut lines: Vec<&str> = content.lines().collect();
+            let idx = if line <= 0 { 0 } else { (line as usize).min(lines.len()) };
+            for (i, new_line) in text.lines().enumerate() {
+                lines.insert(idx + i, new_line);
+            }
+            
+            match session::write_file_in_session(session_id, &args.path, &lines.join("\n")).await {
+                Ok(()) => ToolResult::ok(format!("Inserted at line {}", line)),
+                Err(e) => ToolResult::err(format!("{e}")),
+            }
+        }
+        "create" => {
+            let content = args.file_text.as_deref().unwrap_or("");
+            match session::write_file_in_session(session_id, &args.path, content).await {
+                Ok(()) => ToolResult::ok(format!("Created: {}", args.path)),
+                Err(e) => ToolResult::err(format!("{e}")),
+            }
+        }
+        _ => ToolResult::err(format!("Unknown command: {}", args.command)),
     }
 }
 

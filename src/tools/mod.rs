@@ -21,7 +21,7 @@ pub use shell::ShellTool;
 pub use git::{GitStatusTool, GitDiffTool, GitLogTool, GitAddTool, GitCommitTool};
 pub use clip::{ClipTool, PasteTool, ClipsTool, ClearClipsTool};
 pub use buffer::{BufferReadTool, BufferWriteTool, BufferDeleteTool, BufferReplaceTool, BufferListTool, BufferClearTool, BufferToClipTool, ClipToBufferTool};
-pub use session::{SessionCreateTool, SessionListTool, SessionDestroyTool};
+pub use session::{SessionCreateTool, SessionListTool, SessionDestroyTool, SessionInfoTool, BackendSwitchTool, BackendStatusTool};
 pub use terminal::{TerminalRunAsyncTool, TerminalGetOutputTool, TerminalKillTool, TerminalListTool, TerminalRemoveTool};
 pub use mcp_mount::{McpInstallTool, McpMountTool, McpUnmountTool, McpListTool, McpCallTool};
 pub use filesystem::{FsListDirTool, FsMkdirTool, FsRemoveTool, FsMoveTool, FsCopyTool, FsStatTool, FsWriteTool};
@@ -77,6 +77,9 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(SessionCreateTool),
         Box::new(SessionListTool),
         Box::new(SessionDestroyTool),
+        Box::new(SessionInfoTool),
+        Box::new(BackendSwitchTool),
+        Box::new(BackendStatusTool),
         // MCP mount
         Box::new(McpInstallTool),
         Box::new(McpMountTool),

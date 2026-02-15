@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
 
+pub mod backend;
 pub mod tools;
 
 /// Tool execution result

@@ -4,6 +4,21 @@ A minimal CLI and MCP server for AI agents to interact with sandboxed environmen
 
 ## Architecture
 
+Ash supports two backends for running sandboxes:
+
+### Docker Backend (Local)
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│   Agent     │────▶│   ash CLI        │────▶│   Docker        │
+│   (LLM)     │     │   (local)        │     │   Container     │
+└─────────────┘     └──────────────────┘     │   ┌───────────┐ │
+                            │                │   │ ash-mcp   │ │
+                            │ HTTP           │   │ :3000     │ │
+                            └───────────────▶│   └───────────┘ │
+                                             └─────────────────┘
+```
+
+### K8s Backend (Remote)
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │   Agent     │────▶│  Control Plane   │────▶│   K8s Cluster   │
@@ -21,20 +36,42 @@ A minimal CLI and MCP server for AI agents to interact with sandboxed environmen
 ## Quick Start
 
 ```bash
-# Set endpoints (or use defaults)
-export ASH_CONTROL_PLANE_URL="http://control-plane:80"
-export ASH_GATEWAY_URL="http://gateway:80"
+# Check backend status
+ash config
+# Output: {"backends":{"docker":"available","k8s":"unavailable"},"default":"docker"}
 
-# Create a sandbox session
+# Create a sandbox session (uses default backend)
 ash session create
-# Output: {"session_id":"abc123","status":"Ready","host":"..."}
+# Output: {"session_id":"abc123","backend":"docker","status":"running","host":"localhost"}
+
+# Or specify backend explicitly
+ash session create --backend docker
+ash session create --backend k8s
 
 # Run commands in the sandbox
 ash --session abc123 run "ls -la"
 ash --session abc123 run "cat README.md"
 
+# List all sessions (across backends)
+ash session list
+
 # Destroy when done
 ash session destroy abc123
+```
+
+### Backend Configuration
+
+```bash
+# Switch default backend
+ash backend switch docker
+ash backend switch k8s
+
+# Configure K8s endpoints
+ash config --control-plane-url "http://control-plane:80" --gateway-url "http://gateway:80"
+
+# Or via environment variables
+export ASH_CONTROL_PLANE_URL="http://control-plane:80"
+export ASH_GATEWAY_URL="http://gateway:80"
 ```
 
 ---

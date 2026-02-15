@@ -1,25 +1,24 @@
 //! Git tools
 
 use crate::{BoxFuture, Tool, ToolResult};
+use crate::backend::ExecOptions;
 use crate::tools::session;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::process::Command;
 
-// Helper for MCP routing
-async fn call_mcp_tool(session_id: &str, tool_name: &str, args: Value) -> ToolResult {
-    match session::call_tool_in_session(session_id, tool_name, args).await {
+// Helper for session execution
+async fn exec_git_in_session(session_id: &str, cmd_args: &str) -> ToolResult {
+    let cmd = format!("git {}", cmd_args);
+    match session::exec_in_session(session_id, &cmd, ExecOptions::default()).await {
         Ok(result) => {
-            let content = result.get("content")
-                .and_then(|c| c.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|c| c.get("text"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
-            let is_error = result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
-            if is_error { ToolResult::err(content.to_string()) } else { ToolResult::ok(content.to_string()) }
+            if result.success() {
+                ToolResult::ok(result.stdout)
+            } else {
+                ToolResult::err(format!("{}\n{}", result.stdout, result.stderr))
+            }
         }
-        Err(e) => ToolResult::err(e),
+        Err(e) => ToolResult::err(format!("{e}")),
     }
 }
 
@@ -58,7 +57,8 @@ impl Tool for GitStatusTool {
             let args: Args = serde_json::from_value(args.clone()).unwrap_or_default();
             
             if let Some(sid) = &args.session_id {
-                return call_mcp_tool(sid, "git_status", serde_json::json!({"short": args.short})).await;
+                let cmd = if args.short { "status -s" } else { "status" };
+                return exec_git_in_session(&sid, cmd).await;
             }
             
             let mut cmd = Command::new("git");
@@ -99,9 +99,10 @@ impl Tool for GitDiffTool {
             let args: Args = serde_json::from_value(args.clone()).unwrap_or_default();
             
             if let Some(sid) = &args.session_id {
-                return call_mcp_tool(sid, "git_diff", serde_json::json!({
-                    "staged": args.staged, "paths": args.paths
-                })).await;
+                let mut cmd = String::from("diff");
+                if args.staged { cmd.push_str(" --staged"); }
+                for p in &args.paths { cmd.push_str(&format!(" '{}'", p.replace('\'', "'\\''"))); }
+                return exec_git_in_session(&sid, &cmd).await;
             }
             
             let mut cmd = Command::new("git");
@@ -146,9 +147,9 @@ impl Tool for GitLogTool {
                 .unwrap_or(Args { count: 10, oneline: false, session_id: None });
             
             if let Some(sid) = &args.session_id {
-                return call_mcp_tool(sid, "git_log", serde_json::json!({
-                    "count": args.count, "oneline": args.oneline
-                })).await;
+                let mut cmd = format!("log -{}", args.count);
+                if args.oneline { cmd.push_str(" --oneline"); }
+                return exec_git_in_session(&sid, &cmd).await;
             }
             
             let mut cmd = Command::new("git");
@@ -189,9 +190,14 @@ impl Tool for GitAddTool {
             let args: Args = serde_json::from_value(args.clone()).unwrap_or_default();
             
             if let Some(sid) = &args.session_id {
-                return call_mcp_tool(sid, "git_add", serde_json::json!({
-                    "paths": args.paths, "all": args.all
-                })).await;
+                let cmd = if args.all {
+                    "add -A".to_string()
+                } else if args.paths.is_empty() {
+                    return ToolResult::err("Specify paths or use all=true".to_string());
+                } else {
+                    format!("add {}", args.paths.iter().map(|p| format!("'{}'", p.replace('\'', "'\\''"))).collect::<Vec<_>>().join(" "))
+                };
+                return exec_git_in_session(&sid, &cmd).await;
             }
             
             let mut cmd = Command::new("git");
@@ -243,9 +249,10 @@ impl Tool for GitCommitTool {
             };
             
             if let Some(sid) = &args.session_id {
-                return call_mcp_tool(sid, "git_commit", serde_json::json!({
-                    "message": args.message, "all": args.all
-                })).await;
+                let mut cmd = String::from("commit");
+                if args.all { cmd.push_str(" -a"); }
+                cmd.push_str(&format!(" -m '{}'", args.message.replace('\'', "'\\''")));
+                return exec_git_in_session(&sid, &cmd).await;
             }
             
             let mut cmd = Command::new("git");
