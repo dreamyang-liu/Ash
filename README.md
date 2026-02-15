@@ -303,6 +303,128 @@ ash clips-clear old_note  # Clear specific
 
 ---
 
+### Buffer (Agent Workspace)
+
+Named buffers provide a persistent, editable text workspace for agents. Like a scratchpad with line-based operations.
+
+#### `buffer_write`
+Write content to a buffer (creates if doesn't exist).
+
+```bash
+# Replace entire buffer
+ash buffer write "line 1\nline 2\nline 3"
+
+# Append to buffer
+ash buffer write --append "new lines"
+
+# Insert at specific line
+ash buffer write --at-line 5 "inserted content"
+
+# Use named buffer
+ash buffer write --name scratch "temp notes"
+```
+
+**MCP:**
+```json
+{"name": "buffer_write", "arguments": {"content": "def main():\n    pass", "name": "main"}}
+{"name": "buffer_write", "arguments": {"content": "# append this", "append": true}}
+{"name": "buffer_write", "arguments": {"content": "inserted", "at_line": 10}}
+```
+
+#### `buffer_read`
+Read lines from a buffer.
+
+```bash
+ash buffer read                    # Read all (default: main)
+ash buffer read --name scratch     # Read named buffer
+ash buffer read -s 10 -e 50        # Read lines 10-50
+```
+
+**MCP:**
+```json
+{"name": "buffer_read", "arguments": {}}
+{"name": "buffer_read", "arguments": {"name": "scratch", "start_line": 10, "end_line": 50}}
+```
+
+**Output format:**
+```
+     1 | def main():
+     2 |     print("hello")
+     3 |     return 0
+
+[3 lines shown, buffer 'main' has 3 total]
+```
+
+#### `buffer_replace`
+Replace a range of lines.
+
+```bash
+ash buffer replace --start 5 --end 10 "replacement content"
+```
+
+**MCP:**
+```json
+{"name": "buffer_replace", "arguments": {"start_line": 5, "end_line": 10, "content": "new\nlines"}}
+```
+
+#### `buffer_delete`
+Delete a range of lines.
+
+```bash
+ash buffer delete --start 5 --end 10
+```
+
+**MCP:**
+```json
+{"name": "buffer_delete", "arguments": {"start_line": 5, "end_line": 10}}
+```
+
+#### `buffer_list`
+List all buffers.
+
+```bash
+ash buffer list
+```
+
+**Output:**
+```
+NAME             | LINES  | CHARS   | MODIFIED
+------------------------------------------------------------
+main             |    150 |    4230 | 2024-01-15T10:30:00
+scratch          |     25 |     680 | 2024-01-15T09:15:00
+```
+
+#### `buffer_clear`
+Clear or delete buffers.
+
+```bash
+ash buffer clear              # Clear ALL buffers
+ash buffer clear --name main  # Delete specific buffer
+```
+
+#### Buffer ↔ Clipboard Integration
+
+Transfer content between buffers and clipboard.
+
+```bash
+# Copy buffer range to clipboard
+ash buffer-to-clip --start 10 --end 20 --clip-name snippet
+
+# Paste clipboard into buffer
+ash clip-to-buffer --clip-name snippet --append
+ash clip-to-buffer --clip-name code --at-line 50
+```
+
+**MCP:**
+```json
+{"name": "buffer_to_clip", "arguments": {"start_line": 10, "end_line": 20, "clip_name": "snippet"}}
+{"name": "clip_to_buffer", "arguments": {"clip_name": "snippet", "buffer": "main", "append": true}}
+```
+
+**Use case:** Build up code in buffer, copy sections to clipboard for reference, paste clipboard content back into buffer at specific locations.
+
+---
+
 ## Common Workflows
 
 ### 1. Debug a Failing Test

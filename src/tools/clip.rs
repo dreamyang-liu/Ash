@@ -46,6 +46,32 @@ async fn save_clipboard(cb: &Clipboard) -> Result<(), String> {
     fs::write(&path, content).await.map_err(|e| e.to_string())
 }
 
+// ========== Public helpers for buffer integration ==========
+
+/// Save content to clipboard (for buffer_to_clip)
+pub async fn save_clip_entry(name: &str, content: &str, source: Option<&str>) -> Result<(), String> {
+    let mut cb = load_clipboard().await;
+    
+    let entry = ClipEntry {
+        content: content.to_string(),
+        source: source.map(String::from),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    
+    cb.clips.insert(name.to_string(), entry);
+    save_clipboard(&cb).await
+}
+
+/// Load content from clipboard (for clip_to_buffer)
+pub async fn load_clip_entry(name: &str) -> Result<String, String> {
+    let cb = load_clipboard().await;
+    
+    match cb.clips.get(name) {
+        Some(entry) => Ok(entry.content.clone()),
+        None => Err(format!("Clip '{}' not found", name)),
+    }
+}
+
 // ========== Clip (Copy) ==========
 
 #[derive(Debug, Clone, Deserialize, Default)]

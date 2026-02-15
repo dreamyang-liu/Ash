@@ -6,6 +6,7 @@ pub mod edit;
 pub mod shell;
 pub mod git;
 pub mod clip;
+pub mod buffer;
 pub mod session;
 pub mod terminal;
 pub mod mcp_mount;
@@ -19,6 +20,7 @@ pub use edit::EditTool;
 pub use shell::ShellTool;
 pub use git::{GitStatusTool, GitDiffTool, GitLogTool, GitAddTool, GitCommitTool};
 pub use clip::{ClipTool, PasteTool, ClipsTool, ClearClipsTool};
+pub use buffer::{BufferReadTool, BufferWriteTool, BufferDeleteTool, BufferReplaceTool, BufferListTool, BufferClearTool, BufferToClipTool, ClipToBufferTool};
 pub use session::{SessionCreateTool, SessionListTool, SessionDestroyTool};
 pub use terminal::{TerminalRunAsyncTool, TerminalGetOutputTool, TerminalKillTool, TerminalListTool, TerminalRemoveTool};
 pub use mcp_mount::{McpInstallTool, McpMountTool, McpUnmountTool, McpListTool, McpCallTool};
@@ -62,6 +64,15 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(PasteTool),
         Box::new(ClipsTool),
         Box::new(ClearClipsTool),
+        // Buffers
+        Box::new(BufferReadTool),
+        Box::new(BufferWriteTool),
+        Box::new(BufferDeleteTool),
+        Box::new(BufferReplaceTool),
+        Box::new(BufferListTool),
+        Box::new(BufferClearTool),
+        Box::new(BufferToClipTool),
+        Box::new(ClipToBufferTool),
         // Session/sandbox
         Box::new(SessionCreateTool),
         Box::new(SessionListTool),
