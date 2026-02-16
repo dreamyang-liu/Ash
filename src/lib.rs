@@ -11,6 +11,7 @@ pub mod backend;
 pub mod daemon;
 pub mod gateway;
 pub mod mcp;
+pub mod style;
 pub mod tools;
 
 /// Tool execution result

@@ -11,6 +11,7 @@
 //!   because they manage infrastructure (Docker containers, K8s pods)
 
 use crate::backend::{BackendType, Session};
+use crate::style;
 use crate::tools::session::BackendManager;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -172,7 +173,9 @@ impl Gateway {
         // Verify it's actually ready by hitting the health endpoint
         self.wait_for_mcp_ready(&url, 10).await?;
 
-        eprintln!("Local ash-mcp started on port {}", port);
+        eprintln!("  {} ash-mcp started on port {}",
+            style::ecolor(style::check(), style::GREEN),
+            style::ecolor(&port.to_string(), style::CYAN));
         *guard = Some(LocalMcpProcess { child, port, url });
         Ok(())
     }
@@ -465,7 +468,8 @@ impl Gateway {
                         // Register route for the new session
                         drop(manager);
                         if let Err(e) = self.register_route(&session).await {
-                            eprintln!("Warning: failed to register route for session {}: {}", session.id, e);
+                            eprintln!("  {} route registration failed for {}: {}",
+                                style::ecolor("!", style::BRIGHT_YELLOW), session.id, e);
                         }
                         let text = json!({
                             "session_id": session.id,
@@ -613,7 +617,9 @@ impl Gateway {
         // Kill local ash-mcp subprocess
         let mut guard = self.local_mcp.write().await;
         if let Some(mut proc) = guard.take() {
-            eprintln!("Stopping local ash-mcp (port {})", proc.port);
+            eprintln!("  {} stopping ash-mcp {}",
+            style::ecolor(style::cross(), style::GRAY),
+            style::ecolor(&format!("(port {})", proc.port), style::GRAY));
             let _ = proc.child.kill().await;
         }
     }
@@ -634,14 +640,22 @@ pub async fn run_gateway() -> anyhow::Result<()> {
 
     let gateway = Arc::new(Gateway::new());
 
+    let ver = env!("CARGO_PKG_VERSION");
+    eprintln!("{}", style::gateway_banner(ver));
+
     // Pre-start local ash-mcp
     if let Err(e) = gateway.ensure_local_mcp().await {
-        eprintln!("Warning: failed to start local ash-mcp: {e}");
-        eprintln!("Local tool calls will fail until ash-mcp is available");
+        eprintln!("  {} failed to start ash-mcp: {e}",
+            style::ecolor("!", style::BRIGHT_YELLOW));
+        eprintln!("  {} local tool calls will fail until ash-mcp is available",
+            style::ecolor("!", style::BRIGHT_YELLOW));
     }
 
     let listener = tokio::net::UnixListener::bind(&socket)?;
-    eprintln!("ash gateway listening on {}", socket.display());
+    eprintln!("  {} listening on {}",
+        style::ecolor(style::check(), style::GREEN),
+        style::ecolor(&socket.display().to_string(), style::CYAN));
+    eprintln!();
 
     // Graceful shutdown on SIGTERM/SIGINT
     let socket_cleanup = socket.clone();
@@ -659,7 +673,8 @@ pub async fn run_gateway() -> anyhow::Result<()> {
             _ = sigint.recv() => {}
         }
 
-        eprintln!("ash gateway shutting down");
+        eprintln!("\n  {} gateway shutting down",
+            style::ecolor(style::cross(), style::GRAY));
         gateway_shutdown.shutdown().await;
         let _ = std::fs::remove_file(&socket_cleanup);
         let _ = std::fs::remove_file(&pid_cleanup);
@@ -672,12 +687,14 @@ pub async fn run_gateway() -> anyhow::Result<()> {
                 let gw = gateway.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(gw, stream).await {
-                        eprintln!("gateway connection error: {e}");
+                        eprintln!("  {} connection error: {e}",
+                            style::ecolor("!", style::BRIGHT_YELLOW));
                     }
                 });
             }
             Err(e) => {
-                eprintln!("gateway accept error: {e}");
+                eprintln!("  {} accept error: {e}",
+                    style::ecolor("!", style::BRIGHT_YELLOW));
             }
         }
     }

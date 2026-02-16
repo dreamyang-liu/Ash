@@ -2,6 +2,7 @@
 
 use ash::{Tool, ToolResult};
 use ash::daemon;
+use ash::style;
 use ash::tools;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
@@ -49,16 +50,7 @@ enum OutputFormat { Text, Json }
 #[derive(Subcommand)]
 enum Commands {
     // ==================== File Operations ====================
-    
-    /// Read file with line numbers
-    View {
-        file_path: String,
-        #[arg(short = 'n', long, default_value = "1")]
-        offset: usize,
-        #[arg(short, long, default_value = "100")]
-        limit: usize,
-    },
-    
+
     /// Search for pattern in files (ripgrep)
     Grep {
         pattern: String,
@@ -144,10 +136,9 @@ enum Commands {
 
     // ==================== Filesystem ====================
 
-    /// Filesystem operations
-    Fs {
-        #[command(subcommand)]
-        op: FsOp,
+    /// List directory contents
+    Ls {
+        path: String,
     },
 
     // ==================== Buffer ====================
@@ -409,42 +400,6 @@ enum SessionOp {
     },
 }
 
-#[derive(Subcommand)]
-enum FsOp {
-    /// List directory contents
-    Ls { path: String },
-    /// Get file/directory metadata
-    Stat { path: String },
-    /// Write content to file
-    Write {
-        path: String,
-        content: String,
-    },
-    /// Create directory
-    Mkdir {
-        path: String,
-        #[arg(long, default_value = "true")]
-        recursive: bool,
-    },
-    /// Remove file or directory
-    Rm {
-        path: String,
-        #[arg(short, long)]
-        recursive: bool,
-    },
-    /// Move/rename file or directory
-    Mv {
-        from: String,
-        to: String,
-    },
-    /// Copy file or directory
-    Cp {
-        from: String,
-        to: String,
-        #[arg(short, long)]
-        recursive: bool,
-    },
-}
 
 #[derive(Subcommand)]
 enum BufferOp {
@@ -601,12 +556,6 @@ async fn main() -> anyhow::Result<()> {
     let result = match cli.command {
         // ==================== File Operations ====================
 
-        Commands::View { file_path, offset, limit } => {
-            exec_tool(&tools::ViewTool, serde_json::json!({
-                "file_path": file_path, "offset": offset, "limit": limit
-            }), &session_id).await
-        }
-
         Commands::Grep { pattern, path, include, limit } => {
             exec_tool(&tools::GrepTool, serde_json::json!({
                 "pattern": pattern, "path": path, "include": include, "limit": limit
@@ -675,30 +624,8 @@ async fn main() -> anyhow::Result<()> {
 
         // ==================== Filesystem ====================
 
-        Commands::Fs { op } => {
-            match op {
-                FsOp::Ls { path } => {
-                    exec_tool(&tools::FsListDirTool, serde_json::json!({"path": path}), &session_id).await
-                }
-                FsOp::Stat { path } => {
-                    exec_tool(&tools::FsStatTool, serde_json::json!({"path": path}), &session_id).await
-                }
-                FsOp::Write { path, content } => {
-                    exec_tool(&tools::FsWriteTool, serde_json::json!({"path": path, "content": content}), &session_id).await
-                }
-                FsOp::Mkdir { path, recursive } => {
-                    exec_tool(&tools::FsMkdirTool, serde_json::json!({"path": path, "recursive": recursive}), &session_id).await
-                }
-                FsOp::Rm { path, recursive } => {
-                    exec_tool(&tools::FsRemoveTool, serde_json::json!({"path": path, "recursive": recursive}), &session_id).await
-                }
-                FsOp::Mv { from, to } => {
-                    exec_tool(&tools::FsMoveTool, serde_json::json!({"from": from, "to": to}), &session_id).await
-                }
-                FsOp::Cp { from, to, recursive } => {
-                    exec_tool(&tools::FsCopyTool, serde_json::json!({"from": from, "to": to, "recursive": recursive}), &session_id).await
-                }
-            }
+        Commands::Ls { path } => {
+            exec_tool(&tools::FsListDirTool, serde_json::json!({"path": path}), &session_id).await
         }
 
         // ==================== Buffer ====================
@@ -973,7 +900,8 @@ async fn main() -> anyhow::Result<()> {
             match op {
                 GatewayOp::Start { foreground } => {
                     if daemon::is_gateway_running() {
-                        println!("Gateway is already running");
+                        println!("{} Gateway is already running",
+                            style::color(style::check(), style::GREEN));
                         return Ok(());
                     }
 
@@ -988,7 +916,9 @@ async fn main() -> anyhow::Result<()> {
                             .stdout(std::process::Stdio::null())
                             .stderr(std::process::Stdio::null())
                             .spawn()?;
-                        println!("Gateway started (pid {})", child.id());
+                        println!("{} Gateway started {}",
+                            style::color(style::check(), style::GREEN),
+                            style::dim(&format!("(pid {})", child.id())));
                     }
                 }
                 GatewayOp::Stop => {
@@ -1004,13 +934,16 @@ async fn main() -> anyhow::Result<()> {
                                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                                 let _ = std::fs::remove_file(daemon::pid_path());
                                 let _ = std::fs::remove_file(daemon::socket_path());
-                                println!("Gateway stopped (pid {})", pid);
+                                println!("{} Gateway stopped {}",
+                                    style::color(style::cross(), style::GRAY),
+                                    style::dim(&format!("(pid {})", pid)));
                             } else {
                                 eprintln!("Invalid PID file");
                             }
                         }
                         Err(_) => {
-                            eprintln!("Gateway is not running");
+                            eprintln!("{} Gateway is not running",
+                                style::ecolor(style::cross(), style::GRAY));
                         }
                     }
                 }
@@ -1021,10 +954,15 @@ async fn main() -> anyhow::Result<()> {
                                 .and_then(|r| r.get("uptime_secs"))
                                 .and_then(|u| u.as_u64())
                                 .unwrap_or(0);
-                            println!("Gateway running (uptime: {}s)", uptime);
+                            println!("{} Gateway {} {}",
+                                style::color(style::check(), style::GREEN),
+                                style::color("running", style::GREEN),
+                                style::dim(&format!("(uptime: {})", style::format_uptime(uptime))));
                         }
                         None => {
-                            println!("Gateway is not running");
+                            println!("{} Gateway {}",
+                                style::color(style::cross(), style::GRAY),
+                                style::dim("not running"));
                         }
                     }
                 }
@@ -1034,52 +972,63 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Info => {
             let mut out = String::new();
+            let ver = env!("CARGO_PKG_VERSION");
 
-            // Version
-            out.push_str(&format!("ash {}\n\n", env!("CARGO_PKG_VERSION")));
+            // Banner
+            out.push_str(&format!("\n{}\n", style::banner_line(ver)));
 
             // Try gateway for info
             if let Some(resp) = daemon::gateway_call("gateway/info", serde_json::json!({})).await {
                 if let Some(info) = resp.get("result") {
                     let uptime = info.get("uptime_secs").and_then(|u| u.as_u64()).unwrap_or(0);
-                    out.push_str(&format!("Gateway: running (uptime: {}s)\n", uptime));
+                    out.push_str(&format!("\n{}\n", style::section("Gateway")));
+                    out.push_str(&format!("  {} {} {}\n",
+                        style::color(style::check(), style::GREEN),
+                        style::color("running", style::GREEN),
+                        style::dim(&format!("uptime {}", style::format_uptime(uptime)))));
 
                     let local_mcp_port = info.get("local_mcp_port").and_then(|p| p.as_u64());
                     if let Some(port) = local_mcp_port {
-                        out.push_str(&format!("Local ash-mcp: port {}\n", port));
+                        out.push_str(&format!("  {} ash-mcp on port {}\n",
+                            style::color(style::check(), style::GREEN),
+                            style::color(&port.to_string(), style::CYAN)));
                     }
-                    out.push('\n');
 
                     let docker_ok = info.pointer("/backends/docker").and_then(|v| v.as_bool()).unwrap_or(false);
                     let k8s_ok = info.pointer("/backends/k8s").and_then(|v| v.as_bool()).unwrap_or(false);
                     let default_backend = info.get("default_backend").and_then(|v| v.as_str()).unwrap_or("local");
 
-                    out.push_str("Backends:\n");
-                    let docker_mark = if docker_ok { "ok" } else { "--" };
-                    let k8s_mark = if k8s_ok { "ok" } else { "--" };
+                    out.push_str(&format!("\n{}\n", style::section("Backends")));
                     let docker_default = if default_backend == "docker" { " (default)" } else { "" };
                     let k8s_default = if default_backend == "k8s" { " (default)" } else { "" };
-                    out.push_str(&format!("  docker  {}{}\n", docker_mark, docker_default));
-                    out.push_str(&format!("  k8s     {}{}\n", k8s_mark, k8s_default));
+                    out.push_str(&format!("{}\n", style::status_line(
+                        &format!("docker{}", docker_default), if docker_ok { "available" } else { "unavailable" }, docker_ok)));
+                    out.push_str(&format!("{}\n", style::status_line(
+                        &format!("k8s{}", k8s_default), if k8s_ok { "available" } else { "unavailable" }, k8s_ok)));
 
                     let sessions = info.get("sessions").and_then(|s| s.as_u64()).unwrap_or(0);
                     let routes = info.get("routes").and_then(|r| r.as_u64()).unwrap_or(0);
-                    out.push_str(&format!("\nSessions: {} ({} routes)\n", sessions, routes));
-
                     let tool_count = tools::all_tools().len();
-                    out.push_str(&format!("Tools: {}\n", tool_count));
 
+                    out.push_str(&format!("\n{}\n", style::section("Stats")));
+                    out.push_str(&format!("{}\n", style::kv("sessions", &format!("{} {}", sessions, style::dim(&format!("({} routes)", routes))))));
+                    out.push_str(&format!("{}\n", style::kv("tools   ", &tool_count.to_string())));
+
+                    out.push('\n');
                     print!("{}", out);
                     return Ok(());
                 }
             }
 
             // Fallback: no gateway running
-            out.push_str("Gateway: not running\n\n");
+            out.push_str(&format!("\n{}\n", style::section("Gateway")));
+            out.push_str(&format!("  {} {}\n",
+                style::color(style::cross(), style::GRAY),
+                style::dim("not running")));
 
             use ash::backend::BackendType;
 
-            out.push_str("Backends:\n");
+            out.push_str(&format!("\n{}\n", style::section("Backends")));
             let manager = tools::session::BACKEND_MANAGER.read().await;
             let default_backend = manager.default_backend();
             let local_ok = manager.health_check(BackendType::Local).await.is_ok();
@@ -1087,27 +1036,32 @@ async fn main() -> anyhow::Result<()> {
             let k8s_ok = manager.health_check(BackendType::K8s).await.is_ok();
             drop(manager);
 
-            let local_mark = if local_ok { "ok" } else { "--" };
-            let docker_mark = if docker_ok { "ok" } else { "--" };
-            let k8s_mark = if k8s_ok { "ok" } else { "--" };
             let local_default = if default_backend == BackendType::Local { " (default)" } else { "" };
             let docker_default = if default_backend == BackendType::Docker { " (default)" } else { "" };
             let k8s_default = if default_backend == BackendType::K8s { " (default)" } else { "" };
-            out.push_str(&format!("  local   {}{}\n", local_mark, local_default));
-            out.push_str(&format!("  docker  {}{}\n", docker_mark, docker_default));
-            out.push_str(&format!("  k8s     {}{}\n", k8s_mark, k8s_default));
+            out.push_str(&format!("{}\n", style::status_line(
+                &format!("local{}", local_default), if local_ok { "available" } else { "unavailable" }, local_ok)));
+            out.push_str(&format!("{}\n", style::status_line(
+                &format!("docker{}", docker_default), if docker_ok { "available" } else { "unavailable" }, docker_ok)));
+            out.push_str(&format!("{}\n", style::status_line(
+                &format!("k8s{}", k8s_default), if k8s_ok { "available" } else { "unavailable" }, k8s_ok)));
 
             let tool_count = tools::all_tools().len();
-            out.push_str(&format!("\nTools: {}\n", tool_count));
+            out.push_str(&format!("\n{}\n", style::section("Stats")));
+            out.push_str(&format!("{}\n", style::kv("tools", &tool_count.to_string())));
 
+            out.push('\n');
             print!("{}", out);
             return Ok(());
         }
 
         Commands::Tools => {
-            for tool in tools::all_tools() {
-                println!("{}: {}", tool.name(), tool.description());
+            let all = tools::all_tools();
+            println!("\n{}", style::section(&format!("Tools ({})", all.len())));
+            for tool in all {
+                println!("{}", style::tool_entry(tool.name(), tool.description()));
             }
+            println!();
             return Ok(());
         }
     };
@@ -1119,7 +1073,8 @@ async fn main() -> anyhow::Result<()> {
                 print!("{}", result.output);
                 if !result.output.ends_with('\n') { println!(); }
             } else {
-                eprintln!("Error: {}", result.error.unwrap_or_default());
+                let msg = result.error.unwrap_or_default();
+                eprintln!("{} {}", style::ecolor("error:", style::BRIGHT_RED), msg);
                 std::process::exit(1);
             }
         }

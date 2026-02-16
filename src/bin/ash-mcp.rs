@@ -2,6 +2,7 @@
 //!
 //! Provides tools over MCP protocol (JSON-RPC over stdio or HTTP)
 
+use ash::style;
 use ash::tools;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -109,7 +110,16 @@ async fn run_http(port: u16) -> anyhow::Result<()> {
     let actual_port = listener.local_addr()?.port();
     // Discovery protocol: gateway reads this line to find the assigned port
     eprintln!("LISTENING:{}", actual_port);
-    eprintln!("MCP HTTP server listening on 0.0.0.0:{}", actual_port);
+    let ver = env!("CARGO_PKG_VERSION");
+    eprintln!("{}", style::mcp_banner(ver, "http"));
+    let tool_count = tools::all_tools().len();
+    eprintln!("  {} {} tools loaded",
+        style::ecolor(style::check(), style::GREEN),
+        tool_count);
+    eprintln!("  {} listening on {}",
+        style::ecolor(style::check(), style::GREEN),
+        style::ecolor(&format!("0.0.0.0:{}", actual_port), style::CYAN));
+    eprintln!();
 
     loop {
         let (stream, peer) = listener.accept().await?;

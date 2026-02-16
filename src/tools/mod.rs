@@ -1,6 +1,5 @@
 //! Tool registry
 
-pub mod view;
 pub mod grep;
 pub mod edit;
 pub mod shell;
@@ -15,7 +14,6 @@ pub mod filesystem;
 pub mod utils;
 pub mod events;
 
-pub use view::ViewTool;
 pub use grep::GrepTool;
 pub use edit::EditTool;
 pub use shell::{ShellTool, ShellRevertTool, ShellHistoryTool};
@@ -26,7 +24,7 @@ pub use session::{SessionCreateTool, SessionListTool, SessionDestroyTool, Sessio
 pub use terminal::{TerminalRunAsyncTool, TerminalGetOutputTool, TerminalKillTool, TerminalListTool, TerminalRemoveTool, TerminalRevertTool};
 pub use outline::OutlineTool;
 
-pub use filesystem::{FsListDirTool, FsMkdirTool, FsRemoveTool, FsMoveTool, FsCopyTool, FsStatTool, FsWriteTool};
+pub use filesystem::FsListDirTool;
 pub use utils::{FindFilesTool, TreeTool, DiffFilesTool, PatchApplyTool, HttpFetchTool, FileInfoTool, UndoTool};
 pub use events::{EventsSubscribeTool, EventsPollTool, EventsPushTool, ToolRegisterTool, ToolListCustomTool, ToolCallCustomTool, ToolRemoveCustomTool, ToolViewCustomTool};
 
@@ -35,19 +33,11 @@ use crate::Tool;
 /// All available tools
 pub fn all_tools() -> Vec<Box<dyn Tool>> {
     vec![
-        // File read
-        Box::new(ViewTool),
+        // File operations
         Box::new(GrepTool),
         Box::new(EditTool),
         Box::new(OutlineTool),
-        // File write
-        Box::new(FsWriteTool),
         Box::new(FsListDirTool),
-        Box::new(FsMkdirTool),
-        Box::new(FsRemoveTool),
-        Box::new(FsMoveTool),
-        Box::new(FsCopyTool),
-        Box::new(FsStatTool),
         // Shell (sync)
         Box::new(ShellTool),
         Box::new(ShellRevertTool),
@@ -86,7 +76,6 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(SessionInfoTool),
         Box::new(BackendSwitchTool),
         Box::new(BackendStatusTool),
-
         // Utils
         Box::new(FindFilesTool),
         Box::new(TreeTool),
