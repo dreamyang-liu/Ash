@@ -182,6 +182,24 @@ enum Commands {
         timeout: u64,
         #[arg(long)]
         tail: Option<usize>,
+        /// Command to revert changes (for tracking)
+        #[arg(long)]
+        revert: Option<String>,
+    },
+    
+    /// Revert last shell command
+    #[command(name = "run-revert")]
+    RunRevert {
+        /// Specific run ID to revert
+        #[arg(long)]
+        id: Option<String>,
+    },
+    
+    /// Show shell command history
+    #[command(name = "run-history")]
+    RunHistory {
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
     },
     
     /// Async terminal management
@@ -737,10 +755,18 @@ async fn main() -> anyhow::Result<()> {
 
         // ==================== Shell ====================
 
-        Commands::Run { command, timeout, tail } => {
+        Commands::Run { command, timeout, tail, revert } => {
             exec_tool(&tools::ShellTool, serde_json::json!({
-                "command": command, "timeout_secs": timeout, "tail_lines": tail
+                "command": command, "timeout_secs": timeout, "tail_lines": tail, "revert_command": revert
             }), &session_id).await
+        }
+
+        Commands::RunRevert { id } => {
+            exec_tool(&tools::ShellRevertTool, serde_json::json!({"id": id}), &session_id).await
+        }
+
+        Commands::RunHistory { limit } => {
+            exec_tool(&tools::ShellHistoryTool, serde_json::json!({"limit": limit}), &session_id).await
         }
 
         Commands::Terminal { op } => {

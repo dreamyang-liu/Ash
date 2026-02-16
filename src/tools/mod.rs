@@ -18,7 +18,7 @@ pub mod events;
 pub use view::ViewTool;
 pub use grep::GrepTool;
 pub use edit::EditTool;
-pub use shell::ShellTool;
+pub use shell::{ShellTool, ShellRevertTool, ShellHistoryTool};
 pub use git::{GitStatusTool, GitDiffTool, GitLogTool, GitAddTool, GitCommitTool};
 pub use clip::{ClipTool, PasteTool, ClipsTool, ClearClipsTool};
 pub use buffer::{BufferReadTool, BufferWriteTool, BufferDeleteTool, BufferReplaceTool, BufferListTool, BufferClearTool, BufferToClipTool, ClipToBufferTool};
@@ -50,6 +50,8 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(FsStatTool),
         // Shell (sync)
         Box::new(ShellTool),
+        Box::new(ShellRevertTool),
+        Box::new(ShellHistoryTool),
         // Terminal (async)
         Box::new(TerminalRunAsyncTool),
         Box::new(TerminalGetOutputTool),
