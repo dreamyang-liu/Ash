@@ -23,7 +23,7 @@ pub use git::{GitStatusTool, GitDiffTool, GitLogTool, GitAddTool, GitCommitTool}
 pub use clip::{ClipTool, PasteTool, ClipsTool, ClearClipsTool};
 pub use buffer::{BufferReadTool, BufferWriteTool, BufferDeleteTool, BufferReplaceTool, BufferListTool, BufferClearTool, BufferToClipTool, ClipToBufferTool};
 pub use session::{SessionCreateTool, SessionListTool, SessionDestroyTool, SessionInfoTool, BackendSwitchTool, BackendStatusTool};
-pub use terminal::{TerminalRunAsyncTool, TerminalGetOutputTool, TerminalKillTool, TerminalListTool, TerminalRemoveTool};
+pub use terminal::{TerminalRunAsyncTool, TerminalGetOutputTool, TerminalKillTool, TerminalListTool, TerminalRemoveTool, TerminalRevertTool};
 pub use outline::OutlineTool;
 
 pub use filesystem::{FsListDirTool, FsMkdirTool, FsRemoveTool, FsMoveTool, FsCopyTool, FsStatTool, FsWriteTool};
@@ -56,6 +56,7 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(TerminalKillTool),
         Box::new(TerminalListTool),
         Box::new(TerminalRemoveTool),
+        Box::new(TerminalRevertTool),
         // Git
         Box::new(GitStatusTool),
         Box::new(GitDiffTool),

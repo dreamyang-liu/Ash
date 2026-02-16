@@ -362,6 +362,8 @@ enum TerminalOp {
     List,
     /// Remove completed process
     Remove { handle: String },
+    /// Revert a command's changes (if revert_command was provided)
+    Revert { handle: String },
 }
 
 #[derive(Subcommand)]
@@ -761,6 +763,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 TerminalOp::Remove { handle } => {
                     ("terminal_remove", serde_json::json!({"handle": handle, "session_id": session_id}))
+                }
+                TerminalOp::Revert { handle } => {
+                    ("terminal_revert", serde_json::json!({"handle": handle, "session_id": session_id}))
                 }
             };
             // Try daemon first (session_id is embedded in args for terminal tools),

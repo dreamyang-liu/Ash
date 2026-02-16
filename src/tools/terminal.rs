@@ -594,3 +594,79 @@ impl Tool for TerminalRemoveTool {
         })
     }
 }
+
+pub struct TerminalRevertTool;
+
+impl Tool for TerminalRevertTool {
+    fn name(&self) -> &'static str { "terminal_revert" }
+    fn description(&self) -> &'static str { "Execute the revert command for a process (if one was provided)" }
+
+    fn schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "handle": {"type": "string", "description": "Process handle"},
+                "session_id": {"type": "string", "description": "Route to session sandbox"}
+            },
+            "required": ["handle"]
+        })
+    }
+
+    fn execute(&self, args: Value) -> BoxFuture<'_, ToolResult> {
+        Box::pin(async move {
+            #[derive(Deserialize)]
+            struct Args {
+                handle: String,
+                session_id: Option<String>,
+            }
+
+            let args: Args = match serde_json::from_value(args.clone()) {
+                Ok(a) => a,
+                Err(e) => return ToolResult::err(format!("Invalid args: {e}")),
+            };
+
+            let sid = args.session_id.or_else(|| lookup_handle_session(&args.handle));
+
+            if let Some(ref sid) = sid {
+                let remote_args = serde_json::json!({"handle": args.handle});
+                return match session::call_tool_in_session(sid, "terminal_revert", remote_args).await {
+                    Ok(result) => mcp_result_to_tool_result(result),
+                    Err(e) => ToolResult::err(format!("Session error: {e}")),
+                };
+            }
+
+            // Local lookup
+            let registry = REGISTRY.lock().await;
+            let revert_cmd = match registry.get_revert_command(&args.handle) {
+                Some(cmd) => cmd,
+                None => return ToolResult::err("Handle not found".to_string()),
+            };
+            drop(registry); // Release lock before running command
+
+            match revert_cmd {
+                None => ToolResult::err("Cannot revert: no revert command was provided for this process".to_string()),
+                Some(cmd) if cmd.is_empty() => ToolResult::ok("No revert needed: command had no state changes".to_string()),
+                Some(cmd) => {
+                    // Execute the revert command
+                    match tokio::process::Command::new("sh")
+                        .args(["-c", &cmd])
+                        .output()
+                        .await
+                    {
+                        Ok(output) => {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            if output.status.success() {
+                                ToolResult::ok(format!("Reverted successfully with: {}\n{}{}", cmd, stdout, stderr))
+                            } else {
+                                ToolResult::err(format!("Revert command failed (exit {}): {}\n{}{}", 
+                                    output.status.code().unwrap_or(-1), cmd, stdout, stderr))
+                            }
+                        }
+                        Err(e) => ToolResult::err(format!("Failed to execute revert command: {}", e)),
+                    }
+                }
+            }
+        })
+    }
+}
