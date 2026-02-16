@@ -73,14 +73,37 @@ impl BackendManager {
     }
     
     /// Get backend for a session
+    /// Checks the in-memory tracking map first, then searches all backends
     async fn get_backend(&self, session_id: &str) -> Result<&dyn Backend, BackendError> {
         // "local" always routes to LocalBackend
         if session_id == "local" {
             return Ok(&self.local as &dyn Backend);
         }
+
+        // Check tracking map
         let backends = self.session_backends.read().await;
-        let backend_type = backends.get(session_id).copied().unwrap_or(self.default_backend);
-        self.get_backend_by_type(backend_type)
+        if let Some(&backend_type) = backends.get(session_id) {
+            return self.get_backend_by_type(backend_type);
+        }
+        drop(backends);
+
+        // Search all backends (session may predate current process)
+        if let Some(ref docker) = self.docker {
+            if let Ok(Some(_)) = docker.get(session_id).await {
+                // Cache for future lookups
+                self.session_backends.write().await.insert(session_id.to_string(), BackendType::Docker);
+                return Ok(docker as &dyn Backend);
+            }
+        }
+
+        if let Some(ref k8s) = self.k8s {
+            if let Ok(Some(_)) = k8s.get(session_id).await {
+                self.session_backends.write().await.insert(session_id.to_string(), BackendType::K8s);
+                return Ok(k8s as &dyn Backend);
+            }
+        }
+
+        Err(BackendError::NotFound(session_id.to_string()))
     }
     
     /// Get backend by type
@@ -116,13 +139,9 @@ impl BackendManager {
     pub async fn destroy(&self, session_id: &str) -> Result<(), BackendError> {
         let backend = self.get_backend(session_id).await?;
         backend.destroy(session_id).await?;
-        
+
         // Remove tracking
-        {
-            let mut backends = self.session_backends.write().await;
-            backends.remove(session_id);
-        }
-        
+        self.session_backends.write().await.remove(session_id);
         Ok(())
     }
     
@@ -147,29 +166,11 @@ impl BackendManager {
     
     /// Get session info
     pub async fn get(&self, session_id: &str) -> Result<Option<Session>, BackendError> {
-        // Try the tracked backend first
-        let backends = self.session_backends.read().await;
-        if let Some(&backend_type) = backends.get(session_id) {
-            drop(backends);
-            let backend = self.get_backend_by_type(backend_type)?;
-            return backend.get(session_id).await;
+        match self.get_backend(session_id).await {
+            Ok(backend) => backend.get(session_id).await,
+            Err(BackendError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
         }
-        drop(backends);
-        
-        // Search all backends
-        if let Some(ref docker) = self.docker {
-            if let Ok(Some(session)) = docker.get(session_id).await {
-                return Ok(Some(session));
-            }
-        }
-        
-        if let Some(ref k8s) = self.k8s {
-            if let Ok(Some(session)) = k8s.get(session_id).await {
-                return Ok(Some(session));
-            }
-        }
-        
-        Ok(None)
     }
     
     /// Execute command in session

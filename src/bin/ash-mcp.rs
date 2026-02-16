@@ -106,7 +106,10 @@ fn run_stdio() -> anyhow::Result<()> {
 async fn run_http(port: u16) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
-    eprintln!("MCP HTTP server listening on {}", addr);
+    let actual_port = listener.local_addr()?.port();
+    // Discovery protocol: gateway reads this line to find the assigned port
+    eprintln!("LISTENING:{}", actual_port);
+    eprintln!("MCP HTTP server listening on 0.0.0.0:{}", actual_port);
 
     loop {
         let (stream, peer) = listener.accept().await?;

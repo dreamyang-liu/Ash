@@ -126,7 +126,7 @@ impl Backend for LocalBackend {
             .map_err(|e| BackendError::file(format!("Failed to write {path}: {e}")))
     }
 
-    async fn call_tool(&self, _session_id: &str, tool_name: &str, args: serde_json::Value) -> Result<serde_json::Value, BackendError> {
+    async fn call_tool(&self, _session_id: &str, tool_name: &str, _args: serde_json::Value) -> Result<serde_json::Value, BackendError> {
         // For local backend, we execute tools directly
         // This is handled by the BackendManager, not here
         Err(BackendError::operation(format!(

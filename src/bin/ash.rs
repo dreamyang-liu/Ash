@@ -8,37 +8,22 @@ use serde_json::Value;
 
 use std::collections::HashMap;
 
-/// Execute a tool: try daemon first, then fallback to direct execution.
-/// Daemon handles both local and session-routed calls with persistent connections.
+/// Execute a tool: route through gateway, fallback to direct execution.
+/// Gateway handles all routing: local (via ash-mcp), Docker, K8s.
 async fn exec_tool(tool: &dyn Tool, args: Value, session_id: &Option<String>) -> ToolResult {
-    // 1. Try daemon (handles local + session routing with persistent BackendManager)
-    if let Some(result) = daemon::daemon_tool_call(tool.name(), args.clone(), session_id).await {
+    // 1. Ensure gateway is running (auto-start if needed)
+    daemon::ensure_gateway().await;
+
+    // 2. Route through gateway
+    if let Some(result) = daemon::gateway_tool_call(tool.name(), args.clone(), session_id).await {
         return result;
     }
 
-    // 2. Fallback: direct execution (no daemon running)
-    if let Some(ref sid) = session_id {
-        match tools::session::call_tool_in_session(sid, tool.name(), args).await {
-            Ok(result) => {
-                let is_error = result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false);
-                let text = result.get("content")
-                    .and_then(|c| c.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|c| c.get("text"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if is_error {
-                    ToolResult { success: false, output: text.clone(), error: Some(text) }
-                } else {
-                    ToolResult::ok(text)
-                }
-            }
-            Err(e) => ToolResult::err(format!("Session error: {e}")),
-        }
-    } else {
-        tool.execute(args).await
+    // 3. Fallback: direct local execution (gateway unavailable)
+    if session_id.is_some() {
+        return ToolResult::err("Gateway required for session routing but not available".to_string());
     }
+    tool.execute(args).await
 }
 
 #[derive(Parser)]
@@ -316,10 +301,10 @@ enum Commands {
     /// Start MCP server over stdio (for Claude Desktop, etc.)
     Mcp,
     
-    /// Daemon management (long-lived background process)
-    Daemon {
+    /// Gateway management (routes tool calls to ash-mcp endpoints)
+    Gateway {
         #[command(subcommand)]
-        op: DaemonOp,
+        op: GatewayOp,
     },
 
     /// Show ash status: backends, sessions, processes, config
@@ -583,16 +568,16 @@ enum CustomToolOp {
 }
 
 #[derive(Subcommand)]
-enum DaemonOp {
-    /// Start the daemon
+enum GatewayOp {
+    /// Start the gateway
     Start {
         /// Run in foreground (don't detach)
         #[arg(long)]
         foreground: bool,
     },
-    /// Stop the daemon
+    /// Stop the gateway
     Stop,
-    /// Check daemon status
+    /// Check gateway status
     Status,
 }
 
@@ -797,9 +782,9 @@ async fn main() -> anyhow::Result<()> {
                     ("terminal_revert", serde_json::json!({"handle": handle, "session_id": session_id}))
                 }
             };
-            // Try daemon first (session_id is embedded in args for terminal tools),
-            // fall back to direct execution
-            if let Some(result) = daemon::daemon_tool_call(tool_name, args.clone(), &None).await {
+            // Route through gateway (session_id is embedded in args for terminal tools)
+            daemon::ensure_gateway().await;
+            if let Some(result) = daemon::gateway_tool_call(tool_name, args.clone(), &None).await {
                 result
             } else {
                 tools::find_tool(tool_name).unwrap().execute(args).await
@@ -886,9 +871,9 @@ async fn main() -> anyhow::Result<()> {
                     ("backend_switch", serde_json::json!({"session_id": session_id, "backend": backend}))
                 }
             };
-            // Try daemon first (session management tools, no outer session routing),
-            // fall back to direct execution
-            if let Some(result) = daemon::daemon_tool_call(tool_name, args.clone(), &None).await {
+            // Route through gateway (session management runs in gateway process)
+            daemon::ensure_gateway().await;
+            if let Some(result) = daemon::gateway_tool_call(tool_name, args.clone(), &None).await {
                 result
             } else {
                 tools::find_tool(tool_name).unwrap().execute(args).await
@@ -934,9 +919,9 @@ async fn main() -> anyhow::Result<()> {
                     ("events_push", serde_json::json!({"kind": kind, "source": source, "data": data_val}))
                 }
             };
-            // Try daemon first (events are daemon-managed state),
-            // fall back to direct execution
-            if let Some(result) = daemon::daemon_tool_call(tool_name, args.clone(), &None).await {
+            // Route through gateway (events live in ash-mcp process)
+            daemon::ensure_gateway().await;
+            if let Some(result) = daemon::gateway_tool_call(tool_name, args.clone(), &None).await {
                 result
             } else {
                 tools::find_tool(tool_name).unwrap().execute(args).await
@@ -977,29 +962,29 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         
-        Commands::Daemon { op } => {
+        Commands::Gateway { op } => {
             match op {
-                DaemonOp::Start { foreground } => {
-                    if daemon::is_daemon_running() {
-                        println!("Daemon is already running");
+                GatewayOp::Start { foreground } => {
+                    if daemon::is_gateway_running() {
+                        println!("Gateway is already running");
                         return Ok(());
                     }
 
                     if foreground {
-                        run_daemon().await?;
+                        ash::gateway::run_gateway().await?;
                     } else {
                         // Spawn detached child with --foreground
                         let exe = std::env::current_exe()?;
                         let child = std::process::Command::new(exe)
-                            .args(["daemon", "start", "--foreground"])
+                            .args(["gateway", "start", "--foreground"])
                             .stdin(std::process::Stdio::null())
                             .stdout(std::process::Stdio::null())
                             .stderr(std::process::Stdio::null())
                             .spawn()?;
-                        println!("Daemon started (pid {})", child.id());
+                        println!("Gateway started (pid {})", child.id());
                     }
                 }
-                DaemonOp::Stop => {
+                GatewayOp::Stop => {
                     let pid_file = daemon::pid_path();
                     match std::fs::read_to_string(&pid_file) {
                         Ok(contents) => {
@@ -1012,27 +997,27 @@ async fn main() -> anyhow::Result<()> {
                                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                                 let _ = std::fs::remove_file(daemon::pid_path());
                                 let _ = std::fs::remove_file(daemon::socket_path());
-                                println!("Daemon stopped (pid {})", pid);
+                                println!("Gateway stopped (pid {})", pid);
                             } else {
                                 eprintln!("Invalid PID file");
                             }
                         }
                         Err(_) => {
-                            eprintln!("Daemon is not running");
+                            eprintln!("Gateway is not running");
                         }
                     }
                 }
-                DaemonOp::Status => {
-                    match daemon::daemon_call("ping", serde_json::json!({})).await {
+                GatewayOp::Status => {
+                    match daemon::gateway_call("ping", serde_json::json!({})).await {
                         Some(resp) => {
                             let uptime = resp.get("result")
                                 .and_then(|r| r.get("uptime_secs"))
                                 .and_then(|u| u.as_u64())
                                 .unwrap_or(0);
-                            println!("Daemon running (uptime: {}s)", uptime);
+                            println!("Gateway running (uptime: {}s)", uptime);
                         }
                         None => {
-                            println!("Daemon is not running");
+                            println!("Gateway is not running");
                         }
                     }
                 }
@@ -1046,15 +1031,21 @@ async fn main() -> anyhow::Result<()> {
             // Version
             out.push_str(&format!("ash {}\n\n", env!("CARGO_PKG_VERSION")));
 
-            // Try daemon for cached info
-            if let Some(resp) = daemon::daemon_call("daemon/info", serde_json::json!({})).await {
+            // Try gateway for info
+            if let Some(resp) = daemon::gateway_call("gateway/info", serde_json::json!({})).await {
                 if let Some(info) = resp.get("result") {
                     let uptime = info.get("uptime_secs").and_then(|u| u.as_u64()).unwrap_or(0);
-                    out.push_str(&format!("Daemon: running (uptime: {}s)\n\n", uptime));
+                    out.push_str(&format!("Gateway: running (uptime: {}s)\n", uptime));
+
+                    let local_mcp_port = info.get("local_mcp_port").and_then(|p| p.as_u64());
+                    if let Some(port) = local_mcp_port {
+                        out.push_str(&format!("Local ash-mcp: port {}\n", port));
+                    }
+                    out.push('\n');
 
                     let docker_ok = info.pointer("/backends/docker").and_then(|v| v.as_bool()).unwrap_or(false);
                     let k8s_ok = info.pointer("/backends/k8s").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let default_backend = info.get("default_backend").and_then(|v| v.as_str()).unwrap_or("docker");
+                    let default_backend = info.get("default_backend").and_then(|v| v.as_str()).unwrap_or("local");
 
                     out.push_str("Backends:\n");
                     let docker_mark = if docker_ok { "ok" } else { "--" };
@@ -1065,24 +1056,21 @@ async fn main() -> anyhow::Result<()> {
                     out.push_str(&format!("  k8s     {}{}\n", k8s_mark, k8s_default));
 
                     let sessions = info.get("sessions").and_then(|s| s.as_u64()).unwrap_or(0);
-                    out.push_str(&format!("\nSessions: {}\n", sessions));
-
-                    let running = info.pointer("/processes/running").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let done = info.pointer("/processes/completed").and_then(|v| v.as_u64()).unwrap_or(0);
-                    out.push_str(&format!("Async processes: {} running, {} completed\n", running, done));
+                    let routes = info.get("routes").and_then(|r| r.as_u64()).unwrap_or(0);
+                    out.push_str(&format!("\nSessions: {} ({} routes)\n", sessions, routes));
 
                     let tool_count = tools::all_tools().len();
-                    out.push_str(&format!("\nTools: {}\n", tool_count));
+                    out.push_str(&format!("Tools: {}\n", tool_count));
 
                     print!("{}", out);
                     return Ok(());
                 }
             }
 
-            // Fallback: direct check (no daemon)
-            use ash::backend::BackendType;
+            // Fallback: no gateway running
+            out.push_str("Gateway: not running\n\n");
 
-            out.push_str("Daemon: not running\n\n");
+            use ash::backend::BackendType;
 
             out.push_str("Backends:\n");
             let manager = tools::session::BACKEND_MANAGER.read().await;
@@ -1102,39 +1090,6 @@ async fn main() -> anyhow::Result<()> {
             out.push_str(&format!("  docker  {}{}\n", docker_mark, docker_default));
             out.push_str(&format!("  k8s     {}{}\n", k8s_mark, k8s_default));
 
-            // Sessions
-            out.push_str("\nSessions:\n");
-            let manager = tools::session::BACKEND_MANAGER.read().await;
-            match manager.list().await {
-                Ok(sessions) if sessions.is_empty() => {
-                    out.push_str("  (none)\n");
-                }
-                Ok(sessions) => {
-                    for s in &sessions {
-                        let short_id = if s.id.len() > 12 { &s.id[..12] } else { &s.id };
-                        out.push_str(&format!("  {}  {}  {}  {}\n",
-                            short_id, s.status, s.backend, s.image));
-                    }
-                }
-                Err(e) => {
-                    out.push_str(&format!("  error: {e}\n"));
-                }
-            }
-            drop(manager);
-
-            // Async processes (local)
-            let (running, done) = tools::terminal::local_process_counts().await;
-            out.push_str(&format!("\nAsync processes (local): {} running, {} completed\n", running, done));
-
-            // Tracked handles
-            let handle_map = tools::terminal::load_handle_map();
-            if !handle_map.is_empty() {
-                let unique_sessions: std::collections::HashSet<_> = handle_map.values().collect();
-                out.push_str(&format!("Tracked handles: {} across {} session(s)\n",
-                    handle_map.len(), unique_sessions.len()));
-            }
-
-            // Tools count
             let tool_count = tools::all_tools().len();
             out.push_str(&format!("\nTools: {}\n", tool_count));
 
@@ -1164,273 +1119,4 @@ async fn main() -> anyhow::Result<()> {
     }
     
     Ok(())
-}
-
-// ==================== Daemon Server ====================
-
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-
-#[derive(Deserialize)]
-struct JsonRpcRequest {
-    #[allow(dead_code)]
-    jsonrpc: String,
-    id: Option<Value>,
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
-
-#[derive(Serialize)]
-struct JsonRpcResponse {
-    jsonrpc: String,
-    id: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<JsonRpcError>,
-}
-
-#[derive(Serialize)]
-struct JsonRpcError {
-    code: i32,
-    message: String,
-}
-
-static DAEMON_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-
-async fn run_daemon() -> anyhow::Result<()> {
-    let socket = daemon::socket_path();
-    let pid_file = daemon::pid_path();
-
-    let _ = std::fs::create_dir_all(daemon::ash_dir());
-    let _ = std::fs::remove_file(&socket);
-
-    // Write PID
-    std::fs::write(&pid_file, std::process::id().to_string())?;
-
-    DAEMON_START.get_or_init(std::time::Instant::now);
-
-    let listener = tokio::net::UnixListener::bind(&socket)?;
-    eprintln!("ash daemon listening on {}", socket.display());
-
-    // Graceful shutdown on SIGTERM/SIGINT
-    let socket_cleanup = socket.clone();
-    let pid_cleanup = pid_file.clone();
-
-    tokio::spawn(async move {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM");
-        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-            .expect("failed to register SIGINT");
-
-        tokio::select! {
-            _ = sigterm.recv() => {}
-            _ = sigint.recv() => {}
-        }
-
-        eprintln!("ash daemon shutting down");
-        let _ = std::fs::remove_file(&socket_cleanup);
-        let _ = std::fs::remove_file(&pid_cleanup);
-        std::process::exit(0);
-    });
-
-    loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                tokio::spawn(async move {
-                    if let Err(e) = handle_daemon_connection(stream).await {
-                        eprintln!("daemon connection error: {e}");
-                    }
-                });
-            }
-            Err(e) => {
-                eprintln!("daemon accept error: {e}");
-            }
-        }
-    }
-}
-
-async fn handle_daemon_connection(stream: tokio::net::UnixStream) -> anyhow::Result<()> {
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
-
-    if line.trim().is_empty() {
-        return Ok(());
-    }
-
-    let request: JsonRpcRequest = match serde_json::from_str(&line) {
-        Ok(r) => r,
-        Err(e) => {
-            let response = JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id: Value::Null,
-                result: None,
-                error: Some(JsonRpcError {
-                    code: -32700,
-                    message: format!("Parse error: {e}"),
-                }),
-            };
-            let mut out = serde_json::to_string(&response)?;
-            out.push('\n');
-            writer.write_all(out.as_bytes()).await?;
-            return Ok(());
-        }
-    };
-
-    let response = handle_daemon_request(request).await;
-    let mut out = serde_json::to_string(&response)?;
-    out.push('\n');
-    writer.write_all(out.as_bytes()).await?;
-
-    Ok(())
-}
-
-async fn handle_daemon_request(request: JsonRpcRequest) -> JsonRpcResponse {
-    let id = request.id.unwrap_or(Value::Null);
-
-    match request.method.as_str() {
-        "ping" => {
-            let uptime = DAEMON_START
-                .get()
-                .map(|s| s.elapsed().as_secs())
-                .unwrap_or(0);
-            JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id,
-                result: Some(json!({
-                    "status": "ok",
-                    "uptime_secs": uptime
-                })),
-                error: None,
-            }
-        }
-
-        "daemon/info" => {
-            use ash::backend::BackendType;
-
-            let uptime = DAEMON_START
-                .get()
-                .map(|s| s.elapsed().as_secs())
-                .unwrap_or(0);
-
-            let manager = tools::session::BACKEND_MANAGER.read().await;
-            let default_backend = manager.default_backend();
-            let local_ok = manager.health_check(BackendType::Local).await.is_ok();
-            let docker_ok = manager.health_check(BackendType::Docker).await.is_ok();
-            let k8s_ok = manager.health_check(BackendType::K8s).await.is_ok();
-
-            let sessions = manager.list().await.unwrap_or_default();
-            drop(manager);
-
-            let (running, done) = tools::terminal::local_process_counts().await;
-
-            JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id,
-                result: Some(json!({
-                    "uptime_secs": uptime,
-                    "default_backend": format!("{}", default_backend),
-                    "backends": {
-                        "local": local_ok,
-                        "docker": docker_ok,
-                        "k8s": k8s_ok
-                    },
-                    "sessions": sessions.len(),
-                    "processes": {
-                        "running": running,
-                        "completed": done
-                    }
-                })),
-                error: None,
-            }
-        }
-
-        "tools/call" => {
-            let name = request
-                .params
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("");
-            let arguments = request
-                .params
-                .get("arguments")
-                .cloned()
-                .unwrap_or(json!({}));
-            let session_id = request
-                .params
-                .get("session_id")
-                .and_then(|s| s.as_str());
-
-            // If session_id provided, route through BackendManager to session MCP
-            if let Some(sid) = session_id {
-                match tools::session::call_tool_in_session(sid, name, arguments).await {
-                    Ok(result) => {
-                        return JsonRpcResponse {
-                            jsonrpc: "2.0".to_string(),
-                            id,
-                            result: Some(result),
-                            error: None,
-                        };
-                    }
-                    Err(e) => {
-                        return JsonRpcResponse {
-                            jsonrpc: "2.0".to_string(),
-                            id,
-                            result: Some(json!({
-                                "content": [{"type": "text", "text": format!("Session error: {e}")}],
-                                "isError": true
-                            })),
-                            error: None,
-                        };
-                    }
-                }
-            }
-
-            // Local execution
-            match tools::find_tool(name) {
-                Some(tool) => {
-                    let result = tool.execute(arguments).await;
-                    JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        id,
-                        result: Some(json!({
-                            "content": [{
-                                "type": "text",
-                                "text": if result.success {
-                                    result.output
-                                } else {
-                                    result.error.unwrap_or_default()
-                                }
-                            }],
-                            "isError": !result.success
-                        })),
-                        error: None,
-                    }
-                }
-                None => JsonRpcResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id,
-                    result: None,
-                    error: Some(JsonRpcError {
-                        code: -32601,
-                        message: format!("Unknown tool: {name}"),
-                    }),
-                },
-            }
-        }
-
-        _ => JsonRpcResponse {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: None,
-            error: Some(JsonRpcError {
-                code: -32601,
-                message: format!("Method not found: {}", request.method),
-            }),
-        },
-    }
 }

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
-use crate::{Tool, ToolResult};
+use crate::Tool;
 
 /// MCP JSON-RPC request
 #[derive(Debug, Deserialize)]
