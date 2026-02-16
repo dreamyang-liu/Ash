@@ -313,6 +313,9 @@ enum Commands {
         op: CustomToolOp,
     },
     
+    /// Start MCP server over stdio (for Claude Desktop, etc.)
+    Mcp,
+    
     /// Daemon management (long-lived background process)
     Daemon {
         #[command(subcommand)]
@@ -964,6 +967,14 @@ async fn main() -> anyhow::Result<()> {
                     tools::ToolRemoveCustomTool.execute(serde_json::json!({"name": name})).await
                 }
             }
+        }
+        
+        Commands::Mcp => {
+            // Run MCP server over stdio
+            let all_tools = tools::all_tools();
+            let server = ash::mcp::McpServer::new(all_tools);
+            server.run().await.map_err(|e| anyhow::anyhow!("MCP server error: {}", e))?;
+            return Ok(());
         }
         
         Commands::Daemon { op } => {

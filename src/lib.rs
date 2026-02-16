@@ -9,6 +9,7 @@ use std::pin::Pin;
 
 pub mod backend;
 pub mod daemon;
+pub mod mcp;
 pub mod tools;
 
 /// Tool execution result
