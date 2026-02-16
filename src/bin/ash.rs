@@ -375,6 +375,9 @@ enum TerminalOp {
 #[derive(Subcommand)]
 enum SessionOp {
     Create {
+        /// Backend: local, docker, k8s (default: docker if --image is set, else local)
+        #[arg(short, long)]
+        backend: Option<String>,
         #[arg(short, long)]
         name: Option<String>,
         #[arg(short, long)]
@@ -835,12 +838,16 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Session { op } => {
             let (tool_name, args): (&str, Value) = match op {
-                SessionOp::Create { name, image, port, env, cpu_request, cpu_limit, memory_request, memory_limit, node_selector } => {
+                SessionOp::Create { backend, name, image, port, env, cpu_request, cpu_limit, memory_request, memory_limit, node_selector } => {
                     let env_map = parse_key_value(&env);
                     let node_sel = parse_key_value(&node_selector);
 
+                    // Auto-select docker backend when --image is provided
+                    let backend = backend.or_else(|| image.as_ref().map(|_| "docker".to_string()));
+
                     let mut args = serde_json::json!({
                         "name": name, "image": image, "ports": port, "env": env_map, "node_selector": node_sel,
+                        "backend": backend,
                     });
 
                     let mut resources = serde_json::json!({});

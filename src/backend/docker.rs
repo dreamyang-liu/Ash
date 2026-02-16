@@ -29,7 +29,7 @@ use super::{
 const MCP_PORT: u16 = 3000;
 
 /// ash-mcp release download URL
-const ASH_RELEASE_URL: &str = "https://github.com/dreamyang-liu/Ash/releases/download/dev/ash-linux-x86_64.tar.gz";
+const ASH_RELEASE_URL: &str = "https://github.com/dreamyang-liu/Ash/releases/download/dev/ash-linux-x86_64-ubuntu2204.tar.gz";
 
 /// Docker backend configuration
 #[derive(Debug, Clone)]
@@ -308,8 +308,8 @@ impl Backend for DockerBackend {
             "export DEBIAN_FRONTEND=noninteractive; \
              apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1; \
              curl -fsSL {} | tar xz -C /tmp && \
-             mv /tmp/ash-linux-x86_64 /usr/local/bin/ash && \
-             mv /tmp/ash-linux-x86_64-mcp /usr/local/bin/ash-mcp && \
+             mv /tmp/ash-linux-x86_64-ubuntu2204 /usr/local/bin/ash && \
+             mv /tmp/ash-linux-x86_64-ubuntu2204-mcp /usr/local/bin/ash-mcp && \
              chmod +x /usr/local/bin/ash /usr/local/bin/ash-mcp && \
              ash-mcp --transport http --port {}",
             ASH_RELEASE_URL, MCP_PORT,
