@@ -1,12 +1,15 @@
 //! Backend abstraction for session management
 //!
-//! Two backends:
+//! Three backends:
+//! - Local: Direct host execution (default)
 //! - Docker: Local containers via Docker Engine API
 //! - K8s: Remote sandboxes via Control Plane
 
+mod local;
 mod docker;
 mod k8s;
 
+pub use local::{LocalBackend, LocalConfig};
 pub use docker::DockerBackend;
 pub use k8s::{K8sBackend, K8sConfig};
 
@@ -30,6 +33,7 @@ pub struct Session {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BackendType {
+    Local,  // Direct host execution (default)
     Docker,
     K8s,
 }
@@ -37,6 +41,7 @@ pub enum BackendType {
 impl std::fmt::Display for BackendType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            BackendType::Local => write!(f, "local"),
             BackendType::Docker => write!(f, "docker"),
             BackendType::K8s => write!(f, "k8s"),
         }
@@ -47,7 +52,8 @@ impl std::str::FromStr for BackendType {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "docker" | "local" => Ok(BackendType::Docker),
+            "local" | "host" => Ok(BackendType::Local),
+            "docker" | "container" => Ok(BackendType::Docker),
             "k8s" | "kubernetes" | "remote" => Ok(BackendType::K8s),
             _ => Err(format!("Unknown backend: {s}")),
         }
@@ -205,5 +211,17 @@ impl BackendError {
     
     pub fn not_found(id: impl Into<String>) -> Self {
         BackendError::NotFound(id.into())
+    }
+    
+    pub fn exec(msg: impl Into<String>) -> Self {
+        BackendError::ExecFailed(msg.into())
+    }
+    
+    pub fn file(msg: impl Into<String>) -> Self {
+        BackendError::FileError(msg.into())
+    }
+    
+    pub fn operation(msg: impl Into<String>) -> Self {
+        BackendError::Other(msg.into())
     }
 }

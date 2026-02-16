@@ -1,8 +1,9 @@
-//! Session management with pluggable backends (Docker / K8s)
+//! Session management with pluggable backends (Local / Docker / K8s)
 //!
 //! Architecture:
-//! - BackendManager: manages multiple backends (docker, k8s)
-//! - Sessions are identified by UUID, backend is tracked per session
+//! - BackendManager: manages multiple backends (local, docker, k8s)
+//! - Local is the default - executes directly on host
+//! - Sessions are identified by UUID (or "local" for host)
 //! - Operations route to the correct backend automatically
 
 use serde::Deserialize;
@@ -13,7 +14,7 @@ use tokio::sync::RwLock;
 
 use crate::backend::{
     Backend, BackendError, BackendType, CreateOptions, DockerBackend, ExecOptions,
-    ExecResult, K8sBackend, K8sConfig, ResourceSpec, Session,
+    ExecResult, K8sBackend, K8sConfig, LocalBackend, ResourceSpec, Session,
 };
 use crate::{BoxFuture, Tool, ToolResult};
 
@@ -21,6 +22,7 @@ use crate::{BoxFuture, Tool, ToolResult};
 
 /// Manages multiple backends and routes operations
 pub struct BackendManager {
+    local: LocalBackend,
     docker: Option<DockerBackend>,
     k8s: Option<K8sBackend>,
     /// Default backend for new sessions
@@ -30,19 +32,17 @@ pub struct BackendManager {
 }
 
 impl BackendManager {
-    /// Create with both backends available
+    /// Create with all backends
     pub fn new() -> Self {
+        let local = LocalBackend::default();
         let docker = DockerBackend::new().ok();
         let k8s = Some(K8sBackend::new());
         
-        // Default to Docker if available, otherwise K8s
-        let default_backend = if docker.is_some() {
-            BackendType::Docker
-        } else {
-            BackendType::K8s
-        };
+        // Default to Local (host execution)
+        let default_backend = BackendType::Local;
         
         Self {
+            local,
             docker,
             k8s,
             default_backend,
@@ -74,6 +74,10 @@ impl BackendManager {
     
     /// Get backend for a session
     async fn get_backend(&self, session_id: &str) -> Result<&dyn Backend, BackendError> {
+        // "local" always routes to LocalBackend
+        if session_id == "local" {
+            return Ok(&self.local as &dyn Backend);
+        }
         let backends = self.session_backends.read().await;
         let backend_type = backends.get(session_id).copied().unwrap_or(self.default_backend);
         self.get_backend_by_type(backend_type)
@@ -82,6 +86,7 @@ impl BackendManager {
     /// Get backend by type
     fn get_backend_by_type(&self, backend_type: BackendType) -> Result<&dyn Backend, BackendError> {
         match backend_type {
+            BackendType::Local => Ok(&self.local as &dyn Backend),
             BackendType::Docker => self.docker.as_ref()
                 .map(|b| b as &dyn Backend)
                 .ok_or_else(|| BackendError::Unavailable("Docker backend not available".into())),
@@ -502,12 +507,20 @@ pub struct BackendStatusTool;
 
 impl Tool for BackendStatusTool {
     fn name(&self) -> &'static str { "backend_status" }
-    fn description(&self) -> &'static str { "Check status of backends (docker/k8s availability)" }
+    fn description(&self) -> &'static str { "Check status of backends (local/docker/k8s availability)" }
     fn schema(&self) -> Value { serde_json::json!({"type": "object"}) }
     
     fn execute(&self, _args: Value) -> BoxFuture<'_, ToolResult> {
         Box::pin(async move {
             let manager = BACKEND_MANAGER.read().await;
+            
+            let local_status = match manager.health_check(BackendType::Local).await {
+                Ok(()) => "available",
+                Err(e) => {
+                    tracing::debug!("Local health check failed: {e}");
+                    "unavailable"
+                }
+            };
             
             let docker_status = match manager.health_check(BackendType::Docker).await {
                 Ok(()) => "available",
@@ -528,6 +541,7 @@ impl Tool for BackendStatusTool {
             ToolResult::ok(serde_json::json!({
                 "default": manager.default_backend().to_string(),
                 "backends": {
+                    "local": local_status,
                     "docker": docker_status,
                     "k8s": k8s_status,
                 }

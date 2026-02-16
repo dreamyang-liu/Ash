@@ -1076,14 +1076,18 @@ async fn main() -> anyhow::Result<()> {
             out.push_str("Backends:\n");
             let manager = tools::session::BACKEND_MANAGER.read().await;
             let default_backend = manager.default_backend();
+            let local_ok = manager.health_check(BackendType::Local).await.is_ok();
             let docker_ok = manager.health_check(BackendType::Docker).await.is_ok();
             let k8s_ok = manager.health_check(BackendType::K8s).await.is_ok();
             drop(manager);
 
+            let local_mark = if local_ok { "ok" } else { "--" };
             let docker_mark = if docker_ok { "ok" } else { "--" };
             let k8s_mark = if k8s_ok { "ok" } else { "--" };
+            let local_default = if default_backend == BackendType::Local { " (default)" } else { "" };
             let docker_default = if default_backend == BackendType::Docker { " (default)" } else { "" };
             let k8s_default = if default_backend == BackendType::K8s { " (default)" } else { "" };
+            out.push_str(&format!("  local   {}{}\n", local_mark, local_default));
             out.push_str(&format!("  docker  {}{}\n", docker_mark, docker_default));
             out.push_str(&format!("  k8s     {}{}\n", k8s_mark, k8s_default));
 
@@ -1304,6 +1308,7 @@ async fn handle_daemon_request(request: JsonRpcRequest) -> JsonRpcResponse {
 
             let manager = tools::session::BACKEND_MANAGER.read().await;
             let default_backend = manager.default_backend();
+            let local_ok = manager.health_check(BackendType::Local).await.is_ok();
             let docker_ok = manager.health_check(BackendType::Docker).await.is_ok();
             let k8s_ok = manager.health_check(BackendType::K8s).await.is_ok();
 
@@ -1319,6 +1324,7 @@ async fn handle_daemon_request(request: JsonRpcRequest) -> JsonRpcResponse {
                     "uptime_secs": uptime,
                     "default_backend": format!("{}", default_backend),
                     "backends": {
+                        "local": local_ok,
                         "docker": docker_ok,
                         "k8s": k8s_ok
                     },
