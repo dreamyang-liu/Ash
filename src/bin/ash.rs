@@ -4,10 +4,12 @@ use ash::{Tool, ToolResult};
 use ash::daemon;
 use ash::style;
 use ash::tools;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use serde_json::Value;
 
 use std::collections::HashMap;
+
+use ash::cli::*;
 
 /// Execute a tool: route through gateway, fallback to direct execution.
 /// Gateway handles all routing: local (via ash-mcp), Docker, K8s.
@@ -27,517 +29,8 @@ async fn exec_tool(tool: &dyn Tool, args: Value, session_id: &Option<String>) ->
     tool.execute(args).await
 }
 
-#[derive(Parser)]
-#[command(name = "ash")]
-#[command(about = "Code Agent CLI & MCP Server")]
-#[command(version)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-    
-    /// Output format
-    #[arg(short, long, default_value = "text", global = true)]
-    output: OutputFormat,
-    
-    /// Session ID - all tool calls will execute in this sandbox
-    #[arg(long, global = true)]
-    session: Option<String>,
-}
+// CLI type definitions are in ash::cli (src/cli.rs)
 
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum OutputFormat { Text, Json }
-
-#[derive(Subcommand)]
-enum Commands {
-    // ==================== File Operations ====================
-
-    /// Search for pattern in files (ripgrep)
-    Grep {
-        pattern: String,
-        #[arg(default_value = ".")]
-        path: String,
-        #[arg(short, long)]
-        include: Option<String>,
-        #[arg(short, long, default_value = "100")]
-        limit: usize,
-    },
-    
-    /// Edit file
-    Edit {
-        #[command(subcommand)]
-        op: EditOp,
-    },
-    
-    /// Find files by name pattern
-    Find {
-        /// Glob pattern (e.g., *.py, test_*)
-        pattern: String,
-        #[arg(default_value = ".")]
-        path: String,
-        #[arg(short, long)]
-        max_depth: Option<usize>,
-        #[arg(short, long, default_value = "100")]
-        limit: usize,
-    },
-    
-    /// Show directory tree
-    Tree {
-        #[arg(default_value = ".")]
-        path: String,
-        #[arg(short, long, default_value = "3")]
-        max_depth: usize,
-        #[arg(long)]
-        show_hidden: bool,
-    },
-    
-    /// Compare two files
-    Diff {
-        file1: String,
-        file2: String,
-        #[arg(short, long, default_value = "3")]
-        context: usize,
-    },
-    
-    /// Apply unified diff patch
-    Patch {
-        /// Patch content (or use stdin)
-        patch: String,
-        #[arg(short, long)]
-        path: Option<String>,
-        #[arg(long)]
-        dry_run: bool,
-    },
-    
-    /// Get file type and info
-    FileInfo {
-        path: String,
-    },
-    
-    /// HTTP GET request
-    Fetch {
-        url: String,
-        #[arg(short, long, default_value = "30")]
-        timeout: u64,
-    },
-    
-    /// Undo last file edit
-    Undo {
-        /// Specific file to undo
-        path: Option<String>,
-        /// List undo history
-        #[arg(long)]
-        list: bool,
-    },
-
-    /// Show code outline (classes, functions, methods)
-    Outline {
-        file_path: String,
-    },
-
-    // ==================== Filesystem ====================
-
-    /// List directory contents
-    Ls {
-        path: String,
-    },
-
-    // ==================== Buffer ====================
-
-    /// Buffer management
-    Buffer {
-        #[command(subcommand)]
-        op: BufferOp,
-    },
-
-    // ==================== Shell ====================
-
-    /// Execute shell command (sync)
-    Run {
-        command: String,
-        #[arg(short, long, default_value = "300")]
-        timeout: u64,
-        #[arg(long)]
-        tail: Option<usize>,
-        /// Command to revert changes (for tracking)
-        #[arg(long)]
-        revert: Option<String>,
-    },
-    
-    /// Revert last shell command
-    #[command(name = "run-revert")]
-    RunRevert {
-        /// Specific run ID to revert
-        #[arg(long)]
-        id: Option<String>,
-    },
-    
-    /// Show shell command history
-    #[command(name = "run-history")]
-    RunHistory {
-        #[arg(short, long, default_value = "10")]
-        limit: usize,
-    },
-    
-    /// Async terminal management
-    Terminal {
-        #[command(subcommand)]
-        op: TerminalOp,
-    },
-    
-    // ==================== Git ====================
-    
-    /// Git status
-    #[command(name = "git-status")]
-    GitStatus {
-        #[arg(long)]
-        short: bool,
-    },
-    
-    /// Git diff
-    #[command(name = "git-diff")]
-    GitDiff {
-        #[arg(long)]
-        staged: bool,
-        paths: Vec<String>,
-    },
-    
-    /// Git log
-    #[command(name = "git-log")]
-    GitLog {
-        #[arg(short = 'n', long, default_value = "10")]
-        count: usize,
-        #[arg(long)]
-        oneline: bool,
-    },
-    
-    /// Git add (stage files)
-    #[command(name = "git-add")]
-    GitAdd {
-        /// Files to stage
-        paths: Vec<String>,
-        /// Stage all changes (-A)
-        #[arg(short, long)]
-        all: bool,
-    },
-    
-    /// Git commit
-    #[command(name = "git-commit")]
-    GitCommit {
-        /// Commit message
-        #[arg(short, long)]
-        message: String,
-        /// Stage all and commit (-a)
-        #[arg(short, long)]
-        all: bool,
-    },
-    
-    // ==================== Clipboard ====================
-    
-    /// Save to clipboard
-    Clip {
-        content: Option<String>,
-        #[arg(short, long)]
-        file: Option<String>,
-        #[arg(short, long)]
-        name: Option<String>,
-        #[arg(short, long)]
-        source: Option<String>,
-    },
-    
-    /// Retrieve from clipboard
-    Paste { name: Option<String> },
-    
-    /// List clipboard entries
-    Clips,
-    
-    /// Clear clipboard
-    #[command(name = "clips-clear")]
-    ClipsClear { name: Option<String> },
-    
-    // ==================== Session/Sandbox ====================
-    
-    /// Session/sandbox management
-    Session {
-        #[command(subcommand)]
-        op: SessionOp,
-    },
-    
-    // ==================== Config ====================
-    
-    /// Configure endpoints
-    Config {
-        #[arg(long)]
-        control_plane_url: Option<String>,
-        #[arg(long)]
-        gateway_url: Option<String>,
-    },
-    
-    // ==================== Events ====================
-    
-    /// Events management
-    Events {
-        #[command(subcommand)]
-        op: EventsOp,
-    },
-    
-    // ==================== Custom Tools ====================
-    
-    /// Custom tools management
-    #[command(name = "custom-tool")]
-    CustomTool {
-        #[command(subcommand)]
-        op: CustomToolOp,
-    },
-    
-    /// Start MCP server over stdio (for Claude Desktop, etc.)
-    Mcp,
-    
-    /// Gateway management (routes tool calls to ash-mcp endpoints)
-    Gateway {
-        #[command(subcommand)]
-        op: GatewayOp,
-    },
-
-    /// Show ash status: backends, sessions, processes, config
-    Info,
-
-    /// List all available tools
-    Tools,
-}
-
-#[derive(Subcommand)]
-enum EditOp {
-    View {
-        path: String,
-        #[arg(long, default_value = "1")]
-        start: i64,
-        #[arg(long, default_value = "-1")]
-        end: i64,
-    },
-    Replace {
-        path: String,
-        #[arg(long)]
-        old: String,
-        #[arg(long)]
-        new: String,
-    },
-    Insert {
-        path: String,
-        #[arg(long)]
-        line: i64,
-        #[arg(long)]
-        text: String,
-    },
-    Create {
-        path: String,
-        content: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum TerminalOp {
-    /// Start async process
-    Start {
-        command: String,
-        #[arg(short, long)]
-        workdir: Option<String>,
-        #[arg(short, long)]
-        env: Vec<String>,
-        /// Command to revert changes (empty string = no state change, omit = cannot revert)
-        #[arg(long)]
-        revert: Option<String>,
-    },
-    /// Get output from handle
-    Output {
-        handle: String,
-        #[arg(long)]
-        tail: Option<usize>,
-    },
-    /// Kill process
-    Kill { handle: String },
-    /// List processes
-    List,
-    /// Remove completed process
-    Remove { handle: String },
-    /// Revert a command's changes (if revert_command was provided)
-    Revert { handle: String },
-}
-
-#[derive(Subcommand)]
-enum SessionOp {
-    Create {
-        /// Backend: local, docker, k8s (default: docker if --image is set, else local)
-        #[arg(short, long)]
-        backend: Option<String>,
-        #[arg(short, long)]
-        name: Option<String>,
-        #[arg(short, long)]
-        image: Option<String>,
-        #[arg(short, long)]
-        port: Vec<i32>,
-        #[arg(short, long)]
-        env: Vec<String>,
-        #[arg(long)]
-        cpu_request: Option<String>,
-        #[arg(long)]
-        cpu_limit: Option<String>,
-        #[arg(long)]
-        memory_request: Option<String>,
-        #[arg(long)]
-        memory_limit: Option<String>,
-        #[arg(long)]
-        node_selector: Vec<String>,
-    },
-    /// Get session details
-    Info { session_id: String },
-    List,
-    Destroy { session_id: String },
-    /// Switch session backend
-    Switch {
-        session_id: String,
-        /// Target backend (docker or k8s)
-        backend: String,
-    },
-}
-
-
-#[derive(Subcommand)]
-enum BufferOp {
-    /// Read lines from a buffer
-    Read {
-        #[arg(short, long, default_value = "main")]
-        name: String,
-        #[arg(long)]
-        start: Option<usize>,
-        #[arg(long)]
-        end: Option<usize>,
-    },
-    /// Write content to a buffer
-    Write {
-        #[arg(short, long, default_value = "main")]
-        name: String,
-        content: String,
-        #[arg(long)]
-        at_line: Option<usize>,
-        #[arg(long)]
-        append: bool,
-    },
-    /// Delete lines from a buffer
-    Delete {
-        #[arg(short, long, default_value = "main")]
-        name: String,
-        #[arg(long)]
-        start: usize,
-        #[arg(long)]
-        end: usize,
-    },
-    /// Replace lines in a buffer
-    Replace {
-        #[arg(short, long, default_value = "main")]
-        name: String,
-        #[arg(long)]
-        start: usize,
-        #[arg(long)]
-        end: usize,
-        content: String,
-    },
-    /// List all buffers
-    List,
-    /// Clear a buffer or all buffers
-    Clear {
-        #[arg(short, long)]
-        name: Option<String>,
-    },
-    /// Copy buffer range to clipboard
-    ToClip {
-        #[arg(short, long, default_value = "main")]
-        buffer: String,
-        #[arg(long)]
-        start: Option<usize>,
-        #[arg(long)]
-        end: Option<usize>,
-        /// Clip name
-        clip_name: String,
-    },
-    /// Paste clipboard into buffer
-    FromClip {
-        /// Clip name to paste from
-        clip_name: String,
-        #[arg(short, long, default_value = "main")]
-        buffer: String,
-        #[arg(long)]
-        at_line: Option<usize>,
-        #[arg(long)]
-        append: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum EventsOp {
-    /// Subscribe to event types
-    Subscribe {
-        /// Event types (process_complete, file_change, error, custom)
-        events: Vec<String>,
-        /// Unsubscribe instead
-        #[arg(short, long)]
-        unsubscribe: bool,
-    },
-    /// Poll pending events
-    Poll {
-        #[arg(short, long, default_value = "10")]
-        limit: usize,
-        /// Peek without removing
-        #[arg(long)]
-        peek: bool,
-    },
-    /// Push a custom event
-    Push {
-        kind: String,
-        #[arg(short, long, default_value = "llm")]
-        source: String,
-        #[arg(short, long, default_value = "{}")]
-        data: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum CustomToolOp {
-    /// Create a custom tool script
-    Create {
-        name: String,
-        #[arg(short, long)]
-        script: String,
-        #[arg(short, long, default_value = "sh")]
-        lang: String,
-    },
-    /// List custom tools
-    List,
-    /// View a custom tool's script
-    View { name: String },
-    /// Run a custom tool
-    Run {
-        name: String,
-        /// Positional arguments
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
-    },
-    /// Remove a custom tool
-    Remove { name: String },
-}
-
-#[derive(Subcommand)]
-enum GatewayOp {
-    /// Start the gateway
-    Start {
-        /// Run in foreground (don't detach)
-        #[arg(long)]
-        foreground: bool,
-    },
-    /// Stop the gateway
-    Stop,
-    /// Check gateway status
-    Status,
-}
 
 fn parse_key_value(items: &[String]) -> HashMap<String, String> {
     items.iter()
@@ -658,16 +151,6 @@ async fn main() -> anyhow::Result<()> {
                 BufferOp::Clear { name } => {
                     exec_tool(&tools::BufferClearTool, serde_json::json!({"name": name}), &session_id).await
                 }
-                BufferOp::ToClip { buffer, start, end, clip_name } => {
-                    exec_tool(&tools::BufferToClipTool, serde_json::json!({
-                        "buffer": buffer, "start_line": start, "end_line": end, "clip_name": clip_name
-                    }), &session_id).await
-                }
-                BufferOp::FromClip { clip_name, buffer, at_line, append } => {
-                    exec_tool(&tools::ClipToBufferTool, serde_json::json!({
-                        "clip_name": clip_name, "buffer": buffer, "at_line": at_line, "append": append
-                    }), &session_id).await
-                }
             }
         }
 
@@ -741,24 +224,6 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::GitCommit { message, all } => {
             exec_tool(&tools::GitCommitTool, serde_json::json!({"message": message, "all": all}), &session_id).await
-        }
-
-        // ==================== Clipboard ====================
-
-        Commands::Clip { content, file, name, source } => {
-            exec_tool(&tools::ClipTool, serde_json::json!({"content": content, "file": file, "name": name, "source": source}), &session_id).await
-        }
-
-        Commands::Paste { name } => {
-            exec_tool(&tools::PasteTool, serde_json::json!({"name": name}), &session_id).await
-        }
-
-        Commands::Clips => {
-            exec_tool(&tools::ClipsTool, serde_json::json!({}), &session_id).await
-        }
-
-        Commands::ClipsClear { name } => {
-            exec_tool(&tools::ClearClipsTool, serde_json::json!({"name": name}), &session_id).await
         }
 
         // ==================== Session ====================
@@ -1062,6 +527,62 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", style::tool_entry(tool.name(), tool.description()));
             }
             println!();
+            return Ok(());
+        }
+
+        Commands::Man { output_dir } => {
+            use clap::CommandFactory;
+            use clap_mangen::Man;
+            use std::fs;
+            use std::path::Path;
+
+            let out = Path::new(&output_dir);
+            fs::create_dir_all(out)?;
+
+            let cmd = Cli::command();
+            let mut count = 0;
+
+            // Top-level: ash(1)
+            let man = Man::new(cmd.clone());
+            let mut buf = Vec::new();
+            man.render(&mut buf)?;
+            fs::write(out.join("ash.1"), buf)?;
+            count += 1;
+
+            // Subcommands: ash-grep(1), ash-edit(1), etc.
+            for sub in cmd.get_subcommands() {
+                if sub.get_name() == "help" { continue; }
+                let name = format!("ash-{}", sub.get_name());
+                let name_static: &'static str = name.clone().leak();
+                let sub_cmd = sub.clone().name(name_static);
+                let man = Man::new(sub_cmd.clone());
+                let mut buf = Vec::new();
+                man.render(&mut buf)?;
+                fs::write(out.join(format!("{name}.1")), buf)?;
+                count += 1;
+
+                // Nested: ash-edit-view(1), ash-terminal-start(1), etc.
+                for nested in sub_cmd.get_subcommands() {
+                    if nested.get_name() == "help" { continue; }
+                    let nested_name = format!("{name}-{}", nested.get_name());
+                    let nested_static: &'static str = nested_name.clone().leak();
+                    let nested_cmd = nested.clone().name(nested_static);
+                    let man = Man::new(nested_cmd);
+                    let mut buf = Vec::new();
+                    man.render(&mut buf)?;
+                    fs::write(out.join(format!("{nested_name}.1")), buf)?;
+                    count += 1;
+                }
+            }
+
+            println!("{} Generated {} man pages in {}/",
+                style::color(style::check(), style::GREEN), count, output_dir);
+            return Ok(());
+        }
+
+        Commands::Completions { shell } => {
+            use clap::CommandFactory;
+            clap_complete::generate(shell, &mut Cli::command(), "ash", &mut std::io::stdout());
             return Ok(());
         }
     };

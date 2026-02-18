@@ -4,7 +4,6 @@ pub mod grep;
 pub mod edit;
 pub mod shell;
 pub mod git;
-pub mod clip;
 pub mod buffer;
 pub mod session;
 pub mod terminal;
@@ -18,8 +17,7 @@ pub use grep::GrepTool;
 pub use edit::EditTool;
 pub use shell::{ShellTool, ShellRevertTool, ShellHistoryTool};
 pub use git::{GitStatusTool, GitDiffTool, GitLogTool, GitAddTool, GitCommitTool};
-pub use clip::{ClipTool, PasteTool, ClipsTool, ClearClipsTool};
-pub use buffer::{BufferReadTool, BufferWriteTool, BufferDeleteTool, BufferReplaceTool, BufferListTool, BufferClearTool, BufferToClipTool, ClipToBufferTool};
+pub use buffer::{BufferReadTool, BufferWriteTool, BufferDeleteTool, BufferReplaceTool, BufferListTool, BufferClearTool};
 pub use session::{SessionCreateTool, SessionListTool, SessionDestroyTool, SessionInfoTool, BackendSwitchTool, BackendStatusTool};
 pub use terminal::{TerminalRunAsyncTool, TerminalGetOutputTool, TerminalKillTool, TerminalListTool, TerminalRemoveTool, TerminalRevertTool};
 pub use outline::OutlineTool;
@@ -55,11 +53,6 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(GitLogTool),
         Box::new(GitAddTool),
         Box::new(GitCommitTool),
-        // Clipboard
-        Box::new(ClipTool),
-        Box::new(PasteTool),
-        Box::new(ClipsTool),
-        Box::new(ClearClipsTool),
         // Buffers
         Box::new(BufferReadTool),
         Box::new(BufferWriteTool),
@@ -67,8 +60,6 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(BufferReplaceTool),
         Box::new(BufferListTool),
         Box::new(BufferClearTool),
-        Box::new(BufferToClipTool),
-        Box::new(ClipToBufferTool),
         // Session/sandbox
         Box::new(SessionCreateTool),
         Box::new(SessionListTool),

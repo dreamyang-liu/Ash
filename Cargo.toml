@@ -24,6 +24,8 @@ base64 = "0.22"
 bollard = "0.18"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
+clap_mangen = "0.2"
 dirs = "5.0"
 futures-util = "0.3"
 lazy_static = "1.4"
@@ -47,6 +49,11 @@ tree-sitter-c = "0.23"
 tree-sitter-cpp = "0.23"
 tree-sitter-java = "0.23"
 tree-sitter-bash = "0.23"
+
+[build-dependencies]
+clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
+clap_mangen = "0.2"
 
 [dev-dependencies]
 tempfile = "3.10"

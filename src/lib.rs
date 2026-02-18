@@ -8,6 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 pub mod backend;
+pub mod cli;
 pub mod daemon;
 pub mod gateway;
 pub mod mcp;
