@@ -306,7 +306,7 @@ impl Backend for DockerBackend {
         // Container config - download ash-mcp and run it
         let bootstrap_script = format!(
             "export DEBIAN_FRONTEND=noninteractive; \
-             apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1; \
+             apt-get update -qq && apt-get install -y -qq curl ripgrep > /dev/null 2>&1; \
              curl -fsSL {} | tar xz -C /tmp && \
              mv /tmp/ash-linux-x86_64-ubuntu2204 /usr/local/bin/ash && \
              mv /tmp/ash-linux-x86_64-ubuntu2204-mcp /usr/local/bin/ash-mcp && \
