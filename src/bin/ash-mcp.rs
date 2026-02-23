@@ -116,6 +116,24 @@ async fn run_http(port: u16) -> anyhow::Result<()> {
     eprintln!("  {} {} tools loaded",
         style::ecolor(style::check(), style::GREEN),
         tool_count);
+
+    // Self-check: verify required external binaries are available
+    let required_bins = [("rg", "ripgrep (apt install ripgrep)")];
+    for (bin, hint) in &required_bins {
+        match std::process::Command::new(bin).arg("--version").output() {
+            Ok(output) if output.status.success() => {
+                let ver = String::from_utf8_lossy(&output.stdout);
+                let ver = ver.lines().next().unwrap_or("").trim();
+                eprintln!("  {} {} ({})",
+                    style::ecolor(style::check(), style::GREEN), bin, ver);
+            }
+            _ => {
+                eprintln!("  {} {} not found — install: {}",
+                    style::ecolor("✗", style::BRIGHT_RED), bin, hint);
+            }
+        }
+    }
+
     eprintln!("  {} listening on {}",
         style::ecolor(style::check(), style::GREEN),
         style::ecolor(&format!("0.0.0.0:{}", actual_port), style::CYAN));
