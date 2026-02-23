@@ -1,6 +1,6 @@
-# SWE-bench Integration for ash-cli
+# SWE-bench Benchmark for ash-cli
 
-Run ash agent on SWE-bench for evaluation.
+Run an LLM agent with a bash tool on SWE-bench instances in isolated Docker sandboxes.
 
 ## Quick Start
 
@@ -8,109 +8,87 @@ Run ash agent on SWE-bench for evaluation.
 # Install dependencies
 pip install litellm datasets
 
-# Run on a single instance (debug mode)
-python -m swebench.runner --instance sympy__sympy-15599 --model anthropic/claude-sonnet-4-5-20250929
+# Set API key (Claude, GPT-4, Gemini, etc. via litellm)
+export ANTHROPIC_API_KEY=sk-...
+
+# Run on a single instance
+python -m swebench.runner -i sympy__sympy-15599
 
 # Run batch on SWE-bench Lite
-python -m swebench.runner --subset lite --split dev -o results/
+python -m swebench.runner --subset lite --split test -o results/
 
 # Run on SWE-bench Verified with 4 workers
-python -m swebench.runner --subset verified --split test --workers 4 -o results/
+python -m swebench.runner --subset verified --split test -w 4 -o results/
 ```
+
+## Prerequisites
+
+- `ash` binary on PATH (or use `--ash-binary ./target/release/ash`)
+- Docker running (the runner creates Docker containers per instance)
+- The swebench Docker images pulled or pullable
 
 ## Evaluate Results
 
 ```bash
-# Using sb-cli (recommended, free cloud evaluation)
+# Using sb-cli (free cloud evaluation)
 pip install sb-cli
 sb-cli submit swe-bench_verified test --predictions_path results/preds.json --run_id my-run
-
-# Or local evaluation
-python -m swebench.harness.run_evaluation \
-    --dataset_name princeton-nlp/SWE-bench_Verified \
-    --predictions_path results/preds.json \
-    --max_workers 4 \
-    --run_id my-run
 ```
 
 ## Architecture
 
 ```
 swebench/
-├── __init__.py      # Core types: AgentConfig, Trajectory, tool definitions
-├── agent.py         # AshAgent - main agent loop using litellm + ash tools
-├── docker_env.py    # Docker environment for sandboxed execution
-└── runner.py        # CLI runner for single/batch execution
+├── AGENT.md       # System prompt / manual given to the LLM
+├── types.py       # Core types: AgentConfig, Trajectory, ToolResult, CostTracker
+├── ash_cli.py     # AshSession: session lifecycle + bash execution via ash CLI
+├── tools.py       # Single "bash" tool schema (OpenAI function calling format)
+├── agent.py       # AshAgent: litellm agent loop
+└── runner.py      # CLI runner for single/batch execution
 ```
 
 ## How It Works
 
-1. **Agent Loop** (`agent.py`)
-   - Uses litellm to support any model (Claude, GPT-4, Gemini, etc.)
-   - Provides ash tools via OpenAI-compatible function calling
-   - Tracks cost and step limits
-   - Saves trajectories in mini-swe-agent compatible format
-
-2. **Docker Environment** (`docker_env.py`)
-   - Starts SWE-bench Docker containers for each instance
-   - Executes ash tools by translating to shell commands inside container
-   - Handles file reading, editing, grep via standard Unix tools
-
-3. **Runner** (`runner.py`)
-   - Loads instances from HuggingFace datasets
-   - Supports filtering, slicing, resuming
-   - Parallel execution with configurable workers
-   - Outputs `preds.json` for sb-cli evaluation
+1. **Session Setup** — `ash session create --image <swebench-image>` creates a Docker sandbox with ash-mcp running inside
+2. **Agent Loop** — The LLM gets AGENT.md as system prompt + the issue. It has one tool: `bash`. Commands run via `ash --session <id> run "<command>"`
+3. **Patch Extraction** — After the agent finishes, `ash --session <id> git-diff` captures the changes
+4. **Cleanup** — `ash session destroy <id>` removes the container
 
 ## CLI Options
 
 ```
-Usage: python -m swebench.runner [OPTIONS]
+python -m swebench.runner [OPTIONS]
 
-Data Selection:
-  --subset SUBSET       SWE-bench subset: lite, verified, full (default: lite)
-  --split SPLIT         Dataset split: dev, test (default: dev)
-  --instance ID         Run single instance by ID or index
-  --slice SPEC          Slice instances (e.g., "0:10")
+Dataset:
+  --subset SUBSET       lite, verified, or full (default: lite)
+  --split SPLIT         Dataset split (default: test)
+  --instance ID         Single instance by ID or index
+  --slice SPEC          Slice (e.g., "0:10")
   --filter REGEX        Filter instance IDs
 
-Model Config:
-  --model MODEL         Model name (default: anthropic/claude-sonnet-4-5-20250929)
+Model:
+  --model MODEL         litellm model name (default: anthropic/claude-sonnet-4-5-20250929)
   --step-limit N        Max agent steps (default: 250)
   --cost-limit N        Max cost in USD (default: 3.0)
   --temperature T       Sampling temperature (default: 0.0)
 
+Ash:
+  --ash-binary PATH     Path to ash binary (default: ash)
+
 Execution:
   --output DIR          Output directory (default: swebench_results/)
   --workers N           Parallel workers (default: 1)
-  --no-docker           Run locally without Docker
-  --ash-binary PATH     Path to ash binary
 ```
 
-## Tool Mapping
+## Tool Flow
 
-| ash tool | SWE-bench action |
-|----------|-----------------|
-| `read_file` | `sed -n 'start,end'p file | cat -n` |
-| `grep_files` | `rg` or `grep -rn` |
-| `text_editor.view` | `sed -n 'start,end'p file` |
-| `text_editor.str_replace` | Python string replace |
-| `text_editor.insert` | `sed -i 'line a\text'` |
-| `text_editor.create` | `cat > file << EOF` |
-| `shell` | Direct `docker exec` |
-| `git_*` | Native git commands |
-
-## Comparison with mini-swe-agent
-
-| Feature | mini-swe-agent | ash-agent |
-|---------|---------------|-----------|
-| Core | ~100 lines Python | ~300 lines Python + Rust CLI |
-| Tools | bash only | Structured tools (read, grep, edit) |
-| Execution | subprocess.run | ash CLI or MCP |
-| Format | Linear messages | Tool calls + observations |
-
-ash-agent uses structured tools instead of raw bash, which:
-- ✅ Clearer tool boundaries for the model
-- ✅ Better error handling
-- ✅ Consistent interface across local/docker
-- ⚠️ May need prompt tuning for different models
+```
+LLM → tool_call(bash, {command: "ash grep 'def solve' src/"})
+  → AshAgent._execute_tool_calls()
+    → AshSession.run_command("ash grep 'def solve' src/")
+      → subprocess: ash --session <id> run "ash grep 'def solve' src/"
+        → ash CLI → Gateway → ash-mcp inside Docker container
+      ← stdout/stderr as ToolResult
+    ← observation message
+  ← append to messages, next LLM call
+```

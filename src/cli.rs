@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "ash")]
-#[command(about = "Code Agent CLI & MCP Server")]
+#[command(about = "Ash — sandboxed tool runtime for code agents")]
 #[command(version)]
 #[command(propagate_version = true)]
 #[command(after_help = "Run '<command> --help' for detailed usage of any subcommand.\n\
@@ -25,6 +25,10 @@ pub struct Cli {
     /// Session ID — all tool calls will execute in this sandbox
     #[arg(long, global = true)]
     pub session: Option<String>,
+
+    /// Agent mode — only exposes tool commands, hides management commands
+    #[arg(long, global = true)]
+    pub agent: bool,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -73,58 +77,6 @@ pub enum Commands {
         limit: usize,
     },
 
-    /// Show directory tree structure
-    Tree {
-        /// Root directory to display
-        #[arg(default_value = ".")]
-        path: String,
-        /// Max depth to display
-        #[arg(short, long, default_value = "3")]
-        max_depth: usize,
-        /// Include hidden files and directories (dotfiles)
-        #[arg(long)]
-        show_hidden: bool,
-    },
-
-    /// Compare two files and output unified diff
-    Diff {
-        /// First file path (original)
-        file1: String,
-        /// Second file path (modified)
-        file2: String,
-        /// Number of context lines around each change
-        #[arg(short, long, default_value = "3")]
-        context: usize,
-    },
-
-    /// Apply a unified diff patch to files
-    Patch {
-        /// Patch content in unified diff format
-        patch: String,
-        /// Base directory to apply patch relative to
-        #[arg(short, long)]
-        path: Option<String>,
-        /// Preview changes without actually applying them
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Get file type, encoding, and metadata
-    #[command(name = "file-info")]
-    FileInfo {
-        /// File path to inspect
-        path: String,
-    },
-
-    /// HTTP GET request — fetch content from URL
-    Fetch {
-        /// URL to fetch content from
-        url: String,
-        /// Request timeout in seconds
-        #[arg(short, long, default_value = "30")]
-        timeout: u64,
-    },
-
     /// Undo last file edit (reverts the most recent edit operation)
     Undo {
         /// Specific file to undo (default: last edited file)
@@ -136,7 +88,7 @@ pub enum Commands {
 
     /// Show code structure — classes, functions, methods with line numbers (like IDE outline)
     Outline {
-        /// File path to analyze
+        /// Absolute path to the file to analyze
         file_path: String,
     },
 
@@ -173,78 +125,10 @@ pub enum Commands {
         revert: Option<String>,
     },
 
-    /// Revert last shell command by executing its registered revert command
-    #[command(name = "run-revert")]
-    RunRevert {
-        /// Specific run ID to revert (default: last revertible command)
-        #[arg(long)]
-        id: Option<String>,
-    },
-
-    /// Show recent shell commands with revert info
-    #[command(name = "run-history")]
-    RunHistory {
-        /// Number of entries to show
-        #[arg(short, long, default_value = "10")]
-        limit: usize,
-    },
-
     /// Background process management — start, monitor, kill async processes
     Terminal {
         #[command(subcommand)]
         op: TerminalOp,
-    },
-
-    // ==================== Git ====================
-
-    /// Show working tree status
-    #[command(name = "git-status")]
-    GitStatus {
-        /// Short format output (one line per file)
-        #[arg(long)]
-        short: bool,
-    },
-
-    /// Show changes between working tree and index
-    #[command(name = "git-diff")]
-    GitDiff {
-        /// Compare staged (cached) changes instead of unstaged
-        #[arg(long)]
-        staged: bool,
-        /// Limit diff to specific file paths
-        paths: Vec<String>,
-    },
-
-    /// Show commit history
-    #[command(name = "git-log")]
-    GitLog {
-        /// Number of commits to show
-        #[arg(short = 'n', long, default_value = "10")]
-        count: usize,
-        /// One-line format per commit (hash + message)
-        #[arg(long)]
-        oneline: bool,
-    },
-
-    /// Stage files for commit
-    #[command(name = "git-add")]
-    GitAdd {
-        /// File paths to stage
-        paths: Vec<String>,
-        /// Stage all changes including untracked files (-A)
-        #[arg(short, long)]
-        all: bool,
-    },
-
-    /// Create a commit with staged changes
-    #[command(name = "git-commit")]
-    GitCommit {
-        /// Commit message
-        #[arg(short, long)]
-        message: String,
-        /// Automatically stage all tracked modified files before committing (-a)
-        #[arg(short, long)]
-        all: bool,
     },
 
     // ==================== Session/Sandbox ====================
@@ -395,11 +279,6 @@ pub enum TerminalOp {
     /// Remove a completed process from tracking (frees the handle)
     Remove {
         /// Process handle ID to remove
-        handle: String,
-    },
-    /// Execute the revert command for a process (if one was provided at start)
-    Revert {
-        /// Process handle ID to revert
         handle: String,
     },
 }

@@ -4,12 +4,17 @@ use ash::{Tool, ToolResult};
 use ash::daemon;
 use ash::style;
 use ash::tools;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use serde_json::Value;
 
 use std::collections::HashMap;
 
 use ash::cli::*;
+
+/// Management commands hidden and blocked in --agent mode.
+const AGENT_BLOCKED: &[&str] = &[
+    "session", "gateway", "config", "mcp", "info", "tools", "man", "completions", "custom-tool",
+];
 
 /// Execute a tool: route through gateway, fallback to direct execution.
 /// Gateway handles all routing: local (via ash-mcp), Docker, K8s.
@@ -43,9 +48,48 @@ fn parse_key_value(items: &[String]) -> HashMap<String, String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let session_id = cli.session.clone();
-    
+    // Detect agent mode early (before clap renders --help) so we can hide management commands.
+    let is_agent = std::env::args().any(|a| a == "--agent")
+        || std::env::var("ASH_AGENT").unwrap_or_default() == "1";
+
+    let cli = if is_agent {
+        let mut cmd = Cli::command();
+        for name in AGENT_BLOCKED {
+            cmd = cmd.mut_subcommand(name, |sub| sub.hide(true));
+        }
+        // Hide management flags and override after_help
+        cmd = cmd.mut_arg("session", |a| a.hide(true));
+        cmd = cmd.mut_arg("agent", |a| a.hide(true));
+        cmd = cmd.after_help("Run 'ash <command> --help' for detailed usage of any command.");
+        Cli::from_arg_matches(&cmd.get_matches()).unwrap_or_else(|e| e.exit())
+    } else {
+        Cli::parse()
+    };
+
+    let session_id = cli.session.clone()
+        .or_else(|| std::env::var("ASH_SESSION").ok());
+
+    // Block management commands in agent mode
+    if is_agent {
+        let blocked = match &cli.command {
+            Commands::Session { .. } => Some("session"),
+            Commands::Gateway { .. } => Some("gateway"),
+            Commands::Config { .. } => Some("config"),
+            Commands::Mcp => Some("mcp"),
+            Commands::Info => Some("info"),
+            Commands::Tools => Some("tools"),
+            Commands::Man { .. } => Some("man"),
+            Commands::Completions { .. } => Some("completions"),
+            Commands::CustomTool { .. } => Some("custom-tool"),
+            _ => None,
+        };
+        if let Some(name) = blocked {
+            eprintln!("{} `{}` is not available in agent mode.\nRun `ash --help` to see available commands.",
+                style::ecolor("error:", style::BRIGHT_RED), name);
+            std::process::exit(1);
+        }
+    }
+
     let result = match cli.command {
         // ==================== File Operations ====================
 
@@ -76,34 +120,6 @@ async fn main() -> anyhow::Result<()> {
         Commands::Find { pattern, path, max_depth, limit } => {
             exec_tool(&tools::FindFilesTool, serde_json::json!({
                 "pattern": pattern, "path": path, "max_depth": max_depth, "limit": limit
-            }), &session_id).await
-        }
-
-        Commands::Tree { path, max_depth, show_hidden } => {
-            exec_tool(&tools::TreeTool, serde_json::json!({
-                "path": path, "max_depth": max_depth, "show_hidden": show_hidden
-            }), &session_id).await
-        }
-
-        Commands::Diff { file1, file2, context } => {
-            exec_tool(&tools::DiffFilesTool, serde_json::json!({
-                "file1": file1, "file2": file2, "context": context
-            }), &session_id).await
-        }
-
-        Commands::Patch { patch, path, dry_run } => {
-            exec_tool(&tools::PatchApplyTool, serde_json::json!({
-                "patch": patch, "path": path, "dry_run": dry_run
-            }), &session_id).await
-        }
-
-        Commands::FileInfo { path } => {
-            exec_tool(&tools::FileInfoTool, serde_json::json!({"path": path}), &session_id).await
-        }
-
-        Commands::Fetch { url, timeout } => {
-            exec_tool(&tools::HttpFetchTool, serde_json::json!({
-                "url": url, "timeout_secs": timeout
             }), &session_id).await
         }
 
@@ -162,14 +178,6 @@ async fn main() -> anyhow::Result<()> {
             }), &session_id).await
         }
 
-        Commands::RunRevert { id } => {
-            exec_tool(&tools::ShellRevertTool, serde_json::json!({"id": id}), &session_id).await
-        }
-
-        Commands::RunHistory { limit } => {
-            exec_tool(&tools::ShellHistoryTool, serde_json::json!({"limit": limit}), &session_id).await
-        }
-
         Commands::Terminal { op } => {
             let (tool_name, args): (&str, Value) = match op {
                 TerminalOp::Start { command, workdir, env, revert } => {
@@ -191,9 +199,6 @@ async fn main() -> anyhow::Result<()> {
                 TerminalOp::Remove { handle } => {
                     ("terminal_remove", serde_json::json!({"handle": handle, "session_id": session_id}))
                 }
-                TerminalOp::Revert { handle } => {
-                    ("terminal_revert", serde_json::json!({"handle": handle, "session_id": session_id}))
-                }
             };
             // Route through gateway (session_id is embedded in args for terminal tools)
             daemon::ensure_gateway().await;
@@ -202,28 +207,6 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 tools::find_tool(tool_name).unwrap().execute(args).await
             }
-        }
-
-        // ==================== Git ====================
-
-        Commands::GitStatus { short } => {
-            exec_tool(&tools::GitStatusTool, serde_json::json!({"short": short}), &session_id).await
-        }
-
-        Commands::GitDiff { staged, paths } => {
-            exec_tool(&tools::GitDiffTool, serde_json::json!({"staged": staged, "paths": paths}), &session_id).await
-        }
-
-        Commands::GitLog { count, oneline } => {
-            exec_tool(&tools::GitLogTool, serde_json::json!({"count": count, "oneline": oneline}), &session_id).await
-        }
-
-        Commands::GitAdd { paths, all } => {
-            exec_tool(&tools::GitAddTool, serde_json::json!({"paths": paths, "all": all}), &session_id).await
-        }
-
-        Commands::GitCommit { message, all } => {
-            exec_tool(&tools::GitCommitTool, serde_json::json!({"message": message, "all": all}), &session_id).await
         }
 
         // ==================== Session ====================

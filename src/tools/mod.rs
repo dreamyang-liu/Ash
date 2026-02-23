@@ -15,15 +15,14 @@ pub mod events;
 
 pub use grep::GrepTool;
 pub use edit::EditTool;
-pub use shell::{ShellTool, ShellRevertTool, ShellHistoryTool};
-pub use git::{GitStatusTool, GitDiffTool, GitLogTool, GitAddTool, GitCommitTool};
+pub use shell::ShellTool;
 pub use buffer::{BufferReadTool, BufferWriteTool, BufferDeleteTool, BufferReplaceTool, BufferListTool, BufferClearTool};
 pub use session::{SessionCreateTool, SessionListTool, SessionDestroyTool, SessionInfoTool, BackendSwitchTool, BackendStatusTool};
-pub use terminal::{TerminalRunAsyncTool, TerminalGetOutputTool, TerminalKillTool, TerminalListTool, TerminalRemoveTool, TerminalRevertTool};
+pub use terminal::{TerminalRunAsyncTool, TerminalGetOutputTool, TerminalKillTool, TerminalListTool, TerminalRemoveTool};
 pub use outline::OutlineTool;
 
 pub use filesystem::FsListDirTool;
-pub use utils::{FindFilesTool, TreeTool, DiffFilesTool, PatchApplyTool, HttpFetchTool, FileInfoTool, UndoTool};
+pub use utils::{FindFilesTool, UndoTool};
 pub use events::{EventsSubscribeTool, EventsPollTool, EventsPushTool, ToolRegisterTool, ToolListCustomTool, ToolCallCustomTool, ToolRemoveCustomTool, ToolViewCustomTool};
 
 use crate::Tool;
@@ -38,21 +37,12 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(FsListDirTool),
         // Shell (sync)
         Box::new(ShellTool),
-        Box::new(ShellRevertTool),
-        Box::new(ShellHistoryTool),
         // Terminal (async)
         Box::new(TerminalRunAsyncTool),
         Box::new(TerminalGetOutputTool),
         Box::new(TerminalKillTool),
         Box::new(TerminalListTool),
         Box::new(TerminalRemoveTool),
-        Box::new(TerminalRevertTool),
-        // Git
-        Box::new(GitStatusTool),
-        Box::new(GitDiffTool),
-        Box::new(GitLogTool),
-        Box::new(GitAddTool),
-        Box::new(GitCommitTool),
         // Buffers
         Box::new(BufferReadTool),
         Box::new(BufferWriteTool),
@@ -69,11 +59,6 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(BackendStatusTool),
         // Utils
         Box::new(FindFilesTool),
-        Box::new(TreeTool),
-        Box::new(DiffFilesTool),
-        Box::new(PatchApplyTool),
-        Box::new(HttpFetchTool),
-        Box::new(FileInfoTool),
         Box::new(UndoTool),
         // Events
         Box::new(EventsSubscribeTool),

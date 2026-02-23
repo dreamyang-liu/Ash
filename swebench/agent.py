@@ -1,108 +1,207 @@
-#!/usr/bin/env python3
-"""
-Agent loop for SWE-bench using ash tools.
+"""Agent loop for SWE-bench.
 
-The agent uses litellm to support any model and calls ash tools
-via subprocess (CLI) or MCP protocol.
+Uses litellm for model abstraction (supports Claude, GPT-4, Gemini, etc.)
+and runs commands through the ash CLI session via subprocess.
+
+Single tool: bash — agent writes ash CLI commands directly.
+Session routing handled by ASH_SESSION env var.
 """
 
 import json
-import os
-import subprocess
-from dataclasses import dataclass
+import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 try:
-    import litellm
-    from litellm import completion
+    from litellm import completion, stream_chunk_builder
 except ImportError:
     raise ImportError("Install litellm: pip install litellm")
 
-from . import (
-    ASH_TOOLS, 
-    AgentConfig, 
-    AshToolResult, 
-    Trajectory,
-    call_ash_tool,
-    generate_tools_schema,
+from .models import AgentConfig, CostTracker, ToolResult, Trajectory
+
+_PROMPTS_DIR = Path(__file__).parent
+
+_SYSTEM_PROMPT = (_PROMPTS_DIR / "AGENT.md").read_text()
+
+_KICKOFF = (
+    "Solve the issue described above. "
+    "You have one tool: `bash`. Use `ash` CLI commands for all operations:\n"
+    "- `ash grep \"pattern\" path/` to search code\n"
+    "- `ash edit view file.py` to read files\n"
+    "- `ash outline file.py` to see code structure\n"
+    "- `ash find \"*.py\" path/` to find files\n"
+    "- `ash edit replace file.py --old \"...\" --new \"...\"` to edit\n"
+    "- `ash run \"command\"` for python, pytest, pip, git, etc.\n"
+    "- `ash buffer` for scratch pad across steps\n"
+    "Run `ash --help` to see all available commands.\n"
+    "Commands are composable: `ash grep ... && ash edit view ...`\n"
+    "All commands run in /testbed by default.\n"
+    "Start by exploring the repository to understand the issue."
 )
 
 
-def format_tools_description() -> str:
-    """Format tools for system prompt."""
-    lines = []
-    for name, spec in ASH_TOOLS.items():
-        params = ", ".join(f"{k}: {v.get('type', 'any')}" for k, v in spec.get("parameters", {}).items())
-        lines.append(f"- {name}({params}): {spec['description']}")
-    return "\n".join(lines)
+def build_system_prompt(task: str) -> str:
+    """Build the full system prompt from AGENT.md + task."""
+    return _SYSTEM_PROMPT + f"\n\n---\n\n## Task\n\n{task}"
+
+
+class _ThinkingLoopError(Exception):
+    pass
 
 
 class AshAgent:
-    """Agent that uses ash tools to solve SWE-bench tasks."""
-    
+    """Agent that uses tool calls to solve SWE-bench tasks."""
+
     def __init__(
         self,
         config: AgentConfig,
-        executor: Callable[[str, dict], AshToolResult] = None,
+        executor: Callable[[str], ToolResult],
+        on_step: Optional[Callable[[int, str, str], None]] = None,
+        trace_dir: Optional[Path] = None,
     ):
         self.config = config
-        self.executor = executor or (lambda name, args: call_ash_tool(name, args, config.ash_binary))
+        self.executor = executor  # executor(command) -> ToolResult
+        self.on_step = on_step    # on_step(step_num, kind, text)
+        self.trace_dir = trace_dir
         self.trajectory = Trajectory()
-        self.cost = 0.0
-        self.n_calls = 0
-        
-    def _build_system_prompt(self) -> str:
-        return self.config.system_template.format(
-            tools_description=format_tools_description()
-        )
-    
-    def _query_model(self, messages: list[dict]) -> dict:
-        """Query the LLM with tools."""
-        self.n_calls += 1
-        
-        response = completion(
+        self.cost = CostTracker()
+        self._tools_schema: list[dict] = []
+        self._trace_file = None
+
+    def set_tools_schema(self, schema: list[dict]):
+        """Set OpenAI-compatible tool schemas."""
+        self._tools_schema = schema
+
+    def _trace(self, text: str):
+        """Write text to the trace file (real-time, flushed)."""
+        if self._trace_file:
+            self._trace_file.write(text)
+            self._trace_file.flush()
+
+    @staticmethod
+    def _is_repeating(buf: str, window: int = 200, min_repeats: int = 3) -> bool:
+        """Detect if the tail of buf is a repeating pattern."""
+        tail = buf[-window * min_repeats:] if len(buf) >= window * min_repeats else ""
+        if not tail:
+            return False
+        # Check if the last `window` chars repeat earlier in the tail
+        pattern = tail[-window:]
+        count = tail.count(pattern)
+        return count >= min_repeats
+
+    def _query_model(self, messages: list[dict]) -> Any:
+        kwargs: dict[str, Any] = dict(
             model=self.config.model,
             messages=messages,
-            tools=generate_tools_schema(),
-            tool_choice="auto",
+            tools=self._tools_schema if self._tools_schema else None,
+            tool_choice="auto" if self._tools_schema else None,
             temperature=self.config.temperature,
+            max_tokens=self.config.max_tokens,
+            stream=bool(self.on_step),
         )
-        
-        # Track cost
-        if hasattr(response, "usage"):
-            # Rough cost estimate
-            input_cost = (response.usage.prompt_tokens / 1000) * 0.003
-            output_cost = (response.usage.completion_tokens / 1000) * 0.015
-            self.cost += input_cost + output_cost
-        
+        if self.config.api_base:
+            kwargs["api_base"] = self.config.api_base
+        if self.config.api_key:
+            kwargs["api_key"] = self.config.api_key
+
+        raw = completion(**kwargs)
+
+        if not self.on_step:
+            self.cost.update(raw)
+            return raw
+
+        # Stream mode: display thinking tokens as a rolling line
+        from . import style as S
+        chunks = []
+        think_buf = ""
+        content_buf = ""
+        aborted = False
+        w = 76  # display width for rolling line
+        step_n = self.cost.api_calls + 1
+        check_interval = 500  # check for repetition every N thinking tokens
+
+        self._trace(f"\n{'='*60}\n[step {step_n}] model call\n{'='*60}\n")
+
+        for chunk in raw:
+            chunks.append(chunk)
+            delta = chunk.choices[0].delta
+
+            # Reasoning / thinking tokens (Qwen3, DeepSeek, etc.)
+            think_token = getattr(delta, "reasoning_content", None) or ""
+            if think_token:
+                if not think_buf:
+                    self._trace("<think>\n")
+                think_buf += think_token
+                self._trace(think_token)
+                # Show the tail of thinking buffer, overwriting the line
+                vis = think_buf.replace("\n", " ")
+                if len(vis) > w:
+                    vis = "…" + vis[-(w - 1):]
+                sys.stdout.write(f"\r  {S.dim(vis)}\033[K")
+                sys.stdout.flush()
+
+                # Detect thinking loop
+                if len(think_buf) % check_interval < len(think_token):
+                    if self._is_repeating(think_buf):
+                        self._trace("\n[ABORTED: repetition loop detected]\n")
+                        if self.on_step:
+                            self.on_step(step_n, "error", "thinking loop detected, aborting")
+                        aborted = True
+                        break
+
+            # Content tokens
+            content_token = delta.content or ""
+            if content_token:
+                if think_buf and not content_buf:
+                    self._trace("\n</think>\n\n")
+                content_buf += content_token
+                self._trace(content_token)
+
+        # Clear the rolling line
+        if think_buf:
+            if not content_buf:
+                self._trace("\n</think>\n")
+            sys.stdout.write(f"\r\033[K")
+            sys.stdout.flush()
+
+        if aborted:
+            raise _ThinkingLoopError("model stuck in thinking loop")
+
+        response = stream_chunk_builder(chunks)
+        self.cost.update(response)
         return response
-    
+
     def _execute_tool_calls(self, tool_calls: list) -> list[dict]:
-        """Execute tool calls and return observation messages."""
-        observations = []
+        """Execute tool calls and return tool response messages."""
+        results = []
         for tc in tool_calls:
             name = tc.function.name
-            args = json.loads(tc.function.arguments)
-            
-            # Execute via ash
-            result = self.executor(name, args)
-            
-            # Format observation
+            try:
+                args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                args = {}
+
+            command = args.get("command", "")
+            result = self.executor(command)
+
+            # Format content
             if result.success:
-                content = result.output[:10000]  # Truncate long output
-                if len(result.output) > 10000:
-                    content += f"\n... (truncated {len(result.output) - 10000} chars)"
+                content = result.output
             else:
                 content = f"Error: {result.error or 'Unknown error'}"
-            
-            observations.append({
+                if result.output:
+                    content += f"\n{result.output}"
+
+            max_len = 15000
+            if len(content) > max_len:
+                content = content[:max_len] + f"\n... (truncated {len(content) - max_len} chars)"
+
+            results.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
                 "content": content,
             })
-            
-            # Save to trajectory
+
             self.trajectory.add_message(
                 "tool_result",
                 content,
@@ -110,103 +209,121 @@ class AshAgent:
                 tool_args=args,
                 success=result.success,
             )
-        
-        return observations
-    
-    def _check_submission(self, output: str) -> Optional[str]:
-        """Check if output contains submission marker."""
-        lines = output.strip().splitlines()
-        if lines and "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in lines[0]:
-            # Return the patch (everything after the marker line)
-            idx = output.find("COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")
-            rest = output[idx + len("COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"):].strip()
-            # Skip to next line
-            if "\n" in rest:
-                return rest.split("\n", 1)[1]
-            return ""
-        return None
-    
-    def run(self, task: str, instance_id: str = "") -> dict:
-        """Run the agent on a task. Returns exit info."""
+
+        return results
+
+    def run(self, task: str, instance_id: str = "") -> str:
+        """Run the agent loop. Returns exit status.
+
+        Exit statuses:
+        - "completed"   -- agent stopped making tool calls
+        - "step_limit"  -- hit step limit
+        - "cost_limit"  -- hit cost limit
+        - "error"       -- unrecoverable error
+        """
         self.trajectory = Trajectory()
         self.trajectory.instance_id = instance_id
-        self.cost = 0.0
-        self.n_calls = 0
-        
-        # Build initial messages
+        self.cost = CostTracker()
+
+        # Open trace file for real-time logging
+        if self.trace_dir:
+            self.trace_dir.mkdir(parents=True, exist_ok=True)
+            trace_path = self.trace_dir / f"{instance_id or 'trace'}.log"
+            self._trace_file = open(trace_path, "w", encoding="utf-8")
+
+        system_msg = build_system_prompt(task)
+        kickoff = _KICKOFF
         messages = [
-            {"role": "system", "content": self._build_system_prompt()},
-            {"role": "user", "content": task},
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": kickoff},
         ]
-        
-        self.trajectory.add_message("system", messages[0]["content"])
+        self.trajectory.add_message("system", system_msg)
         self.trajectory.add_message("user", task)
-        
-        while self.n_calls < self.config.step_limit and self.cost < self.config.cost_limit:
-            # Query model
-            response = self._query_model(messages)
+
+        consecutive_no_tool = 0
+
+        while True:
+            # Check limits
+            if self.cost.api_calls >= self.config.step_limit:
+                self._close_trace()
+                return "step_limit"
+            if self.cost.total_cost >= self.config.cost_limit:
+                self._close_trace()
+                return "cost_limit"
+
+            step_n = self.cost.api_calls + 1
+
+            try:
+                response = self._query_model(messages)
+            except _ThinkingLoopError:
+                # Model got stuck in a thinking loop — retry with higher temperature
+                self._trace(f"\n[RETRY] thinking loop, retrying with temperature bump\n")
+                try:
+                    old_temp = self.config.temperature
+                    self.config.temperature = max(old_temp + 0.3, 0.6)
+                    response = self._query_model(messages)
+                    self.config.temperature = old_temp
+                except _ThinkingLoopError:
+                    self.config.temperature = old_temp
+                    self._trace(f"\n[ABORT] repeated thinking loop\n")
+                    self._close_trace()
+                    self.trajectory.add_message("error", "repeated thinking loop")
+                    return "error"
+                except Exception as e:
+                    self.config.temperature = old_temp
+                    if self.on_step:
+                        self.on_step(step_n, "error", str(e))
+                    self._trace(f"\n[ERROR] {e}\n")
+                    self._close_trace()
+                    self.trajectory.add_message("error", str(e))
+                    return "error"
+            except Exception as e:
+                if self.on_step:
+                    self.on_step(step_n, "error", str(e))
+                self._trace(f"\n[ERROR] {e}\n")
+                self._close_trace()
+                self.trajectory.add_message("error", str(e))
+                return "error"
+
             choice = response.choices[0]
             message = choice.message
-            
-            # Add assistant message
-            assistant_content = message.content or ""
-            messages.append({
+
+            # Record assistant message
+            assistant_msg = {
                 "role": "assistant",
-                "content": assistant_content,
-                "tool_calls": message.tool_calls,
-            })
-            self.trajectory.add_message("assistant", assistant_content)
-            
-            # Check for tool calls
-            if not message.tool_calls:
-                # No tool calls - agent is confused or done
-                if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in assistant_content:
-                    # Agent tried to submit in text
-                    submission = self._check_submission(assistant_content)
-                    self.trajectory.info = {
-                        "exit_status": "Submitted",
-                        "submission": submission or "",
-                        "model": self.config.model,
-                    }
-                    break
-                continue
-            
-            # Execute tools
-            observations = self._execute_tool_calls(message.tool_calls)
-            messages.extend(observations)
-            
-            # Check for submission in shell output
-            for obs in observations:
-                submission = self._check_submission(obs["content"])
-                if submission is not None:
-                    self.trajectory.info = {
-                        "exit_status": "Submitted",
-                        "submission": submission,
-                        "model": self.config.model,
-                    }
-                    self.trajectory.model_stats = {
-                        "api_calls": self.n_calls,
-                        "instance_cost": self.cost,
-                    }
-                    return self.trajectory.info
-            
-            # Check stop conditions
-            if choice.finish_reason == "stop" and not message.tool_calls:
-                break
-        
-        # Didn't submit - limits exceeded or agent gave up
-        if self.n_calls >= self.config.step_limit or self.cost >= self.config.cost_limit:
-            exit_status = "LimitsExceeded"
-        else:
-            exit_status = "AgentStopped"
-        
-        self.trajectory.info = {
-            "exit_status": exit_status,
-            "submission": "",
-            "model": self.config.model,
-        }
-        self.trajectory.model_stats = {
-            "api_calls": self.n_calls,
-            "instance_cost": self.cost,
-        }
-        return self.trajectory.info
+                "content": message.content or "",
+            }
+            if message.tool_calls:
+                assistant_msg["tool_calls"] = message.tool_calls
+            messages.append(assistant_msg)
+            self.trajectory.add_message("assistant", message.content or "")
+
+            # Execute tool calls if present
+            if message.tool_calls:
+                consecutive_no_tool = 0
+                for tc in message.tool_calls:
+                    try:
+                        cmd = json.loads(tc.function.arguments).get("command", "")
+                    except (json.JSONDecodeError, AttributeError):
+                        cmd = tc.function.arguments or ""
+                    tool_label = tc.function.name or self.mode
+                    if self.on_step:
+                        self.on_step(step_n, tool_label, cmd)
+                    self._trace(f"\n> {tool_label} {cmd}\n")
+                observations = self._execute_tool_calls(message.tool_calls)
+                for obs in observations:
+                    self._trace(f"{obs['content']}\n")
+                messages.extend(observations)
+            else:
+                consecutive_no_tool += 1
+                if consecutive_no_tool >= 2 or choice.finish_reason == "stop":
+                    self._close_trace()
+                    return "completed"
+
+        self._close_trace()
+        return "completed"
+
+    def _close_trace(self):
+        if self._trace_file:
+            self._trace_file.close()
+            self._trace_file = None

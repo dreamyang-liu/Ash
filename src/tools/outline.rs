@@ -371,7 +371,7 @@ impl Tool for OutlineTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "File path to analyze"},
+                "file_path": {"type": "string", "description": "Absolute path to the file to analyze"},
                 "session_id": {"type": "string", "description": "Execute in session sandbox"}
             },
             "required": ["file_path"]
