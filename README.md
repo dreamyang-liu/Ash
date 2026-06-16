@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.svg" width="120" alt="Ash Logo"/>
+  <img src="logo.svg" width="200" alt="Ash Logo"/>
 </p>
 
 <h1 align="center">Ash — Agent Sandbox Hive</h1>
