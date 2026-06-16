@@ -411,16 +411,7 @@ def _find_free_port() -> int:
 # ==================== SandboxPool (K8s multi-sandbox) ====================
 
 class DockerPool:
-    """Manages multiple sandboxes locally via Docker.
-
-    Usage:
-        pool = DockerPool()
-        sb1 = await pool.spawn(image="python:3.11")
-        sb2 = await pool.spawn(image="ubuntu:24.04", entrypoint="pip install pytest")
-
-        await sb1.call("shell", command="pytest")
-        await pool.destroy_all()
-    """
+    """Manages multiple sandboxes locally via Docker."""
 
     BOOTSTRAP_URL = "https://raw.githubusercontent.com/dreamyang-liu/Ash/main/runtime/bootstrap.sh"
 
@@ -433,27 +424,30 @@ class DockerPool:
         self,
         image: str = "ubuntu:24.04",
         entrypoint: str | None = None,
-        docker_args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        resources: dict | None = None,
     ) -> Sandbox:
-        """Spawn a new container with ash-runtime.
+        """Spawn a new sandbox.
 
         Args:
-            image: Docker image to use.
+            image: Container image.
             entrypoint: Setup command run before ash-runtime starts.
-                        e.g. "pip install -r requirements.txt"
-            docker_args: Extra docker run arguments.
-
-        If runtime_bin is set, mounts the local binary (fast, no download).
-        Otherwise, uses bootstrap.sh to download ash-runtime at container start.
+            env: Environment variables for the container.
+            resources: {"cpu": "2", "memory": "4g"} — mapped to Docker limits.
         """
         host_port = _find_free_port()
 
-        env_parts = f"ASH_PORT={self.port}"
-        if entrypoint:
-            env_parts += f' ASH_SETUP="{entrypoint}"'
+        docker_args = []
+        if env:
+            for k, v in env.items():
+                docker_args.extend(["-e", f"{k}={v}"])
+        if resources:
+            if "cpu" in resources:
+                docker_args.extend(["--cpus", str(resources["cpu"])])
+            if "memory" in resources:
+                docker_args.extend(["-m", str(resources["memory"])])
 
         if self.runtime_bin:
-            # Fast path: mount local binary
             if entrypoint:
                 container_cmd = f"({entrypoint}) && ash-runtime --port {self.port}"
             else:
@@ -462,24 +456,20 @@ class DockerPool:
                 "docker", "run", "-d",
                 "-p", f"{host_port}:{self.port}",
                 "-v", f"{self.runtime_bin}:/usr/local/bin/ash-runtime:ro",
-                *(docker_args or []),
+                *docker_args,
                 image,
                 "sh", "-c", container_cmd,
             ]
         else:
-            # Download path: use bootstrap script
-            bootstrap_cmd = (
-                f"curl -fsSL {self.BOOTSTRAP_URL} | "
-                f"ASH_PORT={self.port} "
-            )
+            bootstrap_cmd = f"curl -fsSL {self.BOOTSTRAP_URL} | ASH_PORT={self.port}"
             if entrypoint:
-                bootstrap_cmd += f'ASH_SETUP="{entrypoint}" '
-            bootstrap_cmd += "sh"
-
+                escaped = entrypoint.replace('"', '\\"')
+                bootstrap_cmd += f' ASH_SETUP="{escaped}"'
+            bootstrap_cmd += " sh"
             cmd = [
                 "docker", "run", "-d",
                 "-p", f"{host_port}:{self.port}",
-                *(docker_args or []),
+                *docker_args,
                 image,
                 "sh", "-c", bootstrap_cmd,
             ]
@@ -489,16 +479,14 @@ class DockerPool:
             raise RuntimeError(f"docker run failed: {result.stderr}")
 
         container_id = result.stdout.strip()
-        url = f"http://localhost:{host_port}"
-        sb = Sandbox(backend=HTTPBackend(url))
+        sb = Sandbox(backend=HTTPBackend(f"http://localhost:{host_port}"))
         sb._container_id = container_id
         self._sandboxes[container_id] = sb
 
-        await sb._wait_ready(timeout=60)  # longer timeout for download
+        await sb._wait_ready(timeout=60)
         return sb
 
     async def destroy(self, sandbox: Sandbox):
-        """Destroy a specific sandbox."""
         cid = sandbox._container_id
         if cid and cid in self._sandboxes:
             proc = await asyncio.create_subprocess_exec(
@@ -511,7 +499,6 @@ class DockerPool:
             sandbox._container_id = None
 
     async def destroy_all(self):
-        """Destroy all sandboxes in this pool."""
         for cid in list(self._sandboxes.keys()):
             proc = await asyncio.create_subprocess_exec(
                 "docker", "rm", "-f", cid,
@@ -535,60 +522,42 @@ class DockerPool:
 
 
 class SandboxPool:
-    """Manages multiple sandboxes via control-plane + gateway (K8s deployment).
-
-    Usage:
-        pool = SandboxPool(
-            control_plane_url="http://control-plane:80",
-            gateway_url="http://gateway:80",
-        )
-
-        # Spawn sandboxes
-        sb1 = await pool.spawn(image="python:3.11")
-        sb2 = await pool.spawn(image="ubuntu:24.04")
-
-        # Use them
-        await sb1.call("shell", command="pytest")
-        await sb2.call("shell", command="make build")
-
-        # Destroy
-        await pool.destroy_all()
-    """
+    """Manages multiple sandboxes via K8s control-plane + gateway."""
 
     def __init__(self, control_plane_url: str, gateway_url: str, default_image: str = "ubuntu:24.04"):
         self.control_plane_url = control_plane_url.rstrip("/")
         self.gateway_url = gateway_url.rstrip("/")
         self.default_image = default_image
-        self._client = httpx.AsyncClient(timeout=60)
+        self._client = httpx.AsyncClient(timeout=120)
         self._sandboxes: dict[str, Sandbox] = {}
 
     async def spawn(
         self,
         image: str | None = None,
         entrypoint: str | None = None,
-        ports: list[int] | None = None,
         env: dict[str, str] | None = None,
         resources: dict | None = None,
     ) -> Sandbox:
-        """Spawn a new sandbox via the control plane, return a connected Sandbox.
+        """Spawn a new sandbox.
 
         Args:
             image: Container image.
             entrypoint: Setup command run before ash-runtime starts.
-            ports: Ports to expose (default: [3000]).
             env: Environment variables for the container.
-            resources: CPU/memory requests and limits.
+            resources: {"cpu": "1", "memory": "2Gi"} — K8s resource requests.
         """
         body: dict[str, Any] = {
             "image": image or self.default_image,
-            "ports": [{"container_port": p} for p in (ports or [3000])],
+            "ports": [{"container_port": 3000}],
         }
         if entrypoint:
             body["entrypoint"] = entrypoint
         if env:
             body["env"] = env
         if resources:
-            body["resources"] = resources
+            body["resources"] = {
+                "requests": {k: v for k, v in resources.items()},
+            }
 
         resp = await self._client.post(f"{self.control_plane_url}/spawn", json=body)
         resp.raise_for_status()
@@ -601,7 +570,6 @@ class SandboxPool:
         return sb
 
     async def destroy(self, sandbox: Sandbox):
-        """Destroy a specific sandbox."""
         if sandbox._container_id and sandbox._container_id in self._sandboxes:
             await self._client.post(
                 f"{self.control_plane_url}/destroy",
@@ -611,7 +579,6 @@ class SandboxPool:
             sandbox._container_id = None
 
     async def destroy_all(self):
-        """Destroy all sandboxes managed by this pool."""
         for sid in list(self._sandboxes.keys()):
             await self._client.post(
                 f"{self.control_plane_url}/destroy",
