@@ -1,6 +1,22 @@
-# Ash — Agent Sandbox Hive
+<p align="center">
+  <img src="logo.svg" width="120" alt="Ash Logo"/>
+</p>
 
-Scalable sandbox infrastructure for LLM agents and RL training. Provides isolated execution environments where agents interact via a minimal tool protocol over HTTP, MCP, or stdio.
+<h1 align="center">Ash — Agent Sandbox Hive</h1>
+
+<p align="center">
+  Scalable sandbox infrastructure for LLM agents and RL training.<br/>
+  Isolated execution environments with a minimal tool protocol over HTTP, MCP, or stdio.
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#tools">Tools</a> •
+  <a href="#python-client">Client</a> •
+  <a href="#k8s-infrastructure">K8s Deploy</a>
+</p>
+
+---
 
 ## Architecture
 

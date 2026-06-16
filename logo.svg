@@ -1,0 +1,168 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <!-- Gradient for main hexagons -->
+    <linearGradient id="hiveGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FF9500;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#FF6B00;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Gradient for accent hexagons -->
+    <linearGradient id="accentGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFB84D;stop-opacity:0.8" />
+      <stop offset="100%" style="stop-color:#FF8C00;stop-opacity:0.6" />
+    </linearGradient>
+
+    <!-- Glow effect -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Particle glow -->
+    <filter id="particleGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background circle (optional, can be removed) -->
+  <circle cx="200" cy="200" r="190" fill="#1a1a2e" opacity="0"/>
+
+  <!-- Main honeycomb structure -->
+  <g transform="translate(200, 185)">
+    <!-- Central hexagon (main/largest) -->
+    <polygon
+      points="0,-52 45,-26 45,26 0,52 -45,26 -45,-26"
+      fill="url(#hiveGradient)"
+      filter="url(#glow)"
+      stroke="#FFD700"
+      stroke-width="1.5"
+    />
+
+    <!-- Inner hexagon detail -->
+    <polygon
+      points="0,-30 26,-15 26,15 0,30 -26,15 -26,-15"
+      fill="none"
+      stroke="#FFE4B5"
+      stroke-width="1.5"
+      opacity="0.7"
+    />
+
+    <!-- Top hexagon -->
+    <polygon
+      points="0,-130 39,-110.5 39,-71.5 0,-52 -39,-71.5 -39,-110.5"
+      fill="url(#accentGradient)"
+      stroke="#FF9500"
+      stroke-width="1"
+      opacity="0.85"
+    />
+
+    <!-- Top-right hexagon -->
+    <polygon
+      points="68,-91 107,-71.5 107,-32.5 68,-13 29,-32.5 29,-71.5"
+      fill="url(#accentGradient)"
+      stroke="#FF9500"
+      stroke-width="1"
+      opacity="0.75"
+    />
+
+    <!-- Bottom-right hexagon -->
+    <polygon
+      points="68,13 107,32.5 107,71.5 68,91 29,71.5 29,32.5"
+      fill="url(#accentGradient)"
+      stroke="#FF9500"
+      stroke-width="1"
+      opacity="0.7"
+    />
+
+    <!-- Bottom hexagon -->
+    <polygon
+      points="0,52 39,71.5 39,110.5 0,130 -39,110.5 -39,71.5"
+      fill="url(#accentGradient)"
+      stroke="#FF9500"
+      stroke-width="1"
+      opacity="0.65"
+    />
+
+    <!-- Bottom-left hexagon -->
+    <polygon
+      points="-68,13 -29,32.5 -29,71.5 -68,91 -107,71.5 -107,32.5"
+      fill="url(#accentGradient)"
+      stroke="#FF9500"
+      stroke-width="1"
+      opacity="0.6"
+    />
+
+    <!-- Top-left hexagon -->
+    <polygon
+      points="-68,-91 -29,-71.5 -29,-32.5 -68,-13 -107,-32.5 -107,-71.5"
+      fill="url(#accentGradient)"
+      stroke="#FF9500"
+      stroke-width="1"
+      opacity="0.55"
+    />
+  </g>
+
+  <!-- Floating ash particles (representing agents/sandboxes) -->
+  <g filter="url(#particleGlow)">
+    <!-- Particle cluster top-right -->
+    <circle cx="310" cy="85" r="4" fill="#FFB84D" opacity="0.9"/>
+    <circle cx="325" cy="105" r="2.5" fill="#FFD700" opacity="0.7"/>
+    <circle cx="340" cy="90" r="3" fill="#FFA500" opacity="0.8"/>
+    <circle cx="355" cy="75" r="2" fill="#FFE4B5" opacity="0.6"/>
+
+    <!-- Particle cluster top-left -->
+    <circle cx="90" cy="95" r="3.5" fill="#FFB84D" opacity="0.85"/>
+    <circle cx="70" cy="80" r="2" fill="#FFD700" opacity="0.65"/>
+    <circle cx="55" cy="100" r="2.5" fill="#FFA500" opacity="0.75"/>
+
+    <!-- Particle cluster bottom -->
+    <circle cx="280" cy="320" r="3" fill="#FFB84D" opacity="0.8"/>
+    <circle cx="300" cy="340" r="2" fill="#FFD700" opacity="0.6"/>
+    <circle cx="120" cy="330" r="2.5" fill="#FFA500" opacity="0.7"/>
+    <circle cx="100" cy="315" r="1.5" fill="#FFE4B5" opacity="0.5"/>
+
+    <!-- Scattered particles -->
+    <circle cx="350" cy="200" r="2" fill="#FFB84D" opacity="0.5"/>
+    <circle cx="50" cy="220" r="2.5" fill="#FFD700" opacity="0.55"/>
+    <circle cx="330" cy="280" r="1.5" fill="#FFA500" opacity="0.45"/>
+    <circle cx="75" cy="270" r="2" fill="#FFE4B5" opacity="0.5"/>
+  </g>
+
+  <!-- Connection lines (MCP routes) -->
+  <g stroke="#FF9500" stroke-width="0.5" opacity="0.3">
+    <line x1="310" y1="85" x2="245" y2="135"/>
+    <line x1="90" y1="95" x2="155" y2="135"/>
+    <line x1="280" y1="320" x2="220" y2="265"/>
+    <line x1="120" y1="330" x2="180" y2="265"/>
+  </g>
+
+  <!-- Text: ASH -->
+  <text
+    x="200"
+    y="370"
+    font-family="'Segoe UI', Arial, sans-serif"
+    font-size="36"
+    font-weight="bold"
+    fill="url(#hiveGradient)"
+    text-anchor="middle"
+    letter-spacing="8"
+  >ASH</text>
+
+  <!-- Subtitle -->
+  <text
+    x="200"
+    y="392"
+    font-family="'Segoe UI', Arial, sans-serif"
+    font-size="10"
+    fill="#888888"
+    text-anchor="middle"
+    letter-spacing="2"
+  >AGENT SANDBOX HIVE</text>
+</svg>
