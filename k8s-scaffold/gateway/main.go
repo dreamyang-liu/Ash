@@ -27,7 +27,7 @@ var (
 // Configuration structure
 type Config struct {
 	ListenAddr         string        // Listen address, default :80
-	SessionHeader      string        // Request header to get UUID from, default X-Session-ID
+	SandboxHeader      string        // Request header to get UUID from, default X-Sandbox-ID
 	RedisAddr          string        // Redis address, default 127.0.0.1:6379
 	RedisPassword      string        // Redis password, optional
 	RedisDB            int           // Redis database, default 0
@@ -78,7 +78,7 @@ func getenvDur(key string, def time.Duration) time.Duration {
 func loadConfig() *Config {
 	return &Config{
 		ListenAddr:         getenv("LISTEN_ADDR", ":8080"),
-		SessionHeader:      getenv("SESSION_HEADER", "X-Session-ID"),
+		SandboxHeader:      getenv("SANDBOX_HEADER", "X-Sandbox-ID"),
 		RedisAddr:          getenv("REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword:      os.Getenv("REDIS_PASSWORD"),
 		RedisDB:            getenvInt("REDIS_DB", 0),
@@ -153,7 +153,7 @@ func main() {
 	// Load configuration
 	config = loadConfig()
 	log.Printf("[config] listen=%s sessionHeader=%s redis=%s db=%d prefix=%s defaultScheme=%s",
-		config.ListenAddr, config.SessionHeader, config.RedisAddr, config.RedisDB,
+		config.ListenAddr, config.SandboxHeader, config.RedisAddr, config.RedisDB,
 		config.RedisKeyPrefix, config.DefaultScheme)
 
 	// Initialize Redis client
@@ -297,9 +297,9 @@ func main() {
 	// Main handler for proxying requests
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Get UUID from header
-		uuid := strings.TrimSpace(r.Header.Get(config.SessionHeader))
+		uuid := strings.TrimSpace(r.Header.Get(config.SandboxHeader))
 		if uuid == "" {
-			http.Error(w, "missing session header", http.StatusBadRequest)
+			http.Error(w, "missing sandbox ID header", http.StatusBadRequest)
 			return
 		}
 

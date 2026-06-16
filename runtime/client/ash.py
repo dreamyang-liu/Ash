@@ -211,18 +211,18 @@ class CLIBackend(Backend):
 
 
 class GatewayBackend(Backend):
-    """Calls tools via a gateway that routes by session_id (X-Session-ID header).
+    """Calls tools via a gateway that routes by sandbox_id (X-Sandbox-ID header).
     Used in K8s deployments where a shared gateway proxies to many sandbox pods."""
 
-    def __init__(self, gateway_url: str, session_id: str):
+    def __init__(self, gateway_url: str, sandbox_id: str):
         self.gateway_url = gateway_url.rstrip("/")
-        self.session_id = session_id
+        self.sandbox_id = sandbox_id
         self._client = httpx.AsyncClient(timeout=360)
 
     async def call(self, tool_name: str, args: dict) -> ToolResult:
         resp = await self._client.post(
             self.gateway_url,
-            headers={"X-Session-ID": self.session_id},
+            headers={"X-Sandbox-ID": self.sandbox_id},
             json={
                 "jsonrpc": "2.0", "id": 1,
                 "method": "tools/call",
@@ -244,7 +244,7 @@ class GatewayBackend(Backend):
     async def list_tools(self) -> list[dict]:
         resp = await self._client.post(
             self.gateway_url,
-            headers={"X-Session-ID": self.session_id},
+            headers={"X-Sandbox-ID": self.sandbox_id},
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
         )
         resp.raise_for_status()
@@ -546,10 +546,10 @@ class SandboxPool:
         resp.raise_for_status()
         data = resp.json()
 
-        session_id = data["uuid"]
-        sb = Sandbox(backend=GatewayBackend(self.gateway_url, session_id))
-        sb._container_id = session_id
-        self._sandboxes[session_id] = sb
+        sandbox_id = data["uuid"]
+        sb = Sandbox(backend=GatewayBackend(self.gateway_url, sandbox_id))
+        sb._container_id = sandbox_id
+        self._sandboxes[sandbox_id] = sb
         return sb
 
     async def destroy(self, sandbox: Sandbox):

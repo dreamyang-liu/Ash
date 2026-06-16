@@ -35,7 +35,7 @@
 ┌──────────────────┐  ┌──────────────┐  ┌────────────────────┐
 │ ash-runtime      │  │ Gateway (Go) │  │ Control Plane (Go) │
 │ (per sandbox)    │  │ Redis routing│  │ K8s lifecycle       │
-│                  │  │ X-Session-ID │  │ spawn/destroy pods  │
+│                  │  │ X-Sandbox-ID │  │ spawn/destroy pods  │
 │ POST /   JSON-RPC│  └──────┬───────┘  └────────────────────┘
 │ POST /mcp  MCP   │         │
 │ --mode stdio     │         │
@@ -169,7 +169,7 @@ async with Sandbox.connect("http://localhost:3000") as sb:
 | HTTP | `Sandbox.connect(url)` | Direct to one runtime |
 | MCP | `Sandbox.mcp(url)` | MCP protocol handshake |
 | CLI | `Sandbox.local(bin)` | Subprocess stdio |
-| Gateway | `SandboxPool(cp, gw)` | X-Session-ID header |
+| Gateway | `SandboxPool(cp, gw)` | X-Sandbox-ID header |
 
 ## K8s Infrastructure
 
@@ -178,7 +178,7 @@ async with Sandbox.connect("http://localhost:3000") as sb:
 | Component | Language | Role |
 |-----------|----------|------|
 | Control Plane | Go | REST API for sandbox lifecycle (spawn/destroy) |
-| Gateway | Go | Reverse proxy, routes by session ID via Redis |
+| Gateway | Go | Reverse proxy, routes by sandbox ID via Redis |
 | Redis | - | Session → pod routing table |
 | ash-runtime | Go | Runs inside each sandbox pod |
 
@@ -203,7 +203,7 @@ Routes all tool requests to the correct sandbox pod:
 
 ```bash
 curl -X POST http://gateway/ \
-  -H "X-Session-ID: sandbox-abc123-..." \
+  -H "X-Sandbox-ID: sandbox-abc123-..." \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"shell","arguments":{"command":"ls"}}}'
 ```
