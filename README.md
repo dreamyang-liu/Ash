@@ -1,658 +1,226 @@
-# Ash CLI - Agent Shell for Code Tasks
+# Ash — Agent Sandbox Hive
 
-A minimal CLI and MCP server for AI agents to interact with sandboxed environments.
+Scalable sandbox infrastructure for LLM agents and RL training. Provides isolated execution environments where agents interact via a minimal tool protocol over HTTP, MCP, or stdio.
 
 ## Architecture
 
-Ash supports two backends for running sandboxes:
-
-### Docker Backend (Local)
 ```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   Agent     │────▶│   ash CLI        │────▶│   Docker        │
-│   (LLM)     │     │   (local)        │     │   Container     │
-└─────────────┘     └──────────────────┘     │   ┌───────────┐ │
-                            │                │   │ ash-mcp   │ │
-                            │ HTTP           │   │ :3000     │ │
-                            └───────────────▶│   └───────────┘ │
-                                             └─────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  Agent / Training Loop                                                │
+│    Sandbox.connect(url)     → direct HTTP                            │
+│    Sandbox.mcp(url)         → MCP Streamable HTTP                    │
+│    Sandbox.local(bin)       → subprocess stdio                       │
+│    DockerPool(bin)          → local multi-container                   │
+│    SandboxPool(cp, gw)      → K8s gateway-routed                     │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                │
+              ┌─────────────────┼─────────────────┐
+              ▼                 ▼                 ▼
+┌──────────────────┐  ┌──────────────┐  ┌────────────────────┐
+│ ash-runtime      │  │ Gateway (Go) │  │ Control Plane (Go) │
+│ (per sandbox)    │  │ Redis routing│  │ K8s lifecycle       │
+│                  │  │ X-Session-ID │  │ spawn/destroy pods  │
+│ POST /   JSON-RPC│  └──────┬───────┘  └────────────────────┘
+│ POST /mcp  MCP   │         │
+│ --mode stdio     │         │
+│                  │◄────────┘
+│ 7 tools:         │
+│  shell, process  │
+│  read_file       │
+│  text_editor     │
+│  grep_files      │
+│  web_fetch       │
+│  web_search      │
+└──────────────────┘
 ```
-
-### K8s Backend (Remote)
-```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   Agent     │────▶│  Control Plane   │────▶│   K8s Cluster   │
-│   (LLM)     │     │   POST /spawn    │     │   (sandboxes)   │
-└─────────────┘     │ DELETE /depr...  │     └─────────────────┘
-       │            └──────────────────┘              │
-       │                                              │
-       │            ┌──────────────────┐              │
-       └───────────▶│   MCP Gateway    │◀─────────────┘
-                    │  X-Session-ID    │
-                    │   routes calls   │
-                    └──────────────────┘
-```
-
-### Daemon Mode (Optional)
-
-The optional daemon process maintains persistent backend connections and stateful resources across CLI invocations.
-
-```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   ash CLI   │────▶│   ash daemon     │────▶│   Docker/K8s    │
-│  (thin      │     │   (long-lived)   │     │   Backends      │
-│   client)   │ UDS │                  │     │                 │
-└─────────────┘     │  BackendManager  │     └─────────────────┘
-                    │  ProcessRegistry │
-                    │  EventSystem     │
-                    └──────────────────┘
-```
-
-Without daemon, the CLI falls back to direct execution (same as before).
-
-```bash
-# Start daemon
-ash daemon start
-
-# Check status
-ash daemon status
-
-# Stop daemon
-ash daemon stop
-```
-
-**What the daemon provides:**
-- Persistent connections to Docker/K8s backends (faster session operations)
-- Async process tracking survives across CLI invocations
-- Event queue persists (process completion notifications work)
-- Cached health checks (`ash info` responds instantly)
 
 ## Quick Start
 
-```bash
-# Check backend status
-ash config
-# Output: {"backends":{"docker":"available","k8s":"unavailable"},"default":"docker"}
-
-# Create a sandbox session (uses default backend)
-ash session create
-# Output: {"session_id":"abc123","backend":"docker","status":"running","host":"localhost"}
-
-# Or specify backend explicitly
-ash session create --backend docker
-ash session create --backend k8s
-
-# Run commands in the sandbox
-ash --session abc123 run "ls -la"
-ash --session abc123 run "cat README.md"
-
-# List all sessions (across backends)
-ash session list
-
-# Destroy when done
-ash session destroy abc123
-```
-
-### Backend Configuration
+### Local (single sandbox)
 
 ```bash
-# Switch default backend
-ash backend switch docker
-ash backend switch k8s
-
-# Configure K8s endpoints
-ash config --control-plane-url "http://control-plane:80" --gateway-url "http://gateway:80"
-
-# Or via environment variables
-export ASH_CONTROL_PLANE_URL="http://control-plane:80"
-export ASH_GATEWAY_URL="http://gateway:80"
+cd runtime
+go build -o ash-runtime .
+./ash-runtime --port 3000
 ```
 
----
+```python
+from client import Sandbox
 
-## Tools Reference
+async with Sandbox.connect("http://localhost:3000") as sb:
+    result = await sb.call("shell", command="echo hello")
+    print(result.output)
+```
 
-### Session Management
+### Local Docker (multiple sandboxes)
 
-#### `session_create`
-Create a new sandbox. Returns a `session_id` for subsequent operations.
+```python
+from client import DockerPool
+
+async with DockerPool(runtime_bin="./ash-runtime") as pool:
+    sb1 = await pool.spawn(image="python:3.11")
+    sb2 = await pool.spawn(image="node:20")
+    await sb1.call("shell", command="pytest")
+    await sb2.call("shell", command="npm test")
+```
+
+### Kubernetes (large-scale RL)
 
 ```bash
-# Default image
-ash session create
+# Deploy infrastructure
+cd k8s-config && bash deploy.sh
 
-# Custom image
-ash session create --image "python:3.11"
-
-# With resources
-ash session create --image "ubuntu:22.04" --memory "4Gi" --cpus "2"
+# Or manually
+kubectl apply -f infra.yaml
+kubectl apply -f rbac.yaml
 ```
 
-**MCP:**
-```json
-{
-  "name": "session_create",
-  "arguments": {
-    "image": "python:3.11",
-    "env": {"DEBUG": "1"},
-    "ports": [3000, 8080],
-    "resources": {
-      "requests": {"cpu": "100m", "memory": "256Mi"},
-      "limits": {"cpu": "1", "memory": "1Gi"}
-    },
-    "node_selector": {"gpu": "true"}
-  }
-}
+```python
+from client import SandboxPool
+
+async with SandboxPool(
+    control_plane_url="http://control-plane:80",
+    gateway_url="http://gateway:80",
+) as pool:
+    sandboxes = [await pool.spawn(image="my-task:latest") for _ in range(100)]
+    # Each sandbox is a K8s pod, routed via gateway
 ```
 
-**Returns:**
-```json
-{"session_id": "abc123", "status": "Ready", "host": "sandbox-abc123.default.svc"}
-```
+## Runtime
 
-#### `session_list`
-List all active sessions.
+The `ash-runtime` binary runs inside each sandbox container. It's a single Go binary (~9MB) with no dependencies beyond `ripgrep` (auto-installed on first grep call).
 
-```bash
-ash session list
-```
+### Run Modes
 
-#### `session_destroy`
-Destroy a sandbox by session_id.
+| Mode | Command | Use Case |
+|------|---------|----------|
+| HTTP | `ash-runtime --port 3000` | Container runtime (default) |
+| stdio | `ash-runtime --mode stdio` | CLI, MCP stdio transport |
+| MCP | `POST /mcp` endpoint | FastMCP, Claude Desktop, Cursor |
 
-```bash
-ash session destroy abc123
-```
+### Tools
 
----
-
-### Shell Execution
-
-#### `shell`
-Execute a shell command. If `session_id` is provided, runs in that sandbox via MCP Gateway.
-
-```bash
-# Local execution
-ash run "ls -la"
-
-# In sandbox
-ash --session abc123 run "ls -la"
-ash --session abc123 run "python train.py"
-ash --session abc123 run "pip install numpy && python -c 'import numpy; print(numpy.__version__)'"
-```
-
-**MCP:**
-```json
-{
-  "name": "shell",
-  "arguments": {
-    "command": "python train.py",
-    "session_id": "abc123",
-    "timeout_secs": 300
-  }
-}
-```
-
-**Parameters:**
-| Name | Type | Required | Default | Description |
-|------|------|----------|---------|-------------|
-| `command` | string | yes | - | Shell command to execute |
-| `session_id` | string | no | - | Execute in this sandbox |
-| `timeout_secs` | int | no | 300 | Timeout in seconds |
-
----
-
-### File Operations
-
-#### `read_file`
-Read file contents with line numbers.
-
-```bash
-ash view /path/to/file.py
-ash view /path/to/file.py -n 50 -l 20  # Start at line 50, show 20 lines
-```
-
-**MCP:**
-```json
-{
-  "name": "read_file",
-  "arguments": {
-    "file_path": "/testbed/src/main.py",
-    "offset": 1,
-    "limit": 100,
-    "session_id": "abc123"
-  }
-}
-```
-
-**Output format:**
-```
-     1 | def main():
-     2 |     print("Hello")
-     3 |     return 0
-```
-
-#### `grep_files`
-Search for patterns using ripgrep.
-
-```bash
-ash grep "def.*test" src/
-ash grep "TODO" . --include "*.py"
-```
-
-**MCP:**
-```json
-{
-  "name": "grep_files",
-  "arguments": {
-    "pattern": "def.*test",
-    "path": "src/",
-    "include": "*.py",
-    "limit": 100,
-    "session_id": "abc123"
-  }
-}
-```
-
-#### `text_editor`
-Edit files with four commands: `view`, `str_replace`, `insert`, `create`.
-
-**view** - View file with line range:
-```bash
-ash edit view /path/file.py --start 10 --end 30
-```
-```json
-{"name": "text_editor", "arguments": {"command": "view", "path": "/testbed/src/lib.py", "view_range": [10, 30]}}
-```
-
-**str_replace** - Replace text (must be unique):
-```bash
-ash edit replace /path/file.py --old "old_text" --new "new_text"
-```
-```json
-{"name": "text_editor", "arguments": {"command": "str_replace", "path": "/testbed/src/lib.py", "old_str": "def foo():", "new_str": "def foo(x):"}}
-```
-
-**insert** - Insert text after a line:
-```bash
-ash edit insert /path/file.py --line 10 --text "# New comment"
-```
-```json
-{"name": "text_editor", "arguments": {"command": "insert", "path": "/testbed/src/lib.py", "insert_line": 10, "insert_text": "    # Added line"}}
-```
-
-**create** - Create a new file:
-```bash
-ash edit create /path/new_file.py "#!/usr/bin/env python3\nprint('hello')"
-```
-```json
-{"name": "text_editor", "arguments": {"command": "create", "path": "/testbed/src/new.py", "file_text": "# New file\n"}}
-```
-
----
-
-### Git Operations
-
-#### `git_status`
-```bash
-ash git-status
-ash git-status --short
-```
-```json
-{"name": "git_status", "arguments": {"short": true, "session_id": "abc123"}}
-```
-
-#### `git_diff`
-```bash
-ash git-diff
-ash git-diff --staged
-ash git-diff src/main.py src/lib.py
-```
-```json
-{"name": "git_diff", "arguments": {"staged": true, "paths": ["src/main.py"], "session_id": "abc123"}}
-```
-
-#### `git_log`
-```bash
-ash git-log -n 5
-ash git-log --oneline
-```
-```json
-{"name": "git_log", "arguments": {"count": 10, "oneline": true, "session_id": "abc123"}}
-```
-
----
-
-### Clipboard (Agent Memory)
-
-Clipboard provides named storage for text snippets - useful for tracking context across multiple operations.
-
-#### `clip`
-Save content to clipboard.
-
-```bash
-# Direct text
-ash clip "important note" -n memo
-
-# From file range
-ash clip -f src/lib.rs:10-20 -n code_snippet
-```
-
-**MCP:**
-```json
-{"name": "clip", "arguments": {"content": "error: type mismatch", "name": "error_msg"}}
-{"name": "clip", "arguments": {"file": "src/lib.py:50-60", "name": "function_def"}}
-```
-
-#### `paste`
-Retrieve from clipboard.
-
-```bash
-ash paste              # Latest
-ash paste error_msg    # By name
-```
-
-**MCP:**
-```json
-{"name": "paste", "arguments": {"name": "error_msg"}}
-```
-
-#### `clips`
-List all clipboard entries.
-
-```bash
-ash clips
-```
-
-#### `clips_clear`
-Clear clipboard entries.
-
-```bash
-ash clips-clear           # Clear all
-ash clips-clear old_note  # Clear specific
-```
-
----
-
-### Buffer (Agent Workspace)
-
-Named buffers provide a persistent, editable text workspace for agents. Like a scratchpad with line-based operations.
-
-#### `buffer_write`
-Write content to a buffer (creates if doesn't exist).
-
-```bash
-# Replace entire buffer
-ash buffer write "line 1\nline 2\nline 3"
-
-# Append to buffer
-ash buffer write --append "new lines"
-
-# Insert at specific line
-ash buffer write --at-line 5 "inserted content"
-
-# Use named buffer
-ash buffer write --name scratch "temp notes"
-```
-
-**MCP:**
-```json
-{"name": "buffer_write", "arguments": {"content": "def main():\n    pass", "name": "main"}}
-{"name": "buffer_write", "arguments": {"content": "# append this", "append": true}}
-{"name": "buffer_write", "arguments": {"content": "inserted", "at_line": 10}}
-```
-
-#### `buffer_read`
-Read lines from a buffer.
-
-```bash
-ash buffer read                    # Read all (default: main)
-ash buffer read --name scratch     # Read named buffer
-ash buffer read -s 10 -e 50        # Read lines 10-50
-```
-
-**MCP:**
-```json
-{"name": "buffer_read", "arguments": {}}
-{"name": "buffer_read", "arguments": {"name": "scratch", "start_line": 10, "end_line": 50}}
-```
-
-**Output format:**
-```
-     1 | def main():
-     2 |     print("hello")
-     3 |     return 0
-
-[3 lines shown, buffer 'main' has 3 total]
-```
-
-#### `buffer_replace`
-Replace a range of lines.
-
-```bash
-ash buffer replace --start 5 --end 10 "replacement content"
-```
-
-**MCP:**
-```json
-{"name": "buffer_replace", "arguments": {"start_line": 5, "end_line": 10, "content": "new\nlines"}}
-```
-
-#### `buffer_delete`
-Delete a range of lines.
-
-```bash
-ash buffer delete --start 5 --end 10
-```
-
-**MCP:**
-```json
-{"name": "buffer_delete", "arguments": {"start_line": 5, "end_line": 10}}
-```
-
-#### `buffer_list`
-List all buffers.
-
-```bash
-ash buffer list
-```
-
-**Output:**
-```
-NAME             | LINES  | CHARS   | MODIFIED
-------------------------------------------------------------
-main             |    150 |    4230 | 2024-01-15T10:30:00
-scratch          |     25 |     680 | 2024-01-15T09:15:00
-```
-
-#### `buffer_clear`
-Clear or delete buffers.
-
-```bash
-ash buffer clear              # Clear ALL buffers
-ash buffer clear --name main  # Delete specific buffer
-```
-
-#### Buffer ↔ Clipboard Integration
-
-Transfer content between buffers and clipboard.
-
-```bash
-# Copy buffer range to clipboard
-ash buffer-to-clip --start 10 --end 20 --clip-name snippet
-
-# Paste clipboard into buffer
-ash clip-to-buffer --clip-name snippet --append
-ash clip-to-buffer --clip-name code --at-line 50
-```
-
-**MCP:**
-```json
-{"name": "buffer_to_clip", "arguments": {"start_line": 10, "end_line": 20, "clip_name": "snippet"}}
-{"name": "clip_to_buffer", "arguments": {"clip_name": "snippet", "buffer": "main", "append": true}}
-```
-
-**Use case:** Build up code in buffer, copy sections to clipboard for reference, paste clipboard content back into buffer at specific locations.
-
----
-
-## Common Workflows
-
-### 1. Debug a Failing Test
-
-```bash
-# Create sandbox
-ash session create --image python:3.11
-# → {"session_id": "sess1", ...}
-
-# Run the failing test
-ash --session sess1 run "pytest tests/test_main.py -v"
-
-# Find the error
-ash --session sess1 run "grep -n 'def test_' tests/test_main.py"
-
-# View the test
-ash --session sess1 view tests/test_main.py -n 45 -l 20
-
-# Fix it
-ash --session sess1 edit replace tests/test_main.py \
-  --old "assert result == 1" \
-  --new "assert result == 2"
-
-# Re-run
-ash --session sess1 run "pytest tests/test_main.py -v"
-
-# Cleanup
-ash session destroy sess1
-```
-
-### 2. Explore and Modify Codebase
-
-```bash
-# Search for relevant code
-ash --session sess1 grep "class.*Handler" src/
-
-# View the file
-ash --session sess1 view src/handlers.py -n 100 -l 50
-
-# Save important snippet to clipboard
-ash --session sess1 clip -f src/handlers.py:100-120 -n handler_class
-
-# Make changes
-ash --session sess1 edit replace src/handlers.py \
-  --old "def process(self):" \
-  --new "def process(self, data):"
-
-# Check diff
-ash --session sess1 git-diff src/handlers.py
-```
-
-### 3. SWE-bench Task Pattern
-
-```bash
-# 1. Create sandbox for the task
-ash session create --image swebench/sweb.eval.x86_64.sympy__sympy
-
-# 2. Explore the issue
-ash --session $SID run "cat /testbed/issue.txt"
-ash --session $SID grep "relevant_function" /testbed/
-
-# 3. View and understand the code
-ash --session $SID view /testbed/sympy/core/expr.py -n 500 -l 50
-
-# 4. Make the fix
-ash --session $SID edit replace /testbed/sympy/core/expr.py \
-  --old "..." --new "..."
-
-# 5. Test the fix
-ash --session $SID run "python -c 'from sympy import ...; ...'"
-
-# 6. Create patch
-ash --session $SID run "git diff -- sympy/core/expr.py > /tmp/patch.txt"
-ash --session $SID run "cat /tmp/patch.txt"
-
-# 7. Submit
-ash --session $SID run "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /tmp/patch.txt"
-```
-
----
-
-## MCP Server Mode
-
-Run ash as an MCP server for integration with MCP clients:
-
-```bash
-# Start MCP server (stdio transport)
-ash-mcp
-
-# Or with HTTP transport (future)
-ash-mcp --transport http --port 8080
-```
-
-**MCP Protocol:**
-- `initialize` - Handshake
-- `tools/list` - List available tools
-- `tools/call` - Execute a tool
-
----
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ASH_CONTROL_PLANE_URL` | `http://localhost:8080` | Control plane endpoint |
-| `ASH_GATEWAY_URL` | `http://localhost:8081` | MCP gateway endpoint |
-
-### CLI Global Options
-
-| Flag | Description |
+| Tool | Description |
 |------|-------------|
-| `--session <ID>` | Run commands in this session's sandbox |
-| `--output text\|json` | Output format |
-| `-h, --help` | Show help |
-| `-V, --version` | Show version |
+| `shell` | Execute commands. `background: true` returns a pid. |
+| `process` | Read output or kill background processes. |
+| `read_file` | Read files with line numbers, offset, limit. |
+| `text_editor` | View, create, str_replace, insert files. |
+| `grep_files` | Ripgrep search with pattern, glob, limit. |
+| `web_fetch` | Fetch URLs. Formats: html, text, markdown. |
+| `web_search` | Multi-engine search (Google → DuckDuckGo → Brave). |
 
-### Daemon
+### Notifications
 
-| Command | Description |
-|---------|-------------|
-| `ash daemon start` | Start daemon (detaches to background) |
-| `ash daemon start --foreground` | Start daemon in foreground |
-| `ash daemon stop` | Stop the daemon |
-| `ash daemon status` | Check if daemon is running |
+Every `tools/call` response includes a `notifications` array. Background process exits and file changes are automatically captured and delivered with the next response:
 
-Files: `~/.ash/daemon.sock` (Unix socket), `~/.ash/daemon.pid` (PID file)
+```json
+{
+  "content": [{"type": "text", "text": "..."}],
+  "isError": false,
+  "notifications": [
+    {"kind": "process_exited", "data": {"pid": "abc123", "exit_code": 0}}
+  ]
+}
+```
 
----
+## Python Client
 
-## Error Handling
+```bash
+pip install httpx
+```
 
-**Common errors:**
+```python
+from client import Sandbox
 
-| Error | Cause | Solution |
-|-------|-------|----------|
-| `Session not found` | Invalid session_id | Check `ash session list` |
-| `Connection refused` | Control plane down | Check endpoint URLs |
-| `Timeout` | Long-running command | Increase `timeout_secs` |
-| `Multiple matches` | str_replace not unique | Use more specific `old_str` |
-| `No match found` | str_replace text not in file | Verify with `view` first |
+async with Sandbox.connect("http://localhost:3000") as sb:
+    # Direct tool calls
+    await sb.call("shell", command="pytest")
+    await sb.call("text_editor", command="str_replace", path="app.py", old_str="foo", new_str="bar")
 
----
+    # Get schemas for LLM function calling
+    tools = await sb.tool_schemas(format="openai")    # or "anthropic"
 
-## Tips for LLM Agents
+    # Execute model tool_calls directly
+    result = await sb.execute_tool_call(model_tool_call)
+    # result.output, result.is_error, result.notifications
+```
 
-1. **Always use `session_id`** for sandbox operations - don't rely on local filesystem.
+### Backends
 
-2. **View before editing** - Use `read_file` or `text_editor view` to see current state.
+| Backend | Constructor | Routing |
+|---------|-------------|---------|
+| HTTP | `Sandbox.connect(url)` | Direct to one runtime |
+| MCP | `Sandbox.mcp(url)` | MCP protocol handshake |
+| CLI | `Sandbox.local(bin)` | Subprocess stdio |
+| Gateway | `SandboxPool(cp, gw)` | X-Session-ID header |
 
-3. **str_replace must be unique** - Include enough context to match exactly once.
+## K8s Infrastructure
 
-4. **Use clipboard for context** - Store error messages, important code snippets for reference.
+### Components
 
-5. **Check exit codes** - Non-zero exit means failure; read stderr for details.
+| Component | Language | Role |
+|-----------|----------|------|
+| Control Plane | Go | REST API for sandbox lifecycle (spawn/destroy) |
+| Gateway | Go | Reverse proxy, routes by session ID via Redis |
+| Redis | - | Session → pod routing table |
+| ash-runtime | Go | Runs inside each sandbox pod |
 
-6. **Incremental changes** - Make small edits, test frequently, don't batch large changes.
+### Control Plane API
 
-7. **Clean up sessions** - Always destroy sessions when done to free resources.
+```bash
+# Spawn a sandbox
+curl -X POST http://control-plane/spawn -d '{
+  "image": "my-image:latest",
+  "ports": [{"container_port": 3000}],
+  "resources": {"requests": {"cpu": "500m", "memory": "512Mi"}}
+}'
+# → {"uuid": "sandbox-abc123-...", "status": "ready", ...}
+
+# Destroy
+curl -X POST http://control-plane/destroy -d '{"uuid": "sandbox-abc123-..."}'
+```
+
+### Gateway
+
+Routes all tool requests to the correct sandbox pod:
+
+```bash
+curl -X POST http://gateway/ \
+  -H "X-Session-ID: sandbox-abc123-..." \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"shell","arguments":{"command":"ls"}}}'
+```
+
+## Development
+
+```bash
+# Build runtime
+cd runtime && go build -o ash-runtime .
+
+# Run tests
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"shell","arguments":{"command":"echo ok"}}}' | ./ash-runtime --mode stdio
+
+# Build K8s components
+cd k8s-scaffold && make build
+```
+
+## Project Structure
+
+```
+.
+├── runtime/              # Go sandbox runtime (ash-runtime binary)
+│   ├── main.go           # HTTP server + stdio + MCP endpoint
+│   ├── tools/            # 7 tool implementations
+│   ├── events/           # Notification system
+│   └── client/           # Python async client
+├── k8s-scaffold/         # K8s infrastructure (Go)
+│   ├── control-plane/    # Sandbox lifecycle API
+│   └── gateway/          # Session-routed reverse proxy
+├── k8s-config/           # K8s manifests (deploy, rbac, infra)
+└── src/                  # Legacy Rust implementation (ash-mcp)
+```
+
+## License
+
+Apache-2.0
