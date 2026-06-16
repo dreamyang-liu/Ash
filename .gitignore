@@ -17,3 +17,5 @@ Thumbs.db
 
 # Generated man pages (runtime)
 /man/
+runtime/ash-runtime
+__pycache__/
