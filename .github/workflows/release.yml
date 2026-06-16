@@ -1,192 +1,81 @@
-name: Build & Release
+name: Release
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
-  pull_request:
-    branches: [main]
-
-env:
-  CARGO_TERM_COLOR: always
 
 jobs:
   build:
-    name: Build ${{ matrix.asset_name }}
-    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: runtime
     strategy:
       fail-fast: false
       matrix:
         include:
-          # macOS
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            artifact_name: ash
-            asset_name: ash-macos-x86_64
-            use_cross: false
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            artifact_name: ash
-            asset_name: ash-macos-aarch64
-            use_cross: false
-          # Linux - latest (Ubuntu 24.04)
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact_name: ash
-            asset_name: ash-linux-x86_64
-            use_cross: false
-          # Linux - Ubuntu 22.04
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
-            artifact_name: ash
-            asset_name: ash-linux-x86_64-ubuntu2204
-            use_cross: false
-          # Linux - Ubuntu 20.04 (via Docker, runner no longer available)
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact_name: ash
-            asset_name: ash-linux-x86_64-ubuntu2004
-            use_cross: false
-            docker_image: ubuntu:20.04
-          # Linux - Ubuntu 18.04 (via Docker, runner no longer available)
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact_name: ash
-            asset_name: ash-linux-x86_64-ubuntu1804
-            use_cross: false
-            docker_image: ubuntu:18.04
-          # Linux aarch64
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact_name: ash
-            asset_name: ash-linux-aarch64
-            use_cross: true
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+          - os: linux
+            arch: arm64
+            runner: ubuntu-latest
+          - os: darwin
+            arch: amd64
+            runner: macos-latest
+          - os: darwin
+            arch: arm64
+            runner: macos-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        if: ${{ !matrix.docker_image }}
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          targets: ${{ matrix.target }}
+          go-version: "1.22"
 
-      - name: Install cross
-        if: matrix.use_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build (native)
-        if: ${{ !matrix.use_cross && !matrix.docker_image }}
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Build (cross)
-        if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }}
-
-      - name: Build (Docker - older Ubuntu)
-        if: ${{ matrix.docker_image }}
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            -e CARGO_TERM_COLOR=always \
-            ${{ matrix.docker_image }} bash -c '
-              set -e
-              export DEBIAN_FRONTEND=noninteractive
-
-              # Fix apt sources for EOL releases
-              apt-get update 2>/dev/null || {
-                sed -i "s|archive.ubuntu.com|old-releases.ubuntu.com|g" /etc/apt/sources.list
-                sed -i "s|security.ubuntu.com|old-releases.ubuntu.com|g" /etc/apt/sources.list
-                apt-get update
-              }
-
-              apt-get install -y curl build-essential pkg-config perl ca-certificates
-
-              # Install Rust
-              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-              . "$HOME/.cargo/env"
-
-              cargo build --release --target ${{ matrix.target }}
-            '
-
-      - name: Package artifacts
-        run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/ash dist/${{ matrix.asset_name }}
-          cp target/${{ matrix.target }}/release/ash-mcp dist/${{ matrix.asset_name }}-mcp
-          chmod +x dist/*
-
-          # Create tarball
-          cd dist
-          tar -czvf ${{ matrix.asset_name }}.tar.gz ${{ matrix.asset_name }} ${{ matrix.asset_name }}-mcp
-
-          # Create sha256
-          shasum -a 256 ${{ matrix.asset_name }}.tar.gz > ${{ matrix.asset_name }}.tar.gz.sha256
+      - name: Build
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: go build -ldflags="-s -w" -o ash-runtime-${{ matrix.os }}-${{ matrix.arch }} .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: |
-            dist/${{ matrix.asset_name }}.tar.gz
-            dist/${{ matrix.asset_name }}.tar.gz.sha256
+          name: ash-runtime-${{ matrix.os }}-${{ matrix.arch }}
+          path: runtime/ash-runtime-${{ matrix.os }}-${{ matrix.arch }}
 
   release:
     name: Create Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: List artifacts
-        run: find artifacts -type f
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f -name "ash-runtime-*" -exec cp {} release/ \;
+          chmod +x release/*
+          cd release
+          for f in ash-runtime-*; do
+            sha256sum "$f" > "$f.sha256"
+          done
+          ls -la
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            artifacts/**/*.tar.gz
-            artifacts/**/*.sha256
+          files: release/*
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # Also upload artifacts on push to main (dev builds)
-  dev-release:
-    name: Dev Release
-    needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Update dev release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: dev
-          name: Development Build
-          prerelease: true
-          files: |
-            artifacts/**/*.tar.gz
-            artifacts/**/*.sha256
-          body: |
-            ⚠️ **Development Build** - Built from latest `main` branch.
-            
-            Not recommended for production use. For stable releases, see the [latest release](../../releases/latest).
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
