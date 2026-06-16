@@ -414,39 +414,76 @@ class DockerPool:
     """Manages multiple sandboxes locally via Docker.
 
     Usage:
-        pool = DockerPool(runtime_bin="./ash-runtime")
-
+        pool = DockerPool()
         sb1 = await pool.spawn(image="python:3.11")
-        sb2 = await pool.spawn(image="ubuntu:24.04")
+        sb2 = await pool.spawn(image="ubuntu:24.04", entrypoint="pip install pytest")
 
         await sb1.call("shell", command="pytest")
-        await sb2.call("shell", command="make build")
-
         await pool.destroy_all()
     """
 
+    BOOTSTRAP_URL = "https://raw.githubusercontent.com/dreamyang-liu/Ash/main/runtime/bootstrap.sh"
+
     def __init__(self, runtime_bin: str | None = None, port: int = 3000):
         self.runtime_bin = runtime_bin or shutil.which("ash-runtime")
-        if not self.runtime_bin:
-            raise RuntimeError("ash-runtime binary not found in PATH")
         self.port = port
         self._sandboxes: dict[str, Sandbox] = {}
 
     async def spawn(
         self,
         image: str = "ubuntu:24.04",
+        entrypoint: str | None = None,
         docker_args: list[str] | None = None,
     ) -> Sandbox:
-        """Spawn a new container with ash-runtime injected."""
+        """Spawn a new container with ash-runtime.
+
+        Args:
+            image: Docker image to use.
+            entrypoint: Setup command run before ash-runtime starts.
+                        e.g. "pip install -r requirements.txt"
+            docker_args: Extra docker run arguments.
+
+        If runtime_bin is set, mounts the local binary (fast, no download).
+        Otherwise, uses bootstrap.sh to download ash-runtime at container start.
+        """
         host_port = _find_free_port()
-        cmd = [
-            "docker", "run", "-d",
-            "-p", f"{host_port}:{self.port}",
-            "-v", f"{self.runtime_bin}:/usr/local/bin/ash-runtime:ro",
-            *(docker_args or []),
-            image,
-            "ash-runtime", "--port", str(self.port),
-        ]
+
+        env_parts = f"ASH_PORT={self.port}"
+        if entrypoint:
+            env_parts += f' ASH_SETUP="{entrypoint}"'
+
+        if self.runtime_bin:
+            # Fast path: mount local binary
+            if entrypoint:
+                container_cmd = f"({entrypoint}) && ash-runtime --port {self.port}"
+            else:
+                container_cmd = f"ash-runtime --port {self.port}"
+            cmd = [
+                "docker", "run", "-d",
+                "-p", f"{host_port}:{self.port}",
+                "-v", f"{self.runtime_bin}:/usr/local/bin/ash-runtime:ro",
+                *(docker_args or []),
+                image,
+                "sh", "-c", container_cmd,
+            ]
+        else:
+            # Download path: use bootstrap script
+            bootstrap_cmd = (
+                f"curl -fsSL {self.BOOTSTRAP_URL} | "
+                f"ASH_PORT={self.port} "
+            )
+            if entrypoint:
+                bootstrap_cmd += f'ASH_SETUP="{entrypoint}" '
+            bootstrap_cmd += "sh"
+
+            cmd = [
+                "docker", "run", "-d",
+                "-p", f"{host_port}:{self.port}",
+                *(docker_args or []),
+                image,
+                "sh", "-c", bootstrap_cmd,
+            ]
+
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(f"docker run failed: {result.stderr}")
@@ -457,7 +494,7 @@ class DockerPool:
         sb._container_id = container_id
         self._sandboxes[container_id] = sb
 
-        await sb._wait_ready()
+        await sb._wait_ready(timeout=60)  # longer timeout for download
         return sb
 
     async def destroy(self, sandbox: Sandbox):
@@ -528,15 +565,26 @@ class SandboxPool:
     async def spawn(
         self,
         image: str | None = None,
+        entrypoint: str | None = None,
         ports: list[int] | None = None,
         env: dict[str, str] | None = None,
         resources: dict | None = None,
     ) -> Sandbox:
-        """Spawn a new sandbox via the control plane, return a connected Sandbox."""
+        """Spawn a new sandbox via the control plane, return a connected Sandbox.
+
+        Args:
+            image: Container image.
+            entrypoint: Setup command run before ash-runtime starts.
+            ports: Ports to expose (default: [3000]).
+            env: Environment variables for the container.
+            resources: CPU/memory requests and limits.
+        """
         body: dict[str, Any] = {
             "image": image or self.default_image,
             "ports": [{"container_port": p} for p in (ports or [3000])],
         }
+        if entrypoint:
+            body["entrypoint"] = entrypoint
         if env:
             body["env"] = env
         if resources:
