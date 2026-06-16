@@ -161,7 +161,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install httpx
+      - run: pip install ../sdk
       - run: go build -o ash-runtime .
 
       - name: Test Python client (HTTP + CLI + MCP backends)
@@ -170,8 +170,7 @@ jobs:
           sleep 2
           python3 -c "
           import asyncio, sys, json
-          sys.path.insert(0, '.')
-          from client import Sandbox
+          from ash_sandbox import Sandbox
 
           async def main():
               # HTTP backend
