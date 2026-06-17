@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -119,9 +120,14 @@ func (s *ShellTool) runBackground(command, workingDir, agentID string) Result {
 		cmd.Dir = workingDir
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return Err("failed to create stdout pipe: " + err.Error())
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return Err("failed to create stderr pipe: " + err.Error())
+	}
 
 	proc := &Process{pid: pid, cmd: cmd}
 
@@ -133,12 +139,29 @@ func (s *ShellTool) runBackground(command, workingDir, agentID string) Result {
 	processes[pid] = proc
 	processesMu.Unlock()
 
+	// Stream stdout lines as they arrive
+	go func() {
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			proc.mu.Lock()
+			proc.stdout = append(proc.stdout, scanner.Text())
+			proc.mu.Unlock()
+		}
+	}()
+
+	// Stream stderr lines as they arrive
+	go func() {
+		scanner := bufio.NewScanner(stderrPipe)
+		for scanner.Scan() {
+			proc.mu.Lock()
+			proc.stderr = append(proc.stderr, scanner.Text())
+			proc.mu.Unlock()
+		}
+	}()
+
+	// Wait for exit
 	go func() {
 		err := cmd.Wait()
-
-		proc.mu.Lock()
-		proc.stdout = strings.Split(stdout.String(), "\n")
-		proc.stderr = strings.Split(stderr.String(), "\n")
 		code := 0
 		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
@@ -147,6 +170,7 @@ func (s *ShellTool) runBackground(command, workingDir, agentID string) Result {
 				code = 1
 			}
 		}
+		proc.mu.Lock()
 		proc.exitCode = &code
 		proc.mu.Unlock()
 
