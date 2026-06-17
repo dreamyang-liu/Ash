@@ -49,7 +49,7 @@ func (e *EditTool) Execute(args map[string]any) Result {
 		return e.strReplace(path, args)
 	case "insert":
 		return e.insert(path, args)
-	case "write":
+	case "write", "create":
 		return e.write(path, args)
 	default:
 		return Err("unknown command: " + command)
