@@ -70,8 +70,10 @@ func (s *ShellTool) Execute(args map[string]any) Result {
 	}
 	workingDir, _ := args["working_dir"].(string)
 
+	agentID, _ := args["agent_id"].(string)
+
 	if background {
-		return s.runBackground(command, workingDir)
+		return s.runBackground(command, workingDir, agentID)
 	}
 	return s.runSync(command, workingDir, timeout, tail)
 }
@@ -109,7 +111,7 @@ func (s *ShellTool) runSync(command, workingDir string, timeout, tail int) Resul
 	return Ok(output)
 }
 
-func (s *ShellTool) runBackground(command, workingDir string) Result {
+func (s *ShellTool) runBackground(command, workingDir, agentID string) Result {
 	pid := uuid.New().String()[:8]
 
 	cmd := exec.Command("sh", "-c", command)
@@ -149,7 +151,7 @@ func (s *ShellTool) runBackground(command, workingDir string) Result {
 		proc.mu.Unlock()
 
 		data := map[string]any{"pid": pid, "exitCode": code}
-		events.Push("process_exited", pid, data)
+		events.PushTo(agentID, "process_exited", pid, data)
 	}()
 
 	resp, _ := json.Marshal(map[string]any{"pid": pid})

@@ -91,6 +91,7 @@ func main() {
 			var params struct {
 				Name      string         `json:"name"`
 				Arguments map[string]any `json:"arguments"`
+				AgentID   string         `json:"agent_id"`
 			}
 			if err := json.Unmarshal(req.Params, &params); err != nil {
 				writeRPC(w, req.ID, nil, &RPCError{Code: -32602, Message: "invalid params"})
@@ -109,8 +110,11 @@ func main() {
 				return
 			}
 
+			if params.AgentID != "" {
+				params.Arguments["agent_id"] = params.AgentID
+			}
 			result := target.Execute(params.Arguments)
-			notifications := events.Drain()
+			notifications := events.DrainFor(params.AgentID)
 
 			text := result.Output
 			isError := !result.Success
