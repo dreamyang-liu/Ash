@@ -2,10 +2,10 @@
 Ash Sandbox CLI.
 
 Usage:
-    ash-sandbox config --mode local --url http://localhost:3000
+    ash-sandbox config --mode local
     ash-sandbox config --mode docker
     ash-sandbox config --mode k8s --gateway URL --control-plane URL
-    ash-sandbox info
+    ash-sandbox status
     ash-sandbox spawn [--image IMAGE] [--entrypoint CMD]
     ash-sandbox shell [-s ID] <command>
     ash-sandbox call [-s ID] <tool> [args JSON]
@@ -124,7 +124,7 @@ async def cmd_config(args):
     _print_config(config)
 
 
-async def cmd_info(args):
+async def cmd_status(args):
     config = _load_config()
     state = _load_state()
     sandboxes = state.get("sandboxes", {})
@@ -346,7 +346,25 @@ async def cmd_list(args):
 
 
 async def cmd_destroy(args):
+    config = _load_config()
     state = _load_state()
+
+    # Local mode: kill the runtime process
+    if config.get("mode") == "local" and not args.sandbox_id and not args.all:
+        pid = state.get("local_pid")
+        if pid:
+            import signal
+            try:
+                os.kill(pid, signal.SIGTERM)
+                print(f"  stopped ash-runtime (pid {pid})")
+            except ProcessLookupError:
+                pass
+            state.pop("local_pid", None)
+            _save_state(state)
+        else:
+            print("No local runtime running")
+        return
+
     sandboxes = state.get("sandboxes", {})
 
     if not sandboxes:
@@ -433,8 +451,8 @@ def main():
     cfp.add_argument("--control-plane", help="Control plane URL (k8s mode)")
     cfp.add_argument("--runtime-bin", help="Path to ash-runtime binary (docker mode)")
 
-    # info
-    sub.add_parser("info", help="Show current config and running sandboxes")
+    # status
+    sub.add_parser("status", help="Show current mode and running sandboxes")
 
     # spawn
     sp = sub.add_parser("spawn", help="Spawn a new sandbox")
@@ -468,7 +486,7 @@ def main():
 
     cmd_map = {
         "config": cmd_config,
-        "info": cmd_info,
+        "status": cmd_status,
         "spawn": cmd_spawn,
         "call": cmd_call,
         "shell": cmd_shell,
