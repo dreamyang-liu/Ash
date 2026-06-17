@@ -382,7 +382,7 @@ async def cmd_destroy(args):
 
 
 async def _prune_dead_sandboxes(state: dict):
-    """Check which sandboxes are still alive, remove dead ones from state."""
+    """Check which sandboxes are still alive, remove dead ones and clean up containers."""
     sandboxes = state.get("sandboxes", {})
     dead = []
 
@@ -395,10 +395,12 @@ async def _prune_dead_sandboxes(state: dict):
         )
         stdout, _ = await proc.communicate()
         if proc.returncode != 0 or stdout.decode().strip() != "true":
-            dead.append(sid)
+            dead.append((sid, cid))
 
     if dead:
-        for sid in dead:
+        for sid, cid in dead:
+            # Remove stopped container
+            await _kill_container(cid)
             del sandboxes[sid]
         _save_state(state)
 
