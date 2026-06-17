@@ -1,0 +1,18 @@
+# Anthropic API (direct)
+#
+# Set ANTHROPIC_API_KEY env var.
+#
+# Usage:
+#   python -m swebench -c swebench/configs/anthropic.yaml -i sympy__sympy-15599
+
+model: anthropic/claude-sonnet-4-20250514
+# api_key: <your-key>  # or set ANTHROPIC_API_KEY env var
+
+max_tokens: 16384
+temperature: 0.0
+step_limit: 250
+cost_limit: 5.0
+
+subset: verified
+workers: 2
+output: results/anthropic

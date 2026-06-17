@@ -1,35 +1,98 @@
 """Tool schemas for SWE-bench agent.
 
-Single bash tool — agent writes ash CLI commands directly.
-Session routing is handled by ASH_SESSION env var.
+Exposes ash-runtime tools directly via OpenAI function-calling format.
+The agent calls tools by name (shell, text_editor, grep_files, etc.)
+and the session routes them to the sandbox via SDK.
 """
 
 TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "bash",
+            "name": "shell",
             "description": (
-                "Run a shell command in the sandbox (/testbed).\n"
-                "Use `ash` CLI for all operations:\n"
-                "  ash grep \"<pattern>\" [path] [-i GLOB] [-l N]\n"
-                "  ash edit view <file> [--start N --end N]\n"
-                "  ash edit replace <file> --old \"...\" --new \"...\"\n"
-                "  ash edit create <file> \"content\"\n"
-                "  ash find \"<glob>\" [path] | ash outline <file> | ash ls <path>\n"
-                "  ash run \"<shell_command>\" [--tail N]\n"
-                "  ash undo [file] | ash buffer | ash terminal\n"
-                "Run `ash --help` for all commands. Composable: &&, |, ;, etc."
+                "Execute a shell command synchronously or in the background.\n"
+                "Use for: running tests (pytest), installing packages (pip), git operations, "
+                "and any other shell commands.\n"
+                "Working directory defaults to /testbed."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Shell command to execute.",
-                    },
+                    "command": {"type": "string", "description": "Shell command to execute"},
+                    "background": {"type": "boolean", "default": False, "description": "Run in background, returns pid"},
+                    "timeout": {"type": "integer", "default": 300, "description": "Timeout in seconds"},
+                    "tail": {"type": "integer", "description": "Only return last N lines of output"},
+                    "working_dir": {"type": "string", "description": "Working directory (default: /testbed)"},
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "text_editor",
+            "description": (
+                "View, create, or edit files.\n"
+                "Commands:\n"
+                "  view: Read file contents (optionally a line range)\n"
+                "  str_replace: Replace exact text in a file\n"
+                "  insert: Insert text after a specific line\n"
+                "  create: Create a new file with given content"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "enum": ["view", "str_replace", "insert", "create"], "description": "Command to execute"},
+                    "path": {"type": "string", "description": "File path"},
+                    "view_range": {"type": "array", "items": {"type": "integer"}, "description": "[start, end] line range for view"},
+                    "old_str": {"type": "string", "description": "Text to find (str_replace)"},
+                    "new_str": {"type": "string", "description": "Replacement text (str_replace)"},
+                    "insert_line": {"type": "integer", "description": "Line number to insert after"},
+                    "insert_text": {"type": "string", "description": "Text to insert"},
+                    "file_text": {"type": "string", "description": "Full file content (create)"},
+                },
+                "required": ["command", "path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep_files",
+            "description": (
+                "Search files using ripgrep with a regex pattern.\n"
+                "Use for finding code patterns, function definitions, imports, etc."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regex pattern to search"},
+                    "path": {"type": "string", "description": "Directory or file to search (default: /testbed)"},
+                    "include": {"type": "string", "description": "File glob to include (e.g. '*.py')"},
+                    "limit": {"type": "integer", "description": "Max number of results"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": (
+                "Read a file and return contents with line numbers.\n"
+                "Use for reading specific sections of files."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path"},
+                    "offset": {"type": "integer", "description": "Start line (1-based, default: 1)"},
+                    "limit": {"type": "integer", "description": "Number of lines to read (default: all)"},
+                },
+                "required": ["path"],
             },
         },
     },

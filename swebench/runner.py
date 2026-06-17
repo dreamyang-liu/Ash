@@ -34,7 +34,7 @@ from .models import AgentConfig
 
 def load_swebench_instances(
     subset: str = "lite",
-    split: str = "test",
+    split: str = "",
     slice_spec: str = "",
     filter_regex: str = "",
 ) -> list[dict]:
@@ -77,14 +77,7 @@ _IMAGE_REGISTRIES = {
 
 
 def resolve_image(instance: dict, template: str = "", registry: str = "swebench") -> str:
-    """Resolve Docker image name for a SWE-bench/SWE-Gym instance.
-
-    Priority:
-    1. instance["image_name"] — dataset-provided image name
-    2. template — user-provided format string with {instance_id}, {repo}, {commit}
-    3. Default: {registry}/sweb.eval.x86_64.{id}:latest
-    """
-    # Check dataset-provided image name first
+    """Resolve Docker image name for a SWE-bench/SWE-Gym instance."""
     image_name = instance.get("image_name") or instance.get("env_image_key")
     if image_name:
         return image_name
@@ -118,10 +111,10 @@ Do NOT modify test files. After making your changes, verify them by running rele
 def run_single_instance(
     instance: dict,
     config: AgentConfig,
-    ash_binary: str,
     output_dir: Path,
     image_template: str = "",
     image_registry: str = "swebench",
+    runtime_bin: str | None = None,
 ) -> dict:
     """Run agent on a single SWE-bench/SWE-Gym instance."""
     instance_id = instance.get("instance_id", "unknown")
@@ -130,7 +123,7 @@ def run_single_instance(
     image = resolve_image(instance, template=image_template, registry=image_registry)
     print(S.kv("image   ", S.dim(image)))
 
-    session = AshSession(ash_binary=ash_binary)
+    session = AshSession(runtime_bin=runtime_bin)
 
     try:
         if not session.create(image):
@@ -153,7 +146,7 @@ def run_single_instance(
         task = format_task_prompt(instance)
         exit_status = agent.run(task, instance_id=instance_id)
 
-        # Extract patch via ash CLI (automatic, no magic markers)
+        # Extract patch
         patch = session.get_patch()
 
         # Save trajectory
@@ -195,11 +188,11 @@ def run_single_instance(
 def run_batch(
     instances: list[dict],
     config: AgentConfig,
-    ash_binary: str,
     output_dir: Path,
     workers: int = 1,
     image_template: str = "",
     image_registry: str = "swebench",
+    runtime_bin: str | None = None,
 ):
     """Run agent on multiple instances with resume support."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -221,7 +214,7 @@ def run_batch(
         for i, inst in enumerate(instances):
             print(f"\n{S.progress(i + 1, len(instances))}")
             try:
-                result = run_single_instance(inst, config, ash_binary, output_dir, image_template, image_registry)
+                result = run_single_instance(inst, config, output_dir, image_template, image_registry, runtime_bin)
                 predictions.append(result)
                 save()
             except KeyboardInterrupt:
@@ -240,7 +233,7 @@ def run_batch(
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(run_single_instance, inst, config, ash_binary, output_dir, image_template, image_registry): inst
+                pool.submit(run_single_instance, inst, config, output_dir, image_template, image_registry, runtime_bin): inst
                 for inst in instances
             }
             for future in as_completed(futures):
@@ -262,8 +255,54 @@ def run_batch(
     print(S.summary(len(predictions), submitted, str(preds_path)))
 
 
+def _load_config_file(path: str) -> dict:
+    """Load a YAML or JSON config file."""
+    import yaml
+
+    with open(path) as f:
+        if path.endswith((".yml", ".yaml")):
+            return yaml.safe_load(f) or {}
+        return json.loads(f.read())
+
+
+def _merge_config(args, config: dict):
+    """Merge config file values into args (CLI flags take precedence)."""
+    field_map = {
+        "model": "model",
+        "api_base": "api_base",
+        "api_key": "api_key",
+        "max_tokens": "max_tokens",
+        "step_limit": "step_limit",
+        "cost_limit": "cost_limit",
+        "temperature": "temperature",
+        "subset": "subset",
+        "split": "split",
+        "instance": "instance",
+        "slice": "slice",
+        "filter": "filter",
+        "runtime_bin": "runtime_bin",
+        "image_template": "image_template",
+        "output": "output",
+        "workers": "workers",
+    }
+
+    for yaml_key, attr_name in field_map.items():
+        if yaml_key in config:
+            current = getattr(args, attr_name, None)
+            # CLI flag wins if explicitly set (not default/None/empty)
+            if current is None or current == "" or (attr_name == "subset" and current == "lite"):
+                value = config[yaml_key]
+                if attr_name == "output" and isinstance(value, str):
+                    value = Path(value)
+                setattr(args, attr_name, value)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run ash agent on SWE-bench / SWE-Gym")
+
+    # Config file
+    parser.add_argument("--config", "-c", default=None,
+                        help="Path to YAML/JSON config file")
 
     # Dataset
     parser.add_argument("--subset", default="lite",
@@ -276,29 +315,49 @@ def main():
     parser.add_argument("--filter", help="Regex filter on instance IDs")
 
     # Model
-    parser.add_argument("--model", "-m", default="Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    parser.add_argument("--model", "-m", default=None)
     parser.add_argument("--api-base", default=None,
                         help="OpenAI-compatible API base URL (e.g. http://localhost:30000/v1 for local SGLang)")
     parser.add_argument("--api-key", default=None,
                         help="API key / bearer token (default: auto-detect from env)")
-    parser.add_argument("--max-tokens", type=int, default=8192,
-                        help="Max tokens per model call (caps thinking + response)")
-    parser.add_argument("--step-limit", type=int, default=250)
-    parser.add_argument("--cost-limit", type=float, default=3.0)
-    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--max-tokens", type=int, default=None)
+    parser.add_argument("--step-limit", type=int, default=None)
+    parser.add_argument("--cost-limit", type=float, default=None)
+    parser.add_argument("--temperature", type=float, default=None)
 
-    # Ash
-    parser.add_argument("--ash-binary", default="ash",
-                        help="Path to ash binary (default: ash)")
+    # Sandbox
+    parser.add_argument("--runtime-bin", default=None,
+                        help="Path to ash-runtime binary (default: auto-detect from PATH or download)")
     parser.add_argument("--image-template", default="",
                         help="Docker image template with {instance_id}, {repo}, {commit} placeholders "
                              "(default: swebench/sweb.eval.x86_64.{instance_id}:latest)")
 
     # Execution
-    parser.add_argument("--output", "-o", type=Path, default=Path("swebench_results"))
-    parser.add_argument("--workers", "-w", type=int, default=1)
+    parser.add_argument("--output", "-o", type=Path, default=None)
+    parser.add_argument("--workers", "-w", type=int, default=None)
 
     args = parser.parse_args()
+
+    # Load config file and merge (CLI flags override)
+    if args.config:
+        config = _load_config_file(args.config)
+        _merge_config(args, config)
+
+    # Apply defaults for values not set by config or CLI
+    if args.model is None:
+        args.model = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+    if args.max_tokens is None:
+        args.max_tokens = 8192
+    if args.step_limit is None:
+        args.step_limit = 250
+    if args.cost_limit is None:
+        args.cost_limit = 3.0
+    if args.temperature is None:
+        args.temperature = 0.0
+    if args.output is None:
+        args.output = Path("swebench_results")
+    if args.workers is None:
+        args.workers = 1
 
     # Banner
     print(S.banner())
@@ -324,7 +383,7 @@ def main():
                 print(f"  {S.bright_red('!')} Instance not found: {args.instance}")
                 sys.exit(1)
 
-    # Resolve split for display (load_swebench_instances picks the default)
+    # Resolve split for display
     display_split = args.split or ("train" if args.subset.startswith("gym") else "test")
 
     # Image registry: xingyaoww for SWE-Gym, swebench for SWE-bench
@@ -340,20 +399,16 @@ def main():
     api_key = args.api_key
 
     if model.startswith("bedrock/"):
-        # AWS Bedrock: litellm handles endpoint, auth via bearer token
         api_key = api_key or os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
         if not api_key:
             print(f"  {S.yellow('!')} Warning: no API key. Set AWS_BEARER_TOKEN_BEDROCK or --api-key")
     elif model.startswith(("anthropic/", "gemini/")):
-        # Native providers: litellm handles routing, no api_base needed
         pass
     elif api_base:
-        # Custom endpoint (local SGLang, vLLM, etc.): prefix with openai/
         if not model.startswith("openai/"):
             model = f"openai/{model}"
         api_key = api_key or "unused"
     else:
-        # No api_base and no known prefix — assume local SGLang
         api_base = "http://localhost:30000/v1"
         if not model.startswith("openai/"):
             model = f"openai/{model}"
@@ -371,11 +426,18 @@ def main():
 
     # Run
     if len(instances) == 1:
-        result = run_single_instance(instances[0], agent_config, args.ash_binary, args.output, args.image_template, image_registry)
+        result = run_single_instance(
+            instances[0], agent_config, args.output,
+            args.image_template, image_registry, args.runtime_bin,
+        )
         print(f"\n{S.section('Result')}")
         print(f"  {json.dumps(result, indent=2)}")
     else:
-        run_batch(instances, agent_config, args.ash_binary, args.output, workers=args.workers, image_template=args.image_template, image_registry=image_registry)
+        run_batch(
+            instances, agent_config, args.output,
+            workers=args.workers, image_template=args.image_template,
+            image_registry=image_registry, runtime_bin=args.runtime_bin,
+        )
 
 
 if __name__ == "__main__":

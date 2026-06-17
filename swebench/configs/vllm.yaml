@@ -1,0 +1,19 @@
+# vLLM inference server
+# Start your server first:
+#   vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct --port 8000
+#
+# Usage:
+#   python -m swebench -c swebench/configs/vllm.yaml -i sympy__sympy-15599
+
+model: Qwen/Qwen3-Coder-30B-A3B-Instruct
+api_base: http://localhost:8000/v1
+api_key: unused
+
+max_tokens: 8192
+temperature: 0.0
+step_limit: 250
+cost_limit: 3.0
+
+subset: verified
+workers: 4
+output: results/vllm

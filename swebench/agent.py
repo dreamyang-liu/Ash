@@ -1,10 +1,9 @@
 """Agent loop for SWE-bench.
 
 Uses litellm for model abstraction (supports Claude, GPT-4, Gemini, etc.)
-and runs commands through the ash CLI session via subprocess.
+and executes tool calls through the ash sandbox SDK.
 
-Single tool: bash — agent writes ash CLI commands directly.
-Session routing handled by ASH_SESSION env var.
+Tools: shell, text_editor, grep_files, read_file — called directly by name.
 """
 
 import json
@@ -12,10 +11,12 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-try:
-    from litellm import completion, stream_chunk_builder
-except ImportError:
-    raise ImportError("Install litellm: pip install litellm")
+def _get_litellm():
+    try:
+        from litellm import completion, stream_chunk_builder
+        return completion, stream_chunk_builder
+    except ImportError:
+        raise ImportError("Install litellm: pip install litellm")
 
 from .models import AgentConfig, CostTracker, ToolResult, Trajectory
 
@@ -25,17 +26,11 @@ _SYSTEM_PROMPT = (_PROMPTS_DIR / "AGENT.md").read_text()
 
 _KICKOFF = (
     "Solve the issue described above. "
-    "You have one tool: `bash`. Use `ash` CLI commands for all operations:\n"
-    "- `ash grep \"pattern\" path/` to search code\n"
-    "- `ash edit view file.py` to read files\n"
-    "- `ash outline file.py` to see code structure\n"
-    "- `ash find \"*.py\" path/` to find files\n"
-    "- `ash edit replace file.py --old \"...\" --new \"...\"` to edit\n"
-    "- `ash run \"command\"` for python, pytest, pip, git, etc.\n"
-    "- `ash buffer` for scratch pad across steps\n"
-    "Run `ash --help` to see all available commands.\n"
-    "Commands are composable: `ash grep ... && ash edit view ...`\n"
-    "All commands run in /testbed by default.\n"
+    "You have these tools available:\n"
+    "- `shell`: Run shell commands (pytest, pip, git, etc.) in /testbed\n"
+    "- `text_editor`: View/edit/create files (view, str_replace, insert, create)\n"
+    "- `grep_files`: Search code with ripgrep regex patterns\n"
+    "- `read_file`: Read file contents with line numbers\n\n"
     "Start by exploring the repository to understand the issue."
 )
 
@@ -55,12 +50,12 @@ class AshAgent:
     def __init__(
         self,
         config: AgentConfig,
-        executor: Callable[[str], ToolResult],
+        executor: Callable[[str, dict], ToolResult],
         on_step: Optional[Callable[[int, str, str], None]] = None,
         trace_dir: Optional[Path] = None,
     ):
         self.config = config
-        self.executor = executor  # executor(command) -> ToolResult
+        self.executor = executor  # executor(tool_name, args) -> ToolResult
         self.on_step = on_step    # on_step(step_num, kind, text)
         self.trace_dir = trace_dir
         self.trajectory = Trajectory()
@@ -84,12 +79,13 @@ class AshAgent:
         tail = buf[-window * min_repeats:] if len(buf) >= window * min_repeats else ""
         if not tail:
             return False
-        # Check if the last `window` chars repeat earlier in the tail
         pattern = tail[-window:]
         count = tail.count(pattern)
         return count >= min_repeats
 
     def _query_model(self, messages: list[dict]) -> Any:
+        completion, stream_chunk_builder = _get_litellm()
+
         kwargs: dict[str, Any] = dict(
             model=self.config.model,
             messages=messages,
@@ -118,7 +114,7 @@ class AshAgent:
         aborted = False
         w = 76  # display width for rolling line
         step_n = self.cost.api_calls + 1
-        check_interval = 500  # check for repetition every N thinking tokens
+        check_interval = 500
 
         self._trace(f"\n{'='*60}\n[step {step_n}] model call\n{'='*60}\n")
 
@@ -133,7 +129,6 @@ class AshAgent:
                     self._trace("<think>\n")
                 think_buf += think_token
                 self._trace(think_token)
-                # Show the tail of thinking buffer, overwriting the line
                 vis = think_buf.replace("\n", " ")
                 if len(vis) > w:
                     vis = "…" + vis[-(w - 1):]
@@ -181,8 +176,7 @@ class AshAgent:
             except json.JSONDecodeError:
                 args = {}
 
-            command = args.get("command", "")
-            result = self.executor(command)
+            result = self.executor(name, args)
 
             # Format content
             if result.success:
@@ -232,10 +226,9 @@ class AshAgent:
             self._trace_file = open(trace_path, "w", encoding="utf-8")
 
         system_msg = build_system_prompt(task)
-        kickoff = _KICKOFF
         messages = [
             {"role": "system", "content": system_msg},
-            {"role": "user", "content": kickoff},
+            {"role": "user", "content": _KICKOFF},
         ]
         self.trajectory.add_message("system", system_msg)
         self.trajectory.add_message("user", task)
@@ -256,7 +249,6 @@ class AshAgent:
             try:
                 response = self._query_model(messages)
             except _ThinkingLoopError:
-                # Model got stuck in a thinking loop — retry with higher temperature
                 self._trace(f"\n[RETRY] thinking loop, retrying with temperature bump\n")
                 try:
                     old_temp = self.config.temperature
@@ -303,13 +295,14 @@ class AshAgent:
                 consecutive_no_tool = 0
                 for tc in message.tool_calls:
                     try:
-                        cmd = json.loads(tc.function.arguments).get("command", "")
+                        args = json.loads(tc.function.arguments)
                     except (json.JSONDecodeError, AttributeError):
-                        cmd = tc.function.arguments or ""
-                    tool_label = tc.function.name or self.mode
+                        args = {}
+                    label = tc.function.name
+                    summary = args.get("command", "") or args.get("path", "") or json.dumps(args)[:80]
                     if self.on_step:
-                        self.on_step(step_n, tool_label, cmd)
-                    self._trace(f"\n> {tool_label} {cmd}\n")
+                        self.on_step(step_n, label, summary)
+                    self._trace(f"\n> {label} {summary}\n")
                 observations = self._execute_tool_calls(message.tool_calls)
                 for obs in observations:
                     self._trace(f"{obs['content']}\n")

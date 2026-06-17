@@ -1,0 +1,20 @@
+# AWS Bedrock with Claude
+#
+# Auth options:
+#   1. Set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_REGION_NAME env vars
+#   2. Set AWS_BEARER_TOKEN_BEDROCK env var (or api_key below)
+#
+# Usage:
+#   python -m swebench -c swebench/configs/bedrock-claude.yaml -i sympy__sympy-15599
+
+model: bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0
+# api_key: <your-bearer-token>  # or use AWS env vars
+
+max_tokens: 16384
+temperature: 0.0
+step_limit: 250
+cost_limit: 5.0
+
+subset: verified
+workers: 2
+output: results/bedrock-claude
