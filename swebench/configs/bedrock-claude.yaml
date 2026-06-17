@@ -7,7 +7,7 @@
 # Usage:
 #   python -m swebench -c swebench/configs/bedrock-claude.yaml -i sympy__sympy-15599
 
-model: bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0
+model: bedrock/anthropic.claude-sonnet-4-6
 # api_key: <your-bearer-token>  # or use AWS env vars
 
 max_tokens: 16384
