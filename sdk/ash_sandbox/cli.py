@@ -33,13 +33,26 @@ def _save_state(state: dict):
         json.dump(state, f, indent=2)
 
 
-def _get_url() -> str:
+def _get_url(sandbox_id: str | None = None) -> str:
     state = _load_state()
-    if state.get("active"):
-        return state["sandboxes"][state["active"]]["url"]
-    if state.get("sandboxes"):
-        first = next(iter(state["sandboxes"].values()))
-        return first["url"]
+    sandboxes = state.get("sandboxes", {})
+
+    if sandbox_id:
+        # Match by prefix
+        matches = [k for k in sandboxes if k.startswith(sandbox_id)]
+        if len(matches) == 1:
+            return sandboxes[matches[0]]["url"]
+        elif len(matches) > 1:
+            print(f"Ambiguous ID '{sandbox_id}', matches: {matches}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print(f"Sandbox '{sandbox_id}' not found", file=sys.stderr)
+            sys.exit(1)
+
+    if state.get("active") and state["active"] in sandboxes:
+        return sandboxes[state["active"]]["url"]
+    if sandboxes:
+        return next(iter(sandboxes.values()))["url"]
     return os.getenv("ASH_RUNTIME_URL", "http://localhost:3000")
 
 
@@ -69,7 +82,7 @@ async def cmd_spawn(args):
 
 
 async def cmd_call(args):
-    url = _get_url()
+    url = _get_url(args.sandbox)
     sb = Sandbox(backend=HTTPBackend(url))
 
     try:
@@ -90,7 +103,7 @@ async def cmd_call(args):
 
 
 async def cmd_shell(args):
-    url = _get_url()
+    url = _get_url(args.sandbox)
     sb = Sandbox(backend=HTTPBackend(url))
     command = " ".join(args.command)
     result = await sb.call("shell", command=command)
@@ -130,10 +143,30 @@ async def cmd_destroy(args):
             print(f"  destroyed {sid}")
         state["sandboxes"] = {}
         state.pop("active", None)
+    elif args.sandbox_id:
+        # Match by prefix
+        matches = [k for k in sandboxes if k.startswith(args.sandbox_id)]
+        if not matches:
+            print(f"Sandbox '{args.sandbox_id}' not found")
+            return
+        for sid in matches:
+            cid = sandboxes[sid]["container_id"]
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "rm", "-f", cid,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            del sandboxes[sid]
+            if state.get("active") == sid:
+                state.pop("active", None)
+            print(f"  destroyed {sid}")
+        if sandboxes and not state.get("active"):
+            state["active"] = next(iter(sandboxes))
     else:
         active = state.get("active")
         if not active or active not in sandboxes:
-            print("No active sandbox to destroy")
+            print("No active sandbox. Specify ID or use --all")
             return
         cid = sandboxes[active]["container_id"]
         proc = await asyncio.create_subprocess_exec(
@@ -168,11 +201,13 @@ def main():
 
     # call
     cp = sub.add_parser("call", help="Call a tool")
+    cp.add_argument("-s", "--sandbox", default=None, help="Sandbox ID (prefix match)")
     cp.add_argument("tool", help="Tool name")
     cp.add_argument("args", nargs="?", default=None, help="Tool arguments as JSON")
 
     # shell (shortcut)
     shp = sub.add_parser("shell", help="Run a shell command in the sandbox")
+    shp.add_argument("-s", "--sandbox", default=None, help="Sandbox ID (prefix match)")
     shp.add_argument("command", nargs="+", help="Command to run")
 
     # list
@@ -180,6 +215,7 @@ def main():
 
     # destroy
     dp = sub.add_parser("destroy", aliases=["rm"], help="Destroy sandbox(es)")
+    dp.add_argument("sandbox_id", nargs="?", default=None, help="Sandbox ID to destroy (prefix match)")
     dp.add_argument("--all", "-a", action="store_true", help="Destroy all sandboxes")
 
     args = parser.parse_args()
