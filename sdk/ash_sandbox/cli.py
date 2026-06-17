@@ -143,10 +143,8 @@ async def cmd_info(args):
 def _print_config(config: dict):
     mode = config.get("mode", "local")
     print(f"  Mode:    {mode}")
-    if mode == "local":
-        print(f"  URL:     {config.get('url', 'http://localhost:3000')}")
-    elif mode == "docker":
-        print(f"  Runtime: {config.get('runtime_bin', '(auto-detect)')}")
+    if mode == "docker":
+        print(f"  Runtime: {config.get('runtime_bin') or _which('ash-runtime') or '(auto-download)'}")
     elif mode == "k8s":
         print(f"  Gateway: {config.get('gateway_url', '(not set)')}")
         print(f"  Control: {config.get('control_plane_url', '(not set)')}")
