@@ -141,7 +141,7 @@ class Sandbox:
             self._tools_cache = await self.backend.list_tools()
         return self._tools_cache
 
-    async def _wait_ready(self, timeout: float = 30):
+    async def _wait_ready(self, timeout: float = 60):
         deadline = asyncio.get_event_loop().time() + timeout
         client = httpx.AsyncClient(timeout=5)
         try:
@@ -150,9 +150,9 @@ class Sandbox:
                     resp = await client.get(self.backend.url)
                     if resp.status_code == 200:
                         return
-                except httpx.ConnectError:
+                except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, OSError):
                     pass
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(1)
         finally:
             await client.aclose()
         raise TimeoutError(f"ash-runtime not ready after {timeout}s")
