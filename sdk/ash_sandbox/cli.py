@@ -2,11 +2,15 @@
 Ash Sandbox CLI.
 
 Usage:
-    ash-sandbox spawn [--image IMAGE] [--entrypoint CMD] [--port PORT]
-    ash-sandbox call <tool> [args as JSON]
+    ash-sandbox config --mode local --url http://localhost:3000
+    ash-sandbox config --mode docker
+    ash-sandbox config --mode k8s --gateway URL --control-plane URL
+    ash-sandbox info
+    ash-sandbox spawn [--image IMAGE] [--entrypoint CMD]
+    ash-sandbox shell [-s ID] <command>
+    ash-sandbox call [-s ID] <tool> [args JSON]
     ash-sandbox list
-    ash-sandbox destroy [--all]
-    ash-sandbox shell <command>
+    ash-sandbox destroy [ID | --all]
 """
 
 import argparse
@@ -15,9 +19,25 @@ import json
 import os
 import sys
 
-from . import DockerPool, Sandbox, HTTPBackend
+from . import DockerPool, SandboxPool, Sandbox, HTTPBackend, GatewayBackend
 
+CONFIG_FILE = os.path.expanduser("~/.ash/config.json")
 STATE_FILE = os.path.expanduser("~/.ash/sandboxes.json")
+
+
+# ==================== State ====================
+
+def _load_config() -> dict:
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    return {"mode": "local", "url": "http://localhost:3000"}
+
+
+def _save_config(config: dict):
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=2)
 
 
 def _load_state() -> dict:
@@ -34,9 +54,15 @@ def _save_state(state: dict):
 
 
 def _get_url(sandbox_id: str | None = None) -> str:
+    config = _load_config()
     state = _load_state()
     sandboxes = state.get("sandboxes", {})
 
+    # Local mode: always use config URL
+    if config["mode"] == "local":
+        return config.get("url", "http://localhost:3000")
+
+    # Docker/K8s mode: must select a sandbox
     if sandbox_id:
         matches = [k for k in sandboxes if k.startswith(sandbox_id)]
         if len(matches) == 1:
@@ -48,42 +74,114 @@ def _get_url(sandbox_id: str | None = None) -> str:
             print(f"Sandbox '{sandbox_id}' not found", file=sys.stderr)
             sys.exit(1)
 
-    # No ID specified
     if len(sandboxes) > 1:
-        print("Multiple sandboxes running. Specify one with -s <id>:", file=sys.stderr)
+        print("Multiple sandboxes running. Specify with -s <id>:", file=sys.stderr)
         for sid, info in sandboxes.items():
-            print(f"  {sid}  {info['image']:20s}  {info['url']}", file=sys.stderr)
+            print(f"  {sid}  {info.get('image',''):20s}  {info['url']}", file=sys.stderr)
         sys.exit(1)
 
     if len(sandboxes) == 1:
         return next(iter(sandboxes.values()))["url"]
 
-    return os.getenv("ASH_RUNTIME_URL", "http://localhost:3000")
+    print("No sandbox running. Run: ash-sandbox spawn", file=sys.stderr)
+    sys.exit(1)
+
+
+# ==================== Commands ====================
+
+async def cmd_config(args):
+    config = _load_config()
+
+    if args.mode:
+        config["mode"] = args.mode
+    if args.url:
+        config["url"] = args.url
+    if args.gateway:
+        config["gateway_url"] = args.gateway
+    if args.control_plane:
+        config["control_plane_url"] = args.control_plane
+    if args.runtime_bin:
+        config["runtime_bin"] = args.runtime_bin
+
+    _save_config(config)
+    print(f"Config saved: {CONFIG_FILE}")
+    _print_config(config)
+
+
+async def cmd_info(args):
+    config = _load_config()
+    state = _load_state()
+    sandboxes = state.get("sandboxes", {})
+
+    _print_config(config)
+    print()
+
+    if sandboxes:
+        print(f"Sandboxes: {len(sandboxes)} running")
+        for sid, info in sandboxes.items():
+            print(f"  {sid}  {info.get('image',''):20s}  {info['url']}")
+    else:
+        print("Sandboxes: none")
+
+
+def _print_config(config: dict):
+    mode = config.get("mode", "local")
+    print(f"  Mode:    {mode}")
+    if mode == "local":
+        print(f"  URL:     {config.get('url', 'http://localhost:3000')}")
+    elif mode == "docker":
+        print(f"  Runtime: {config.get('runtime_bin', '(auto-detect)')}")
+    elif mode == "k8s":
+        print(f"  Gateway: {config.get('gateway_url', '(not set)')}")
+        print(f"  Control: {config.get('control_plane_url', '(not set)')}")
 
 
 async def cmd_spawn(args):
-    runtime_bin = os.getenv("ASH_RUNTIME_BIN") or _which("ash-runtime")
-    pool = DockerPool(runtime_bin=runtime_bin, port=args.port)
+    config = _load_config()
+    mode = config.get("mode", "local")
 
-    sb = await pool.spawn(image=args.image, entrypoint=args.entrypoint)
-    url = sb.backend.url
-    cid = sb._container_id
+    if mode == "local":
+        print("Mode is 'local' — no container to spawn. Use: ash-sandbox config --mode docker")
+        return
+
+    image = args.image
+    entrypoint = args.entrypoint
+
+    if mode == "docker":
+        runtime_bin = config.get("runtime_bin") or _which("ash-runtime")
+        pool = DockerPool(runtime_bin=runtime_bin, port=args.port)
+        sb = await pool.spawn(image=image, entrypoint=entrypoint)
+        url = sb.backend.url
+        cid = sb._container_id
+
+    elif mode == "k8s":
+        gw = config.get("gateway_url")
+        cp = config.get("control_plane_url")
+        if not gw or not cp:
+            print("K8s mode requires --gateway and --control-plane in config", file=sys.stderr)
+            sys.exit(1)
+        pool = SandboxPool(control_plane_url=cp, gateway_url=gw)
+        sb = await pool.spawn(image=image, entrypoint=entrypoint)
+        url = gw
+        cid = sb._container_id
+    else:
+        print(f"Unknown mode: {mode}", file=sys.stderr)
+        sys.exit(1)
 
     state = _load_state()
     state.setdefault("sandboxes", {})[cid[:12]] = {
         "url": url,
         "container_id": cid,
-        "image": args.image,
+        "image": image,
+        "mode": mode,
     }
-    state["active"] = cid[:12]
     _save_state(state)
 
     print(f"Sandbox started: {cid[:12]}")
-    print(f"  Image: {args.image}")
+    print(f"  Image: {image}")
     print(f"  URL:   {url}")
-    if args.entrypoint:
-        print(f"  Setup: {args.entrypoint}")
-    print(f"\nUse: ash-sandbox shell 'echo hello'")
+    if entrypoint:
+        print(f"  Setup: {entrypoint}")
 
 
 async def cmd_call(args):
@@ -120,73 +218,64 @@ async def cmd_shell(args):
 
 
 async def cmd_list(args):
+    config = _load_config()
     state = _load_state()
     sandboxes = state.get("sandboxes", {})
+
     if not sandboxes:
-        print("No sandboxes. Run: ash-sandbox spawn")
+        if config["mode"] == "local":
+            print(f"Mode: local → {config.get('url', 'http://localhost:3000')}")
+        else:
+            print("No sandboxes running. Run: ash-sandbox spawn")
         return
 
-    active = state.get("active")
     for sid, info in sandboxes.items():
-        marker = "*" if sid == active else " "
-        print(f"  {marker} {sid}  {info['image']:25s}  {info['url']}")
+        print(f"  {sid}  {info.get('image',''):20s}  {info['url']}")
 
 
 async def cmd_destroy(args):
     state = _load_state()
     sandboxes = state.get("sandboxes", {})
 
+    if not sandboxes:
+        print("No sandboxes to destroy")
+        return
+
     if args.all:
-        for sid, info in sandboxes.items():
-            cid = info["container_id"]
-            proc = await asyncio.create_subprocess_exec(
-                "docker", "rm", "-f", cid,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.wait()
+        for sid, info in list(sandboxes.items()):
+            await _kill_container(info["container_id"])
             print(f"  destroyed {sid}")
         state["sandboxes"] = {}
-        state.pop("active", None)
     elif args.sandbox_id:
-        # Match by prefix
         matches = [k for k in sandboxes if k.startswith(args.sandbox_id)]
         if not matches:
             print(f"Sandbox '{args.sandbox_id}' not found")
             return
         for sid in matches:
-            cid = sandboxes[sid]["container_id"]
-            proc = await asyncio.create_subprocess_exec(
-                "docker", "rm", "-f", cid,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.wait()
+            await _kill_container(sandboxes[sid]["container_id"])
             del sandboxes[sid]
-            if state.get("active") == sid:
-                state.pop("active", None)
             print(f"  destroyed {sid}")
-        if sandboxes and not state.get("active"):
-            state["active"] = next(iter(sandboxes))
     else:
-        active = state.get("active")
-        if not active or active not in sandboxes:
-            print("No active sandbox. Specify ID or use --all")
-            return
-        cid = sandboxes[active]["container_id"]
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "rm", "-f", cid,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.wait()
-        del sandboxes[active]
-        state.pop("active", None)
-        if sandboxes:
-            state["active"] = next(iter(sandboxes))
-        print(f"  destroyed {active}")
+        if len(sandboxes) > 1:
+            print("Multiple sandboxes. Specify ID or use --all:", file=sys.stderr)
+            for sid, info in sandboxes.items():
+                print(f"  {sid}  {info.get('image','')}", file=sys.stderr)
+            sys.exit(1)
+        sid = next(iter(sandboxes))
+        await _kill_container(sandboxes[sid]["container_id"])
+        del sandboxes[sid]
+        print(f"  destroyed {sid}")
 
     _save_state(state)
+
+
+async def _kill_container(cid: str):
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "rm", "-f", cid,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
 
 
 def _which(name: str) -> str | None:
@@ -194,12 +283,25 @@ def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
+# ==================== Main ====================
+
 def main():
     parser = argparse.ArgumentParser(prog="ash-sandbox", description="Ash Sandbox CLI")
     sub = parser.add_subparsers(dest="subcmd")
 
+    # config
+    cfp = sub.add_parser("config", help="Configure mode and connection settings")
+    cfp.add_argument("--mode", "-m", choices=["local", "docker", "k8s"], help="Execution mode")
+    cfp.add_argument("--url", help="Runtime URL (local mode)")
+    cfp.add_argument("--gateway", help="Gateway URL (k8s mode)")
+    cfp.add_argument("--control-plane", help="Control plane URL (k8s mode)")
+    cfp.add_argument("--runtime-bin", help="Path to ash-runtime binary (docker mode)")
+
+    # info
+    sub.add_parser("info", help="Show current config and running sandboxes")
+
     # spawn
-    sp = sub.add_parser("spawn", help="Spawn a new sandbox container")
+    sp = sub.add_parser("spawn", help="Spawn a new sandbox")
     sp.add_argument("--image", "-i", default="ubuntu:24.04", help="Container image")
     sp.add_argument("--entrypoint", "-e", default=None, help="Setup command before runtime starts")
     sp.add_argument("--port", "-p", type=int, default=3000, help="Runtime port")
@@ -210,8 +312,8 @@ def main():
     cp.add_argument("tool", help="Tool name")
     cp.add_argument("args", nargs="?", default=None, help="Tool arguments as JSON")
 
-    # shell (shortcut)
-    shp = sub.add_parser("shell", help="Run a shell command in the sandbox")
+    # shell
+    shp = sub.add_parser("shell", help="Run a shell command")
     shp.add_argument("-s", "--sandbox", default=None, help="Sandbox ID (prefix match)")
     shp.add_argument("command", nargs="+", help="Command to run")
 
@@ -220,8 +322,8 @@ def main():
 
     # destroy
     dp = sub.add_parser("destroy", aliases=["rm"], help="Destroy sandbox(es)")
-    dp.add_argument("sandbox_id", nargs="?", default=None, help="Sandbox ID to destroy (prefix match)")
-    dp.add_argument("--all", "-a", action="store_true", help="Destroy all sandboxes")
+    dp.add_argument("sandbox_id", nargs="?", default=None, help="Sandbox ID (prefix match)")
+    dp.add_argument("--all", "-a", action="store_true", help="Destroy all")
 
     args = parser.parse_args()
     if not args.subcmd:
@@ -229,6 +331,8 @@ def main():
         sys.exit(1)
 
     cmd_map = {
+        "config": cmd_config,
+        "info": cmd_info,
         "spawn": cmd_spawn,
         "call": cmd_call,
         "shell": cmd_shell,
