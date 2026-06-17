@@ -1,21 +1,16 @@
-from .client import (
-    Sandbox,
-    DockerPool,
-    SandboxPool,
-    ToolResult,
-    GatewayBackend,
-    HTTPBackend,
-    MCPBackend,
-    CLIBackend,
-)
+from .result import ToolResult
+from .backends import Backend, HTTPBackend, MCPBackend, CLIBackend, GatewayBackend
+from .sandbox import Sandbox
+from .pool import DockerPool, SandboxPool
 
 __all__ = [
-    "Sandbox",
-    "DockerPool",
-    "SandboxPool",
     "ToolResult",
-    "GatewayBackend",
+    "Backend",
     "HTTPBackend",
     "MCPBackend",
     "CLIBackend",
+    "GatewayBackend",
+    "Sandbox",
+    "DockerPool",
+    "SandboxPool",
 ]

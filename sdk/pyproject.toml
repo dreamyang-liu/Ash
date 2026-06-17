@@ -11,6 +11,9 @@ license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = ["httpx>=0.25"]
 
+[project.scripts]
+ash-sandbox = "ash_sandbox.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/dreamyang-liu/Ash"
 Repository = "https://github.com/dreamyang-liu/Ash"
