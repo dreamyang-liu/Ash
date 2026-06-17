@@ -7,7 +7,7 @@
 #   python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --slice 0:8
 
 model:
-  name: bedrock/us.anthropic.claude-opus-4-6-v1
+  name: bedrock/minimax.minimax-m2.5
   # api_key: <bearer-token>
 
 generation:
@@ -23,5 +23,5 @@ dataset:
   subset: verified
 
 execution:
-  workers: 16
-  output: results/bedrock-opus46
+  workers: 32
+  output: results/minimax-25

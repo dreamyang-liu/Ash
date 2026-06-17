@@ -27,17 +27,66 @@ _SYSTEM_PROMPT = (_PROMPTS_DIR / "AGENT.md").read_text()
 _KICKOFF = (
     "Solve the issue described above. "
     "You have these tools available:\n"
-    "- `shell`: Run shell commands (pytest, pip, git, etc.) in /testbed\n"
+    "- `grep_files`: Search code with ripgrep (use FIRST to locate relevant files)\n"
+    "- `read_file`: Read file contents with line numbers (use offset/limit for large files)\n"
     "- `text_editor`: View/edit/create files (view, str_replace, insert, create)\n"
-    "- `grep_files`: Search code with ripgrep regex patterns\n"
-    "- `read_file`: Read file contents with line numbers\n\n"
-    "Start by exploring the repository to understand the issue."
+    "- `shell`: Run tests and commands (always use tail= to limit output)\n"
+    "- `process`: Manage background processes (read output, kill)\n\n"
+    "Start by reproducing the issue, then locate and read the relevant code."
 )
 
 
 def build_system_prompt(task: str) -> str:
     """Build the full system prompt from AGENT.md + task."""
     return _SYSTEM_PROMPT + f"\n\n---\n\n## Task\n\n{task}"
+
+
+def _tool_summary(name: str, args: dict) -> str:
+    """Build a human-readable one-line summary for a tool call."""
+    if name == "shell":
+        cmd = args.get("command", "")
+        bg = " &" if args.get("background") else ""
+        return cmd + bg
+    elif name == "grep_files":
+        pat = args.get("pattern", "")
+        path = args.get("path", "")
+        inc = args.get("include", "")
+        parts = [f"/{pat}/"]
+        if path:
+            parts.append(path)
+        if inc:
+            parts.append(f"({inc})")
+        return " ".join(parts)
+    elif name == "read_file":
+        path = args.get("path", "")
+        offset = args.get("offset")
+        limit = args.get("limit")
+        if offset or limit:
+            return f"{path}:{offset or 1}+{limit or '?'}"
+        return path
+    elif name == "text_editor":
+        cmd = args.get("command", "")
+        path = args.get("path", "")
+        if cmd == "str_replace":
+            old = args.get("old_str", "")
+            preview = old[:40].replace("\n", "\\n")
+            return f"{path} [{cmd}] \"{preview}\""
+        elif cmd == "view":
+            vr = args.get("view_range")
+            if vr:
+                return f"{path} [{vr[0]}:{vr[1]}]"
+            return f"{path} [view]"
+        return f"{path} [{cmd}]"
+    elif name == "process":
+        pid = args.get("pid", "?")
+        action = args.get("action", "?")
+        return f"{pid} {action}"
+    elif name == "web_fetch":
+        return args.get("url", "")
+    elif name == "web_search":
+        return args.get("query", "")
+    else:
+        return args.get("command", "") or args.get("path", "") or str(args)[:80]
 
 
 class _ThinkingLoopError(Exception):
@@ -62,6 +111,12 @@ class AshAgent:
         self.cost = CostTracker()
         self._tools_schema: list[dict] = []
         self._trace_file = None
+        # Guardrail state
+        self._files_read: set[str] = set()       # files read via read_file/text_editor view
+        self._consecutive_edits: dict[str, int] = {}  # file -> consecutive edits without test
+        self._ran_test_since_edit = True
+        self._budget_warned = False
+        self.stream = True  # set to False to disable streaming (parallel mode)
 
     def set_tools_schema(self, schema: list[dict]):
         """Set OpenAI-compatible tool schemas."""
@@ -91,10 +146,14 @@ class AshAgent:
             messages=messages,
             tools=self._tools_schema if self._tools_schema else None,
             tool_choice="auto" if self._tools_schema else None,
-            temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
-            stream=bool(self.on_step),
+            stream=self.stream,
         )
+        if self.config.temperature is not None:
+            kwargs["temperature"] = self.config.temperature
+        if self.config.thinking_budget:
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": self.config.thinking_budget}
+            kwargs["drop_params"] = True  # let litellm skip unsupported params for other models
         if self.config.api_base:
             kwargs["api_base"] = self.config.api_base
         if self.config.api_key:
@@ -102,7 +161,7 @@ class AshAgent:
 
         raw = completion(**kwargs)
 
-        if not self.on_step:
+        if not self.stream:
             self.cost.update(raw)
             return raw
 
@@ -166,6 +225,40 @@ class AshAgent:
         self.cost.update(response)
         return response
 
+    def _check_guardrails(self, name: str, args: dict) -> str:
+        """Check tool-level guardrails. Returns warning string or empty."""
+        warnings = []
+        path = args.get("path", "")
+
+        # Track file reads
+        if name == "read_file" or (name == "text_editor" and args.get("command") == "view"):
+            self._files_read.add(path)
+
+        # Read-before-edit: must have read a file before editing it
+        if name == "text_editor" and args.get("command") in ("str_replace", "insert"):
+            if path and path not in self._files_read:
+                warnings.append(
+                    f"[Warning] You are editing {path} without reading it first. "
+                    f"Use read_file or text_editor(view) first to see the current content."
+                )
+            # Track consecutive edits without testing
+            self._consecutive_edits[path] = self._consecutive_edits.get(path, 0) + 1
+            self._ran_test_since_edit = False
+            if self._consecutive_edits[path] >= 3:
+                warnings.append(
+                    f"[Warning] This is edit #{self._consecutive_edits[path]} to {path} "
+                    f"without running tests. Consider testing before making more changes."
+                )
+
+        # Reset edit counter when running tests
+        if name == "shell":
+            cmd = args.get("command", "")
+            if "pytest" in cmd or "test_" in cmd or "assert" in cmd:
+                self._consecutive_edits.clear()
+                self._ran_test_since_edit = True
+
+        return "\n".join(warnings)
+
     def _execute_tool_calls(self, tool_calls: list) -> list[dict]:
         """Execute tool calls and return tool response messages."""
         results = []
@@ -176,6 +269,9 @@ class AshAgent:
             except json.JSONDecodeError:
                 args = {}
 
+            # Check guardrails before execution
+            guardrail_warning = self._check_guardrails(name, args)
+
             result = self.executor(name, args)
 
             # Format content
@@ -185,6 +281,10 @@ class AshAgent:
                 content = f"Error: {result.error or 'Unknown error'}"
                 if result.output:
                     content += f"\n{result.output}"
+
+            # Append guardrail warnings
+            if guardrail_warning:
+                content += f"\n\n{guardrail_warning}"
 
             max_len = 15000
             if len(content) > max_len:
@@ -244,6 +344,20 @@ class AshAgent:
                 self._close_trace()
                 return "cost_limit"
 
+            # Budget warning at 75%
+            if not self._budget_warned:
+                cost_pct = self.cost.total_cost / self.config.cost_limit if self.config.cost_limit else 0
+                step_pct = self.cost.api_calls / self.config.step_limit if self.config.step_limit else 0
+                if cost_pct >= 0.75 or step_pct >= 0.75:
+                    self._budget_warned = True
+                    budget_msg = (
+                        f"[Budget Warning] You have used {self.cost.api_calls}/{self.config.step_limit} steps "
+                        f"and ${self.cost.total_cost:.2f}/${self.config.cost_limit:.2f} budget. "
+                        f"Wrap up: test your current fix and stop. Do not start new approaches."
+                    )
+                    messages.append({"role": "user", "content": budget_msg})
+                    self._trace(f"\n{budget_msg}\n")
+
             step_n = self.cost.api_calls + 1
 
             try:
@@ -287,6 +401,10 @@ class AshAgent:
             }
             if message.tool_calls:
                 assistant_msg["tool_calls"] = message.tool_calls
+            # Preserve thinking_blocks for Anthropic extended thinking + tool use
+            thinking_blocks = getattr(message, "thinking_blocks", None)
+            if thinking_blocks:
+                assistant_msg["thinking_blocks"] = thinking_blocks
             messages.append(assistant_msg)
             self.trajectory.add_message("assistant", message.content or "")
 
@@ -299,7 +417,7 @@ class AshAgent:
                     except (json.JSONDecodeError, AttributeError):
                         args = {}
                     label = tc.function.name
-                    summary = args.get("command", "") or args.get("path", "") or json.dumps(args)[:80]
+                    summary = _tool_summary(label, args)
                     if self.on_step:
                         self.on_step(step_n, label, summary)
                     self._trace(f"\n> {label} {summary}\n")

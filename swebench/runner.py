@@ -16,6 +16,8 @@ import argparse
 import json
 import os
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -115,15 +117,21 @@ def run_single_instance(
     image_template: str = "",
     image_registry: str = "swebench",
     runtime_bin: str | None = None,
+    workers: int = 1,
+    on_step_callback=None,
 ) -> dict:
     """Run agent on a single SWE-bench/SWE-Gym instance."""
     instance_id = instance.get("instance_id", "unknown")
-    print(S.header(instance_id))
+    quiet = workers > 1  # suppress direct prints in parallel mode
+
+    if not quiet:
+        print(S.header(instance_id))
 
     image = resolve_image(instance, template=image_template, registry=image_registry)
-    print(S.kv("image   ", S.dim(image)))
+    if not quiet:
+        print(S.kv("image   ", S.dim(image)))
 
-    session = AshSession(runtime_bin=runtime_bin)
+    session = AshSession(runtime_bin=runtime_bin, quiet=quiet)
 
     try:
         if not session.create(image):
@@ -134,12 +142,39 @@ def run_single_instance(
                 "exit_status": "session_failed",
             }
 
-        # Create and configure agent
+        # Create and configure agent — rolling step display
+        _step_lines: list[str] = []
+        _max_visible = 30
+        _agent_ref: list = []  # mutable container to reference agent from closure
+
         def _on_step(n: int, kind: str, text: str):
-            print(S.step(n, kind, text), flush=True)
+            line = S.step(n, kind, text)
+            _step_lines.append(line)
+
+            if quiet:
+                if on_step_callback:
+                    cost = _agent_ref[0].cost.total_cost if _agent_ref else 0
+                    on_step_callback(n, kind, text, cost)
+                return
+
+            if not S._IS_TTY:
+                print(line, flush=True)
+                return
+
+            # Single worker + TTY: rolling window
+            visible = _step_lines[-_max_visible:]
+            if len(_step_lines) > 1:
+                clear_count = min(len(_step_lines) - 1, _max_visible)
+                sys.stdout.write(f"\033[{clear_count}A")
+            for l in visible:
+                sys.stdout.write(f"\033[K{l}\n")
+            sys.stdout.flush()
 
         trace_dir = output_dir / "traces"
         agent = AshAgent(config, executor=session.execute, on_step=_on_step, trace_dir=trace_dir)
+        _agent_ref.append(agent)
+        if quiet:
+            agent.stream = False  # no streaming in parallel (avoids stdout conflicts)
         agent.set_tools_schema(TOOLS_SCHEMA)
 
         # Run agent loop
@@ -159,11 +194,11 @@ def run_single_instance(
         traj_path = output_dir / "trajectories" / f"{instance_id}.json"
         agent.trajectory.save(traj_path)
 
-        # Styled result output
-        exit_color = S.green if exit_status == "completed" else S.yellow
-        print(S.kv("exit    ", exit_color(exit_status)))
-        print(S.kv("cost    ", S.cost(agent.cost.total_cost, agent.cost.api_calls)))
-        print(S.kv("patch   ", S.patch_info(patch)))
+        if not quiet:
+            exit_color = S.green if exit_status == "completed" else S.yellow
+            print(S.kv("exit    ", exit_color(exit_status)))
+            print(S.kv("cost    ", S.cost(agent.cost.total_cost, agent.cost.api_calls)))
+            print(S.kv("patch   ", S.patch_info(patch)))
 
         return {
             "instance_id": instance_id,
@@ -173,7 +208,8 @@ def run_single_instance(
         }
 
     except Exception as e:
-        print(S.kv("error   ", S.bright_red(str(e))))
+        if not quiet:
+            print(S.kv("error   ", S.bright_red(str(e))))
         return {
             "instance_id": instance_id,
             "model_patch": "",
@@ -183,6 +219,128 @@ def run_single_instance(
 
     finally:
         session.destroy()
+
+
+class _Dashboard:
+    """Live dashboard for parallel instance execution."""
+
+    def __init__(self, instance_ids: list[str]):
+        self._ids = instance_ids
+        self._state: dict[str, dict] = {
+            iid: {"status": "waiting", "step": 0, "detail": ""}
+            for iid in instance_ids
+        }
+        self._lock = threading.Lock()
+        self._rendered_lines = 0
+
+    def update(self, instance_id: str, status: str = "", step: int = 0, detail: str = "", cost: float = 0):
+        with self._lock:
+            s = self._state.get(instance_id, {})
+            if status:
+                s["status"] = status
+            if step:
+                s["step"] = step
+            if detail:
+                s["detail"] = detail
+            if cost:
+                s["cost"] = cost
+            self._state[instance_id] = s
+
+    def render(self):
+        if not S._IS_TTY:
+            return
+        with self._lock:
+            total_cost = 0.0
+            n_done = 0
+            n_failed = 0
+            n_running = 0
+            running_lines = []
+
+            n_waiting = 0
+            for iid in self._ids:
+                s = self._state[iid]
+                status = s["status"]
+                cost = s.get("cost", 0)
+                total_cost += cost
+
+                if status == "done":
+                    n_done += 1
+                elif status == "failed":
+                    n_failed += 1
+                elif status == "waiting":
+                    n_waiting += 1
+                elif status in ("running", "spawning"):
+                    n_running += 1
+                    short_id = iid.split("__")[-1][:20].ljust(20)
+                    step = s["step"]
+                    detail = s.get("detail", "").replace("\n", " ")[:36]
+                    cost_str = f"${cost:.2f}".rjust(6) if cost else "      "
+
+                    if status == "running":
+                        tag = S.neon_cyan(f"step {step:>3}")
+                    else:
+                        tag = S.neon_purple("spawn ")
+
+                    info = S.dim(detail) if detail else ""
+                    running_lines.append(f"\033[K  {S.dim(short_id)} [{tag}] {S.neon_orange(cost_str)}  {info}")
+
+            # Header: counts summary
+            header_parts = []
+            if n_done:
+                header_parts.append(S.neon_green(f"◆ {n_done} resolved"))
+            if n_failed:
+                header_parts.append(S.neon_pink(f"✘ {n_failed} failed"))
+            if n_running:
+                header_parts.append(S.neon_cyan(f"⚡{n_running} running"))
+            if n_waiting:
+                header_parts.append(S.dim(f"… {n_waiting} queued"))
+            header = "  ".join(header_parts)
+            total_str = S.neon_orange(f"${total_cost:.2f}")
+            summary_line = f"\033[K  {header}    total: {total_str}"
+
+            lines = [summary_line]
+            if running_lines:
+                lines.append(f"\033[K  {S.neon_purple('╌' * 56)}")
+                lines.extend(running_lines)
+
+            # Build full frame and write atomically
+            frame = ""
+            if self._rendered_lines > 0:
+                frame = f"\033[{self._rendered_lines}A"
+            # Pad with empty lines if frame shrank (instances finishing)
+            while len(lines) < self._rendered_lines:
+                lines.append("\033[K")
+            frame += "\n".join(lines) + "\n"
+            sys.stdout.write(frame)
+            sys.stdout.flush()
+            self._rendered_lines = len(lines)
+
+    def final_summary(self):
+        """Print final non-overwritable summary after dashboard stops."""
+        if S._IS_TTY and self._rendered_lines > 0:
+            sys.stdout.write(f"\033[{self._rendered_lines}A")
+        total_cost = 0.0
+        with self._lock:
+            for iid in self._ids:
+                s = self._state[iid]
+                short_id = iid.split("__")[-1][:20]
+                status = s["status"]
+                cost = s.get("cost", 0)
+                total_cost += cost
+                cost_str = f"${cost:.2f}" if cost else ""
+                detail = s.get("detail", "").replace("\n", " ")[:40]
+                if status == "done":
+                    tag = S.neon_green("◆")
+                    info = S.dim(detail)
+                elif status == "failed":
+                    tag = S.neon_pink("✘")
+                    info = S.dim(detail)
+                else:
+                    tag = S.dim("·")
+                    info = S.dim(status)
+                print(f"  {tag} {short_id:<22} {S.neon_orange(cost_str):>8}  {info}")
+            print(f"  {S.neon_purple('╌' * 56)}")
+            print(f"  {'total':<24} {S.neon_orange(f'${total_cost:.2f}')}")
 
 
 def run_batch(
@@ -214,7 +372,7 @@ def run_batch(
         for i, inst in enumerate(instances):
             print(f"\n{S.progress(i + 1, len(instances))}")
             try:
-                result = run_single_instance(inst, config, output_dir, image_template, image_registry, runtime_bin)
+                result = run_single_instance(inst, config, output_dir, image_template, image_registry, runtime_bin, workers=workers)
                 predictions.append(result)
                 save()
             except KeyboardInterrupt:
@@ -231,24 +389,67 @@ def run_batch(
                 })
                 save()
     else:
+        # Parallel mode with live dashboard
+        instance_ids = [i["instance_id"] for i in instances]
+        dashboard = _Dashboard(instance_ids)
+
+        # Render loop in background
+        stop_render = threading.Event()
+
+        def _render_loop():
+            while not stop_render.is_set():
+                dashboard.render()
+                time.sleep(0.5)
+
+        # Initial render before starting threads (establishes cursor position)
+        dashboard.render()
+
+        render_thread = threading.Thread(target=_render_loop, daemon=True)
+        render_thread.start()
+
+        def _run_with_dashboard(inst: dict) -> dict:
+            iid = inst["instance_id"]
+            dashboard.update(iid, status="spawning")
+
+            def _cb(n, kind, text, cost=0):
+                detail = text.replace("\n", " ")[:40]
+                tag_map = {"shell": "$", "grep_files": "grep", "read_file": "read",
+                           "text_editor": "edit", "process": "proc"}
+                prefix = tag_map.get(kind, kind[:4])
+                dashboard.update(iid, status="running", step=n, detail=f"{prefix} {detail}", cost=cost)
+
+            try:
+                result = run_single_instance(
+                    inst, config, output_dir, image_template, image_registry,
+                    runtime_bin, workers=workers, on_step_callback=_cb,
+                )
+                patch = result.get("model_patch", "")
+                if patch:
+                    dashboard.update(iid, status="done", detail=f"patch: {len(patch)} chars")
+                else:
+                    exit_st = result.get("exit_status", "unknown")
+                    dashboard.update(iid, status="failed", detail=exit_st)
+                return result
+            except Exception as e:
+                dashboard.update(iid, status="failed", detail=str(e)[:40])
+                return {
+                    "instance_id": iid,
+                    "model_patch": "",
+                    "model_name_or_path": config.model,
+                    "exit_status": f"error: {e}",
+                }
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(run_single_instance, inst, config, output_dir, image_template, image_registry, runtime_bin): inst
-                for inst in instances
-            }
+            futures = {pool.submit(_run_with_dashboard, inst): inst for inst in instances}
             for future in as_completed(futures):
-                inst = futures[future]
-                try:
-                    result = future.result()
-                except Exception as e:
-                    result = {
-                        "instance_id": inst["instance_id"],
-                        "model_patch": "",
-                        "model_name_or_path": config.model,
-                        "exit_status": f"error: {e}",
-                    }
+                result = future.result()
                 predictions.append(result)
                 save()
+
+        stop_render.set()
+        render_thread.join(timeout=1)
+        dashboard.final_summary()
+        print()
 
     # Summary
     submitted = sum(1 for p in predictions if p.get("model_patch"))
@@ -265,36 +466,69 @@ def _load_config_file(path: str) -> dict:
         return json.loads(f.read())
 
 
-def _merge_config(args, config: dict):
-    """Merge config file values into args (CLI flags take precedence)."""
-    field_map = {
-        "model": "model",
-        "api_base": "api_base",
-        "api_key": "api_key",
-        "max_tokens": "max_tokens",
-        "step_limit": "step_limit",
-        "cost_limit": "cost_limit",
-        "temperature": "temperature",
-        "subset": "subset",
-        "split": "split",
-        "instance": "instance",
-        "slice": "slice",
-        "filter": "filter",
-        "runtime_bin": "runtime_bin",
-        "image_template": "image_template",
-        "output": "output",
-        "workers": "workers",
+def _flatten_config(config: dict) -> dict:
+    """Flatten a nested YAML config into a flat dict.
+
+    Supports both flat and nested formats:
+      Flat:   {model: "...", max_tokens: 16384}
+      Nested: {model: {name: "..."}, generation: {max_tokens: 16384}}
+    """
+    # Mapping from nested paths to flat keys
+    nested_map = {
+        ("model", "name"): "model",
+        ("model", "api_base"): "api_base",
+        ("model", "api_key"): "api_key",
+        ("generation", "max_tokens"): "max_tokens",
+        ("generation", "temperature"): "temperature",
+        ("generation", "thinking_budget"): "thinking_budget",
+        ("limits", "step_limit"): "step_limit",
+        ("limits", "cost_limit"): "cost_limit",
+        ("dataset", "subset"): "subset",
+        ("dataset", "split"): "split",
+        ("dataset", "instance"): "instance",
+        ("dataset", "slice"): "slice",
+        ("dataset", "filter"): "filter",
+        ("execution", "workers"): "workers",
+        ("execution", "output"): "output",
+        ("execution", "runtime_bin"): "runtime_bin",
+        ("execution", "image_template"): "image_template",
     }
 
-    for yaml_key, attr_name in field_map.items():
-        if yaml_key in config:
-            current = getattr(args, attr_name, None)
-            # CLI flag wins if explicitly set (not default/None/empty)
-            if current is None or current == "" or (attr_name == "subset" and current == "lite"):
-                value = config[yaml_key]
-                if attr_name == "output" and isinstance(value, str):
-                    value = Path(value)
-                setattr(args, attr_name, value)
+    flat = {}
+
+    # First pass: extract nested values
+    for (section, key), flat_key in nested_map.items():
+        if section in config and isinstance(config[section], dict):
+            if key in config[section]:
+                flat[flat_key] = config[section][key]
+
+    # Second pass: top-level flat keys override (for backwards compat)
+    top_level_keys = {
+        "model", "api_base", "api_key", "max_tokens", "step_limit",
+        "cost_limit", "temperature", "thinking_budget", "subset", "split",
+        "instance", "slice", "filter", "runtime_bin", "image_template",
+        "output", "workers",
+    }
+    for key in top_level_keys:
+        if key in config and not isinstance(config[key], dict):
+            flat[key] = config[key]
+
+    return flat
+
+
+def _merge_config(args, config: dict):
+    """Merge config file values into args (CLI flags take precedence)."""
+    flat = _flatten_config(config)
+
+    for yaml_key in flat:
+        attr_name = yaml_key
+        current = getattr(args, attr_name, None)
+        # CLI flag wins if explicitly set (not default/None/empty)
+        if current is None or current == "" or (attr_name == "subset" and current == "lite"):
+            value = flat[yaml_key]
+            if attr_name == "output" and isinstance(value, str):
+                value = Path(value)
+            setattr(args, attr_name, value)
 
 
 def main():
@@ -352,8 +586,7 @@ def main():
         args.step_limit = 250
     if args.cost_limit is None:
         args.cost_limit = 3.0
-    if args.temperature is None:
-        args.temperature = 0.0
+    # temperature: None means use model default (don't force 0.0)
     if args.output is None:
         args.output = Path("swebench_results")
     if args.workers is None:
@@ -422,6 +655,7 @@ def main():
         step_limit=args.step_limit,
         cost_limit=args.cost_limit,
         temperature=args.temperature,
+        thinking_budget=getattr(args, "thinking_budget", None),
     )
 
     # Run
@@ -429,6 +663,7 @@ def main():
         result = run_single_instance(
             instances[0], agent_config, args.output,
             args.image_template, image_registry, args.runtime_bin,
+            workers=1,
         )
         print(f"\n{S.section('Result')}")
         print(f"  {json.dumps(result, indent=2)}")

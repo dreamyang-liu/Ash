@@ -34,24 +34,24 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "text_editor",
             "description": (
-                "View, create, or edit files.\n"
+                "View or edit files.\n"
                 "Commands:\n"
                 "  view: Read file contents (optionally a line range)\n"
                 "  str_replace: Replace exact text in a file\n"
                 "  insert: Insert text after a specific line\n"
-                "  create: Create a new file with given content"
+                "  write: Write full content to a file (creates or overwrites)"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "enum": ["view", "str_replace", "insert", "create"], "description": "Command to execute"},
+                    "command": {"type": "string", "enum": ["view", "str_replace", "insert", "write"], "description": "Command to execute"},
                     "path": {"type": "string", "description": "File path"},
                     "view_range": {"type": "array", "items": {"type": "integer"}, "description": "[start, end] line range for view"},
                     "old_str": {"type": "string", "description": "Text to find (str_replace)"},
                     "new_str": {"type": "string", "description": "Replacement text (str_replace)"},
                     "insert_line": {"type": "integer", "description": "Line number to insert after"},
                     "insert_text": {"type": "string", "description": "Text to insert"},
-                    "file_text": {"type": "string", "description": "Full file content (create)"},
+                    "file_text": {"type": "string", "description": "Full file content (write)"},
                 },
                 "required": ["command", "path"],
             },
@@ -93,6 +93,27 @@ TOOLS_SCHEMA = [
                     "limit": {"type": "integer", "description": "Number of lines to read (default: all)"},
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "process",
+            "description": (
+                "Manage a background process started with shell(background=true).\n"
+                "Actions:\n"
+                "  read: Get new output lines since last read (incremental)\n"
+                "  kill: Terminate the process"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pid": {"type": "string", "description": "Process ID returned by shell(background=true)"},
+                    "action": {"type": "string", "enum": ["read", "kill"], "description": "read or kill"},
+                    "tail": {"type": "integer", "description": "Only return last N lines (read only)"},
+                },
+                "required": ["pid", "action"],
             },
         },
     },

@@ -23,7 +23,8 @@ class AgentConfig:
     max_tokens: int = 16384
     step_limit: int = 250
     cost_limit: float = 3.0
-    temperature: float = 0.0
+    temperature: Optional[float] = None  # None = use model default
+    thinking_budget: Optional[int] = None  # Extended thinking budget tokens (e.g. 10000)
     workdir: str = "/testbed"
 
 

@@ -22,14 +22,14 @@ func (e *EditTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"command":     map[string]any{"type": "string", "enum": []string{"view", "str_replace", "insert", "create"}, "description": "Command to execute"},
+			"command":     map[string]any{"type": "string", "enum": []string{"view", "str_replace", "insert", "write"}, "description": "Command to execute"},
 			"path":        map[string]any{"type": "string", "description": "File path"},
 			"view_range":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "[start, end] lines for view"},
 			"old_str":     map[string]any{"type": "string", "description": "Text to find (str_replace)"},
 			"new_str":     map[string]any{"type": "string", "description": "Replacement text (str_replace)"},
 			"insert_line": map[string]any{"type": "integer", "description": "Line number to insert after"},
 			"insert_text": map[string]any{"type": "string", "description": "Text to insert"},
-			"file_text":   map[string]any{"type": "string", "description": "Full file content (create)"},
+			"file_text":   map[string]any{"type": "string", "description": "Full file content (write)"},
 		},
 		"required": []string{"command", "path"},
 	}
@@ -49,8 +49,8 @@ func (e *EditTool) Execute(args map[string]any) Result {
 		return e.strReplace(path, args)
 	case "insert":
 		return e.insert(path, args)
-	case "create":
-		return e.create(path, args)
+	case "write":
+		return e.write(path, args)
 	default:
 		return Err("unknown command: " + command)
 	}
@@ -144,11 +144,7 @@ func (e *EditTool) insert(path string, args map[string]any) Result {
 	return Ok("OK")
 }
 
-func (e *EditTool) create(path string, args map[string]any) Result {
-	if _, err := os.Stat(path); err == nil {
-		return Err("File exists. Use str_replace to modify.")
-	}
-
+func (e *EditTool) write(path string, args map[string]any) Result {
 	fileText, _ := args["file_text"].(string)
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -158,6 +154,6 @@ func (e *EditTool) create(path string, args map[string]any) Result {
 		return Err(err.Error())
 	}
 
-	events.Push("file_change", path, map[string]any{"path": path, "operation": "create"})
+	events.Push("file_change", path, map[string]any{"path": path, "operation": "write"})
 	return Ok("OK")
 }
