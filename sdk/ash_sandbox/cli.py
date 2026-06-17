@@ -58,9 +58,25 @@ def _get_url(sandbox_id: str | None = None) -> str:
     state = _load_state()
     sandboxes = state.get("sandboxes", {})
 
-    # Local mode: always use config URL
+    # Local mode: ensure runtime is running, return URL
     if config["mode"] == "local":
-        return config.get("url", "http://localhost:3000")
+        url = config.get("url", "http://localhost:3000")
+        # Quick check if it's up
+        try:
+            import httpx as _hx
+            with _hx.Client(timeout=2) as c:
+                if c.get(url).status_code == 200:
+                    return url
+        except Exception:
+            pass
+        # Try to start it
+        bin_path = _ensure_runtime(config)
+        import subprocess
+        port = int(url.rsplit(":", 1)[-1])
+        subprocess.Popen([bin_path, "--port", str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        import time
+        time.sleep(2)
+        return url
 
     # Docker/K8s mode: must select a sandbox
     if sandbox_id:
@@ -136,12 +152,102 @@ def _print_config(config: dict):
         print(f"  Control: {config.get('control_plane_url', '(not set)')}")
 
 
+def _ensure_runtime(config: dict) -> str:
+    """Ensure ash-runtime is available locally. Downloads if needed. Returns binary path."""
+    import platform
+    import stat
+    import urllib.request
+
+    bin_path = config.get("runtime_bin") or _which("ash-runtime")
+    if bin_path:
+        return bin_path
+
+    # Download to ~/.ash/bin/ash-runtime
+    bin_dir = os.path.expanduser("~/.ash/bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    bin_path = os.path.join(bin_dir, "ash-runtime")
+
+    if os.path.exists(bin_path):
+        return bin_path
+
+    os_name = platform.system().lower()  # linux / darwin
+    arch = platform.machine()
+    if arch == "x86_64":
+        arch = "amd64"
+    elif arch == "aarch64" or arch == "arm64":
+        arch = "arm64"
+
+    url = f"https://github.com/dreamyang-liu/Ash/releases/latest/download/ash-runtime-{os_name}-{arch}"
+    print(f"Downloading ash-runtime from {url}...")
+
+    try:
+        urllib.request.urlretrieve(url, bin_path)
+        os.chmod(bin_path, os.stat(bin_path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        print(f"Installed: {bin_path}")
+    except Exception as e:
+        print(f"Download failed: {e}", file=sys.stderr)
+        print("Install manually: https://github.com/dreamyang-liu/Ash/releases", file=sys.stderr)
+        sys.exit(1)
+
+    return bin_path
+
+
+async def _ensure_local_running(config: dict) -> str:
+    """Ensure ash-runtime is running locally. Starts it if needed. Returns URL."""
+    import httpx
+
+    url = config.get("url", "http://localhost:3000")
+    port = int(url.rsplit(":", 1)[-1])
+
+    # Check if already running
+    try:
+        async with httpx.AsyncClient(timeout=2) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return url
+    except (httpx.ConnectError, OSError):
+        pass
+
+    # Not running — start it
+    bin_path = _ensure_runtime(config)
+    import subprocess
+    proc = subprocess.Popen(
+        [bin_path, "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # Save PID for cleanup
+    state = _load_state()
+    state["local_pid"] = proc.pid
+    state["local_url"] = url
+    _save_state(state)
+
+    # Wait for ready
+    import time
+    for _ in range(30):
+        time.sleep(0.5)
+        try:
+            import httpx as httpx_sync
+            with httpx_sync.Client(timeout=2) as client:
+                resp = client.get(url)
+                if resp.status_code == 200:
+                    print(f"ash-runtime started (pid {proc.pid}) on {url}")
+                    return url
+        except (httpx_sync.ConnectError, OSError):
+            pass
+
+    print("Failed to start ash-runtime", file=sys.stderr)
+    sys.exit(1)
+
+
 async def cmd_spawn(args):
     config = _load_config()
     mode = config.get("mode", "local")
 
     if mode == "local":
-        print("Mode is 'local' — no container to spawn. Use: ash-sandbox config --mode docker")
+        await _ensure_local_running(config)
+        print("Mode: local — runtime is running. Use: ash-sandbox shell <command>")
         return
 
     image = args.image
