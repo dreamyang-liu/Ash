@@ -73,9 +73,9 @@ jobs:
           print('OK: read_file works')
           "
 
-      - name: Test text_editor create + str_replace (stdio)
+      - name: Test text_editor write + str_replace (stdio)
         run: |
-          echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"text_editor","arguments":{"command":"create","path":"/tmp/ci_edit.txt","file_text":"hello world"}}}' | ./ash-runtime --mode stdio > /dev/null
+          echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"text_editor","arguments":{"command":"write","path":"/tmp/ci_edit.txt","file_text":"hello world"}}}' | ./ash-runtime --mode stdio > /dev/null
           echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"text_editor","arguments":{"command":"str_replace","path":"/tmp/ci_edit.txt","old_str":"hello","new_str":"goodbye"}}}' | ./ash-runtime --mode stdio | python3 -c "
           import sys, json
           data = json.loads(sys.stdin.read())
