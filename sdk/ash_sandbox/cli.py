@@ -133,6 +133,10 @@ async def cmd_info(args):
     print()
 
     if sandboxes:
+        await _prune_dead_sandboxes(state)
+        sandboxes = state.get("sandboxes", {})
+
+    if sandboxes:
         print(f"Sandboxes: {len(sandboxes)} running")
         for sid, info in sandboxes.items():
             print(f"  {sid}  {info.get('image',''):20s}  {info['url']}")
@@ -326,9 +330,13 @@ async def cmd_list(args):
     state = _load_state()
     sandboxes = state.get("sandboxes", {})
 
+    if sandboxes:
+        await _prune_dead_sandboxes(state)
+        sandboxes = state.get("sandboxes", {})
+
     if not sandboxes:
         if config["mode"] == "local":
-            print(f"Mode: local → {config.get('url', 'http://localhost:3000')}")
+            print("Mode: local (no containers)")
         else:
             print("No sandboxes running. Run: ash-sandbox spawn")
         return
@@ -371,6 +379,28 @@ async def cmd_destroy(args):
         print(f"  destroyed {sid}")
 
     _save_state(state)
+
+
+async def _prune_dead_sandboxes(state: dict):
+    """Check which sandboxes are still alive, remove dead ones from state."""
+    sandboxes = state.get("sandboxes", {})
+    dead = []
+
+    for sid, info in sandboxes.items():
+        cid = info["container_id"]
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "inspect", "--format", "{{.State.Running}}", cid,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0 or stdout.decode().strip() != "true":
+            dead.append(sid)
+
+    if dead:
+        for sid in dead:
+            del sandboxes[sid]
+        _save_state(state)
 
 
 async def _kill_container(cid: str):
