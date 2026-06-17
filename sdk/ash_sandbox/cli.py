@@ -38,7 +38,6 @@ def _get_url(sandbox_id: str | None = None) -> str:
     sandboxes = state.get("sandboxes", {})
 
     if sandbox_id:
-        # Match by prefix
         matches = [k for k in sandboxes if k.startswith(sandbox_id)]
         if len(matches) == 1:
             return sandboxes[matches[0]]["url"]
@@ -49,10 +48,16 @@ def _get_url(sandbox_id: str | None = None) -> str:
             print(f"Sandbox '{sandbox_id}' not found", file=sys.stderr)
             sys.exit(1)
 
-    if state.get("active") and state["active"] in sandboxes:
-        return sandboxes[state["active"]]["url"]
-    if sandboxes:
+    # No ID specified
+    if len(sandboxes) > 1:
+        print("Multiple sandboxes running. Specify one with -s <id>:", file=sys.stderr)
+        for sid, info in sandboxes.items():
+            print(f"  {sid}  {info['image']:20s}  {info['url']}", file=sys.stderr)
+        sys.exit(1)
+
+    if len(sandboxes) == 1:
         return next(iter(sandboxes.values()))["url"]
+
     return os.getenv("ASH_RUNTIME_URL", "http://localhost:3000")
 
 
