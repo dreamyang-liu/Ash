@@ -104,23 +104,19 @@ class AshSession:
 
     def get_patch(self) -> str:
         """Get the full diff of all changes (committed + uncommitted) vs initial state."""
-        # Stage everything so uncommitted changes are visible to diff
+        # Stage everything so uncommitted changes are visible
         self.execute("shell", {"command": "git add -A", "working_dir": "/testbed"})
 
-        if self._base_commit:
-            # Diff all changes (committed + staged) against the original HEAD
-            result = self.execute("shell", {
-                "command": f"git diff {self._base_commit}",
-                "working_dir": "/testbed",
-            })
-            if result.success and result.output.strip():
-                return result.output.strip()
+        base = self._base_commit or "HEAD"
+        result = self.execute("shell", {
+            "command": f"git diff {base}",
+            "working_dir": "/testbed",
+        })
+        patch = result.output if result.success else ""
 
-        # Fallback: uncommitted changes only (agent didn't commit)
-        result = self.execute("shell", {"command": "git diff HEAD", "working_dir": "/testbed"})
-        if result.success and result.output.strip():
-            return result.output.strip()
+        # Don't use .strip() — it removes the trailing newline that git apply requires
+        patch = patch.rstrip("\r\n")
+        if patch:
+            patch += "\n"
 
-        # Last fallback: staged changes
-        result = self.execute("shell", {"command": "git diff --cached", "working_dir": "/testbed"})
-        return result.output.strip() if result.success else ""
+        return patch

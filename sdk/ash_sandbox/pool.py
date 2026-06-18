@@ -49,6 +49,8 @@ class DockerPool:
             if "memory" in resources:
                 docker_args.extend(["-m", str(resources["memory"])])
 
+        label_args = ["--label", "ash.managed=1"]
+
         if self.runtime_bin:
             if entrypoint:
                 container_cmd = f"({entrypoint}) && ash-runtime --port {self.port}"
@@ -58,6 +60,7 @@ class DockerPool:
                 "docker", "run", "-d",
                 "-p", f"{host_port}:{self.port}",
                 "-v", f"{self.runtime_bin}:/usr/local/bin/ash-runtime:ro",
+                *label_args,
                 *docker_args,
                 image,
                 "sh", "-c", container_cmd,
@@ -71,6 +74,7 @@ class DockerPool:
             cmd = [
                 "docker", "run", "-d",
                 "-p", f"{host_port}:{self.port}",
+                *label_args,
                 *docker_args,
                 image,
                 "sh", "-c", bootstrap_cmd,
@@ -161,7 +165,7 @@ class SandboxPool:
                 "requests": {k: v for k, v in resources.items()},
             }
 
-        resp = await self._client.post(f"{self.control_plane_url}/spawn", json=body)
+        resp = await self._client.post(f"{self.control_plane_url}/create", json=body)
         resp.raise_for_status()
         data = resp.json()
 
@@ -169,23 +173,20 @@ class SandboxPool:
         sb = Sandbox(backend=GatewayBackend(self.gateway_url, sandbox_id))
         sb._container_id = sandbox_id
         self._sandboxes[sandbox_id] = sb
+
+        await sb._wait_ready(timeout=60)
         return sb
 
     async def destroy(self, sandbox: Sandbox):
         if sandbox._container_id and sandbox._container_id in self._sandboxes:
-            await self._client.post(
-                f"{self.control_plane_url}/destroy",
-                json={"uuid": sandbox._container_id},
+            await self._client.delete(
+                f"{self.control_plane_url}/destroy/{sandbox._container_id}",
             )
             del self._sandboxes[sandbox._container_id]
             sandbox._container_id = None
 
     async def destroy_all(self):
-        for sid in list(self._sandboxes.keys()):
-            await self._client.post(
-                f"{self.control_plane_url}/destroy",
-                json={"uuid": sid},
-            )
+        await self._client.delete(f"{self.control_plane_url}/destroy-all")
         self._sandboxes.clear()
 
     async def close(self):

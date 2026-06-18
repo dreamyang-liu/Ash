@@ -110,6 +110,77 @@ Do NOT modify test files. After making your changes, verify them by running rele
 """
 
 
+def _cleanup_containers():
+    """Kill all ash-managed containers (label: ash.managed=1)."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "-q", "--filter", "label=ash.managed=1"],
+            capture_output=True, text=True, timeout=10,
+        )
+        cids = result.stdout.strip().split()
+        if cids:
+            subprocess.run(
+                ["docker", "rm", "-f", *cids],
+                capture_output=True, timeout=30,
+            )
+            print(S.kv("cleanup ", S.dim(f"removed {len(cids)} containers")))
+    except Exception:
+        pass
+
+
+class _ContainerJanitor:
+    """Background thread that periodically cleans up leaked containers."""
+
+    def __init__(self, interval: int = 60):
+        self._interval = interval
+        self._active_cids: set[str] = set()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=5)
+        # Final sweep
+        _cleanup_containers()
+
+    def register(self, cid: str):
+        """Mark a container as actively in use."""
+        with self._lock:
+            self._active_cids.add(cid)
+
+    def unregister(self, cid: str):
+        """Mark a container as no longer needed."""
+        with self._lock:
+            self._active_cids.discard(cid)
+
+    def _run(self):
+        import subprocess
+        while not self._stop.is_set():
+            self._stop.wait(self._interval)
+            if self._stop.is_set():
+                break
+            try:
+                result = subprocess.run(
+                    ["docker", "ps", "-q", "--filter", "label=ash.managed=1"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                all_cids = set(result.stdout.strip().split()) - {""}
+                with self._lock:
+                    leaked = all_cids - self._active_cids
+                if leaked:
+                    subprocess.run(
+                        ["docker", "rm", "-f", *leaked],
+                        capture_output=True, timeout=30,
+                    )
+            except Exception:
+                pass
+
+
 def run_single_instance(
     instance: dict,
     config: AgentConfig,
@@ -119,6 +190,7 @@ def run_single_instance(
     runtime_bin: str | None = None,
     workers: int = 1,
     on_step_callback=None,
+    janitor: "_ContainerJanitor | None" = None,
 ) -> dict:
     """Run agent on a single SWE-bench/SWE-Gym instance."""
     instance_id = instance.get("instance_id", "unknown")
@@ -141,6 +213,10 @@ def run_single_instance(
                 "model_name_or_path": config.model,
                 "exit_status": "session_failed",
             }
+
+        # Register container with janitor
+        if janitor and session._sandbox and session._sandbox._container_id:
+            janitor.register(session._sandbox._container_id)
 
         # Create and configure agent — rolling step display
         _step_lines: list[str] = []
@@ -218,6 +294,8 @@ def run_single_instance(
         }
 
     finally:
+        if janitor and session._sandbox and session._sandbox._container_id:
+            janitor.unregister(session._sandbox._container_id)
         session.destroy()
 
 
@@ -281,8 +359,7 @@ class _Dashboard:
                     else:
                         tag = S.neon_purple("spawn ")
 
-                    info = S.dim(detail) if detail else ""
-                    running_lines.append(f"\033[K  {S.dim(short_id)} [{tag}] {S.neon_orange(cost_str)}  {info}")
+                    running_lines.append(f"\033[K  {S.dim(short_id)} [{tag}] {S.neon_orange(cost_str)}  {detail}")
 
             # Header: counts summary
             header_parts = []
@@ -353,6 +430,10 @@ def run_batch(
     runtime_bin: str | None = None,
 ):
     """Run agent on multiple instances with resume support."""
+    janitor = None  # Disabled: was killing containers mid-run due to race condition
+    # janitor = _ContainerJanitor(interval=30)
+    # janitor.start()
+
     output_dir.mkdir(parents=True, exist_ok=True)
     preds_path = output_dir / "preds.json"
 
@@ -372,7 +453,7 @@ def run_batch(
         for i, inst in enumerate(instances):
             print(f"\n{S.progress(i + 1, len(instances))}")
             try:
-                result = run_single_instance(inst, config, output_dir, image_template, image_registry, runtime_bin, workers=workers)
+                result = run_single_instance(inst, config, output_dir, image_template, image_registry, runtime_bin, workers=workers, janitor=janitor)
                 predictions.append(result)
                 save()
             except KeyboardInterrupt:
@@ -412,16 +493,21 @@ def run_batch(
             dashboard.update(iid, status="spawning")
 
             def _cb(n, kind, text, cost=0):
-                detail = text.replace("\n", " ")[:40]
-                tag_map = {"shell": "$", "grep_files": "grep", "read_file": "read",
-                           "text_editor": "edit", "process": "proc"}
-                prefix = tag_map.get(kind, kind[:4])
-                dashboard.update(iid, status="running", step=n, detail=f"{prefix} {detail}", cost=cost)
+                detail = text.replace("\n", " ")[:36]
+                tag_map = {
+                    "shell":       S.neon_cyan("$"),
+                    "grep_files":  S.neon_purple("grep"),
+                    "read_file":   S.electric_blue("read"),
+                    "text_editor": S.neon_orange("edit"),
+                    "process":     S.neon_green("proc"),
+                }
+                prefix = tag_map.get(kind, S.dim(kind[:4]))
+                dashboard.update(iid, status="running", step=n, detail=f"{prefix} {S.dim(detail)}", cost=cost)
 
             try:
                 result = run_single_instance(
                     inst, config, output_dir, image_template, image_registry,
-                    runtime_bin, workers=workers, on_step_callback=_cb,
+                    runtime_bin, workers=workers, on_step_callback=_cb, janitor=janitor,
                 )
                 patch = result.get("model_patch", "")
                 if patch:
@@ -450,6 +536,10 @@ def run_batch(
         render_thread.join(timeout=1)
         dashboard.final_summary()
         print()
+
+    # Stop janitor (does a final sweep)
+    if janitor:
+        janitor.stop()
 
     # Summary
     submitted = sum(1 for p in predictions if p.get("model_patch"))
