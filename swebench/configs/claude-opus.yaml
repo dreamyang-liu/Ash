@@ -1,0 +1,24 @@
+# Claude Code — Opus via Anthropic API (direct)
+#
+# Usage:
+#   python -m swebench -c swebench/configs/claude-opus.yaml
+#   python -m swebench -c swebench/configs/claude-opus.yaml --slice 0:10
+
+execution:
+  harness: claude-code
+  workers: 1
+  output: results/claude-opus
+
+model:
+  name: opus
+  # provider: anthropic          # default — direct Anthropic API
+  # api_base: ...                # override base URL (e.g. OpenRouter)
+  # api_key: ...                 # override API key (default: ANTHROPIC_API_KEY env)
+
+claude:
+  max_budget: 8.0                # USD per instance
+  timeout: 1800                  # seconds per instance (30 min)
+  # permission_mode: bypassPermissions
+
+dataset:
+  subset: verified

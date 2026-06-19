@@ -17,7 +17,7 @@ generation:
 
 limits:
   step_limit: 250
-  cost_limit: 8.0
+  cost_limit: 20.0
 
 dataset:
   subset: verified

@@ -1,0 +1,28 @@
+# Claude Code — via OpenRouter
+#
+# Routes Claude through OpenRouter (useful for rate limit bypass or billing)
+#
+# Usage:
+#   python -m swebench -c swebench/configs/claude-openrouter.yaml
+
+execution:
+  harness: claude-code
+  workers: 2
+  output: results/claude-openrouter
+
+model:
+  name: opus
+  provider: openrouter
+  api_base: https://openrouter.ai/api/v1
+  # api_key: sk-or-v1-xxx       # or set ANTHROPIC_API_KEY env
+
+claude:
+  max_budget: 8.0
+  timeout: 1800
+
+env:
+  ANTHROPIC_BASE_URL: https://openrouter.ai/api/v1
+  # ANTHROPIC_API_KEY: sk-or-v1-xxx
+
+dataset:
+  subset: verified

@@ -28,7 +28,7 @@ except ImportError:
     sys.exit(1)
 
 from .agent import AshAgent
-from .ash_cli import AshSession
+from .sandbox import AshSession
 from . import style as S
 from .tools import TOOLS_SCHEMA
 from .models import AgentConfig

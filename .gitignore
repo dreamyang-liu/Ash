@@ -19,3 +19,4 @@ Thumbs.db
 /man/
 runtime/ash-runtime
 __pycache__/
+results/*

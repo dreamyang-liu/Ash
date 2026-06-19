@@ -34,6 +34,8 @@ class CostTracker:
     total_cost: float = 0.0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     api_calls: int = 0
 
     def update(self, response: Any):
@@ -41,6 +43,10 @@ class CostTracker:
         if hasattr(response, "usage") and response.usage:
             self.total_input_tokens += response.usage.prompt_tokens or 0
             self.total_output_tokens += response.usage.completion_tokens or 0
+            # Track cache usage from Anthropic/Bedrock responses
+            usage = response.usage
+            self.cache_read_tokens += getattr(usage, "cache_read_input_tokens", 0) or 0
+            self.cache_write_tokens += getattr(usage, "cache_creation_input_tokens", 0) or 0
         try:
             from litellm import completion_cost
             self.total_cost += completion_cost(completion_response=response)
@@ -48,12 +54,16 @@ class CostTracker:
             pass
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "api_calls": self.api_calls,
             "instance_cost": round(self.total_cost, 4),
             "input_tokens": self.total_input_tokens,
             "output_tokens": self.total_output_tokens,
         }
+        if self.cache_read_tokens or self.cache_write_tokens:
+            d["cache_read_tokens"] = self.cache_read_tokens
+            d["cache_write_tokens"] = self.cache_write_tokens
+        return d
 
 
 @dataclass

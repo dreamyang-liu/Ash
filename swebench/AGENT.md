@@ -105,6 +105,12 @@ Read the issue. Extract:
 - Key identifiers: error messages, class names, function names, variable names
 - Any test names or test files mentioned
 
+**Write a reproduction script** if the issue includes a code example:
+```json
+shell({"command": "cd /testbed && python -c \"<repro code>\" 2>&1", "tail": 30})
+```
+This confirms you understand the bug and gives you a fast way to verify your fix later.
+
 ### 2. Locate
 
 Use `grep_files` to find relevant code. Start specific, broaden if needed:
@@ -275,6 +281,7 @@ If your first fix breaks other tests:
 5. **No guessing.** If unsure, search more. Never make speculative edits.
 6. **Work in /testbed.** Don't create files outside it.
 7. **Clean patch.** Final diff must contain ONLY source changes. No repro scripts, no build artifacts, no test apps.
+8. **Never assume the fix is already applied.** Even if the code looks correct, you MUST run the failing test. If tests fail, the fix is incomplete — keep working. "Looks fixed" is not evidence; only passing tests are.
 
 ---
 

@@ -1,17 +1,21 @@
-"""SWE-bench benchmark using ash-sandbox SDK.
+"""SWE-bench evaluation framework with pluggable agent harnesses.
 
-Runs an LLM agent with ash tools (via SDK) on SWE-bench instances
-in isolated Docker containers managed by DockerPool.
+Harnesses:
+    - litellm: Custom agent loop supporting any model via litellm
+    - claude-code: Claude Code CLI via MCP sandbox
+    - codex: (future) OpenAI Codex CLI
 
 Usage:
-    python -m swebench --instance sympy__sympy-15599
-    python -m swebench --subset verified --split test --workers 4 -o results/
+    python -m swebench -c swebench/configs/claude-opus.yaml --harness claude-code
+    python -m swebench -c swebench/configs/bedrock-opus46.yaml
+    python -m swebench --harness litellm --model openai/gpt-4o --api-base http://...
 """
 
 from .models import AgentConfig, CostTracker, ToolResult, Trajectory
-from .ash_cli import AshSession
+from .sandbox import AshSession
 from .agent import AshAgent
 from .tools import TOOLS_SCHEMA
+from .dataset import load_instances, resolve_image, format_task_prompt
 
 __all__ = [
     "AgentConfig",
@@ -21,4 +25,7 @@ __all__ = [
     "TOOLS_SCHEMA",
     "ToolResult",
     "Trajectory",
+    "load_instances",
+    "resolve_image",
+    "format_task_prompt",
 ]

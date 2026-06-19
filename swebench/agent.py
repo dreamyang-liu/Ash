@@ -8,6 +8,7 @@ Tools: shell, text_editor, grep_files, read_file — called directly by name.
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -138,12 +139,53 @@ class AshAgent:
         count = tail.count(pattern)
         return count >= min_repeats
 
+    def _add_cache_breakpoints(self, messages: list[dict]) -> list[dict]:
+        """Add cache_control breakpoints for Anthropic/Bedrock prompt caching.
+
+        Strategy: mark system message and the second-to-last message as cache
+        breakpoints. This caches the static system prompt and the entire
+        conversation prefix (everything except the latest tool result).
+        """
+        if not messages or "anthropic" not in self.config.model and "bedrock" not in self.config.model:
+            return messages
+
+        msgs = [dict(m) for m in messages]
+
+        # Mark system message (always cacheable — same across all calls)
+        if msgs and msgs[0]["role"] == "system":
+            content = msgs[0]["content"]
+            if isinstance(content, str):
+                msgs[0]["content"] = [
+                    {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+                ]
+
+        # Mark the second-to-last message as cache breakpoint
+        # (the prefix up to the last user/tool message)
+        if len(msgs) >= 3:
+            bp_idx = len(msgs) - 2
+            content = msgs[bp_idx].get("content", "")
+            if isinstance(content, str) and content:
+                msgs[bp_idx]["content"] = [
+                    {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+                ]
+            elif isinstance(content, list) and content:
+                # Already a list of blocks — add cache_control to the last block
+                msgs[bp_idx]["content"] = list(content)
+                last_block = dict(msgs[bp_idx]["content"][-1])
+                last_block["cache_control"] = {"type": "ephemeral"}
+                msgs[bp_idx]["content"][-1] = last_block
+
+        return msgs
+
     def _query_model(self, messages: list[dict]) -> Any:
         completion, stream_chunk_builder = _get_litellm()
 
+        # Apply prompt caching for Anthropic/Bedrock models
+        cached_messages = self._add_cache_breakpoints(messages)
+
         kwargs: dict[str, Any] = dict(
             model=self.config.model,
-            messages=messages,
+            messages=cached_messages,
             tools=self._tools_schema if self._tools_schema else None,
             tool_choice="auto" if self._tools_schema else None,
             max_tokens=self.config.max_tokens,
@@ -159,7 +201,20 @@ class AshAgent:
         if self.config.api_key:
             kwargs["api_key"] = self.config.api_key
 
-        raw = completion(**kwargs)
+        max_retries = 8
+        for attempt in range(max_retries):
+            try:
+                raw = completion(**kwargs)
+                break
+            except Exception as e:
+                if "RateLimitError" in type(e).__name__ or "rate" in str(e).lower():
+                    wait = min(2 ** attempt, 120)
+                    self._trace(f"\n[RATE_LIMIT] attempt {attempt+1}/{max_retries}, waiting {wait}s\n")
+                    time.sleep(wait)
+                    if attempt == max_retries - 1:
+                        raise
+                else:
+                    raise
 
         if not self.stream:
             self.cost.update(raw)
@@ -286,9 +341,18 @@ class AshAgent:
             if guardrail_warning:
                 content += f"\n\n{guardrail_warning}"
 
-            max_len = 15000
+            max_len = 12000
             if len(content) > max_len:
-                content = content[:max_len] + f"\n... (truncated {len(content) - max_len} chars)"
+                head = max_len * 2 // 3  # ~8000 chars
+                tail = max_len // 3      # ~4000 chars
+                elided = len(content) - head - tail
+                content = (
+                    content[:head] +
+                    f"\n\n... [{elided} characters truncated — output too long. "
+                    f"Use `tail` on shell commands, `limit` on grep/read_file, "
+                    f"or pipe through `grep` to get more targeted output] ...\n\n" +
+                    content[-tail:]
+                )
 
             results.append({
                 "role": "tool",
@@ -344,18 +408,25 @@ class AshAgent:
                 self._close_trace()
                 return "cost_limit"
 
-            # Budget warning at 75%
-            if not self._budget_warned:
-                cost_pct = self.cost.total_cost / self.config.cost_limit if self.config.cost_limit else 0
-                step_pct = self.cost.api_calls / self.config.step_limit if self.config.step_limit else 0
-                if cost_pct >= 0.75 or step_pct >= 0.75:
+            # Budget warning only when ~3-5 steps remaining (based on avg cost per step)
+            if not self._budget_warned and self.cost.api_calls >= 3:
+                avg_cost_per_step = self.cost.total_cost / self.cost.api_calls
+                remaining_budget = self.config.cost_limit - self.cost.total_cost
+                remaining_steps = self.config.step_limit - self.cost.api_calls
+                est_steps_left = min(remaining_steps, int(remaining_budget / avg_cost_per_step)) if avg_cost_per_step > 0 else remaining_steps
+
+                if est_steps_left <= 4 or remaining_steps <= 4:
                     self._budget_warned = True
                     budget_msg = (
-                        f"[Budget Warning] You have used {self.cost.api_calls}/{self.config.step_limit} steps "
-                        f"and ${self.cost.total_cost:.2f}/${self.config.cost_limit:.2f} budget. "
-                        f"Wrap up: test your current fix and stop. Do not start new approaches."
+                        f"\n\n[Budget Warning] ~{est_steps_left} steps remaining "
+                        f"({self.cost.api_calls}/{self.config.step_limit} steps, "
+                        f"${self.cost.total_cost:.2f}/${self.config.cost_limit:.2f} budget). "
+                        f"Finalize your fix now: run tests and stop. If tests fail, revert and submit your best attempt."
                     )
-                    messages.append({"role": "user", "content": budget_msg})
+                    for msg in reversed(messages):
+                        if msg["role"] in ("tool", "user"):
+                            msg["content"] += budget_msg
+                            break
                     self._trace(f"\n{budget_msg}\n")
 
             step_n = self.cost.api_calls + 1

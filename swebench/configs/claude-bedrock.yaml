@@ -1,0 +1,28 @@
+# Claude Code — Opus via AWS Bedrock
+#
+# Auth: set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_REGION_NAME
+#
+# Usage:
+#   python -m swebench -c swebench/configs/claude-bedrock.yaml
+
+execution:
+  harness: claude-code
+  workers: 4
+  output: results/claude-bedrock
+
+model:
+  name: opus
+  provider: bedrock
+
+claude:
+  max_budget: 8.0
+  timeout: 1800
+
+env:
+  CLAUDE_CODE_USE_BEDROCK: "1"
+  AWS_REGION: us-west-2
+  # AWS_ACCESS_KEY_ID: ...
+  # AWS_SECRET_ACCESS_KEY: ...
+
+dataset:
+  subset: verified
