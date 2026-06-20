@@ -203,7 +203,7 @@ func main() {
 	})
 
 	// Main API endpoints
-	r.POST("/spawn", func(c *gin.Context) {
+	r.POST("/create", func(c *gin.Context) {
 		var req SpawnReq
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -469,7 +469,7 @@ func main() {
 		c.JSON(http.StatusOK, resp)
 	})
 
-	r.DELETE("/deprovision-all", func(c *gin.Context) {
+	r.DELETE("/destroy-all", func(c *gin.Context) {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Minute)
 		defer cancel()
 
@@ -541,7 +541,7 @@ func main() {
 		})
 	})
 
-	r.DELETE("/deprovision/:uuid", func(c *gin.Context) {
+	r.DELETE("/destroy/:uuid", func(c *gin.Context) {
 		uuid := c.Param("uuid")
 
 		// Use request context with timeout

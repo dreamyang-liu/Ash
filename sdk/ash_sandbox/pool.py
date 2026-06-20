@@ -165,7 +165,7 @@ class SandboxPool:
                 "requests": {k: v for k, v in resources.items()},
             }
 
-        resp = await self._client.post(f"{self.control_plane_url}/spawn", json=body)
+        resp = await self._client.post(f"{self.control_plane_url}/create", json=body)
         resp.raise_for_status()
         data = resp.json()
 
@@ -180,13 +180,13 @@ class SandboxPool:
     async def destroy(self, sandbox: Sandbox):
         if sandbox._container_id and sandbox._container_id in self._sandboxes:
             await self._client.delete(
-                f"{self.control_plane_url}/deprovision/{sandbox._container_id}",
+                f"{self.control_plane_url}/destroy/{sandbox._container_id}",
             )
             del self._sandboxes[sandbox._container_id]
             sandbox._container_id = None
 
     async def destroy_all(self):
-        await self._client.delete(f"{self.control_plane_url}/deprovision-all")
+        await self._client.delete(f"{self.control_plane_url}/destroy-all")
         self._sandboxes.clear()
 
     async def close(self):

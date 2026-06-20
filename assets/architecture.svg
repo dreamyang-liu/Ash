@@ -112,9 +112,9 @@
 
   <!-- API endpoints -->
   <rect x="645" y="340" width="150" height="22" rx="3" fill="#21262d"/>
-  <text x="720" y="355" text-anchor="middle" fill="#a371f7" font-size="10" font-family="monospace">POST /spawn</text>
+  <text x="720" y="355" text-anchor="middle" fill="#a371f7" font-size="10" font-family="monospace">POST /create</text>
   <rect x="645" y="370" width="150" height="22" rx="3" fill="#21262d"/>
-  <text x="720" y="385" text-anchor="middle" fill="#a371f7" font-size="10" font-family="monospace">DELETE /deprovision</text>
+  <text x="720" y="385" text-anchor="middle" fill="#a371f7" font-size="10" font-family="monospace">DELETE /destroy</text>
 
   <!-- Connection line: Gateway → Runtime -->
   <line x1="340" y1="380" x2="320" y2="380" stroke="#484f58" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrowhead)"/>

@@ -192,16 +192,16 @@ async with Sandbox.connect("http://localhost:3000") as sb:
 ### Control Plane API
 
 ```bash
-# Spawn a sandbox
-curl -X POST http://control-plane/spawn -d '{
+# Create a sandbox
+curl -X POST http://control-plane/create -d '{
   "image": "my-image:latest",
   "ports": [{"container_port": 3000}],
   "resources": {"requests": {"cpu": "500m", "memory": "512Mi"}}
 }'
 # → {"uuid": "sandbox-abc123-...", "status": "ready", ...}
 
-# Deprovision
-curl -X DELETE http://control-plane/deprovision/sandbox-abc123-...
+# Destroy
+curl -X DELETE http://control-plane/destroy/sandbox-abc123-...
 ```
 
 ## Project Structure
