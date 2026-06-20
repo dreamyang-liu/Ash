@@ -40,17 +40,17 @@ curl -X POST http://localhost:8080/spawn \
 
 
 
-# # 滚动状态（快速看到是否 ProgressDeadlineExceeded）
+# # Rollout status (quickly see if ProgressDeadlineExceeded)
 # minikube kubectl -- -n $NS rollout status deploy/$DEP --timeout=30s
 
-# # Deployment 条件 & 事件
+# # Deployment conditions & events
 # minikube kubectl -- -n $NS describe deploy/$DEP | sed -n '/Conditions:/,/Events:/p'
 # minikube kubectl -- -n $NS describe deploy/$DEP | sed -n '/Events:/,$p'
 
-# # 关联 ReplicaSet（新旧版本各多少副本）
+# # Associated ReplicaSets (replica counts for old/new versions)
 # minikube kubectl -- -n $NS get rs -l app=$APP -o wide --sort-by=.metadata.creationTimestamp
 
-# # Pod 概览（状态/READY/REASON）
+# # Pod overview (status/READY/REASON)
 # minikube kubectl -- -n $NS get pod -l app=$APP -o wide
 
 # # cd gateway
