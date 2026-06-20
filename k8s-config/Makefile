@@ -1,9 +1,22 @@
-
-purge:
-	kubectl delete namespace ash
+NS := ash
 
 deploy:
-	kubectl apply -f rbac.yaml
-	kubectl apply -f infra.yaml
+	./deploy.sh
 
-.PHONY: deploy purge
+deploy-local:
+	./deploy.sh --local
+
+status:
+	kubectl -n $(NS) get pods -o wide
+	kubectl -n $(NS) get svc
+
+logs-cp:
+	kubectl -n $(NS) logs -f -l app=control-plane --all-containers
+
+logs-gw:
+	kubectl -n $(NS) logs -f -l app=gateway --all-containers
+
+purge:
+	kubectl delete namespace $(NS) --ignore-not-found
+
+.PHONY: deploy deploy-local status logs-cp logs-gw purge

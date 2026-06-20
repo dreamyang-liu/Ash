@@ -1,61 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
 
-minikube kubectl -- delete namespace ash
+# Deploy Ash infrastructure to Kubernetes.
+# Usage:
+#   ./deploy.sh              Deploy to current kubectl context (EKS)
+#   ./deploy.sh --local      Deploy to minikube
 
+NS="ash"
+LOCAL=false
 
+if [[ "${1:-}" == "--local" ]]; then
+  LOCAL=true
+  KUBECTL="minikube kubectl --"
+  INFRA_FILE="infra-local.yaml"
+else
+  KUBECTL="kubectl"
+  INFRA_FILE="infra.yaml"
+fi
 
-docker build -f Dockerfile.cp -t timemagic/rl-mcp:rl-sandbox-cp-0.1 .
-docker build -f Dockerfile.gateway -t timemagic/rl-mcp:rl-sandbox-gateway-0.1 .
+echo "==> Deploying Ash to namespace '$NS' (local=$LOCAL)"
 
-# minikube image build -f Dockerfile.cp -t rl-sandbox-cp:0.1 .
-# minikube image build -f Dockerfile.gateway -t rl-sandbox-gateway:0.1 .
+# Create namespace and RBAC
+$KUBECTL apply -f rbac.yaml
 
-minikube kubectl -- apply -f rbac.yaml
-minikube kubectl -- apply -f infra.yaml
-minikube kubectl -- apply -f stateless-mcps.yaml
+# Deploy infrastructure (Redis, Control Plane, Gateway)
+$KUBECTL apply -f "$INFRA_FILE"
 
+# Wait for rollouts
+echo "==> Waiting for deployments..."
+$KUBECTL -n $NS rollout status deploy/redis --timeout=60s
+$KUBECTL -n $NS rollout status deploy/control-plane --timeout=90s
+$KUBECTL -n $NS rollout status deploy/gateway --timeout=90s
 
-# minikube kubectl -- -n ash rollout restart deploy/spawner
-minikube kubectl -- -n ash rollout status deploy/gateway
-minikube kubectl -- -n ash rollout status deploy/control-plane
+echo "==> All deployments ready."
 
-minikube service control-plane -n ash --url
-minikube service gateway -n ash --url
-minikube service proxy-mcp -n ash --url
-
-# CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
-# minikube image build -f Dockerfile.gateway -t rl-sandbox-gateway:0.1 .
-# minikube kubectl -- -n ash port-forward svc/spawner 8080:80
-
-
-curl -X POST http://localhost:8080/spawn \
-  -H "Content-Type: application/json" \
-  -d '{
-    "image": "nginx:1.27",
-    "ports": [{"container_port": 80}],
-    "expose": "LoadBalancer",
-    "env": {"HELLO": "world"},
-    "replicas": 1
-  }'
-# minikube kubectl -- -n ash logs -f -l app=spawner --all-containers --prefix --max-log-requests=20
-
-
-
-# # Rollout status (quickly see if ProgressDeadlineExceeded)
-# minikube kubectl -- -n $NS rollout status deploy/$DEP --timeout=30s
-
-# # Deployment conditions & events
-# minikube kubectl -- -n $NS describe deploy/$DEP | sed -n '/Conditions:/,/Events:/p'
-# minikube kubectl -- -n $NS describe deploy/$DEP | sed -n '/Events:/,$p'
-
-# # Associated ReplicaSets (replica counts for old/new versions)
-# minikube kubectl -- -n $NS get rs -l app=$APP -o wide --sort-by=.metadata.creationTimestamp
-
-# # Pod overview (status/READY/REASON)
-# minikube kubectl -- -n $NS get pod -l app=$APP -o wide
-
-# # cd gateway
-# # CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
-# # cd ..
-# # minikube image build -f Dockerfile.gateway -t rl-sandbox-gateway:0.1 .
-# # minikube kubectl -- -n ash rollout restart deploy/gateway
-# # minikube kubectl -- -n ash rollout status deploy/gateway
+# Print service URLs
+if $LOCAL; then
+  echo ""
+  echo "Service URLs (minikube):"
+  minikube service control-plane -n $NS --url
+  minikube service gateway -n $NS --url
+else
+  echo ""
+  echo "Services:"
+  $KUBECTL -n $NS get svc -o wide
+fi
