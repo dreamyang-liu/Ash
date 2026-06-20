@@ -200,8 +200,11 @@ curl -X POST http://control-plane/create -d '{
 }'
 # → {"uuid": "sandbox-abc123-...", "status": "ready", ...}
 
-# Destroy
-curl -X DELETE http://control-plane/destroy/sandbox-abc123-...
+# Destroy specific sandboxes
+curl -X DELETE http://control-plane/destroy -d '{"ids": ["sandbox-abc123-..."]}'
+
+# Destroy all
+curl -X DELETE http://control-plane/destroy -d '{"all": true}'
 ```
 
 ## Project Structure

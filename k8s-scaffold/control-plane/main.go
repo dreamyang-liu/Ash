@@ -469,120 +469,111 @@ func main() {
 		c.JSON(http.StatusOK, resp)
 	})
 
-	r.DELETE("/destroy-all", func(c *gin.Context) {
+	// DELETE /sandboxes — destroy sandboxes
+	// Body: {"ids": ["uuid-1", "uuid-2"]} or {"all": true}
+	r.DELETE("/destroy", func(c *gin.Context) {
+		var req struct {
+			IDs []string `json:"ids"`
+			All bool     `json:"all"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		if !req.All && len(req.IDs) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "must specify 'ids' or 'all: true'"})
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Minute)
 		defer cancel()
 
 		var succeeded []string
 		var failed []string
 
-		// Find all deployments created by control-plane with label type=sandbox
-		selector := "from=control-plane,type=sandbox"
-		deps, err := clientset.AppsV1().Deployments(config.Namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: selector,
-		})
-		if err != nil {
-			log.Printf("Failed to list deployments: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list deployments"})
-			return
-		}
-
-		for _, dep := range deps.Items {
-			name := dep.Name
-			namespace := dep.Namespace
-			id := fmt.Sprintf("%s/%s", namespace, name)
-
-			// Delete service
-			if err := clientset.CoreV1().Services(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
-				// Log but continue
-				log.Printf("Failed to delete service %s: %v", id, err)
+		if req.All {
+			// Destroy all sandboxes by label selector
+			selector := "from=control-plane,type=sandbox"
+			deps, err := clientset.AppsV1().Deployments(config.Namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: selector,
+			})
+			if err != nil {
+				log.Printf("Failed to list deployments: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list deployments"})
+				return
 			}
 
-			// Delete deployment
-			if err := clientset.AppsV1().Deployments(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
-				log.Printf("Failed to delete deployment %s: %v", id, err)
-			}
+			for _, dep := range deps.Items {
+				name := dep.Name
+				namespace := dep.Namespace
+				id := fmt.Sprintf("%s/%s", namespace, name)
 
-			// Remove associated Redis keys: sandbox:<name>-*
-			pattern := fmt.Sprintf("sandbox:%s-*", name)
-			iter := rdb.Scan(ctx, 0, pattern, 0).Iterator()
-			var redisDelErr bool
-			var anyDeleted bool
-			for iter.Next(ctx) {
-				key := iter.Val()
-				anyDeleted = true
+				if err := clientset.CoreV1().Services(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+					log.Printf("Failed to delete service %s: %v", id, err)
+				}
+				if err := clientset.AppsV1().Deployments(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+					log.Printf("Failed to delete deployment %s: %v", id, err)
+				}
+
+				pattern := fmt.Sprintf("sandbox:%s-*", name)
+				iter := rdb.Scan(ctx, 0, pattern, 0).Iterator()
+				var redisErr bool
+				for iter.Next(ctx) {
+					if err := rdb.Del(ctx, iter.Val()).Err(); err != nil {
+						redisErr = true
+					}
+				}
+				if iter.Err() != nil {
+					redisErr = true
+				}
+				if redisErr {
+					failed = append(failed, id)
+				} else {
+					succeeded = append(succeeded, id)
+				}
+			}
+		} else {
+			// Destroy specific sandboxes by UUID
+			for _, uuid := range req.IDs {
+				key := fmt.Sprintf("sandbox:%s", uuid)
+				result, err := rdb.HGetAll(ctx, key).Result()
+				if err != nil || len(result) == 0 {
+					log.Printf("Destroy failed: UUID %s not found", uuid)
+					failed = append(failed, uuid)
+					continue
+				}
+
+				name := result["host"]
+				parts := strings.Split(name, ".")
+				if len(parts) < 2 {
+					log.Printf("Destroy failed: invalid host format for UUID %s", uuid)
+					failed = append(failed, uuid)
+					continue
+				}
+				svcName := parts[0]
+				namespace := parts[1]
+
+				if err := clientset.CoreV1().Services(namespace).Delete(ctx, svcName, metav1.DeleteOptions{}); err != nil {
+					log.Printf("Failed to delete service %s: %v", svcName, err)
+				}
+				if err := clientset.AppsV1().Deployments(namespace).Delete(ctx, svcName, metav1.DeleteOptions{}); err != nil {
+					log.Printf("Failed to delete deployment %s: %v", svcName, err)
+				}
 				if err := rdb.Del(ctx, key).Err(); err != nil {
-					log.Printf("Failed to delete Redis key %s for %s: %v", key, id, err)
-					redisDelErr = true
+					log.Printf("Failed to delete Redis key %s: %v", key, err)
 				}
-			}
-			if err := iter.Err(); err != nil {
-				log.Printf("Error scanning Redis for pattern %s: %v", pattern, err)
-				redisDelErr = true
-			}
-			// If no matching redis key found, that's not a fatal error; still consider succeeded.
-			if redisDelErr {
-				failed = append(failed, id)
-			} else {
-				// Consider this resource successfully handled
-				succeeded = append(succeeded, id)
-				// If there were no redis keys but resource deletions succeeded, still success.
-				if !anyDeleted {
-					log.Printf("No Redis keys found for %s (pattern %s)", id, pattern)
-				}
+
+				succeeded = append(succeeded, uuid)
 			}
 		}
 
-		log.Printf("Deprovision-all completed: succeeded=%d failed=%d", len(succeeded), len(failed))
+		log.Printf("Destroy completed: succeeded=%d failed=%d", len(succeeded), len(failed))
 		c.JSON(http.StatusOK, gin.H{
 			"deleted": succeeded,
 			"failed":  failed,
 			"count":   len(succeeded),
 		})
-	})
-
-	r.DELETE("/destroy/:uuid", func(c *gin.Context) {
-		uuid := c.Param("uuid")
-
-		// Use request context with timeout
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
-		defer cancel()
-
-		key := fmt.Sprintf("sandbox:%s", uuid)
-		result, err := rdb.HGetAll(ctx, key).Result()
-		if err != nil || len(result) == 0 {
-			log.Printf("Deprovision failed: UUID %s not found", uuid)
-			c.JSON(http.StatusNotFound, gin.H{"error": "UUID not found"})
-			return
-		}
-
-		name := result["host"]
-
-		parts := strings.Split(name, ".")
-		if len(parts) < 2 {
-			log.Printf("Deprovision failed: Invalid host format for UUID %s", uuid)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid host format"})
-			return
-		}
-		svcName := parts[0]
-		namespace := parts[1]
-
-		// Delete resources sequentially
-		if err := clientset.CoreV1().Services(namespace).Delete(ctx, svcName, metav1.DeleteOptions{}); err != nil {
-			log.Printf("Failed to delete service %s: %v", svcName, err)
-		}
-
-		if err := clientset.AppsV1().Deployments(namespace).Delete(ctx, svcName, metav1.DeleteOptions{}); err != nil {
-			log.Printf("Failed to delete deployment %s: %v", svcName, err)
-		}
-
-		// Delete Redis key
-		if err := rdb.Del(ctx, key).Err(); err != nil {
-			log.Printf("Failed to delete Redis key %s: %v", key, err)
-		}
-
-		log.Printf("Successfully deprovisioned UUID %s", uuid)
-		c.JSON(http.StatusOK, gin.H{"message": "Deprovisioned", "uuid": uuid})
 	})
 	// Create HTTP server with graceful shutdown
 	srv := http.Server{

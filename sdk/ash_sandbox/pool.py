@@ -177,16 +177,21 @@ class SandboxPool:
         await sb._wait_ready(timeout=60)
         return sb
 
-    async def destroy(self, sandbox: Sandbox):
-        if sandbox._container_id and sandbox._container_id in self._sandboxes:
-            await self._client.delete(
-                f"{self.control_plane_url}/destroy/{sandbox._container_id}",
-            )
-            del self._sandboxes[sandbox._container_id]
-            sandbox._container_id = None
+    async def destroy(self, *sandboxes: Sandbox):
+        """Destroy one or more sandboxes."""
+        ids = [sb._container_id for sb in sandboxes if sb._container_id and sb._container_id in self._sandboxes]
+        if not ids:
+            return
+        await self._client.request("DELETE", f"{self.control_plane_url}/destroy", json={"ids": ids})
+        for sid in ids:
+            if sid in self._sandboxes:
+                del self._sandboxes[sid]
+        for sb in sandboxes:
+            sb._container_id = None
 
     async def destroy_all(self):
-        await self._client.delete(f"{self.control_plane_url}/destroy-all")
+        """Destroy all sandboxes."""
+        await self._client.request("DELETE", f"{self.control_plane_url}/destroy", json={"all": True})
         self._sandboxes.clear()
 
     async def close(self):
