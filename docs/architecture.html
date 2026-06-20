@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ash Architecture</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0d1117;
+    color: #e6edf3;
+    padding: 40px;
+    min-height: 100vh;
+  }
+  h1 {
+    text-align: center;
+    font-size: 28px;
+    margin-bottom: 8px;
+    color: #fff;
+  }
+  .subtitle {
+    text-align: center;
+    color: #8b949e;
+    margin-bottom: 48px;
+    font-size: 14px;
+  }
+  .diagram {
+    max-width: 900px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+  .layer {
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 24px;
+    background: #161b22;
+    position: relative;
+  }
+  .layer-label {
+    position: absolute;
+    top: -10px;
+    left: 20px;
+    background: #161b22;
+    padding: 0 8px;
+    font-size: 11px;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .agent-layer {
+    text-align: center;
+    border-color: #58a6ff;
+  }
+  .agent-layer .layer-label { color: #58a6ff; }
+  .agent-title {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 12px;
+  }
+  .connectors {
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .connector {
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    color: #c9d1d9;
+  }
+  .arrow-down {
+    text-align: center;
+    font-size: 24px;
+    color: #484f58;
+    line-height: 1;
+  }
+  .infra-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+  }
+  .component {
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 20px;
+    background: #0d1117;
+    text-align: center;
+  }
+  .component.runtime { border-color: #3fb950; }
+  .component.gateway { border-color: #d29922; }
+  .component.control { border-color: #a371f7; }
+  .component-icon {
+    font-size: 32px;
+    margin-bottom: 8px;
+  }
+  .component-name {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .component-lang {
+    font-size: 11px;
+    color: #8b949e;
+    margin-bottom: 12px;
+  }
+  .component-desc {
+    font-size: 13px;
+    color: #8b949e;
+    line-height: 1.5;
+  }
+  .protocols {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 12px;
+    align-items: center;
+  }
+  .protocol {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    background: #21262d;
+    border-radius: 4px;
+    padding: 3px 8px;
+    color: #7ee787;
+  }
+  .tools-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+    margin-top: 12px;
+  }
+  .tool-chip {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    background: #1c2128;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 4px 6px;
+    text-align: center;
+    color: #c9d1d9;
+  }
+  .flow-label {
+    text-align: center;
+    font-size: 11px;
+    color: #484f58;
+    margin: 4px 0;
+  }
+  .redis-badge {
+    display: inline-block;
+    background: #da3633;
+    color: #fff;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin-top: 8px;
+    font-weight: 600;
+  }
+</style>
+</head>
+<body>
+
+<h1>Ash Architecture</h1>
+<p class="subtitle">Agent Sandbox Hive — isolated execution environments for LLM agents</p>
+
+<div class="diagram">
+
+  <!-- Agent Layer -->
+  <div class="layer agent-layer">
+    <span class="layer-label">Your Code</span>
+    <div class="agent-title">Agent / Training Loop</div>
+    <div class="connectors">
+      <span class="connector">Sandbox.connect(url)</span>
+      <span class="connector">Sandbox.mcp(url)</span>
+      <span class="connector">Sandbox.local(bin)</span>
+      <span class="connector">DockerPool(bin)</span>
+      <span class="connector">SandboxPool(cp, gw)</span>
+    </div>
+  </div>
+
+  <!-- Arrows -->
+  <div class="arrow-down">
+    <div>&#x25BC; &nbsp; &#x25BC; &nbsp; &#x25BC;</div>
+    <div class="flow-label">HTTP / MCP / stdio</div>
+  </div>
+
+  <!-- Infrastructure Layer -->
+  <div class="layer">
+    <span class="layer-label">Infrastructure</span>
+    <div class="infra-row">
+
+      <!-- Runtime -->
+      <div class="component runtime">
+        <div class="component-icon">&#x1F4E6;</div>
+        <div class="component-name">ash-runtime</div>
+        <div class="component-lang">Go &middot; per sandbox</div>
+        <div class="component-desc">
+          Runs inside each container.<br/>
+          Executes tool calls, manages processes.
+        </div>
+        <div class="protocols">
+          <span class="protocol">POST / &nbsp; JSON-RPC</span>
+          <span class="protocol">POST /mcp &nbsp; MCP</span>
+          <span class="protocol">--mode stdio</span>
+        </div>
+        <div class="tools-grid">
+          <span class="tool-chip">shell</span>
+          <span class="tool-chip">process</span>
+          <span class="tool-chip">read_file</span>
+          <span class="tool-chip">text_editor</span>
+          <span class="tool-chip">grep_files</span>
+          <span class="tool-chip">web_fetch</span>
+          <span class="tool-chip">web_search</span>
+          <span class="tool-chip" style="border-color:#3fb950;">+custom</span>
+        </div>
+      </div>
+
+      <!-- Gateway -->
+      <div class="component gateway">
+        <div class="component-icon">&#x1F310;</div>
+        <div class="component-name">Gateway</div>
+        <div class="component-lang">Go &middot; reverse proxy</div>
+        <div class="component-desc">
+          Routes requests to sandbox pods<br/>
+          by <code style="color:#d29922;">X-Sandbox-ID</code> header.
+        </div>
+        <div style="margin-top: 16px;">
+          <span class="redis-badge">Redis</span>
+          <div class="component-desc" style="margin-top:6px;">session &rarr; pod routing</div>
+        </div>
+      </div>
+
+      <!-- Control Plane -->
+      <div class="component control">
+        <div class="component-icon">&#x2699;&#xFE0F;</div>
+        <div class="component-name">Control Plane</div>
+        <div class="component-lang">Go &middot; K8s operator</div>
+        <div class="component-desc">
+          Sandbox lifecycle management.<br/>
+          Spawn &amp; destroy pods on demand.
+        </div>
+        <div class="protocols" style="margin-top:16px;">
+          <span class="protocol" style="color:#a371f7;">POST /spawn</span>
+          <span class="protocol" style="color:#a371f7;">POST /destroy</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

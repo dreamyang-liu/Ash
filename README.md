@@ -122,59 +122,9 @@ async with SandboxPool(
 
 ## Architecture
 
-<table>
-<tr>
-<td colspan="3" align="center">
-<br/>
-
-**Agent / Training Loop**
-
-`Sandbox.connect(url)` · `DockerPool(bin)` · `SandboxPool(cp, gw)`
-
-<br/>
-</td>
-</tr>
-<tr>
-<td align="center" width="33%">
-
-**ash-runtime**<br/>
-<sub>per sandbox</sub>
-
-`POST /` JSON-RPC<br/>
-`POST /mcp` MCP<br/>
-`--mode stdio`
-
-<details>
-<summary>7 tools</summary>
-
-shell, process<br/>
-read_file, text_editor<br/>
-grep_files<br/>
-web_fetch, web_search
-
-</details>
-
-</td>
-<td align="center" width="33%">
-
-**Gateway**<br/>
-<sub>Go · Redis routing</sub>
-
-Routes requests by<br/>
-`X-Sandbox-ID` header
-
-</td>
-<td align="center" width="33%">
-
-**Control Plane**<br/>
-<sub>Go · K8s lifecycle</sub>
-
-Spawn / destroy<br/>
-sandbox pods
-
-</td>
-</tr>
-</table>
+<p align="center">
+  <img src="docs/architecture.svg" width="800" alt="Ash Architecture"/>
+</p>
 
 ## Runtime
 

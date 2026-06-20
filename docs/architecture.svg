@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d1117"/>
+      <stop offset="100%" style="stop-color:#161b22"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="520" rx="12" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="450" y="36" text-anchor="middle" fill="#e6edf3" font-size="20" font-weight="600">Ash Architecture</text>
+
+  <!-- Agent Layer Box -->
+  <rect x="40" y="56" width="820" height="90" rx="10" fill="none" stroke="#58a6ff" stroke-width="1.5"/>
+  <rect x="60" y="48" width="80" height="16" rx="3" fill="#0d1117"/>
+  <text x="100" y="60" text-anchor="middle" fill="#58a6ff" font-size="10" letter-spacing="0.5">YOUR CODE</text>
+
+  <text x="450" y="82" text-anchor="middle" fill="#e6edf3" font-size="15" font-weight="600">Agent / Training Loop</text>
+
+  <!-- Connectors -->
+  <rect x="70" y="100" width="140" height="24" rx="4" fill="#21262d" stroke="#30363d" stroke-width="0.5"/>
+  <text x="140" y="116" text-anchor="middle" fill="#c9d1d9" font-size="10" font-family="monospace">Sandbox.connect(url)</text>
+
+  <rect x="225" y="100" width="120" height="24" rx="4" fill="#21262d" stroke="#30363d" stroke-width="0.5"/>
+  <text x="285" y="116" text-anchor="middle" fill="#c9d1d9" font-size="10" font-family="monospace">Sandbox.mcp(url)</text>
+
+  <rect x="360" y="100" width="125" height="24" rx="4" fill="#21262d" stroke="#30363d" stroke-width="0.5"/>
+  <text x="422" y="116" text-anchor="middle" fill="#c9d1d9" font-size="10" font-family="monospace">Sandbox.local(bin)</text>
+
+  <rect x="500" y="100" width="120" height="24" rx="4" fill="#21262d" stroke="#30363d" stroke-width="0.5"/>
+  <text x="560" y="116" text-anchor="middle" fill="#c9d1d9" font-size="10" font-family="monospace">DockerPool(bin)</text>
+
+  <rect x="635" y="100" width="150" height="24" rx="4" fill="#21262d" stroke="#30363d" stroke-width="0.5"/>
+  <text x="710" y="116" text-anchor="middle" fill="#c9d1d9" font-size="10" font-family="monospace">SandboxPool(cp, gw)</text>
+
+  <!-- Arrows -->
+  <line x1="200" y1="150" x2="200" y2="185" stroke="#484f58" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <line x1="450" y1="150" x2="450" y2="185" stroke="#484f58" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <line x1="700" y1="150" x2="700" y2="185" stroke="#484f58" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+  <defs>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#484f58"/>
+    </marker>
+  </defs>
+
+  <text x="450" y="175" text-anchor="middle" fill="#484f58" font-size="10">HTTP / MCP / stdio</text>
+
+  <!-- Infrastructure Layer Box -->
+  <rect x="40" y="190" width="820" height="310" rx="10" fill="none" stroke="#30363d" stroke-width="1"/>
+  <rect x="60" y="182" width="105" height="16" rx="3" fill="#0d1117"/>
+  <text x="112" y="194" text-anchor="middle" fill="#8b949e" font-size="10" letter-spacing="0.5">INFRASTRUCTURE</text>
+
+  <!-- ash-runtime -->
+  <rect x="60" y="210" width="260" height="270" rx="8" fill="#0d1117" stroke="#3fb950" stroke-width="1.2"/>
+  <text x="190" y="236" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">ash-runtime</text>
+  <text x="190" y="254" text-anchor="middle" fill="#8b949e" font-size="10">Go · per sandbox</text>
+
+  <text x="190" y="280" text-anchor="middle" fill="#8b949e" font-size="11">Runs inside each container.</text>
+  <text x="190" y="296" text-anchor="middle" fill="#8b949e" font-size="11">Executes tool calls, manages processes.</text>
+
+  <!-- Protocols -->
+  <rect x="90" y="312" width="200" height="20" rx="3" fill="#21262d"/>
+  <text x="190" y="326" text-anchor="middle" fill="#7ee787" font-size="10" font-family="monospace">POST /  JSON-RPC</text>
+  <rect x="90" y="338" width="200" height="20" rx="3" fill="#21262d"/>
+  <text x="190" y="352" text-anchor="middle" fill="#7ee787" font-size="10" font-family="monospace">POST /mcp  MCP</text>
+  <rect x="90" y="364" width="200" height="20" rx="3" fill="#21262d"/>
+  <text x="190" y="378" text-anchor="middle" fill="#7ee787" font-size="10" font-family="monospace">--mode stdio</text>
+
+  <!-- Tools -->
+  <rect x="80" y="396" width="68" height="20" rx="3" fill="#1c2128" stroke="#30363d" stroke-width="0.5"/>
+  <text x="114" y="410" text-anchor="middle" fill="#c9d1d9" font-size="9" font-family="monospace">shell</text>
+  <rect x="154" y="396" width="68" height="20" rx="3" fill="#1c2128" stroke="#30363d" stroke-width="0.5"/>
+  <text x="188" y="410" text-anchor="middle" fill="#c9d1d9" font-size="9" font-family="monospace">process</text>
+  <rect x="228" y="396" width="72" height="20" rx="3" fill="#1c2128" stroke="#30363d" stroke-width="0.5"/>
+  <text x="264" y="410" text-anchor="middle" fill="#c9d1d9" font-size="9" font-family="monospace">read_file</text>
+
+  <rect x="80" y="422" width="82" height="20" rx="3" fill="#1c2128" stroke="#30363d" stroke-width="0.5"/>
+  <text x="121" y="436" text-anchor="middle" fill="#c9d1d9" font-size="9" font-family="monospace">text_editor</text>
+  <rect x="168" y="422" width="76" height="20" rx="3" fill="#1c2128" stroke="#30363d" stroke-width="0.5"/>
+  <text x="206" y="436" text-anchor="middle" fill="#c9d1d9" font-size="9" font-family="monospace">grep_files</text>
+  <rect x="250" y="422" width="50" height="20" rx="3" fill="#1c2128" stroke="#30363d" stroke-width="0.5"/>
+  <text x="275" y="436" text-anchor="middle" fill="#c9d1d9" font-size="9" font-family="monospace">web_*</text>
+
+  <!-- Gateway -->
+  <rect x="340" y="210" width="240" height="270" rx="8" fill="#0d1117" stroke="#d29922" stroke-width="1.2"/>
+  <text x="460" y="236" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">Gateway</text>
+  <text x="460" y="254" text-anchor="middle" fill="#8b949e" font-size="10">Go · reverse proxy</text>
+
+  <text x="460" y="284" text-anchor="middle" fill="#8b949e" font-size="11">Routes requests to</text>
+  <text x="460" y="300" text-anchor="middle" fill="#8b949e" font-size="11">sandbox pods by</text>
+
+  <rect x="385" y="314" width="150" height="24" rx="4" fill="#21262d"/>
+  <text x="460" y="330" text-anchor="middle" fill="#d29922" font-size="11" font-family="monospace">X-Sandbox-ID</text>
+
+  <!-- Redis badge -->
+  <rect x="425" y="360" width="70" height="20" rx="3" fill="#da3633"/>
+  <text x="460" y="374" text-anchor="middle" fill="#fff" font-size="10" font-weight="600">Redis</text>
+  <text x="460" y="400" text-anchor="middle" fill="#8b949e" font-size="11">session → pod</text>
+  <text x="460" y="416" text-anchor="middle" fill="#8b949e" font-size="11">routing table</text>
+
+  <!-- Control Plane -->
+  <rect x="600" y="210" width="240" height="270" rx="8" fill="#0d1117" stroke="#a371f7" stroke-width="1.2"/>
+  <text x="720" y="236" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">Control Plane</text>
+  <text x="720" y="254" text-anchor="middle" fill="#8b949e" font-size="10">Go · K8s operator</text>
+
+  <text x="720" y="284" text-anchor="middle" fill="#8b949e" font-size="11">Sandbox lifecycle</text>
+  <text x="720" y="300" text-anchor="middle" fill="#8b949e" font-size="11">management. Spawn &amp;</text>
+  <text x="720" y="316" text-anchor="middle" fill="#8b949e" font-size="11">destroy pods on demand.</text>
+
+  <!-- API endpoints -->
+  <rect x="645" y="340" width="150" height="22" rx="3" fill="#21262d"/>
+  <text x="720" y="355" text-anchor="middle" fill="#a371f7" font-size="10" font-family="monospace">POST /spawn</text>
+  <rect x="645" y="370" width="150" height="22" rx="3" fill="#21262d"/>
+  <text x="720" y="385" text-anchor="middle" fill="#a371f7" font-size="10" font-family="monospace">POST /destroy</text>
+
+  <!-- Connection line: Gateway → Runtime -->
+  <line x1="340" y1="380" x2="320" y2="380" stroke="#484f58" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrowhead)"/>
+
+</svg>
