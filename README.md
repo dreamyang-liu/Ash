@@ -208,6 +208,25 @@ curl -X POST http://gateway/ \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"shell","arguments":{"command":"ls"}}}'
 ```
 
+## SWE-bench Results
+
+Evaluation on SWE-bench Verified (500 instances), using Ash sandboxes with different models and tool configurations:
+
+| Model | Resolved | Total | Rate |
+|---|---|---|---|
+| Claude Opus 4.6 (5-tool) | 397 | 500 | 79.4% |
+| MiniMax M2.5 (bash-only) | 376 | 497 | 75.7% |
+| mini-swe-agent Kimi K2.5 | 356 | 500 | 71.2% |
+| MiniMax M2.5 (5-tool) | 353 | 500 | 70.6% |
+| Kimi K2.5 (bash-only) | 350 | 500 | 70.0% |
+| Kimi K2.5 (5-tool) | 343 | 500 | 68.6% |
+
+**Key findings:**
+- bash-only mode (single `bash` tool with sed/grep) outperforms 5-tool mode for smaller models
+- MiniMax M2.5 bash-only achieves 75.7%, only 3.7% behind Opus 4.6
+
+Run configs are in `swebench/configs/`.
+
 ## Development
 
 ```bash
