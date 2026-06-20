@@ -200,8 +200,8 @@ curl -X POST http://control-plane/spawn -d '{
 }'
 # → {"uuid": "sandbox-abc123-...", "status": "ready", ...}
 
-# Destroy
-curl -X POST http://control-plane/destroy -d '{"uuid": "sandbox-abc123-..."}'
+# Deprovision
+curl -X DELETE http://control-plane/deprovision/sandbox-abc123-...
 ```
 
 ## Project Structure
