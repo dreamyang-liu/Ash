@@ -23,9 +23,9 @@ from .models import AgentConfig, CostTracker, ToolResult, Trajectory
 
 _PROMPTS_DIR = Path(__file__).parent
 
-_SYSTEM_PROMPT = (_PROMPTS_DIR / "AGENT.md").read_text()
+_DEFAULT_SYSTEM_PROMPT = (_PROMPTS_DIR / "AGENT.md").read_text()
 
-_KICKOFF = (
+_DEFAULT_KICKOFF = (
     "Solve the issue described above. "
     "You have these tools available:\n"
     "- `grep_files`: Search code with ripgrep (use FIRST to locate relevant files)\n"
@@ -37,9 +37,37 @@ _KICKOFF = (
 )
 
 
-def build_system_prompt(task: str) -> str:
-    """Build the full system prompt from AGENT.md + task."""
-    return _SYSTEM_PROMPT + f"\n\n---\n\n## Task\n\n{task}"
+def _get_system_info() -> dict:
+    """Get system info for template variables."""
+    import platform
+    return {
+        "system": platform.system(),
+        "release": platform.release(),
+        "version": platform.version(),
+        "machine": platform.machine(),
+    }
+
+
+def _render_template(template: str, **kwargs) -> str:
+    """Render a template with simple {{var}} substitution."""
+    result = template
+    for key, value in kwargs.items():
+        result = result.replace("{{" + key + "}}", str(value))
+    return result
+
+
+def build_system_prompt(task: str, config: Optional["AgentConfig"] = None) -> str:
+    """Build the full system prompt, using template if provided."""
+    if config and config.system_template:
+        return _render_template(config.system_template, task=task, **_get_system_info())
+    return _DEFAULT_SYSTEM_PROMPT + f"\n\n---\n\n## Task\n\n{task}"
+
+
+def build_instance_message(task: str, config: Optional["AgentConfig"] = None) -> str:
+    """Build the first user message (kickoff), using template if provided."""
+    if config and config.instance_template:
+        return _render_template(config.instance_template, task=task, **_get_system_info())
+    return _DEFAULT_KICKOFF
 
 
 def _tool_summary(name: str, args: dict) -> str:
@@ -180,8 +208,8 @@ class AshAgent:
     def _query_model(self, messages: list[dict]) -> Any:
         completion, stream_chunk_builder = _get_litellm()
 
-        # Apply prompt caching for Anthropic/Bedrock models
-        cached_messages = self._add_cache_breakpoints(messages)
+        # Apply prompt caching if enabled
+        cached_messages = self._add_cache_breakpoints(messages) if self.config.prompt_cache else messages
 
         kwargs: dict[str, Any] = dict(
             model=self.config.model,
@@ -193,8 +221,9 @@ class AshAgent:
         )
         if self.config.temperature is not None:
             kwargs["temperature"] = self.config.temperature
-        if self.config.thinking_budget:
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": self.config.thinking_budget}
+        if self.config.reasoning_effort:
+            kwargs["reasoning_effort"] = self.config.reasoning_effort
+            kwargs["allowed_openai_params"] = kwargs.get("allowed_openai_params", []) + ["reasoning_effort"]
             kwargs["drop_params"] = True  # let litellm skip unsupported params for other models
         if self.config.api_base:
             kwargs["api_base"] = self.config.api_base
@@ -207,9 +236,20 @@ class AshAgent:
                 raw = completion(**kwargs)
                 break
             except Exception as e:
-                if "RateLimitError" in type(e).__name__ or "rate" in str(e).lower():
+                err_type = type(e).__name__
+                err_str = str(e).lower()
+                retryable = (
+                    "RateLimitError" in err_type
+                    or "rate" in err_str
+                    or "Timeout" in err_type
+                    or "timed out" in err_str
+                    or "timeout" in err_str
+                    or "ServiceUnavailableError" in err_type
+                    or "InternalServerError" in err_type
+                )
+                if retryable:
                     wait = min(2 ** attempt, 120)
-                    self._trace(f"\n[RATE_LIMIT] attempt {attempt+1}/{max_retries}, waiting {wait}s\n")
+                    self._trace(f"\n[RETRY] {err_type} attempt {attempt+1}/{max_retries}, waiting {wait}s\n")
                     time.sleep(wait)
                     if attempt == max_retries - 1:
                         raise
@@ -324,10 +364,13 @@ class AshAgent:
             except json.JSONDecodeError:
                 args = {}
 
-            # Check guardrails before execution
-            guardrail_warning = self._check_guardrails(name, args)
+            # Map bash -> shell for bash_only mode
+            exec_name = "shell" if name == "bash" else name
 
-            result = self.executor(name, args)
+            # Check guardrails before execution
+            guardrail_warning = self._check_guardrails(exec_name, args)
+
+            result = self.executor(exec_name, args)
 
             # Format content
             if result.success:
@@ -389,13 +432,14 @@ class AshAgent:
             trace_path = self.trace_dir / f"{instance_id or 'trace'}.log"
             self._trace_file = open(trace_path, "w", encoding="utf-8")
 
-        system_msg = build_system_prompt(task)
+        system_msg = build_system_prompt(task, self.config)
+        user_msg = build_instance_message(task, self.config)
         messages = [
             {"role": "system", "content": system_msg},
-            {"role": "user", "content": _KICKOFF},
+            {"role": "user", "content": user_msg},
         ]
         self.trajectory.add_message("system", system_msg)
-        self.trajectory.add_message("user", task)
+        self.trajectory.add_message("user", user_msg)
 
         consecutive_no_tool = 0
 
@@ -498,7 +542,11 @@ class AshAgent:
                 messages.extend(observations)
             else:
                 consecutive_no_tool += 1
-                if consecutive_no_tool >= 2 or choice.finish_reason == "stop":
+                if not (message.content or "").strip():
+                    # Empty response — always reprompt
+                    messages.append({"role": "user", "content": "You must call a tool to proceed."})
+                    self._trace(f"\n[NUDGE] empty response, prompting retry\n")
+                elif consecutive_no_tool >= 2:
                     self._close_trace()
                     return "completed"
 

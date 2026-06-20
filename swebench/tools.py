@@ -5,6 +5,26 @@ The agent calls tools by name (shell, text_editor, grep_files, etc.)
 and the session routes them to the sandbox via SDK.
 """
 
+BASH_ONLY_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Execute a bash command",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The bash command to execute",
+                    }
+                },
+                "required": ["command"],
+            },
+        },
+    },
+]
+
 TOOLS_SCHEMA = [
     {
         "type": "function",

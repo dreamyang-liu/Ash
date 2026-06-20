@@ -1,28 +1,28 @@
-# AWS Bedrock — MiniMax M2.5
+# AWS Bedrock — Kimi K2.5
 #
 # Auth: set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_REGION_NAME
 #
 # Usage:
-#   python -m swebench -c swebench/configs/bedrock-minimax.yaml --slice 0:8
+#   python -m swebench -c swebench/configs/bedrock-kimi25.yaml --slice 0:8
 
 model:
-  name: bedrock/minimax.minimax-m2.5
+  name: bedrock/moonshotai.kimi-k2.5
 
 generation:
-  max_tokens: 16384
+  max_tokens: 32768
   reasoning_effort: high
   prompt_cache: false
 
 limits:
   step_limit: 250
-  cost_limit: 3.0
+  cost_limit: 6.0
 
 dataset:
   subset: verified
 
 execution:
   workers: 32
-  output: results/minimax-25
+  output: results/bedrock-kimi25-1
 
 agent:
   system_template: |
@@ -76,6 +76,10 @@ agent:
     - Keep patches clean: only source changes, no temp files
     - When you are done, clean up any temporary files you created:
       `shell({"command": "cd /testbed && rm -f repro*.py reproduce*.py test_fix*.py"})`
+
+    <system_information>
+    {{system}} {{release}} {{version}} {{machine}}
+    </system_information>
 
     ## Tool Examples
 

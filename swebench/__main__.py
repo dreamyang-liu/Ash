@@ -39,7 +39,12 @@ def _flatten_config(config: dict) -> dict:
         # generation (litellm harness)
         ("generation", "max_tokens"): "max_tokens",
         ("generation", "temperature"): "temperature",
-        ("generation", "thinking_budget"): "thinking_budget",
+        ("generation", "reasoning_effort"): "reasoning_effort",
+        ("generation", "prompt_cache"): "prompt_cache",
+        # agent prompts
+        ("agent", "system_template"): "system_template",
+        ("agent", "instance_template"): "instance_template",
+        ("agent", "tools"): "tools",
         # limits (litellm harness)
         ("limits", "step_limit"): "step_limit",
         ("limits", "cost_limit"): "cost_limit",
@@ -116,6 +121,8 @@ def main():
     parser.add_argument("--step-limit", type=int, default=None)
     parser.add_argument("--cost-limit", type=float, default=None)
     parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--reasoning-effort", default=None,
+                        help="Adaptive thinking effort: low, medium, high, none")
 
     # Claude-code-specific
     parser.add_argument("--max-budget", type=float, default=None)
@@ -152,8 +159,9 @@ def main():
     harness_config = dict(file_config)
     # Override with CLI values where set
     for key in ["model", "provider", "api_base", "api_key", "max_tokens",
-                "step_limit", "cost_limit", "temperature", "max_budget",
-                "timeout", "runtime_bin", "image_template", "subset", "workers"]:
+                "step_limit", "cost_limit", "temperature", "reasoning_effort",
+                "prompt_cache", "max_budget", "timeout", "runtime_bin",
+                "image_template", "subset", "workers"]:
         cli_val = getattr(args, key.replace("-", "_"), None)
         if cli_val is not None:
             harness_config[key] = cli_val

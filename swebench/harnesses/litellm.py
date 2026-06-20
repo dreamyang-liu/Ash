@@ -8,7 +8,7 @@ from ..dataset import resolve_image, format_task_prompt, image_registry_for_subs
 from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent
-from ..tools import TOOLS_SCHEMA
+from ..tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA
 from .. import style as S
 
 
@@ -56,7 +56,10 @@ class LiteLLMHarness(BaseHarness):
                 step_limit=c.get("step_limit", 250),
                 cost_limit=c.get("cost_limit", 3.0),
                 temperature=c.get("temperature"),
-                thinking_budget=c.get("thinking_budget"),
+                reasoning_effort=c.get("reasoning_effort"),
+                prompt_cache=c.get("prompt_cache", True),
+                system_template=c.get("system_template"),
+                instance_template=c.get("instance_template"),
             )
 
             if not quiet:
@@ -79,9 +82,13 @@ class LiteLLMHarness(BaseHarness):
             )
             if quiet:
                 agent.stream = False
-            agent.set_tools_schema(TOOLS_SCHEMA)
+            tools_mode = c.get("tools", "default")
+            agent.set_tools_schema(BASH_ONLY_SCHEMA if tools_mode == "bash_only" else TOOLS_SCHEMA)
 
-            task = format_task_prompt(instance)
+            if agent_config.instance_template:
+                task = instance.get("problem_statement", "")
+            else:
+                task = format_task_prompt(instance)
             exit_status = agent.run(task, instance_id=instance_id)
             patch = session.get_patch()
 

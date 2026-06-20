@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "Agent(*)",
+      "Workflow(*)",
+      "Skill(*)",
+      "WebFetch(*)",
+      "TodoWrite(*)",
+      "NotebookEdit(*)"
+    ]
+  }
+}

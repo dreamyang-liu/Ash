@@ -570,7 +570,8 @@ def _flatten_config(config: dict) -> dict:
         ("model", "api_key"): "api_key",
         ("generation", "max_tokens"): "max_tokens",
         ("generation", "temperature"): "temperature",
-        ("generation", "thinking_budget"): "thinking_budget",
+        ("generation", "reasoning_effort"): "reasoning_effort",
+        ("generation", "prompt_cache"): "prompt_cache",
         ("limits", "step_limit"): "step_limit",
         ("limits", "cost_limit"): "cost_limit",
         ("dataset", "subset"): "subset",
@@ -595,7 +596,7 @@ def _flatten_config(config: dict) -> dict:
     # Second pass: top-level flat keys override (for backwards compat)
     top_level_keys = {
         "model", "api_base", "api_key", "max_tokens", "step_limit",
-        "cost_limit", "temperature", "thinking_budget", "subset", "split",
+        "cost_limit", "temperature", "reasoning_effort", "prompt_cache", "subset", "split",
         "instance", "slice", "filter", "runtime_bin", "image_template",
         "output", "workers",
     }
@@ -648,6 +649,8 @@ def main():
     parser.add_argument("--step-limit", type=int, default=None)
     parser.add_argument("--cost-limit", type=float, default=None)
     parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--reasoning-effort", default=None,
+                        help="Adaptive thinking effort: low, medium, high, none")
 
     # Sandbox
     parser.add_argument("--runtime-bin", default=None,
@@ -745,7 +748,8 @@ def main():
         step_limit=args.step_limit,
         cost_limit=args.cost_limit,
         temperature=args.temperature,
-        thinking_budget=getattr(args, "thinking_budget", None),
+        reasoning_effort=getattr(args, "reasoning_effort", None),
+        prompt_cache=getattr(args, "prompt_cache", True),
     )
 
     # Run

@@ -13,7 +13,8 @@ model:
 generation:
   max_tokens: 16384
   # temperature: not set (model default, required for extended thinking)
-  thinking_budget: 8192  # 8k reasoning + 8k output
+  reasoning_effort: high
+  prompt_cache: true     # enable Bedrock prompt caching (set false if model doesn't support it)
 
 limits:
   step_limit: 250

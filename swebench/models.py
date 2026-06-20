@@ -24,8 +24,11 @@ class AgentConfig:
     step_limit: int = 250
     cost_limit: float = 3.0
     temperature: Optional[float] = None  # None = use model default
-    thinking_budget: Optional[int] = None  # Extended thinking budget tokens (e.g. 10000)
+    reasoning_effort: Optional[str] = None  # "low" | "medium" | "high" | "none" (adaptive thinking)
+    prompt_cache: bool = True  # Enable prompt caching for Anthropic/Bedrock models
     workdir: str = "/testbed"
+    system_template: Optional[str] = None  # Jinja2 template for system prompt (overrides AGENT.md)
+    instance_template: Optional[str] = None  # Jinja2 template for instance/task message
 
 
 @dataclass
