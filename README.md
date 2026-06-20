@@ -10,101 +10,175 @@
 </p>
 
 <p align="center">
+  <a href="#swe-bench-results">Results</a> •
   <a href="#quick-start">Quick Start</a> •
-  <a href="#tools">Tools</a> •
+  <a href="#architecture">Architecture</a> •
+  <a href="#runtime">Runtime</a> •
   <a href="#python-client">Client</a> •
   <a href="#k8s-infrastructure">K8s Deploy</a>
 </p>
 
 ---
 
-## Architecture
+## SWE-bench Verified
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│  Agent / Training Loop                                                │
-│    Sandbox.connect(url)     → direct HTTP                            │
-│    Sandbox.mcp(url)         → MCP Streamable HTTP                    │
-│    Sandbox.local(bin)       → subprocess stdio                       │
-│    DockerPool(bin)          → local multi-container                   │
-│    SandboxPool(cp, gw)      → K8s gateway-routed                     │
-└───────────────────────────────┬──────────────────────────────────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              ▼                 ▼                 ▼
-┌──────────────────┐  ┌──────────────┐  ┌────────────────────┐
-│ ash-runtime      │  │ Gateway (Go) │  │ Control Plane (Go) │
-│ (per sandbox)    │  │ Redis routing│  │ K8s lifecycle       │
-│                  │  │ X-Sandbox-ID │  │ spawn/destroy pods  │
-│ POST /   JSON-RPC│  └──────┬───────┘  └────────────────────┘
-│ POST /mcp  MCP   │         │
-│ --mode stdio     │         │
-│                  │◄────────┘
-│ 7 tools:         │
-│  shell, process  │
-│  read_file       │
-│  text_editor     │
-│  grep_files      │
-│  web_fetch       │
-│  web_search      │
-└──────────────────┘
-```
+<table>
+<tr>
+<th>Model</th>
+<th>Tool Mode</th>
+<th align="right">Resolved</th>
+<th align="right">Rate</th>
+</tr>
+<tr>
+<td><b>Claude Opus 4.6</b></td>
+<td>5-tool</td>
+<td align="right">397 / 500</td>
+<td align="right"><b>79.4%</b></td>
+</tr>
+<tr>
+<td><b>MiniMax M2.5</b></td>
+<td>bash-only</td>
+<td align="right">378 / 500</td>
+<td align="right"><b>75.6%</b></td>
+</tr>
+<tr>
+<td>MiniMax M2.5</td>
+<td>5-tool</td>
+<td align="right">353 / 500</td>
+<td align="right">70.6%</td>
+</tr>
+<tr>
+<td><b>Kimi K2.5</b></td>
+<td>bash-only</td>
+<td align="right">350 / 500</td>
+<td align="right"><b>70.0%</b></td>
+</tr>
+<tr>
+<td>Kimi K2.5</td>
+<td>5-tool</td>
+<td align="right">343 / 500</td>
+<td align="right">68.6%</td>
+</tr>
+</table>
+
+All runs use the same Ash sandbox environment and agent loop. Configs: [`swebench/configs/`](swebench/configs/).
 
 ## Quick Start
 
-### Local (single sandbox)
-
 ```bash
-cd runtime
-go build -o ash-runtime .
-./ash-runtime --port 3000
+# Build the runtime
+cd runtime && go build -o ash-runtime .
 ```
 
+### Run a single sandbox
+
 ```python
-from client import Sandbox
+from ash_sandbox import Sandbox
 
 async with Sandbox.connect("http://localhost:3000") as sb:
     result = await sb.call("shell", command="echo hello")
     print(result.output)
 ```
 
-### Local Docker (multiple sandboxes)
+### Run many sandboxes with Docker
 
 ```python
-from client import DockerPool
+from ash_sandbox import DockerPool
 
 async with DockerPool(runtime_bin="./ash-runtime") as pool:
-    sb1 = await pool.spawn(image="python:3.11")
-    sb2 = await pool.spawn(image="node:20")
-    await sb1.call("shell", command="pytest")
-    await sb2.call("shell", command="npm test")
+    sb = await pool.spawn(image="python:3.11")
+    await sb.call("shell", command="pytest")
+    await sb.call("text_editor", command="str_replace", path="app.py",
+                  old_str="foo", new_str="bar")
 ```
 
-### Kubernetes (large-scale RL)
+### Run SWE-bench evaluation
 
 ```bash
-# Deploy infrastructure
-cd k8s-config && bash deploy.sh
+pip install litellm pyyaml datasets
 
-# Or manually
-kubectl apply -f infra.yaml
-kubectl apply -f rbac.yaml
+# Single instance
+python -m swebench -c swebench/configs/bedrock-kimi25-bash.yaml -i django__django-11848
+
+# Full run (32 workers)
+python -m swebench -c swebench/configs/bedrock-kimi25-bash.yaml
+```
+
+### Deploy at scale on Kubernetes
+
+```bash
+cd k8s-config && bash deploy.sh
 ```
 
 ```python
-from client import SandboxPool
+from ash_sandbox import SandboxPool
 
 async with SandboxPool(
     control_plane_url="http://control-plane:80",
     gateway_url="http://gateway:80",
 ) as pool:
     sandboxes = [await pool.spawn(image="my-task:latest") for _ in range(100)]
-    # Each sandbox is a K8s pod, routed via gateway
 ```
+
+## Architecture
+
+<table>
+<tr>
+<td colspan="3" align="center">
+<br/>
+
+**Agent / Training Loop**
+
+`Sandbox.connect(url)` · `DockerPool(bin)` · `SandboxPool(cp, gw)`
+
+<br/>
+</td>
+</tr>
+<tr>
+<td align="center" width="33%">
+
+**ash-runtime**<br/>
+<sub>per sandbox</sub>
+
+`POST /` JSON-RPC<br/>
+`POST /mcp` MCP<br/>
+`--mode stdio`
+
+<details>
+<summary>7 tools</summary>
+
+shell, process<br/>
+read_file, text_editor<br/>
+grep_files<br/>
+web_fetch, web_search
+
+</details>
+
+</td>
+<td align="center" width="33%">
+
+**Gateway**<br/>
+<sub>Go · Redis routing</sub>
+
+Routes requests by<br/>
+`X-Sandbox-ID` header
+
+</td>
+<td align="center" width="33%">
+
+**Control Plane**<br/>
+<sub>Go · K8s lifecycle</sub>
+
+Spawn / destroy<br/>
+sandbox pods
+
+</td>
+</tr>
+</table>
 
 ## Runtime
 
-The `ash-runtime` binary runs inside each sandbox container. It's a single Go binary (~9MB) with no dependencies beyond `ripgrep` (auto-installed on first grep call).
+The `ash-runtime` binary runs inside each sandbox container. Single Go binary (~9MB), no dependencies beyond `ripgrep`.
 
 ### Run Modes
 
@@ -124,42 +198,27 @@ The `ash-runtime` binary runs inside each sandbox container. It's a single Go bi
 | `text_editor` | View, create, str_replace, insert files. |
 | `grep_files` | Ripgrep search with pattern, glob, limit. |
 | `web_fetch` | Fetch URLs. Formats: html, text, markdown. |
-| `web_search` | Multi-engine search (Google → DuckDuckGo → Brave). |
-
-### Notifications
-
-Every `tools/call` response includes a `notifications` array. Background process exits and file changes are automatically captured and delivered with the next response:
-
-```json
-{
-  "content": [{"type": "text", "text": "..."}],
-  "isError": false,
-  "notifications": [
-    {"kind": "process_exited", "data": {"pid": "abc123", "exit_code": 0}}
-  ]
-}
-```
+| `web_search` | Multi-engine search (Google, DuckDuckGo, Brave). |
 
 ## Python Client
 
 ```bash
-pip install httpx
+pip install ash-sandbox
 ```
 
 ```python
-from client import Sandbox
+from ash_sandbox import Sandbox
 
 async with Sandbox.connect("http://localhost:3000") as sb:
-    # Direct tool calls
     await sb.call("shell", command="pytest")
-    await sb.call("text_editor", command="str_replace", path="app.py", old_str="foo", new_str="bar")
+    await sb.call("text_editor", command="str_replace", path="app.py",
+                  old_str="foo", new_str="bar")
 
     # Get schemas for LLM function calling
     tools = await sb.tool_schemas(format="openai")    # or "anthropic"
 
     # Execute model tool_calls directly
     result = await sb.execute_tool_call(model_tool_call)
-    # result.output, result.is_error, result.notifications
 ```
 
 ### Backends
@@ -172,8 +231,6 @@ async with Sandbox.connect("http://localhost:3000") as sb:
 | Gateway | `SandboxPool(cp, gw)` | X-Sandbox-ID header |
 
 ## K8s Infrastructure
-
-### Components
 
 | Component | Language | Role |
 |-----------|----------|------|
@@ -197,49 +254,6 @@ curl -X POST http://control-plane/spawn -d '{
 curl -X POST http://control-plane/destroy -d '{"uuid": "sandbox-abc123-..."}'
 ```
 
-### Gateway
-
-Routes all tool requests to the correct sandbox pod:
-
-```bash
-curl -X POST http://gateway/ \
-  -H "X-Sandbox-ID: sandbox-abc123-..." \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"shell","arguments":{"command":"ls"}}}'
-```
-
-## SWE-bench Results
-
-Evaluation on SWE-bench Verified (500 instances), using Ash sandboxes with different models and tool configurations:
-
-| Model | Resolved | Total | Rate |
-|---|---|---|---|
-| Claude Opus 4.6 (5-tool) | 397 | 500 | 79.4% |
-| MiniMax M2.5 (bash-only) | 376 | 497 | 75.7% |
-| mini-swe-agent Kimi K2.5 | 356 | 500 | 71.2% |
-| MiniMax M2.5 (5-tool) | 353 | 500 | 70.6% |
-| Kimi K2.5 (bash-only) | 350 | 500 | 70.0% |
-| Kimi K2.5 (5-tool) | 343 | 500 | 68.6% |
-
-**Key findings:**
-- bash-only mode (single `bash` tool with sed/grep) outperforms 5-tool mode for smaller models
-- MiniMax M2.5 bash-only achieves 75.7%, only 3.7% behind Opus 4.6
-
-Run configs are in `swebench/configs/`.
-
-## Development
-
-```bash
-# Build runtime
-cd runtime && go build -o ash-runtime .
-
-# Run tests
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"shell","arguments":{"command":"echo ok"}}}' | ./ash-runtime --mode stdio
-
-# Build K8s components
-cd k8s-scaffold && make build
-```
-
 ## Project Structure
 
 ```
@@ -247,13 +261,16 @@ cd k8s-scaffold && make build
 ├── runtime/              # Go sandbox runtime (ash-runtime binary)
 │   ├── main.go           # HTTP server + stdio + MCP endpoint
 │   ├── tools/            # 7 tool implementations
-│   ├── events/           # Notification system
-│   └── client/           # Python async client
+│   └── events/           # Notification system
+├── ash_sandbox/          # Python async client
+├── swebench/             # SWE-bench evaluation harness
+│   ├── agent.py          # Agent loop (litellm + tool execution)
+│   ├── configs/          # Model configs (YAML)
+│   └── AGENT.md          # System prompt for strong models
 ├── k8s-scaffold/         # K8s infrastructure (Go)
 │   ├── control-plane/    # Sandbox lifecycle API
 │   └── gateway/          # Session-routed reverse proxy
-├── k8s-config/           # K8s manifests (deploy, rbac, infra)
-└── src/                  # Legacy Rust implementation (ash-mcp)
+└── k8s-config/           # K8s manifests (deploy, rbac, infra)
 ```
 
 ## License
