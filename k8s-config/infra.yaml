@@ -253,7 +253,7 @@ spec:
               memory: "64Mi"
       containers:
         - name: control-plane
-          image: timemagic/ash:control-plane-0.1
+          image: dreamyangliu/ash:control-plane-0.1
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
@@ -387,7 +387,7 @@ spec:
               memory: "64Mi"
       containers:
         - name: gateway
-          image: timemagic/ash:gateway-0.1
+          image: dreamyangliu/ash:gateway-0.1
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
