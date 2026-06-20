@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.svg" width="200" alt="Ash Logo"/>
+  <img src="assets/logo.svg" width="200" alt="Ash Logo"/>
 </p>
 
 <h1 align="center">Ash — Agent Sandbox Hive</h1>
@@ -123,7 +123,7 @@ async with SandboxPool(
 ## Architecture
 
 <p align="center">
-  <img src="docs/architecture.svg" width="800" alt="Ash Architecture"/>
+  <img src="assets/architecture.svg" width="800" alt="Ash Architecture"/>
 </p>
 
 ## Runtime
@@ -225,4 +225,4 @@ curl -X POST http://control-plane/destroy -d '{"uuid": "sandbox-abc123-..."}'
 
 ## License
 
-Apache-2.0
+MIT
