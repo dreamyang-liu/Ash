@@ -20,6 +20,10 @@
 
 ---
 
+<p align="center">
+  <img src="assets/architecture.svg" width="800" alt="Ash Architecture"/>
+</p>
+
 ## SWE-bench Verified
 
 <table>
@@ -121,10 +125,6 @@ async with SandboxPool(
 ```
 
 ## Architecture
-
-<p align="center">
-  <img src="assets/architecture.svg" width="800" alt="Ash Architecture"/>
-</p>
 
 ## Runtime
 
