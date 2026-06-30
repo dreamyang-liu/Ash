@@ -1,8 +1,8 @@
-"""Claude Code harness — uses Claude Code CLI with MCP sandbox tools."""
+"""Claude Code harness — uses Claude Code SDK with MCP sandbox tools."""
 
+import asyncio
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import time
@@ -22,6 +22,16 @@ You are an expert software engineer solving a GitHub issue inside an isolated Do
 - You have full root access. All dependencies are pre-installed. No internet access.
 - Your ONLY tools are the 5 MCP tools from the ash-sandbox server: shell, text_editor, grep_files, read_file, process.
 - Do NOT use any built-in tools (Bash, Read, Edit, Write, etc.) — they won't work in the sandbox.
+
+## First: load your tools
+
+Your sandbox tools are presented as *deferred* — they are NOT callable until loaded.
+Your VERY FIRST action must be a single ToolSearch call that loads all five at once:
+
+  ToolSearch({"query": "select:mcp__ash-sandbox__shell,mcp__ash-sandbox__text_editor,mcp__ash-sandbox__grep_files,mcp__ash-sandbox__read_file,mcp__ash-sandbox__process"})
+
+Call ToolSearch EXACTLY ONCE. Do not search again, do not load tools one at a time,
+and do not attempt a sandbox tool before this call succeeds.
 
 ## Tools
 
@@ -54,107 +64,194 @@ You are an expert software engineer solving a GitHub issue inside an isolated Do
 """
 
 
+async def _aclose_stream(stream) -> None:
+    """Close a query() async stream if it supports aclose().
+
+    Idempotent: safe to call on a None, already-exhausted, or already-closed
+    stream. Used to deterministically tear the MCP server down on every exit path.
+    """
+    if stream is None:
+        return
+    aclose = getattr(stream, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception as e:
+        sys.stderr.write(f"[harness] query stream aclose error: {e}\n")
+
+
 class ClaudeCodeHarness(BaseHarness):
-    """Runs Claude Code CLI with ash sandbox exposed via MCP."""
+    """Runs Claude Code SDK with ash sandbox exposed via MCP."""
 
     def run_instance(self, instance: dict, output_dir: Path) -> dict:
+        return asyncio.run(self._run_instance_async(instance, output_dir))
+
+    async def _run_instance_async(self, instance: dict, output_dir: Path) -> dict:
+        # Prefer the maintained `claude-agent-sdk` (handles newer CLI stream events
+        # like `rate_limit_event`); fall back to the legacy `claude-code-sdk`.
+        try:
+            from claude_agent_sdk import query, ClaudeAgentOptions as Options
+            from claude_agent_sdk.types import (
+                AssistantMessage, UserMessage, ResultMessage,
+                TextBlock, ThinkingBlock, ToolUseBlock, ToolResultBlock,
+            )
+        except ImportError:
+            from claude_code_sdk import query, ClaudeCodeOptions as Options
+            from claude_code_sdk.types import (
+                AssistantMessage, UserMessage, ResultMessage,
+                TextBlock, ThinkingBlock, ToolUseBlock, ToolResultBlock,
+            )
+
         c = self.config
         instance_id = instance["instance_id"]
         image = resolve_image(instance)
         model = c.get("model", "opus")
-        max_budget = c.get("max_budget", 5.0)
         timeout = c.get("timeout", 1800)
 
         print(S.header(instance_id))
         print(S.kv("image   ", S.dim(image)))
         print(S.kv("model   ", S.dim(model)))
 
-        # Temp file for patch (MCP server writes on shutdown)
-        patch_file = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".diff", prefix=f"patch_{instance_id}_", delete=False
-        )
-        patch_file.close()
+        # Temp dir for patches (MCP server writes per-sandbox patches here)
+        patch_dir = tempfile.mkdtemp(prefix=f"patch_{instance_id}_")
 
-        # MCP config
-        mcp_args = ["-m", "swebench.mcp_server", "--image", image, "--patch-file", patch_file.name]
+        # MCP server config — SDK accepts dict directly, no temp file needed
+        mcp_args = ["-m", "swebench.mcp_server", "--image", image, "--patch-dir", patch_dir]
         if c.get("runtime_bin"):
             mcp_args.extend(["--runtime-bin", c["runtime_bin"]])
 
-        mcp_config = {
-            "mcpServers": {
-                "ash-sandbox": {
-                    "command": sys.executable,
-                    "args": mcp_args,
-                    "env": {},
-                }
+        mcp_servers = {
+            "ash-sandbox": {
+                "type": "stdio",
+                "command": sys.executable,
+                "args": mcp_args,
             }
         }
 
-        mcp_config_file = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", prefix="mcp_", delete=False
-        )
-        json.dump(mcp_config, mcp_config_file)
-        mcp_config_file.close()
-
-        # Task prompt
-        task = format_task_prompt(instance)
-
-        # Build claude command
-        permission_mode = c.get("permission_mode", "bypassPermissions")
-        cmd = [
-            "claude",
-            "--print",
-            "--bare",
-            "--model", model,
-            "--system-prompt", _SYSTEM_PROMPT,
-            "--mcp-config", mcp_config_file.name,
-            "--strict-mcp-config",
-            "--tools", "",
-            "--permission-mode", permission_mode,
-            "--output-format", "text",
-            "--max-budget-usd", str(max_budget),
-            "--no-session-persistence",
-        ]
-
-        # Environment
-        proc_env = os.environ.copy()
+        # Environment variables for provider auth
+        env = {}
         if c.get("env"):
-            proc_env.update(c["env"])
+            env.update(c["env"])
         provider = c.get("provider")
         if provider == "bedrock":
-            proc_env.setdefault("CLAUDE_CODE_USE_BEDROCK", "1")
+            env.setdefault("CLAUDE_CODE_USE_BEDROCK", "1")
         elif provider == "vertex":
-            proc_env.setdefault("CLAUDE_CODE_USE_VERTEX", "1")
+            env.setdefault("CLAUDE_CODE_USE_VERTEX", "1")
         if c.get("api_base"):
-            proc_env["ANTHROPIC_BASE_URL"] = c["api_base"]
+            env["ANTHROPIC_BASE_URL"] = c["api_base"]
         if c.get("api_key"):
-            proc_env["ANTHROPIC_API_KEY"] = c["api_key"]
+            env["ANTHROPIC_API_KEY"] = c["api_key"]
 
+        # Build SDK options
+        permission_mode = c.get("permission_mode", "bypassPermissions")
+        options = Options(
+            model=model,
+            system_prompt=_SYSTEM_PROMPT,
+            mcp_servers=mcp_servers,
+            permission_mode=permission_mode,
+            allowed_tools=["mcp__ash-sandbox__shell", "mcp__ash-sandbox__text_editor",
+                           "mcp__ash-sandbox__grep_files", "mcp__ash-sandbox__read_file",
+                           "mcp__ash-sandbox__process"],
+            disallowed_tools=["Bash", "Read", "Edit", "Write", "NotebookEdit"],
+            max_turns=c.get("max_turns", 200),
+            cwd=str(Path(__file__).parent.parent.parent),
+            env=env,
+        )
+
+        task = format_task_prompt(instance)
         start_time = time.time()
+        trajectory = []      # ordered events: text / thinking / tool_use / tool_result
+        messages = []        # assistant prose only (convenience view, untruncated)
+        result_msg = None
+        step_n = 0
+        _stream = None
 
         try:
-            result = subprocess.run(
-                cmd,
-                input=task,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=str(Path(__file__).parent.parent.parent),
-                env=proc_env,
-            )
+            _stream = query(prompt=task, options=options)
+            # Wall-clock deadline: a hung model or stuck tool can't block the
+            # worker indefinitely. Raises TimeoutError (caught below) on expiry.
+            async with asyncio.timeout(timeout):
+                async for message in _stream:
+                    if isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, ToolUseBlock):
+                                step_n += 1
+                                tool_name = block.name.replace("mcp__ash-sandbox__", "")
+                                print(S.step(step_n, tool_name, str(block.input)[:40]), flush=True)
+                                trajectory.append({
+                                    "type": "tool_use", "step": step_n,
+                                    "id": block.id, "name": tool_name, "input": block.input,
+                                })
+                            elif isinstance(block, TextBlock) and block.text.strip():
+                                messages.append(block.text)
+                                trajectory.append({"type": "text", "text": block.text})
+                            elif isinstance(block, ThinkingBlock):
+                                thinking = (getattr(block, "thinking", "") or "").strip()
+                                if thinking:
+                                    trajectory.append({"type": "thinking", "text": thinking})
+                    elif isinstance(message, UserMessage):
+                        # Tool results (observations) stream back as UserMessage content.
+                        content = message.content
+                        if isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, ToolResultBlock):
+                                    trajectory.append({
+                                        "type": "tool_result",
+                                        "tool_use_id": block.tool_use_id,
+                                        "content": block.content,
+                                        "is_error": bool(block.is_error),
+                                    })
+                    elif isinstance(message, ResultMessage):
+                        result_msg = message
+
+            # Close the query stream so the `claude` CLI (and the MCP server it
+            # spawned) tears down and flushes the patch file before we read it.
+            # Also closed in `finally` so error/timeout paths shut the MCP server
+            # down before the patch dir is removed; aclose() is idempotent.
+            await _aclose_stream(_stream)
 
             elapsed = time.time() - start_time
 
-            # Read patch
+            # The patch lands asynchronously as the MCP subprocess exits. Poll for
+            # it instead of reading once (which races the subprocess teardown).
+            # Note: an empty diff still writes the file, so this breaks promptly
+            # once shutdown completes; it only burns the full timeout on failure.
             patch = ""
-            if Path(patch_file.name).exists():
-                patch = Path(patch_file.name).read_text()
+            patch_written = False
+            patch_path = Path(patch_dir) / "sb-1.diff"
+            for _ in range(150):  # up to ~15s
+                if patch_path.exists():
+                    patch = patch_path.read_text()
+                    patch_written = True
+                    break
+                await asyncio.sleep(0.1)
 
-            exit_status = "completed" if patch else "no_patch"
-            if result.returncode != 0 and not patch:
-                exit_status = f"error: exit code {result.returncode}"
+            # Warn on an empty patch, distinguishing extraction failure (file never
+            # appeared → MCP server likely crashed before its shutdown extraction)
+            # from a genuine no-op (agent produced no diff).
+            if not patch_written:
+                print(S.kv("warn    ", S.bright_red(
+                    "patch file never written — MCP extraction did not run (server crash?)")),
+                    flush=True)
+            elif not patch.strip():
+                print(S.kv("warn    ", S.bright_red(
+                    "empty patch — agent produced no diff")), flush=True)
+
+            # Determine status
+            if result_msg and result_msg.is_error:
+                exit_status = f"error: {result_msg.result or 'unknown'}"
+            elif patch:
+                exit_status = "completed"
+            else:
+                exit_status = "no_patch"
+
+            cost = result_msg.total_cost_usd if result_msg else None
+            num_turns = result_msg.num_turns if result_msg else step_n
 
             print(S.kv("time    ", S.dim(f"{elapsed:.1f}s")))
+            if cost is not None:
+                print(S.kv("cost    ", S.dim(f"${cost:.2f} ({num_turns} turns)")))
             print(S.kv("patch   ", S.patch_info(patch)))
 
             # Save trajectory
@@ -163,11 +260,15 @@ class ClaudeCodeHarness(BaseHarness):
             (traj_dir / f"{instance_id}.json").write_text(json.dumps({
                 "instance_id": instance_id,
                 "model": model,
-                "output": (result.stdout or "")[-3000:],
-                "stderr": (result.stderr or "")[-2000:],
-                "elapsed_seconds": elapsed,
                 "exit_status": exit_status,
-            }, indent=2))
+                "elapsed_seconds": elapsed,
+                "cost_usd": cost,
+                "num_turns": num_turns,
+                "num_steps": step_n,
+                "trajectory": trajectory,   # full ordered events (text/thinking/tool_use/tool_result)
+                "messages": messages,       # assistant prose only, untruncated
+                "usage": result_msg.usage if result_msg else None,
+            }, indent=2, default=str))
 
             return {
                 "instance_id": instance_id,
@@ -176,18 +277,18 @@ class ClaudeCodeHarness(BaseHarness):
                 "exit_status": exit_status,
             }
 
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
             print(S.kv("error   ", S.bright_red(f"timeout ({timeout}s)")))
             return self._fail(instance_id, model, "timeout")
         except Exception as e:
             print(S.kv("error   ", S.bright_red(str(e))))
             return self._fail(instance_id, model, f"error: {e}")
         finally:
-            try:
-                os.unlink(mcp_config_file.name)
-                os.unlink(patch_file.name)
-            except OSError:
-                pass
+            # Close the stream (idempotent) before removing the patch dir, so the
+            # MCP server has been told to shut down and isn't still writing into it.
+            await _aclose_stream(_stream)
+            import shutil
+            shutil.rmtree(patch_dir, ignore_errors=True)
 
     def _fail(self, instance_id: str, model: str, status: str) -> dict:
         return {
