@@ -1,9 +1,5 @@
-# AWS Bedrock — Kimi K2.5 (bash-only mode)
-#
-# Same model but with only a single `bash` tool, matching mini-swe-agent's approach.
-#
-# Usage:
-#   python -m swebench -c swebench/configs/bedrock-kimi25-bash.yaml --slice 0:8
+# AWS Bedrock — MiniMax M2.5 (bash-only)
+extends: default-bash
 
 model:
   name: bedrock/minimax.minimax-m2.5
@@ -14,90 +10,8 @@ generation:
   prompt_cache: false
 
 limits:
-  step_limit: 250
   cost_limit: 6.0
-
-dataset:
-  subset: verified
 
 execution:
   workers: 32
   output: results/bedrock-minimax25-bash
-
-agent:
-  tools: bash_only
-  system_template: |
-    You are a helpful assistant that can interact with a computer.
-  instance_template: |
-    Please solve this issue: {{task}}
-
-    You can execute bash commands to implement the necessary changes.
-
-    ## Recommended Workflow
-
-    This workflow should be done step-by-step so that you can iterate on your changes and any possible problems.
-
-    1. Analyze the codebase by finding and reading relevant files
-    2. Create a script to reproduce the issue
-    3. Edit the source code to resolve the issue
-    4. Verify your fix works by running your script again
-    5. Test edge cases to ensure your fix is robust by running related tests
-
-    ## Command Execution Rules
-
-    You are operating in an environment where:
-
-    1. You issue at least one command
-    2. The system executes the command(s) in a subshell
-    3. You see the result(s)
-    4. You write your next command(s)
-
-    Each response should include:
-
-    1. **Reasoning text** where you explain your analysis and plan
-    2. At least one tool call with your command
-
-    **CRITICAL REQUIREMENTS:**
-
-    - Your response SHOULD include reasoning text explaining what you're doing
-    - Your response MUST include AT LEAST ONE bash tool call
-    - NEVER modify test files. If you accidentally did, revert them before finishing:
-      `cd /testbed && git checkout -- '**/test*' '**/conftest*'`
-    - Fix ALL instances of a bug pattern, not just one
-    - Keep patches clean: only source changes, no temp files
-    - When you are done, clean up temporary files:
-      `cd /testbed && rm -f repro*.py reproduce*.py test_fix*.py`
-
-    <system_information>
-    {{system}} {{release}} {{version}} {{machine}}
-    </system_information>
-
-    ## Useful command examples
-
-    ### Search for code:
-    ```bash
-    cd /testbed && grep -rn "function_name" --include="*.py" | head -20
-    ```
-
-    ### View file content:
-    ```bash
-    cd /testbed && nl -ba src/module.py | sed -n '100,150p'
-    ```
-
-    ### Edit files with sed:
-    ```bash
-    cd /testbed && sed -i 's/old_string/new_string/g' filename.py
-    ```
-
-    ### Create a new file:
-    ```bash
-    cat <<'EOF' > /testbed/repro.py
-    import something
-    print("hello")
-    EOF
-    ```
-
-    ### Run tests:
-    ```bash
-    cd /testbed && python -m pytest tests/test_module.py -x 2>&1 | tail -30
-    ```

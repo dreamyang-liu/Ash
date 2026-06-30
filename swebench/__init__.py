@@ -14,7 +14,7 @@ Usage:
 from .models import AgentConfig, CostTracker, ToolResult, Trajectory
 from .sandbox import AshSession
 from .agent import AshAgent
-from .tools import TOOLS_SCHEMA
+from .agent.tools import TOOLS_SCHEMA
 from .dataset import load_instances, resolve_image, format_task_prompt
 
 __all__ = [

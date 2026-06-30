@@ -1,19 +1,18 @@
-# Local SGLang / vLLM inference
+# Local SGLang inference
 # Start your server first:
 #   python -m sglang.launch_server --model Qwen/Qwen3-Coder-30B-A3B-Instruct --port 30000
-#
-# Usage:
-#   python -m swebench -c swebench/configs/sglang.yaml -i sympy__sympy-15599
+extends: default
 
-model: Qwen/Qwen3-Coder-30B-A3B-Instruct
-api_base: http://localhost:30000/v1
-api_key: unused
+model:
+  name: Qwen/Qwen3-Coder-30B-A3B-Instruct
+  api_base: http://localhost:30000/v1
+  api_key: unused
 
-max_tokens: 8192
-temperature: 0.0
-step_limit: 250
-cost_limit: 3.0
+generation:
+  max_tokens: 8192
+  temperature: 0.0
+  prompt_cache: false
 
-subset: verified
-workers: 4
-output: results/sglang
+execution:
+  workers: 4
+  output: results/sglang

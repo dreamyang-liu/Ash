@@ -25,6 +25,57 @@ BASH_ONLY_SCHEMA = [
     },
 ]
 
+def truncate_output(content: str, max_len: int = 12000) -> str:
+    """Elide the middle of overly long tool output."""
+    if len(content) <= max_len:
+        return content
+    head, tail = max_len * 2 // 3, max_len // 3  # ~8000 / ~4000 chars
+    elided = len(content) - head - tail
+    return (
+        content[:head] +
+        f"\n\n... [{elided} characters truncated — output too long. Use `tail` on shell "
+        f"commands, `limit` on grep/read_file, or pipe through `grep` for targeted output] ...\n\n" +
+        content[-tail:]
+    )
+
+
+def tool_summary(name: str, args: dict) -> str:
+    """Build a human-readable one-line summary for a tool call (for display)."""
+    if name == "shell":
+        cmd = args.get("command", "")
+        return cmd + (" &" if args.get("background") else "")
+    elif name == "grep_files":
+        parts = [f"/{args.get('pattern', '')}/"]
+        if args.get("path"):
+            parts.append(args["path"])
+        if args.get("include"):
+            parts.append(f"({args['include']})")
+        return " ".join(parts)
+    elif name == "read_file":
+        path = args.get("path", "")
+        offset, limit = args.get("offset"), args.get("limit")
+        if offset or limit:
+            return f"{path}:{offset or 1}+{limit or '?'}"
+        return path
+    elif name == "text_editor":
+        cmd = args.get("command", "")
+        path = args.get("path", "")
+        if cmd == "str_replace":
+            preview = args.get("old_str", "")[:40].replace("\n", "\\n")
+            return f'{path} [{cmd}] "{preview}"'
+        elif cmd == "view":
+            vr = args.get("view_range")
+            return f"{path} [{vr[0]}:{vr[1]}]" if vr else f"{path} [view]"
+        return f"{path} [{cmd}]"
+    elif name == "process":
+        return f"{args.get('pid', '?')} {args.get('action', '?')}"
+    elif name == "web_fetch":
+        return args.get("url", "")
+    elif name == "web_search":
+        return args.get("query", "")
+    return args.get("command", "") or args.get("path", "") or str(args)[:80]
+
+
 TOOLS_SCHEMA = [
     {
         "type": "function",

@@ -30,7 +30,7 @@ except ImportError:
 from .agent import AshAgent
 from .sandbox import AshSession
 from . import style as S
-from .tools import TOOLS_SCHEMA
+from .agent.tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA
 from .models import AgentConfig
 
 
@@ -251,7 +251,8 @@ def run_single_instance(
         _agent_ref.append(agent)
         if quiet:
             agent.stream = False  # no streaming in parallel (avoids stdout conflicts)
-        agent.set_tools_schema(TOOLS_SCHEMA)
+        tools_mode = getattr(config, "tools", "default")
+        agent.set_tools_schema(BASH_ONLY_SCHEMA if tools_mode == "bash_only" else TOOLS_SCHEMA)
 
         # Run agent loop
         task = format_task_prompt(instance)
@@ -547,12 +548,12 @@ def run_batch(
 
 
 def _load_config_file(path: str) -> dict:
-    """Load a YAML or JSON config file."""
-    import yaml
-
+    """Load a YAML or JSON config file. YAML honors `extends:` inheritance via
+    the unified loader so the runner path matches `python -m swebench`."""
+    if path.endswith((".yml", ".yaml")):
+        from .__main__ import _load_config
+        return _load_config(path)
     with open(path) as f:
-        if path.endswith((".yml", ".yaml")):
-            return yaml.safe_load(f) or {}
         return json.loads(f.read())
 
 
@@ -741,6 +742,7 @@ def main():
         api_key = api_key or "unused"
 
     agent_config = AgentConfig(
+        tools=getattr(args, "tools", "default"),
         model=model,
         api_base=api_base,
         api_key=api_key,

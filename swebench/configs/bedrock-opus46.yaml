@@ -1,27 +1,14 @@
 # AWS Bedrock — Claude Opus 4.6
-#
-# Auth: set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_REGION_NAME
-#   or: set AWS_BEARER_TOKEN_BEDROCK (passed as api_key)
-#
-# Usage:
-#   python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --slice 0:8
+extends: default
 
 model:
   name: bedrock/us.anthropic.claude-opus-4-6-v1
-  # api_key: <bearer-token>
 
 generation:
-  max_tokens: 16384
-  # temperature: not set (model default, required for extended thinking)
   reasoning_effort: high
-  prompt_cache: true     # enable Bedrock prompt caching (set false if model doesn't support it)
 
 limits:
-  step_limit: 250
   cost_limit: 20.0
-
-dataset:
-  subset: verified
 
 execution:
   workers: 16

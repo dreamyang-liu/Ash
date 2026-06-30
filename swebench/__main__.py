@@ -22,10 +22,41 @@ from .batch import run_batch
 from .harnesses import get_harness
 
 
-def _load_config(path: str) -> dict:
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base (override wins)."""
+    result = dict(base)
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+def _load_config(path: str, _seen: set | None = None) -> dict:
     import yaml
+    from pathlib import Path
+
+    if _seen is None:
+        _seen = set()
+    resolved = str(Path(path).resolve())
+    if resolved in _seen:
+        raise ValueError(f"Circular extends: {resolved}")
+    _seen.add(resolved)
+
     with open(path) as f:
-        return yaml.safe_load(f) or {}
+        config = yaml.safe_load(f) or {}
+
+    extends = config.pop("extends", None)
+    if extends:
+        configs_dir = Path(path).parent
+        parent_path = configs_dir / f"{extends}.yaml"
+        if not parent_path.exists():
+            raise FileNotFoundError(f"extends: '{extends}' not found at {parent_path}")
+        parent = _load_config(str(parent_path), _seen)
+        config = _deep_merge(parent, config)
+
+    return config
 
 
 def _flatten_config(config: dict) -> dict:

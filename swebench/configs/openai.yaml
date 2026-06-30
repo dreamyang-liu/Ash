@@ -1,18 +1,16 @@
 # OpenAI API
-#
-# Set OPENAI_API_KEY env var.
-#
-# Usage:
-#   python -m swebench -c swebench/configs/openai.yaml -i sympy__sympy-15599
+extends: default
 
-model: gpt-4o
-# api_key: <your-key>  # or set OPENAI_API_KEY env var
+model:
+  name: gpt-4o
 
-max_tokens: 16384
-temperature: 0.0
-step_limit: 250
-cost_limit: 5.0
+generation:
+  temperature: 0.0
+  prompt_cache: false
 
-subset: verified
-workers: 4
-output: results/openai
+limits:
+  cost_limit: 5.0
+
+execution:
+  workers: 4
+  output: results/openai

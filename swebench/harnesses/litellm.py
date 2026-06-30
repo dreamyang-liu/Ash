@@ -8,7 +8,7 @@ from ..dataset import resolve_image, format_task_prompt, image_registry_for_subs
 from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent
-from ..tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA
+from ..agent.tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA
 from .. import style as S
 
 
@@ -58,6 +58,7 @@ class LiteLLMHarness(BaseHarness):
                 temperature=c.get("temperature"),
                 reasoning_effort=c.get("reasoning_effort"),
                 prompt_cache=c.get("prompt_cache", True),
+                tools=c.get("tools", "default"),
                 system_template=c.get("system_template"),
                 instance_template=c.get("instance_template"),
             )
