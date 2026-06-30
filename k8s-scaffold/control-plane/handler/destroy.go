@@ -130,6 +130,9 @@ func destroyByIDs(ctx context.Context, deps Dependencies, uuids []string) ([]str
 
 		if err := k8s.DestroySandbox(ctx, deps.Clientset, namespace, svcName); err != nil {
 			log.Printf("Failed to destroy sandbox %s: %v", uuid, err)
+			failed = append(failed, uuid)
+			metrics.SandboxDestroyTotal.WithLabelValues("error").Inc()
+			continue
 		}
 
 		if err := store.DeleteRecord(ctx, deps.Redis, uuid); err != nil {

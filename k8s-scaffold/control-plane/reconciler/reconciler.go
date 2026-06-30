@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -147,6 +148,12 @@ func syncRedisToK8s(ctx context.Context, clientset *kubernetes.Clientset, rdb *r
 		// Check if deployment exists
 		_, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
+			// Only treat a definitive NotFound as "gone". Transient errors
+			// (API timeout, RBAC, connection) must NOT delete a live route.
+			if !apierrors.IsNotFound(err) {
+				log.Printf("Reconciler: Deployment %s/%s lookup failed, keeping record %s: %v", namespace, name, uuid, err)
+				continue
+			}
 			log.Printf("Reconciler: Deployment %s/%s no longer exists, deleting Redis record %s", namespace, name, uuid)
 			if err := store.DeleteRecord(ctx, rdb, uuid); err != nil {
 				log.Printf("Failed to delete stale record %s: %v", uuid, err)
