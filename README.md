@@ -40,6 +40,24 @@
 <td align="right"><b>79.4%</b></td>
 </tr>
 <tr>
+<td><b>Claude Sonnet 4.6</b></td>
+<td>5-tool</td>
+<td align="right">377 / 500</td>
+<td align="right"><b>75.4%</b></td>
+</tr>
+<tr>
+<td><b>Claude Sonnet 4.6</b></td>
+<td>bash-only</td>
+<td align="right">362 / 500</td>
+<td align="right">72.4%</td>
+</tr>
+<tr>
+<td><b>Claude Sonnet 4.6</b></td>
+<td>Claude Code</td>
+<td align="right">371 / 500</td>
+<td align="right">74.2%</td>
+</tr>
+<tr>
 <td><b>MiniMax M2.5</b></td>
 <td>bash-only</td>
 <td align="right">378 / 500</td>
@@ -65,7 +83,9 @@
 </tr>
 </table>
 
-All runs use the same Ash sandbox environment and agent loop. Configs: [`swebench/configs/`](swebench/configs/).
+All runs use the same Ash sandbox environment. Most rows use Ash's shared litellm agent
+loop (`5-tool` / `bash-only`); the **Claude Code** row instead drives Claude Code itself as
+the agent via the `claude-code` harness. Configs: [`swebench/configs/`](swebench/configs/).
 
 ## Quick Start
 
