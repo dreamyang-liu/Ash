@@ -47,10 +47,10 @@ class SandboxEntry:
 class Session:
     id: str
     groups: list[str] = field(default_factory=lambda: ["default"])
-    active_id: str | None = None
-    # Serializes this session's tool dispatch in HTTP mode so concurrent requests
-    # can't race on active_id (read-modify-write). Unused/harmless in stdio mode.
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock, compare=False, repr=False)
+    # Fixed single-sandbox binding, set once at startup in single-sandbox stdio
+    # mode. Multi-sandbox mode leaves this None and requires an explicit
+    # sandbox_id on every exec call — there is no switchable "active" state.
+    bound_id: str | None = None
 
     @property
     def owner_group(self) -> str:
@@ -92,17 +92,6 @@ LIFECYCLE_TOOLS = [
             "properties": {
                 "group": {"type": "string", "description": "Filter by group (omit for all visible)"},
             },
-        },
-    },
-    {
-        "name": "sandbox_switch",
-        "description": "Switch your active sandbox (default target for tool calls).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "sandbox_id": {"type": "string", "description": "Sandbox ID to switch to"},
-            },
-            "required": ["sandbox_id"],
         },
     },
     {
@@ -203,15 +192,12 @@ EXEC_TOOLS = [
     },
 ]
 
-ALL_TOOLS = LIFECYCLE_TOOLS + EXEC_TOOLS
-
-
 def _single_sandbox_tools() -> list[dict]:
     """Exec tools only, with the multi-sandbox `sandbox_id` arg removed.
 
-    Used in single-sandbox stdio mode: the sandbox is pre-provisioned and set
-    active by the harness, so the agent should see only shell/text_editor/
-    grep_files/read_file/process — no lifecycle tools, no sandbox routing.
+    Used in single-sandbox stdio mode: the sandbox is pre-provisioned and bound
+    at startup, so the agent should see only shell/text_editor/grep_files/
+    read_file/process — no lifecycle tools, no sandbox routing.
     """
     tools = copy.deepcopy(EXEC_TOOLS)
     for t in tools:
@@ -219,7 +205,28 @@ def _single_sandbox_tools() -> list[dict]:
     return tools
 
 
+def _multi_sandbox_tools() -> list[dict]:
+    """Exec tools with `sandbox_id` REQUIRED — stateless multi-sandbox mode.
+
+    Every exec call names its target sandbox explicitly; there is no switchable
+    "active" sandbox, so concurrent calls can't race and no lock is needed.
+    """
+    tools = copy.deepcopy(EXEC_TOOLS)
+    for t in tools:
+        props = t["inputSchema"]["properties"]
+        if "sandbox_id" in props:
+            props["sandbox_id"]["description"] = "Target sandbox ID (required)"
+        req = t["inputSchema"].setdefault("required", [])
+        if "sandbox_id" not in req:
+            req.append("sandbox_id")
+    return tools
+
+
 EXEC_TOOLS_SINGLE = _single_sandbox_tools()
+EXEC_TOOLS_MULTI = _multi_sandbox_tools()
+
+# Multi-sandbox surface: lifecycle (create/list/destroy) + id-required exec tools.
+ALL_TOOLS = LIFECYCLE_TOOLS + EXEC_TOOLS_MULTI
 
 
 # ---------------------------------------------------------------------------
@@ -321,42 +328,30 @@ class SessionHandler:
         self.auto_extract = auto_extract
 
     def _resolve(self, sandbox_id: str | None) -> SandboxEntry | None:
-        """Resolve target sandbox, checking visibility via group intersection."""
-        if sandbox_id:
-            entry = self.pool.get(sandbox_id)
-            if entry and entry.visible_to(self.session.groups):
-                return entry
+        """Resolve the target sandbox by explicit id, falling back to the fixed
+        single-sandbox binding. No switchable "active" state."""
+        target = sandbox_id or self.session.bound_id
+        if not target:
             return None
-        if self.session.active_id:
-            entry = self.pool.get(self.session.active_id)
-            if entry and entry.visible_to(self.session.groups):
-                return entry
+        entry = self.pool.get(target)
+        if entry and entry.visible_to(self.session.groups):
+            return entry
         return None
 
     async def call_tool(self, name: str, args: dict) -> dict:
         # -- Lifecycle tools --
         if name == "sandbox_create":
-            # Always include the caller's owner group; add any extra shared groups
+            # Always include the caller's owner group; add any extra shared groups.
             extra_groups = args.get("groups", [])
             groups = [self.session.owner_group] + extra_groups
             entry = await self.pool.create(args["image"], groups)
-            self.session.active_id = entry.id
             return _ok(json.dumps({"id": entry.id, "groups": entry.groups}))
 
         if name == "sandbox_list":
             entries = self.pool.visible_to(self.session, args.get("group"))
             items = [{"id": e.id, "image": e.image, "groups": e.groups,
-                      "mine": self.session.owner_group in e.groups,
-                      "active": e.id == self.session.active_id} for e in entries]
+                      "mine": self.session.owner_group in e.groups} for e in entries]
             return _ok(json.dumps(items, indent=2))
-
-        if name == "sandbox_switch":
-            sb_id = args["sandbox_id"]
-            entry = self.pool.get(sb_id)
-            if not entry or not entry.visible_to(self.session.groups):
-                return _err(f"sandbox {sb_id} not found or not accessible")
-            self.session.active_id = sb_id
-            return _ok(f"Switched to {sb_id}")
 
         if name == "sandbox_destroy":
             sb_id = args["sandbox_id"]
@@ -366,17 +361,16 @@ class SessionHandler:
             if self.session.owner_group not in entry.groups:
                 return _err(f"cannot destroy {sb_id}: not the owner")
             patch = await self.pool.destroy(sb_id)
-            if self.session.active_id == sb_id:
-                visible = self.pool.visible_to(self.session)
-                self.session.active_id = visible[0].id if visible else None
             return _ok(f"Destroyed {sb_id}. Patch: {len(patch)} chars.")
 
-        # -- Exec tools --
+        # -- Exec tools -- sandbox_id is required in multi-sandbox mode; in
+        # single-sandbox mode it is omitted and resolves to the bound sandbox.
         args = dict(args)  # copy so we never mutate the caller's argument dict
         sandbox_id = args.pop("sandbox_id", None)
         entry = self._resolve(sandbox_id)
         if not entry:
-            return _err("No active sandbox visible to you. Use sandbox_create or sandbox_switch.")
+            return _err("sandbox_id is required and must reference a sandbox visible "
+                        "to you (see sandbox_create / sandbox_list).")
 
         try:
             result: SdkToolResult = await entry.sandbox.call(name, **args)
@@ -452,10 +446,9 @@ class HttpMcpServer:
 
             elif method == "tools/call":
                 params = body.get("params", {})
-                # Hold the session lock so concurrent requests for the same session
-                # can't interleave active_id read-modify-write (e.g. switch vs use).
-                async with session.lock:
-                    content = await handler.call_tool(params.get("name", ""), params.get("arguments", {}))
+                # Stateless: every exec call carries its own sandbox_id, so
+                # concurrent same-session requests share no mutable routing state.
+                content = await handler.call_tool(params.get("name", ""), params.get("arguments", {}))
                 return web.json_response({
                     "jsonrpc": "2.0", "id": id_,
                     "result": {"content": [content], "isError": content.get("isError", False)},
@@ -594,7 +587,7 @@ def main():
                         f"[ash-mcp] failed to create sandbox from image '{args.image}': {e}\n")
                     sys.stderr.flush()
                     raise SystemExit(1)
-                stdio.session.active_id = entry.id
+                stdio.session.bound_id = entry.id
                 # Write an initial (empty) patch file immediately so the harness
                 # always finds a current diff, even if the agent never edits.
                 if pool.patch_dir:
