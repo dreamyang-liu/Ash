@@ -18,5 +18,6 @@ Thumbs.db
 # Generated man pages (runtime)
 /man/
 runtime/ash-runtime
+k8s-scaffold/gateway/k8s-gateway
 __pycache__/
 results/*

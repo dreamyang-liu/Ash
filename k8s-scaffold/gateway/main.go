@@ -120,6 +120,7 @@ func lookupTarget(ctx context.Context, uuid string) (*url.URL, error) {
 	pipe := rdb.Pipeline()
 	getHostCmd := pipe.HGet(ctx, key, "host")
 	getPortCmd := pipe.HGet(ctx, key, "port")
+	getPathCmd := pipe.HGet(ctx, key, "path")
 
 	// Execute pipeline
 	_, err := pipe.Exec(ctx)
@@ -136,7 +137,6 @@ func lookupTarget(ctx context.Context, uuid string) (*url.URL, error) {
 	// Get port
 	portStr, err := getPortCmd.Result()
 	if err == redis.Nil || portStr == "" {
-		// Default to port 3000 if not specified
 		portStr = "3000"
 	}
 
@@ -145,8 +145,14 @@ func lookupTarget(ctx context.Context, uuid string) (*url.URL, error) {
 		return nil, fmt.Errorf("invalid port %q: %w", portStr, err)
 	}
 
-	log.Printf("[lookup] UUID %s -> Host %s, Port %d", uuid, host, port)
-	return url.Parse(fmt.Sprintf("%s://%s:%d/mcp", config.DefaultScheme, host, port))
+	// Get path — defaults to /mcp for backwards compatibility
+	path, err := getPathCmd.Result()
+	if err == redis.Nil || path == "" {
+		path = "/mcp"
+	}
+
+	log.Printf("[lookup] UUID %s -> Host %s, Port %d, Path %s", uuid, host, port, path)
+	return url.Parse(fmt.Sprintf("%s://%s:%d%s", config.DefaultScheme, host, port, path))
 }
 
 func main() {
