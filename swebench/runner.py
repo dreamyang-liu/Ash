@@ -30,7 +30,7 @@ except ImportError:
 from .agent import AshAgent
 from .sandbox import AshSession
 from . import style as S
-from .tools import TOOLS_SCHEMA
+from .agent.tools import TOOLS_SCHEMA
 from .models import AgentConfig
 
 

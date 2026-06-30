@@ -26,6 +26,7 @@ class AgentConfig:
     temperature: Optional[float] = None  # None = use model default
     reasoning_effort: Optional[str] = None  # "low" | "medium" | "high" | "none" (adaptive thinking)
     prompt_cache: bool = True  # Enable prompt caching for Anthropic/Bedrock models
+    tools: str = "default"  # "default" (structured tools) | "bash_only" (single bash tool)
     workdir: str = "/testbed"
     system_template: Optional[str] = None  # Jinja2 template for system prompt (overrides AGENT.md)
     instance_template: Optional[str] = None  # Jinja2 template for instance/task message
@@ -55,6 +56,21 @@ class CostTracker:
             self.total_cost += completion_cost(completion_response=response)
         except Exception:
             pass
+
+    def budget_warning(self, step_limit: int, cost_limit: float) -> Optional[str]:
+        """Return a one-time warning string when only a few steps remain, else None."""
+        if self.api_calls < 3:
+            return None
+        avg = self.total_cost / self.api_calls
+        remaining_steps = step_limit - self.api_calls
+        est = min(remaining_steps, int((cost_limit - self.total_cost) / avg)) if avg > 0 else remaining_steps
+        if est > 4 and remaining_steps > 4:
+            return None
+        return (
+            f"\n\n[Budget Warning] ~{est} steps remaining "
+            f"({self.api_calls}/{step_limit} steps, ${self.total_cost:.2f}/${cost_limit:.2f} budget). "
+            f"Finalize your fix now: run tests and stop. If tests fail, revert and submit your best attempt."
+        )
 
     def to_dict(self) -> dict:
         d = {
