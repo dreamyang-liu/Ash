@@ -369,6 +369,7 @@ class SessionHandler:
             return _ok(f"Destroyed {sb_id}. Patch: {len(patch)} chars.")
 
         # -- Exec tools --
+        args = dict(args)  # copy so we never mutate the caller's argument dict
         sandbox_id = args.pop("sandbox_id", None)
         entry = self._resolve(sandbox_id)
         if not entry:
@@ -500,7 +501,7 @@ class StdioMcpServer:
     async def run(self):
         reader = asyncio.StreamReader()
         protocol = asyncio.StreamReaderProtocol(reader)
-        await asyncio.get_event_loop().connect_read_pipe(lambda: protocol, sys.stdin)
+        await asyncio.get_running_loop().connect_read_pipe(lambda: protocol, sys.stdin)
 
         try:
             while True:

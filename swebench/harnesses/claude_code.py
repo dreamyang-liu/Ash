@@ -64,6 +64,23 @@ and do not attempt a sandbox tool before this call succeeds.
 """
 
 
+async def _aclose_stream(stream) -> None:
+    """Close a query() async stream if it supports aclose().
+
+    Idempotent: safe to call on a None, already-exhausted, or already-closed
+    stream. Used to deterministically tear the MCP server down on every exit path.
+    """
+    if stream is None:
+        return
+    aclose = getattr(stream, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception as e:
+        sys.stderr.write(f"[harness] query stream aclose error: {e}\n")
+
+
 class ClaudeCodeHarness(BaseHarness):
     """Runs Claude Code SDK with ash sandbox exposed via MCP."""
 
@@ -148,52 +165,51 @@ class ClaudeCodeHarness(BaseHarness):
         messages = []        # assistant prose only (convenience view, untruncated)
         result_msg = None
         step_n = 0
+        _stream = None
 
         try:
             _stream = query(prompt=task, options=options)
-            async for message in _stream:
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, ToolUseBlock):
-                            step_n += 1
-                            tool_name = block.name.replace("mcp__ash-sandbox__", "")
-                            print(S.step(step_n, tool_name, str(block.input)[:40]), flush=True)
-                            trajectory.append({
-                                "type": "tool_use", "step": step_n,
-                                "id": block.id, "name": tool_name, "input": block.input,
-                            })
-                        elif isinstance(block, TextBlock) and block.text.strip():
-                            messages.append(block.text)
-                            trajectory.append({"type": "text", "text": block.text})
-                        elif isinstance(block, ThinkingBlock):
-                            thinking = (getattr(block, "thinking", "") or "").strip()
-                            if thinking:
-                                trajectory.append({"type": "thinking", "text": thinking})
-                elif isinstance(message, UserMessage):
-                    # Tool results (observations) stream back as UserMessage content.
-                    content = message.content
-                    if isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, ToolResultBlock):
+            # Wall-clock deadline: a hung model or stuck tool can't block the
+            # worker indefinitely. Raises TimeoutError (caught below) on expiry.
+            async with asyncio.timeout(timeout):
+                async for message in _stream:
+                    if isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, ToolUseBlock):
+                                step_n += 1
+                                tool_name = block.name.replace("mcp__ash-sandbox__", "")
+                                print(S.step(step_n, tool_name, str(block.input)[:40]), flush=True)
                                 trajectory.append({
-                                    "type": "tool_result",
-                                    "tool_use_id": block.tool_use_id,
-                                    "content": block.content,
-                                    "is_error": bool(block.is_error),
+                                    "type": "tool_use", "step": step_n,
+                                    "id": block.id, "name": tool_name, "input": block.input,
                                 })
-                elif isinstance(message, ResultMessage):
-                    result_msg = message
+                            elif isinstance(block, TextBlock) and block.text.strip():
+                                messages.append(block.text)
+                                trajectory.append({"type": "text", "text": block.text})
+                            elif isinstance(block, ThinkingBlock):
+                                thinking = (getattr(block, "thinking", "") or "").strip()
+                                if thinking:
+                                    trajectory.append({"type": "thinking", "text": thinking})
+                    elif isinstance(message, UserMessage):
+                        # Tool results (observations) stream back as UserMessage content.
+                        content = message.content
+                        if isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, ToolResultBlock):
+                                    trajectory.append({
+                                        "type": "tool_result",
+                                        "tool_use_id": block.tool_use_id,
+                                        "content": block.content,
+                                        "is_error": bool(block.is_error),
+                                    })
+                    elif isinstance(message, ResultMessage):
+                        result_msg = message
 
             # Close the query stream so the `claude` CLI (and the MCP server it
-            # spawned) tears down. The MCP server extracts the git diff and writes
-            # <sandbox>.diff during its shutdown — not mid-session — so we must
-            # force shutdown before reading, then wait for the file to appear.
-            _aclose = getattr(_stream, "aclose", None)
-            if _aclose is not None:
-                try:
-                    await _aclose()
-                except Exception:
-                    pass
+            # spawned) tears down and flushes the patch file before we read it.
+            # Also closed in `finally` so error/timeout paths shut the MCP server
+            # down before the patch dir is removed; aclose() is idempotent.
+            await _aclose_stream(_stream)
 
             elapsed = time.time() - start_time
 
@@ -268,6 +284,9 @@ class ClaudeCodeHarness(BaseHarness):
             print(S.kv("error   ", S.bright_red(str(e))))
             return self._fail(instance_id, model, f"error: {e}")
         finally:
+            # Close the stream (idempotent) before removing the patch dir, so the
+            # MCP server has been told to shut down and isn't still writing into it.
+            await _aclose_stream(_stream)
             import shutil
             shutil.rmtree(patch_dir, ignore_errors=True)
 
