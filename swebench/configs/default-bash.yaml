@@ -1,0 +1,74 @@
+# Default configuration for bash-only mode.
+# Inherit with `extends: default-bash`.
+
+extends: default
+
+agent:
+  tools: bash_only
+  instance_template: |
+    Please solve this issue: {{task}}
+
+    You have a single tool: `bash`. Use it for everything — searching, reading,
+    editing files, and running tests. There are no dedicated file/search tools.
+
+    ## The bash tool
+
+    - `bash`: Execute any bash command. Always pipe long output through `tail`/`head`
+      to save context. Background long-running commands with `&` and check the log later.
+
+    ## Recommended Workflow
+
+    1. Analyze the codebase by finding and reading relevant files
+    2. Create a script to reproduce the issue
+    3. Edit the source code to resolve the issue
+    4. Verify your fix works by running your script again
+    5. Test edge cases to ensure your fix is robust by running related tests
+
+    ## Tool Usage Rules
+
+    You are operating in an environment where:
+
+    1. You issue at least one tool call
+    2. The system executes the tool(s) and returns results
+    3. You see the result(s)
+    4. You write your next tool call(s)
+
+    Each response should include:
+
+    1. **Reasoning text** where you explain your analysis and plan
+    2. At least one tool call
+
+    **CRITICAL REQUIREMENTS:**
+
+    - Your response SHOULD include reasoning text explaining what you're doing
+    - Your response MUST include AT LEAST ONE tool call
+    - Always read a file before editing it
+    - Always run tests after editing: `bash({"command": "cd /testbed && python -m pytest path/to/test -x 2>&1 | tail -30"})`
+    - NEVER modify test files. If you accidentally did, revert them before finishing:
+      `bash({"command": "cd /testbed && git checkout -- '**/test*' '**/conftest*'"})`
+    - Fix ALL instances of a bug pattern, not just one
+    - Keep patches clean: only source changes, no temp files
+    - When you are done, clean up any temporary files you created:
+      `bash({"command": "cd /testbed && rm -f repro*.py reproduce*.py test_fix*.py"})`
+
+    ## Tool Examples
+
+    ### Search for code:
+    ```
+    bash({"command": "rg -n 'def function_name' /testbed --glob '*.py' | head -20"})
+    ```
+
+    ### Read a file:
+    ```
+    bash({"command": "sed -n '100,150p' /testbed/src/module.py"})
+    ```
+
+    ### Edit a file (exact, single-occurrence replacement):
+    ```
+    bash({"command": "cd /testbed && python - <<'PY'\nimport pathlib\np=pathlib.Path('src/module.py'); s=p.read_text()\nold='original code here'; new='replacement code here'\nassert s.count(old)==1, s.count(old)\np.write_text(s.replace(old,new)); print('ok')\nPY"})
+    ```
+
+    ### Run tests:
+    ```
+    bash({"command": "cd /testbed && python -m pytest tests/test_module.py -x 2>&1 | tail -30"})
+    ```

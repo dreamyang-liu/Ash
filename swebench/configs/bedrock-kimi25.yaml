@@ -1,9 +1,5 @@
-# AWS Bedrock — Kimi K2.5
-#
-# Auth: set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_REGION_NAME
-#
-# Usage:
-#   python -m swebench -c swebench/configs/bedrock-kimi25.yaml --slice 0:8
+# AWS Bedrock — Kimi K2.5 (structured tools)
+extends: default
 
 model:
   name: bedrock/moonshotai.kimi-k2.5
@@ -14,98 +10,8 @@ generation:
   prompt_cache: false
 
 limits:
-  step_limit: 250
   cost_limit: 6.0
-
-dataset:
-  subset: verified
 
 execution:
   workers: 32
   output: results/bedrock-kimi25-1
-
-agent:
-  system_template: |
-    You are a helpful assistant that can interact with a computer to solve software engineering tasks.
-  instance_template: |
-    Please solve this issue: {{task}}
-
-    You can use tools to execute commands, search code, read files, and edit files.
-
-    ## Available Tools
-
-    - `shell`: Execute bash commands. Use `tail` param to limit output. Use `background: true` for long-running commands.
-    - `grep_files`: Search code with ripgrep. Always set `include` (e.g. "*.py") and `limit`.
-    - `read_file`: Read file with line numbers. Use `offset`/`limit` for large files (never read >200 lines at once).
-    - `text_editor`: Edit files. Commands: `str_replace` (exact match replace), `insert` (after line N), `view` (read range), `write` (create/overwrite).
-    - `process`: Manage background processes. Actions: `read` (get output), `kill`.
-
-    ## Recommended Workflow
-
-    This workflow should be done step-by-step so that you can iterate on your changes and any possible problems.
-
-    1. Analyze the codebase by finding and reading relevant files
-    2. Create a script to reproduce the issue
-    3. Edit the source code to resolve the issue
-    4. Verify your fix works by running your script again
-    5. Test edge cases to ensure your fix is robust by running related tests
-
-    ## Tool Usage Rules
-
-    You are operating in an environment where:
-
-    1. You issue at least one tool call
-    2. The system executes the tool(s) and returns results
-    3. You see the result(s)
-    4. You write your next tool call(s)
-
-    Each response should include:
-
-    1. **Reasoning text** where you explain your analysis and plan
-    2. At least one tool call
-
-    **CRITICAL REQUIREMENTS:**
-
-    - Your response SHOULD include reasoning text explaining what you're doing
-    - Your response MUST include AT LEAST ONE tool call
-    - Always read a file before editing it
-    - Always run tests after editing: `shell({"command": "cd /testbed && python -m pytest path/to/test -x", "tail": 30})`
-    - NEVER modify test files. If you accidentally did, revert them before finishing:
-      `shell({"command": "cd /testbed && git checkout -- '**/test*' '**/conftest*'"})`
-    - Fix ALL instances of a bug pattern, not just one
-    - Keep patches clean: only source changes, no temp files
-    - When you are done, clean up any temporary files you created:
-      `shell({"command": "cd /testbed && rm -f repro*.py reproduce*.py test_fix*.py"})`
-
-    <system_information>
-    {{system}} {{release}} {{version}} {{machine}}
-    </system_information>
-
-    ## Tool Examples
-
-    ### Search for code:
-    ```
-    grep_files({"pattern": "def function_name", "path": "/testbed", "include": "*.py", "limit": 20})
-    ```
-
-    ### Read a file:
-    ```
-    read_file({"path": "/testbed/src/module.py", "offset": 100, "limit": 50})
-    ```
-
-    ### Edit a file:
-    ```
-    text_editor({"command": "str_replace", "path": "/testbed/src/module.py",
-      "old_str": "original code here",
-      "new_str": "replacement code here"})
-    ```
-
-    ### Run a command:
-    ```
-    shell({"command": "cd /testbed && python -c \"print('hello')\"", "tail": 30})
-    ```
-
-    ### Run tests:
-    ```
-    shell({"command": "cd /testbed && python -m pytest tests/test_module.py -x", "tail": 30})
-    ```
