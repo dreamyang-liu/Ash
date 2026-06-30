@@ -4,165 +4,31 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
-	"github.com/google/uuid"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/rl-sandbox/k8s-cp/config"
+	"github.com/rl-sandbox/k8s-cp/handler"
+	"github.com/rl-sandbox/k8s-cp/k8s"
+	"github.com/rl-sandbox/k8s-cp/reconciler"
 )
-
-// Note: rand.Seed is deprecated since Go 1.20 - the runtime auto-seeds now
-
-type Port struct {
-	ContainerPort int `json:"container_port"`
-}
-
-type SpawnReq struct {
-	Image        string            `json:"image" binding:"required"`
-	Name         string            `json:"name"`
-	Ports        []Port            `json:"ports"`
-	Env          map[string]string `json:"env"`
-	Resources    ResourceReq       `json:"resources"`
-	NodeSelector map[string]string `json:"node_selector"`
-}
-
-type ResourceReq struct {
-	Requests ResourceSpec `json:"requests"`
-	Limits   ResourceSpec `json:"limits"`
-}
-
-type ResourceSpec struct {
-	CPU    string `json:"cpu"`
-	Memory string `json:"memory"`
-}
-
-type SpawnResp struct {
-	Name             string `json:"name"`
-	UUID             string `json:"uuid"`
-	Namespace        string `json:"namespace"`
-	Status           string `json:"status"`
-	ServiceType      string `json:"service_type"`
-	ClusterIP        string `json:"cluster_ip,omitempty"`
-	Host             string `json:"host,omitempty"`
-	ExternalIP       string `json:"external_ip,omitempty"`
-	ExternalHostname string `json:"external_hostname,omitempty"`
-	Ports            []int  `json:"ports,omitempty"`
-	NodePorts        []int  `json:"node_ports,omitempty"`
-	Message          string `json:"message,omitempty"`
-}
-
-// Configuration holds all the environment-based configuration
-type Config struct {
-	Namespace          string
-	WaitDeployReadySec int
-	WaitSvcIPSec       int
-	RedisHost          string
-	RedisPort          int
-	RedisDB            int
-	ServiceAccountName string
-}
-
-// getEnv returns the environment variable value or a default
-func getEnv(key, defaultVal string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return defaultVal
-}
-
-// getEnvInt returns the environment variable as int or a default
-func getEnvInt(key string, defaultVal int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-		log.Printf("Warning: invalid integer value for %s: %s, using default %d", key, v, defaultVal)
-	}
-	return defaultVal
-}
-
-// LoadConfig loads configuration from environment variables
-func LoadConfig() *Config {
-	return &Config{
-		Namespace:          getEnv("TARGET_NAMESPACE", "ash"),
-		WaitDeployReadySec: getEnvInt("WAIT_DEPLOY_READY_SEC", 120),
-		WaitSvcIPSec:       getEnvInt("WAIT_SVC_IP_SEC", 120),
-		RedisHost:          getEnv("REDIS_HOST", "localhost"),
-		RedisPort:          getEnvInt("REDIS_PORT", 6379),
-		RedisDB:            getEnvInt("REDIS_DB", 0),
-		ServiceAccountName: getEnv("SERVICE_ACCOUNT_NAME", "default"),
-	}
-}
-
-// Generate a random string of specified length
-func randSuffix(n int) string {
-	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = letters[rand.Intn(len(letters))]
-	}
-	return string(b)
-}
-
-// Get Kubernetes client from in-cluster or kubeconfig
-func getK8sClient() (*kubernetes.Clientset, error) {
-	var config *rest.Config
-	var err error
-
-	// Try in-cluster config first
-	config, err = rest.InClusterConfig()
-	if err != nil {
-		// Fall back to kubeconfig
-		kubeconfig := os.Getenv("KUBECONFIG")
-		if kubeconfig == "" {
-			kubeconfig = os.ExpandEnv("$HOME/.kube/config")
-		}
-		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create k8s config: %w", err)
-		}
-	}
-
-	// Create clientset
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create k8s client: %w", err)
-	}
-
-	return clientset, nil
-}
-
-// Create a Redis client
-func createRedisClient(config *Config) *redis.Client {
-	return redis.NewClient(&redis.Options{
-		Addr: fmt.Sprintf("%s:%d", config.RedisHost, config.RedisPort),
-		DB:   config.RedisDB,
-	})
-}
 
 func main() {
 	// Load configuration
-	config := LoadConfig()
+	cfg := config.LoadConfig()
 
 	// Create Redis client
-	rdb := createRedisClient(config)
+	rdb := redis.NewClient(&redis.Options{
+		Addr: fmt.Sprintf("%s:%d", cfg.RedisHost, cfg.RedisPort),
+		DB:   cfg.RedisDB,
+	})
 	defer rdb.Close()
 
 	// Ping Redis to ensure connection
@@ -172,8 +38,8 @@ func main() {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
 
-	// Create Kubernetes client once at startup (singleton pattern)
-	clientset, err := getK8sClient()
+	// Create Kubernetes client
+	clientset, err := k8s.GetK8sClient()
 	if err != nil {
 		log.Fatalf("Failed to create Kubernetes client: %v", err)
 	}
@@ -202,387 +68,34 @@ func main() {
 		c.String(http.StatusOK, "ready")
 	})
 
+	// Metrics endpoint
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	// Create handler dependencies
+	deps := handler.Dependencies{
+		Clientset: clientset,
+		Redis:     rdb,
+		Config:    cfg,
+	}
+
 	// Main API endpoints
-	r.POST("/create", func(c *gin.Context) {
-		var req SpawnReq
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
+	r.POST("/create", handler.HandleSpawn(deps))
+	r.DELETE("/destroy", handler.HandleDestroy(deps))
 
-		// Use request context with timeout
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
-		defer cancel()
-
-		name := req.Name
-		if name == "" {
-			name = fmt.Sprintf("sandbox-%s", randSuffix(12))
-		}
-		labels := map[string]string{"app": name, "from": "control-plane", "type": "sandbox"}
-
-		// 1) Deployment
-		var envVars []corev1.EnvVar
-		for k, v := range req.Env {
-			envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
-		}
-
-		var containerPorts []corev1.ContainerPort
-		for _, p := range req.Ports {
-			containerPorts = append(containerPorts, corev1.ContainerPort{ContainerPort: int32(p.ContainerPort)})
-		}
-		if len(containerPorts) == 0 {
-			containerPorts = append(containerPorts, corev1.ContainerPort{ContainerPort: 80})
-		}
-
-		// Determine the probe port (first container port, default 3000)
-		probePort := 3000
-		if len(containerPorts) > 0 {
-			probePort = int(containerPorts[0].ContainerPort)
-		}
-
-		// Create container with readiness probe
-		// The probe checks if MCP server is listening on the port
-		container := corev1.Container{
-			Name:  "sandbox",
-			Image: req.Image,
-			Ports: containerPorts,
-			Env:   envVars,
-			ReadinessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					TCPSocket: &corev1.TCPSocketAction{
-						Port: intstrFromInt(probePort),
-					},
-				},
-				InitialDelaySeconds: 2,
-				PeriodSeconds:       3,
-				TimeoutSeconds:      1,
-				SuccessThreshold:    1,
-				FailureThreshold:    10,
-			},
-		}
-
-		// Add resource limits and requests if specified
-		if req.Resources.Requests.CPU != "" || req.Resources.Requests.Memory != "" ||
-			req.Resources.Limits.CPU != "" || req.Resources.Limits.Memory != "" {
-
-			container.Resources = corev1.ResourceRequirements{}
-
-			if req.Resources.Requests.CPU != "" || req.Resources.Requests.Memory != "" {
-				container.Resources.Requests = corev1.ResourceList{}
-				if req.Resources.Requests.CPU != "" {
-					qty, err := resource.ParseQuantity(req.Resources.Requests.CPU)
-					if err != nil {
-						c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid CPU request: %v", err)})
-						return
-					}
-					container.Resources.Requests[corev1.ResourceCPU] = qty
-				}
-				if req.Resources.Requests.Memory != "" {
-					qty, err := resource.ParseQuantity(req.Resources.Requests.Memory)
-					if err != nil {
-						c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid memory request: %v", err)})
-						return
-					}
-					container.Resources.Requests[corev1.ResourceMemory] = qty
-				}
-			}
-
-			if req.Resources.Limits.CPU != "" || req.Resources.Limits.Memory != "" {
-				container.Resources.Limits = corev1.ResourceList{}
-				if req.Resources.Limits.CPU != "" {
-					qty, err := resource.ParseQuantity(req.Resources.Limits.CPU)
-					if err != nil {
-						c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid CPU limit: %v", err)})
-						return
-					}
-					container.Resources.Limits[corev1.ResourceCPU] = qty
-				}
-				if req.Resources.Limits.Memory != "" {
-					qty, err := resource.ParseQuantity(req.Resources.Limits.Memory)
-					if err != nil {
-						c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid memory limit: %v", err)})
-						return
-					}
-					container.Resources.Limits[corev1.ResourceMemory] = qty
-				}
-			}
-		}
-
-		// Use client-provided node selector, or default if not provided
-		nodeSelector := req.NodeSelector
-		if nodeSelector == nil {
-			nodeSelector = map[string]string{
-				"kubernetes.io/os": "linux",
-			}
-		}
-
-		podSpec := corev1.PodSpec{
-			Containers:         []corev1.Container{container},
-			ServiceAccountName: config.ServiceAccountName,
-			NodeSelector:       nodeSelector,
-		}
-		dep := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: config.Namespace,
-				Labels:    labels,
-			},
-			Spec: appsv1.DeploymentSpec{
-				Replicas: int32Ptr(1), // Always single replica
-				Selector: &metav1.LabelSelector{
-					MatchLabels: map[string]string{"app": name},
-				},
-				Template: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Labels: labels},
-					Spec:       podSpec,
-				},
-			},
-		}
-
-		// Create deployment with context
-		_, err = clientset.AppsV1().Deployments(config.Namespace).Create(ctx, dep, metav1.CreateOptions{})
-		if err != nil {
-			log.Printf("Failed to create deployment: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to create deployment: %v", err)})
-			return
-		}
-
-		// 2) Create ClusterIP Service
-		var servicePorts []corev1.ServicePort
-		for _, p := range req.Ports {
-			servicePorts = append(servicePorts, corev1.ServicePort{
-				Port:       int32(p.ContainerPort),
-				TargetPort: intstrFromInt(p.ContainerPort),
-			})
-		}
-		if len(servicePorts) == 0 {
-			servicePorts = append(servicePorts, corev1.ServicePort{
-				Port:       80,
-				TargetPort: intstrFromInt(80),
-			})
-		}
-		svc := &corev1.Service{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: config.Namespace,
-				Labels:    labels,
-			},
-			Spec: corev1.ServiceSpec{
-				Type:     corev1.ServiceTypeClusterIP,
-				Selector: map[string]string{"app": name},
-				Ports:    servicePorts,
-			},
-		}
-		svcObj, err := clientset.CoreV1().Services(config.Namespace).Create(ctx, svc, metav1.CreateOptions{})
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-
-		// 3) Wait for Deployment Ready with exponential backoff
-		ready := false
-		backoff := 1 * time.Second
-		maxBackoff := 10 * time.Second
-		end := time.Now().Add(time.Duration(config.WaitDeployReadySec) * time.Second)
-
-		for time.Now().Before(end) {
-			cur, err := clientset.AppsV1().Deployments(config.Namespace).Get(ctx, name, metav1.GetOptions{})
-			if err == nil && cur.Status.AvailableReplicas >= 1 {
-				ready = true
-				break
-			}
-
-			// Use exponential backoff with jitter
-			jitter := time.Duration(rand.Int63n(int64(backoff) / 2))
-			sleepTime := backoff + jitter
-			time.Sleep(sleepTime)
-
-			// Increase backoff for next iteration
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-		}
-
-		// 4) Collect Service Address (ClusterIP only)
-		var clusterIP string
-		var svcPorts []int
-		if svcObj != nil {
-			s, err := clientset.CoreV1().Services(config.Namespace).Get(ctx, name, metav1.GetOptions{})
-			if err == nil {
-				clusterIP = s.Spec.ClusterIP
-				for _, p := range s.Spec.Ports {
-					svcPorts = append(svcPorts, int(p.Port))
-				}
-			}
-		}
-
-		// Prepare Redis record
-		sandboxUUID := fmt.Sprintf("%s-%s", name, uuid.New().String())
-
-		sandboxStatus := "ready"
-		if !ready {
-			sandboxStatus = "starting"
-		}
-
-		sandboxPort := 0
-		if len(svcPorts) > 0 {
-			sandboxPort = svcPorts[0]
-		}
-
-		// Create Redis record with pipeline for efficiency
-		record := map[string]interface{}{
-			"uuid":   sandboxUUID,
-			"host":   fmt.Sprintf("%s.%s.svc.cluster.local", name, config.Namespace),
-			"port":   sandboxPort,
-			"status": sandboxStatus,
-		}
-
-		key := fmt.Sprintf("sandbox:%s", sandboxUUID)
-		pipe := rdb.Pipeline()
-		pipe.HSet(ctx, key, record)
-
-		if _, err := pipe.Exec(ctx); err != nil {
-			log.Printf("Failed to save sandbox record to Redis: %v", err)
-		}
-
-		log.Printf("Sandbox created: name=%s, uuid=%s, status=%s", name, sandboxUUID, sandboxStatus)
-
-		resp := SpawnResp{
-			Name:        name,
-			UUID:        sandboxUUID,
-			Namespace:   config.Namespace,
-			Status:      cases.Title(language.English).String(sandboxStatus),
-			ServiceType: "ClusterIP",
-			ClusterIP:   clusterIP,
-			Host:        fmt.Sprintf("%s.%s.svc.cluster.local", name, config.Namespace),
-			Ports:       svcPorts,
-		}
-
-		// Log status
-		status := "success"
-		if !ready {
-			status = "partial"
-		}
-		log.Printf("Spawn request completed with status: %s", status)
-
-		c.JSON(http.StatusOK, resp)
-	})
-
-	// DELETE /sandboxes — destroy sandboxes
-	// Body: {"ids": ["uuid-1", "uuid-2"]} or {"all": true}
-	r.DELETE("/destroy", func(c *gin.Context) {
-		var req struct {
-			IDs []string `json:"ids"`
-			All bool     `json:"all"`
-		}
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-
-		if !req.All && len(req.IDs) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "must specify 'ids' or 'all: true'"})
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Minute)
-		defer cancel()
-
-		var succeeded []string
-		var failed []string
-
-		if req.All {
-			// Destroy all sandboxes by label selector
-			selector := "from=control-plane,type=sandbox"
-			deps, err := clientset.AppsV1().Deployments(config.Namespace).List(ctx, metav1.ListOptions{
-				LabelSelector: selector,
-			})
-			if err != nil {
-				log.Printf("Failed to list deployments: %v", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list deployments"})
-				return
-			}
-
-			for _, dep := range deps.Items {
-				name := dep.Name
-				namespace := dep.Namespace
-				id := fmt.Sprintf("%s/%s", namespace, name)
-
-				if err := clientset.CoreV1().Services(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
-					log.Printf("Failed to delete service %s: %v", id, err)
-				}
-				if err := clientset.AppsV1().Deployments(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
-					log.Printf("Failed to delete deployment %s: %v", id, err)
-				}
-
-				pattern := fmt.Sprintf("sandbox:%s-*", name)
-				iter := rdb.Scan(ctx, 0, pattern, 0).Iterator()
-				var redisErr bool
-				for iter.Next(ctx) {
-					if err := rdb.Del(ctx, iter.Val()).Err(); err != nil {
-						redisErr = true
-					}
-				}
-				if iter.Err() != nil {
-					redisErr = true
-				}
-				if redisErr {
-					failed = append(failed, id)
-				} else {
-					succeeded = append(succeeded, id)
-				}
-			}
-		} else {
-			// Destroy specific sandboxes by UUID
-			for _, uuid := range req.IDs {
-				key := fmt.Sprintf("sandbox:%s", uuid)
-				result, err := rdb.HGetAll(ctx, key).Result()
-				if err != nil || len(result) == 0 {
-					log.Printf("Destroy failed: UUID %s not found", uuid)
-					failed = append(failed, uuid)
-					continue
-				}
-
-				name := result["host"]
-				parts := strings.Split(name, ".")
-				if len(parts) < 2 {
-					log.Printf("Destroy failed: invalid host format for UUID %s", uuid)
-					failed = append(failed, uuid)
-					continue
-				}
-				svcName := parts[0]
-				namespace := parts[1]
-
-				if err := clientset.CoreV1().Services(namespace).Delete(ctx, svcName, metav1.DeleteOptions{}); err != nil {
-					log.Printf("Failed to delete service %s: %v", svcName, err)
-				}
-				if err := clientset.AppsV1().Deployments(namespace).Delete(ctx, svcName, metav1.DeleteOptions{}); err != nil {
-					log.Printf("Failed to delete deployment %s: %v", svcName, err)
-				}
-				if err := rdb.Del(ctx, key).Err(); err != nil {
-					log.Printf("Failed to delete Redis key %s: %v", key, err)
-				}
-
-				succeeded = append(succeeded, uuid)
-			}
-		}
-
-		log.Printf("Destroy completed: succeeded=%d failed=%d", len(succeeded), len(failed))
-		c.JSON(http.StatusOK, gin.H{
-			"deleted": succeeded,
-			"failed":  failed,
-			"count":   len(succeeded),
-		})
-	})
-	// Create HTTP server with graceful shutdown
+	// Create HTTP server
 	srv := http.Server{
 		Addr:    ":8080",
 		Handler: r,
 	}
 
+	// Start reconciler in background
+	reconcilerCtx, reconcilerCancel := context.WithCancel(context.Background())
+	defer reconcilerCancel()
+	go reconciler.Start(reconcilerCtx, clientset, rdb, cfg)
+
 	// Start server in a goroutine
 	go func() {
+		log.Println("Starting control-plane server on :8080")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
 		}
@@ -595,23 +108,17 @@ func main() {
 
 	log.Println("Shutting down server...")
 
+	// Stop reconciler
+	reconcilerCancel()
+
 	// Create shutdown context with timeout
-	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
 
 	// Shutdown the server
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
 	log.Println("Server exited properly")
-}
-
-func int32Ptr(i int) *int32 {
-	v := int32(i)
-	return &v
-}
-
-func intstrFromInt(i int) intstr.IntOrString {
-	return intstr.IntOrString{Type: intstr.Int, IntVal: int32(i)}
 }
