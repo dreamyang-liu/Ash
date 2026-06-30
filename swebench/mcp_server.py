@@ -48,6 +48,9 @@ class Session:
     id: str
     groups: list[str] = field(default_factory=lambda: ["default"])
     active_id: str | None = None
+    # Serializes this session's tool dispatch in HTTP mode so concurrent requests
+    # can't race on active_id (read-modify-write). Unused/harmless in stdio mode.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock, compare=False, repr=False)
 
     @property
     def owner_group(self) -> str:
@@ -449,7 +452,10 @@ class HttpMcpServer:
 
             elif method == "tools/call":
                 params = body.get("params", {})
-                content = await handler.call_tool(params.get("name", ""), params.get("arguments", {}))
+                # Hold the session lock so concurrent requests for the same session
+                # can't interleave active_id read-modify-write (e.g. switch vs use).
+                async with session.lock:
+                    content = await handler.call_tool(params.get("name", ""), params.get("arguments", {}))
                 return web.json_response({
                     "jsonrpc": "2.0", "id": id_,
                     "result": {"content": [content], "isError": content.get("isError", False)},
