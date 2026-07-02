@@ -1,0 +1,10 @@
+# Manager–worker with the coordination layer enabled (OCC + reservations).
+# File overlap between subtasks is permitted; stale writes are rejected with a
+# diff and retried by the agents themselves.
+extends: manager-worker
+
+manager_worker:
+  waggle: true
+
+execution:
+  output: results/manager-worker-waggle
