@@ -11,8 +11,18 @@ tool-call granularity:
   re-read and re-apply without being overtaken (no starvation). Writers that
   hit a foreign reservation wait; on release they re-arbitrate in FIFO order.
 - **shell** cannot be arbitrated up front. Instead its *effects* are detected
-  by fingerprinting registered files after each call, so out-of-band writes
-  still bump versions (post-hoc accounting: detect effects, don't guess intent).
+  by fingerprinting registered files after each call: any drift from the last
+  coordinated state is recorded as an ``external`` version (post-hoc
+  accounting: detect effects, don't guess intent). Attribution is deliberately
+  honest — the record names the agent whose scan *detected* the drift, not a
+  claimed culprit (concurrent shells are indistinguishable).
+
+Deliberate trade-off: same-file operations are serialized on purpose, and the
+tool I/O of a commit (write + content/fingerprint fetch) happens while holding
+the file's condition — the fingerprint must be updated atomically with the
+write, or drift detection could not tell coordinated writes from external
+ones. Sandbox calls are localhost HTTP (milliseconds), so the serialization
+cost is bounded; different files never contend.
 
 Conflict *resolution* is delegated to the calling LLM: a rejection is just a
 failed tool result carrying the diff and instructions to re-read.
@@ -54,7 +64,7 @@ class ChangeRecord:
     """One committed version of a file (full content, self-evident history)."""
     version: int
     author: str
-    op: str                  # baseline | write | create | shell | delete
+    op: str                  # baseline | write | create | external | delete
     timestamp: float
     content: str             # "" when deleted or larger than CONTENT_LIMIT
 
@@ -142,7 +152,7 @@ class WorkspaceCoordinator:
             f"{sbx}:{path}": [
                 {"version": r.version, "author": r.author, "op": r.op,
                  "timestamp": r.timestamp, "bytes": len(r.content)}
-                for r in rec.history
+                for r in list(rec.history)     # snapshot: appends may race the dump
             ]
             for (sbx, path), rec in files.items() if rec.history
         }
@@ -211,8 +221,10 @@ class CoordinatedExecutor:
     def _write(self, args: dict) -> ToolResult:
         path = args.get("path", "")
         rec = self._state.file(self._sbx, path)
-        deadline = time.monotonic() + self._state.ttl
         with rec.cond:
+            # Deadline starts once the lock is held — time spent waiting to
+            # acquire it must not burn the budget (spurious contended errors).
+            deadline = time.monotonic() + self._state.ttl
             if not self._await_reservation(rec, deadline):
                 return self._reject_contended(rec, path)
             if rec.version == 0:
@@ -238,7 +250,10 @@ class CoordinatedExecutor:
                 return True
             if now >= deadline:
                 return False
-            rec.cond.wait(timeout=min(reservation.expires_at, deadline) - now)
+            # Floor of 1s: near-expiry micro-timeouts would otherwise busy-spin.
+            # A commit still wakes us instantly via notify_all; the floor only
+            # coarsens how often we poll for TTL expiry.
+            rec.cond.wait(timeout=max(1.0, min(reservation.expires_at, deadline) - now))
 
     def _write_unregistered(self, rec: _FileRecord, path: str, args: dict) -> ToolResult:
         """Write to a never-seen path: allow creation, refuse blind overwrite."""
@@ -277,40 +292,51 @@ class CoordinatedExecutor:
         return result
 
     def _scan_effects(self) -> None:
-        """Fingerprint registered files; version-bump anything a shell changed.
+        """Fingerprint registered files; record any drift from the last
+        coordinated state as an ``external`` version.
 
-        Attribution is approximate under concurrent shells (scans are
-        serialized, the shells themselves are not) — correctness only needs
-        the version bump, the author string is informational.
+        Two-phase safety: the bulk fingerprint is taken WITHOUT the per-file
+        lock, so it may predate a coordinated commit that lands before the
+        comparison (phantom-version risk). Any suspected drift is therefore
+        re-fingerprinted while holding ``rec.cond`` before being believed.
+
+        Attribution is deliberately honest: the record names the agent whose
+        scan detected the drift (concurrent shells are indistinguishable);
+        correctness only needs the version bump.
         """
+        detector = f"external (detected by {self._agent})"
         with self._state.scan_lock:
             paths = self._state.registered_paths(self._sbx)
             if not paths:
                 return
-            digests = self._fetch_digests(paths)
+            digests = self._fetch_digests(paths)             # bulk, pre-lock photo
             for path in paths:
                 rec = self._state.file(self._sbx, path)
                 with rec.cond:
-                    current = digests.get(path)
-                    if current == rec.digest:
+                    if digests.get(path) == rec.digest:
                         continue
-                    if current is None:                      # deleted out of band
-                        WorkspaceCoordinator.record_change(
-                            rec, f"shell({self._agent})", "delete", "", "")
+                    # Suspected drift — confirm with a fresh fingerprint under
+                    # the lock, so a raced coordinated commit is not misread.
+                    fresh = self._fetch_digests([path]).get(path)
+                    if fresh == rec.digest:
+                        continue                             # coordinated write raced the scan
+                    if fresh is None:                        # deleted out of band
+                        WorkspaceCoordinator.record_change(rec, detector, "delete", "", "")
                     else:
-                        content, _ = self._fetch_state(path)
-                        WorkspaceCoordinator.record_change(
-                            rec, f"shell({self._agent})", "shell", content, current)
+                        content = self._fetch_content(path)
+                        WorkspaceCoordinator.record_change(rec, detector, "external",
+                                                           content, fresh)
                     rec.cond.notify_all()
 
     # -- sandbox probes (via the same inner executor) --------------------------- #
 
     def _fetch_state(self, path: str) -> tuple[str, str]:
         """Return (content, digest) of a file as the sandbox sees it now."""
-        content_result = self._inner("shell", {"command": shlex.join(["cat", "--", path])})
-        content = content_result.output if content_result.success else ""
-        digests = self._fetch_digests([path])
-        return content, digests.get(path, "")
+        return self._fetch_content(path), self._fetch_digests([path]).get(path, "")
+
+    def _fetch_content(self, path: str) -> str:
+        result = self._inner("shell", {"command": shlex.join(["cat", "--", path])})
+        return result.output if result.success else ""
 
     def _fetch_digests(self, paths: list[str]) -> dict[str, str]:
         command = shlex.join(["md5sum", "--", *paths])

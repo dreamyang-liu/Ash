@@ -236,13 +236,39 @@ def test_shell_effect_bumps_version_and_stales_other_agents():
 
     rec = state.file("default", PATH)
     assert rec.version == 2
-    assert rec.history[-1].op == "shell"
-    assert rec.history[-1].author == "shell(B)"
+    assert rec.history[-1].op == "external"
+    assert rec.history[-1].author == "external (detected by B)"
     assert rec.history[-1].content == "changed out of band"
 
     rejection = _write(a, "based on stale v1")   # A must now be stale
     assert not rejection.success
-    assert "shell(B)" in rejection.output
+    assert "external (detected by B)" in rejection.output
+
+
+def test_scan_double_check_prevents_phantom_version():
+    """A bulk fingerprint taken just before a coordinated commit must not be
+    misread as external drift: the under-lock re-check must catch the race."""
+    sandbox, state, make = _setup({PATH: "base"})
+    a = make("A")
+    _read(a)
+    assert _write(a, "v2").success               # rec.digest now tracks v2
+    rec = state.file("default", PATH)
+    assert rec.version == 2
+
+    real_fetch = a._fetch_digests
+    calls = {"count": 0}
+
+    def stale_bulk_then_fresh(paths):
+        calls["count"] += 1
+        if calls["count"] == 1:                  # bulk photo: stale, pre-commit
+            return {PATH: "0" * 32}
+        return real_fetch(paths)                 # under-lock double check: fresh
+
+    a._fetch_digests = stale_bulk_then_fresh
+    a("shell", {"command": "true"})              # triggers the scan
+
+    assert rec.version == 2                      # no phantom "external" version
+    assert calls["count"] == 2                   # the double check actually ran
 
 
 # --------------------------------------------------------------------------- #

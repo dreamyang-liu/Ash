@@ -21,6 +21,7 @@ Verified instances are small localized fixes where decomposition rarely helps.
 
 import json
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -104,8 +105,9 @@ class _WorkerExecutor:
     def close(self):
         try:
             self._loop.run_until_complete(self._sb.backend.close())
-        except Exception:  # noqa: BLE001
-            pass
+            self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+        except Exception as e:  # noqa: BLE001 - cleanup failures leak FDs; log, don't hide
+            print(f"[manager-worker] executor close failed: {e}", file=sys.stderr)
         finally:
             self._loop.close()
 
@@ -194,7 +196,12 @@ class ManagerWorkerHarness(BaseHarness):
                 subtasks = [{"id": "solo", "description": problem, "files": [], "acceptance": ""}]
 
             # --- 2. Reset tree to base (discard any stray manager edits) ---------
-            base = session._base_commit or "HEAD"
+            # Fail fast if the base commit was never captured: "reset --hard HEAD"
+            # would silently keep any commit the manager made, corrupting the
+            # patch baseline the evaluator diffs against.
+            base = session._base_commit
+            if not base:
+                return self._fail(iid, c, "no_base_commit")
             session.execute("shell", {"command": f"git reset --hard {base} && git clean -fd",
                                       "working_dir": "/testbed"})
 
