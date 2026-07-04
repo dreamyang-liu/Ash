@@ -9,10 +9,12 @@ Each harness implements a different agent backend:
 from .base import BaseHarness
 from .litellm import LiteLLMHarness
 from .claude_code import ClaudeCodeHarness
+from .manager_worker import ManagerWorkerHarness
 
 HARNESSES = {
     "litellm": LiteLLMHarness,
     "claude-code": ClaudeCodeHarness,
+    "manager-worker": ManagerWorkerHarness,
     # "codex": CodexHarness,
 }
 
