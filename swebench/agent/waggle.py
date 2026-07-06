@@ -31,19 +31,27 @@ Design rules:
 - Topology-agnostic — no manager/worker/subtask concepts, only flat agent ids.
 - The 7-tool schema is never changed; all semantics live in tool results.
 - History stores full file content per version (self-evident, diff on demand).
+- Mechanism vs policy: the OCC kernel is fixed; decisions are ``WagglePolicy``
+  hooks (all-``Defer`` defaults == stock behavior). Two mountings share the
+  kernel: ``CoordinatedExecutor`` (in-process wrapper, transitional / test
+  fixture) and ``WaggleInterceptor`` (the MCP-proxy pipeline element).
 """
 
 from __future__ import annotations
 
 import difflib
+import logging
 import re
 import shlex
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 from ..models import ToolResult
+from .pipeline import CallContext, Continue, ShortCircuit, ToolInterceptor, Verdict
+
+logger = logging.getLogger("ash.waggle")  # unconfigured -> WARNING+ to stderr
 
 DEFAULT_TTL = 120.0          # reservation lifetime (also bounds one write call)
 DIFF_LIMIT = 4_000           # max chars of diff shown in a rejection
@@ -159,6 +167,94 @@ class WorkspaceCoordinator:
 
 
 # --------------------------------------------------------------------------- #
+#  Policy surface (mechanism vs policy — ARCHITECTURE.md L2)
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class Allow:
+    """Let the write commit now, bypassing further OCC checks."""
+
+
+@dataclass(frozen=True)
+class Reject:
+    """Refuse the write; ``message`` (if any) is shown to the agent."""
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class Wait:
+    """Block until the file's state changes hands, then re-ask the policy
+    (bounded by the write call's TTL deadline)."""
+
+
+@dataclass(frozen=True)
+class Defer:
+    """Fall through to the default OCC behavior (the stock kernel decision)."""
+
+
+@dataclass(frozen=True)
+class Ignore:
+    """``on_drift`` only: skip recording the detected drift."""
+
+
+PolicyDecision = Union[Allow, Reject, Wait, Defer, Ignore]
+_DECISION_TYPES = (Allow, Reject, Wait, Defer, Ignore)
+
+
+@dataclass(frozen=True)
+class PolicyContext:
+    """Read-only, kernel-computed view handed to policy hooks.
+
+    Carries values, not the ledger: policies can decide but have no API to
+    mutate coordination state (account integrity is unreachable from policy
+    code). ``history`` items are frozen ``ChangeRecord``s.
+    """
+    event: str                       # write | conflict | drift | commit
+    agent_id: str
+    sandbox_id: str
+    path: str
+    tool_name: str
+    args: dict
+    snapshot_version: Optional[int]  # this agent's snapshot (None = never read)
+    current_version: int
+    authors_since: tuple[str, ...]   # authors of versions after the snapshot
+    diff: str                        # unified diff (conflict events only)
+    history: tuple[ChangeRecord, ...]
+
+
+class WagglePolicy:
+    """Decision hooks for Waggle. Mechanism is fixed; these choose decisions.
+
+    Hooks run INSIDE the file's critical section (policy authors never reason
+    about concurrency), receive a read-only ``PolicyContext``, and any hook
+    exception falls back to default OCC and is logged (fail-safe). The default
+    implementations reproduce stock OCC behavior exactly: everything defers.
+    """
+
+    def on_write(self, ctx: PolicyContext) -> PolicyDecision:
+        """Gate a write before arbitration. ``Allow`` = commit without
+        snapshot checks; ``Reject`` = refuse; ``Wait`` = block until the file
+        changes hands, then re-ask; ``Defer`` = default OCC arbitration."""
+        return Defer()
+
+    def on_conflict(self, ctx: PolicyContext) -> PolicyDecision:
+        """Choose the response to a stale write (``ctx.diff`` is populated).
+        ``Allow`` = last-writer-wins; ``Reject(message)`` = custom rejection
+        (the loser still gets a reservation); ``Defer`` = reject with diff +
+        reservation grant (default)."""
+        return Defer()
+
+    def on_drift(self, ctx: PolicyContext) -> PolicyDecision:
+        """React to confirmed out-of-band drift. ``Ignore`` = don't record
+        it; ``Defer`` = record an ``external`` version (default)."""
+        return Defer()
+
+    def on_commit(self, ctx: PolicyContext) -> None:
+        """Observe a committed version. Observe-only; return value ignored."""
+        return None
+
+
+# --------------------------------------------------------------------------- #
 #  Executor middleware (incarnation 1: in-process wrapper)
 # --------------------------------------------------------------------------- #
 
@@ -172,12 +268,14 @@ class CoordinatedExecutor:
     WRITE_COMMANDS = frozenset({"str_replace", "insert", "write"})
 
     def __init__(self, inner: Executor, state: WorkspaceCoordinator, agent_id: str,
-                 sandbox_id: str = "default", require_read: bool = True) -> None:
+                 sandbox_id: str = "default", require_read: bool = True,
+                 policy: Optional[WagglePolicy] = None) -> None:
         self._inner = inner
         self._state = state
         self._agent = agent_id
         self._sbx = sandbox_id
         self._require_read = require_read
+        self._policy = policy            # None = pure OCC (no hook overhead)
 
     # -- dispatch ----------------------------------------------------------- #
 
@@ -202,13 +300,18 @@ class CoordinatedExecutor:
         result = self._inner(tool_name, args)
         path = args.get("path")
         if result.success and path:
-            rec = self._state.file(self._sbx, path)
-            with rec.cond:
-                if rec.version == 0:
-                    self._register_baseline(rec, path)
-                self._state.set_snapshot(self._agent, self._sbx, path, rec.version)
-                rec.rejects.pop(self._agent, None)
+            self._record_read(path)
         return result
+
+    def _record_read(self, path: str) -> None:
+        """Register/refresh this agent's snapshot of ``path`` after any
+        successful read (shared by both mountings)."""
+        rec = self._state.file(self._sbx, path)
+        with rec.cond:
+            if rec.version == 0:
+                self._register_baseline(rec, path)
+            self._state.set_snapshot(self._agent, self._sbx, path, rec.version)
+            rec.rejects.pop(self._agent, None)
 
     def _register_baseline(self, rec: _FileRecord, path: str) -> None:
         """First sighting of an existing file: store v1. Holds ``rec.cond``."""
@@ -225,17 +328,72 @@ class CoordinatedExecutor:
             # Deadline starts once the lock is held — time spent waiting to
             # acquire it must not burn the budget (spurious contended errors).
             deadline = time.monotonic() + self._state.ttl
+            gate = self._policy_gate(rec, path, args, deadline)
+            if isinstance(gate, ToolResult):
+                return gate                          # deadline passed while waiting
+            if isinstance(gate, Reject):
+                return self._reject_policy(path, gate)
+            if isinstance(gate, Allow):
+                return self._commit_forced(rec, path, args)
+            return self._arbitrate(rec, path, args)  # Defer -> default OCC
+
+    def _policy_gate(self, rec: _FileRecord, path: str, args: dict,
+                     deadline: float) -> "PolicyDecision | ToolResult":
+        """Wait out foreign reservations, then ask ``on_write``. ``Wait``
+        decisions block on the file's condition and re-arbitrate on wake-up.
+        Returns Allow | Reject | Defer, or a contended-rejection ToolResult if
+        the deadline passes first. Holds ``rec.cond``."""
+        while True:
             if not self._await_reservation(rec, deadline):
                 return self._reject_contended(rec, path)
-            if rec.version == 0:
-                return self._write_unregistered(rec, path, args)
-            snapshot = self._state.snapshot(self._agent, self._sbx, path)
-            if snapshot is None:
-                return self._reject_unread(path)
-            if snapshot != rec.version:
+            if self._policy is None:
+                return Defer()
+            decision = self._safe_hook(
+                "on_write", self._policy_ctx("write", rec, path, args))
+            if not isinstance(decision, Wait):
+                return decision if isinstance(decision, (Allow, Reject)) else Defer()
+            now = time.monotonic()
+            if now >= deadline:
+                return self._reject(
+                    f"[WAGGLE] Write rejected: policy kept {path} on hold past "
+                    f"the deadline.\nRe-read the file and retry shortly.")
+            rec.cond.wait(timeout=min(1.0, deadline - now))
+
+    def _arbitrate(self, rec: _FileRecord, path: str, args: dict) -> ToolResult:
+        """Default OCC arbitration (snapshot currency). Holds ``rec.cond``."""
+        if rec.version == 0:
+            return self._write_unregistered(rec, path, args)
+        snapshot = self._state.snapshot(self._agent, self._sbx, path)
+        if snapshot is None:
+            return self._reject_unread(path)
+        if snapshot != rec.version:
+            return self._conflict(rec, path, args, snapshot)
+        return self._commit(rec, path, args, op="write")
+
+    def _conflict(self, rec: _FileRecord, path: str, args: dict,
+                  snapshot: int) -> ToolResult:
+        """Stale snapshot: ``on_conflict`` may override; the default (and any
+        policy fallback) is reject + diff + reservation grant. Holds ``rec.cond``."""
+        if self._policy is not None:
+            ctx = self._policy_ctx("conflict", rec, path, args, snapshot=snapshot)
+            decision = self._safe_hook("on_conflict", ctx)
+            if isinstance(decision, Allow):
+                return self._commit(rec, path, args, op="write")
+            if isinstance(decision, Reject) and decision.message:
                 self._grant_reservation(rec)
-                return self._reject_stale(rec, path, snapshot)
-            return self._commit(rec, path, args, op="write")
+                return self._reject(
+                    f"[WAGGLE] Write rejected by policy: {decision.message}")
+        self._grant_reservation(rec)
+        return self._reject_stale(rec, path, snapshot)
+
+    def _commit_forced(self, rec: _FileRecord, path: str, args: dict) -> ToolResult:
+        """Policy ``Allow``: bypass snapshot checks and commit now. Holds ``rec.cond``."""
+        op = "create" if rec.version == 0 else "write"
+        return self._commit(rec, path, args, op=op)
+
+    def _reject_policy(self, path: str, decision: Reject) -> ToolResult:
+        message = decision.message or f"policy denied writing {path}"
+        return self._reject(f"[WAGGLE] Write rejected by policy: {message}")
 
     def _await_reservation(self, rec: _FileRecord, deadline: float) -> bool:
         """Wait out a foreign reservation. Woken waiters re-arbitrate; an
@@ -261,7 +419,7 @@ class CoordinatedExecutor:
             return self._reject_unread(path)
         result = self._inner("text_editor", args)
         if result.success:
-            self._commit_bookkeeping(rec, path, op="create")
+            self._commit_bookkeeping(rec, path, op="create", args=args)
         return result
 
     def _commit(self, rec: _FileRecord, path: str, args: dict, op: str) -> ToolResult:
@@ -269,10 +427,11 @@ class CoordinatedExecutor:
         (same-file writes are serialized, so no check-then-write race)."""
         result = self._inner("text_editor", args)
         if result.success:
-            self._commit_bookkeeping(rec, path, op)
+            self._commit_bookkeeping(rec, path, op, args=args)
         return result
 
-    def _commit_bookkeeping(self, rec: _FileRecord, path: str, op: str) -> None:
+    def _commit_bookkeeping(self, rec: _FileRecord, path: str, op: str,
+                            args: Optional[dict] = None) -> None:
         content, digest = self._fetch_state(path)
         WorkspaceCoordinator.record_change(rec, self._agent, op, content, digest)
         if rec.reservation and rec.reservation.agent == self._agent:
@@ -280,6 +439,50 @@ class CoordinatedExecutor:
         rec.rejects.pop(self._agent, None)
         self._state.set_snapshot(self._agent, self._sbx, path, rec.version)
         rec.cond.notify_all()
+        self._observe_commit(rec, path, args or {})
+
+    def _observe_commit(self, rec: _FileRecord, path: str, args: dict) -> None:
+        """``on_commit`` (observe-only), inside the critical section. A hook
+        exception is logged and ignored — it can never undo a commit."""
+        if self._policy is None:
+            return
+        try:
+            self._policy.on_commit(self._policy_ctx("commit", rec, path, args))
+        except Exception as exc:  # noqa: BLE001 — policy code must not break the kernel
+            logger.warning("waggle policy on_commit failed (ignored): %s",
+                           exc, exc_info=True)
+
+    # -- policy plumbing --------------------------------------------------------- #
+
+    def _safe_hook(self, hook: str, ctx: PolicyContext) -> PolicyDecision:
+        """Run one policy hook. Exceptions and junk returns fall back to
+        default OCC (``Defer``) and are logged — fail-safe by construction."""
+        try:
+            decision = getattr(self._policy, hook)(ctx)
+        except Exception as exc:  # noqa: BLE001 — policy code must not break the kernel
+            logger.warning("waggle policy %s failed; deferring to OCC: %s",
+                           hook, exc, exc_info=True)
+            return Defer()
+        if isinstance(decision, _DECISION_TYPES):
+            return decision
+        logger.warning("waggle policy %s returned %r; deferring to OCC",
+                       hook, decision)
+        return Defer()
+
+    def _policy_ctx(self, event: str, rec: _FileRecord, path: str, args: dict,
+                    snapshot: Optional[int] = None) -> PolicyContext:
+        """Kernel-computed, read-only context for policy hooks. Holds ``rec.cond``."""
+        snap = snapshot if snapshot is not None else \
+            self._state.snapshot(self._agent, self._sbx, path)
+        diff = self._diff_since(rec, path, snap) \
+            if event == "conflict" and snap is not None else ""
+        return PolicyContext(
+            event=event, agent_id=self._agent, sandbox_id=self._sbx, path=path,
+            tool_name="shell" if event == "drift" else "text_editor",
+            args=dict(args), snapshot_version=snap, current_version=rec.version,
+            authors_since=tuple(rec.authors_since(snap)) if snap is not None else (),
+            diff=diff, history=tuple(rec.history),
+        )
 
     def _grant_reservation(self, rec: _FileRecord) -> None:
         rec.reservation = Reservation(self._agent, time.monotonic() + self._state.ttl)
@@ -320,6 +523,8 @@ class CoordinatedExecutor:
                     fresh = self._fetch_digests([path]).get(path)
                     if fresh == rec.digest:
                         continue                             # coordinated write raced the scan
+                    if self._drift_ignored(rec, path):
+                        continue                             # policy chose not to record it
                     if fresh is None:                        # deleted out of band
                         WorkspaceCoordinator.record_change(rec, detector, "delete", "", "")
                     else:
@@ -327,6 +532,14 @@ class CoordinatedExecutor:
                         WorkspaceCoordinator.record_change(rec, detector, "external",
                                                            content, fresh)
                     rec.cond.notify_all()
+
+    def _drift_ignored(self, rec: _FileRecord, path: str) -> bool:
+        """Ask ``on_drift`` about confirmed drift; ``Ignore`` skips recording
+        it (default records an ``external`` version). Holds ``rec.cond``."""
+        if self._policy is None:
+            return False
+        decision = self._safe_hook("on_drift", self._policy_ctx("drift", rec, path, {}))
+        return isinstance(decision, Ignore)
 
     # -- sandbox probes (via the same inner executor) --------------------------- #
 
@@ -404,3 +617,77 @@ class CoordinatedExecutor:
         if len(diff) > DIFF_LIMIT:
             diff = diff[:DIFF_LIMIT] + "\n... (diff truncated)"
         return "--- what changed since your read ---\n" + diff
+
+
+# --------------------------------------------------------------------------- #
+#  Pipeline mounting (incarnation 2: MCP-proxy interceptor)
+# --------------------------------------------------------------------------- #
+
+class WaggleInterceptor(ToolInterceptor):
+    """Mounts the Waggle kernel on the tool-interceptor pipeline.
+
+    Adapts ``CoordinatedExecutor`` (kept as the proxy-less lite mode / test
+    fixture) to before/after hooks:
+
+    - **write** (``before``): arbitration AND the write itself happen inside
+      the file's critical section (ADR-5 — the commit's write and fingerprint
+      update must be atomic), so the verdict is a ``ShortCircuit`` carrying
+      the committed or rejected result; the framework's own inner call is
+      skipped for writes.
+    - **read** (``after``): a successful read records this agent's snapshot.
+    - **shell** (``after``): registered files are scanned for drift.
+
+    The proxy must supply the raw per-sandbox executor in
+    ``ctx.metadata["executor"]``; Waggle uses it for the arbitrated write
+    itself and for probe traffic (content/digest fetches) that must not
+    re-enter the pipeline. Coordination state is shared across sessions via
+    one ``WorkspaceCoordinator``; the per-call adapter objects are stateless.
+
+    ``fail_mode`` is closed: a broken coordinator must reject rather than
+    silently allow lost updates.
+    """
+
+    tools = {"read_file", "text_editor", "shell"}
+    fail_mode = "closed"
+
+    def __init__(self, state: Optional[WorkspaceCoordinator] = None,
+                 policy: Optional[WagglePolicy] = None,
+                 ttl: float = DEFAULT_TTL, require_read: bool = True) -> None:
+        self.state = state or WorkspaceCoordinator(ttl=ttl)
+        self.policy = policy
+        self.require_read = require_read
+
+    def before(self, ctx: CallContext) -> Verdict:
+        if ctx.tool_name == "text_editor" and \
+                ctx.args.get("command", "") in CoordinatedExecutor.WRITE_COMMANDS:
+            return ShortCircuit(self._adapter(ctx)._write(dict(ctx.args)))
+        return Continue()
+
+    def after(self, ctx: CallContext, result: ToolResult) -> ToolResult:
+        if ctx.tool_name == "shell":
+            self._adapter(ctx)._scan_effects()
+        elif result.success and self._is_read(ctx):
+            path = ctx.args.get("path")
+            if path:
+                self._adapter(ctx)._record_read(path)
+        return result
+
+    def dump(self) -> dict:
+        """JSON-friendly coordination audit (see ``WorkspaceCoordinator.dump``)."""
+        return self.state.dump()
+
+    def _adapter(self, ctx: CallContext) -> CoordinatedExecutor:
+        """Per-call kernel adapter bound to this call's agent/sandbox/executor."""
+        executor = ctx.metadata.get("executor")
+        if executor is None:
+            raise RuntimeError(
+                "WaggleInterceptor needs the raw sandbox executor in "
+                "ctx.metadata['executor'] for writes and probe traffic")
+        return CoordinatedExecutor(executor, self.state, agent_id=ctx.agent_id,
+                                   sandbox_id=ctx.sandbox_id,
+                                   require_read=self.require_read, policy=self.policy)
+
+    @staticmethod
+    def _is_read(ctx: CallContext) -> bool:
+        return ctx.tool_name == "read_file" or (
+            ctx.tool_name == "text_editor" and ctx.args.get("command") == "view")
