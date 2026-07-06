@@ -178,8 +178,9 @@ overlap between agents' edits is arbitrated below it.
 
 Registered harnesses: `litellm` (single agent), `claude-code`,
 `manager-worker` (explore → decompose → parallel workers on one shared
-sandbox). Planned: `best-of-n`, orchestrator-worker with Magentic-style
-ledger/replan, debate.
+sandbox), `best-of-n` (N fully isolated parallel candidates, one patch
+selected by tests or heuristic). Planned: orchestrator-worker with
+Magentic-style ledger/replan, debate.
 
 ## L4 — Eval
 
@@ -239,7 +240,7 @@ localhost HTTP (milliseconds), which bounds the cost.
 | Waggle mounting | in-process `CoordinatedExecutor` wrapping harness executors (*transitional*) | `WaggleInterceptor` inside the MCP proxy; the executor wrapper remains as a test fixture / proxy-less lite mode |
 | Interceptor pipeline | not yet built | proxy core; guardrails/ACL/audit migrate out of the agent loop into it |
 | Policy hooks | interface defined here | implemented with the pipeline |
-| Harnesses (L3) | `litellm`, `claude-code`, `manager-worker` | + `best-of-n`, orchestrator-worker (ledger/replan), debate |
+| Harnesses (L3) | `litellm`, `claude-code`, `manager-worker`, `best-of-n` | + orchestrator-worker (ledger/replan), debate |
 | Eval (L4) | SWE-bench (`extends:` configs, batch runner) | + more benchmarks; topology × coordination A/B matrix |
 
 ## Roadmap (ordered)

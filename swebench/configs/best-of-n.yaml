@@ -1,0 +1,28 @@
+# Best-of-N harness (topology B: fully isolated parallel candidates).
+# N independent rollouts per instance — each in its OWN sandbox (no shared state,
+# no coordination) — then ONE patch is selected as the prediction.
+#
+# selection modes:
+#   tests     — run the instance's FAIL_TO_PASS tests inside each candidate's own
+#               sandbox; winner = most passing (ties: fewer changed files, then
+#               shorter patch). RESEARCH MODE — test-aware, NOT leaderboard-fair:
+#               it peeks at the evaluation tests to pick the winner, so it measures
+#               the topology's oracle-verifier upper bound.
+#   heuristic — no test execution: prefer non-empty patches, then the changed-file
+#               set most candidates agree on, then the shortest patch. Leaderboard-fair.
+extends: bedrock-sonnet46
+
+execution:
+  harness: best-of-n
+  workers: 2                 # instance-level parallelism (each instance spawns n_candidates sandboxes)
+  output: results/best-of-n
+  runtime_bin: /opt/dlami/nvme/projects/Ash/runtime/ash-runtime
+
+best_of_n:
+  n_candidates: 3            # independent rollouts per instance (own sandbox each)
+  selection: tests           # "tests" (research mode — see header) | "heuristic"
+  temperature_jitter: 0.2    # candidate i samples at temperature + i*jitter (clamped to 1.0);
+                             # with no base temperature the ladder is 0.0, 0.2, 0.4, ...
+
+limits:
+  cost_limit: 3.0            # PER-CANDIDATE budget (instance total ~= n_candidates x this)
