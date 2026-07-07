@@ -1,8 +1,8 @@
 # Ash Architecture
 
-> Status: accepted design (2026-07). Layers L1/L3/L4 are implemented; L2 exists
-> as an in-process library today and moves into the MCP proxy (see
-> [Status](#status-implemented-vs-target)).
+> Status: accepted design (2026-07). All four layers are implemented; the L2
+> interceptor pipeline is mounted in the MCP proxy (opt-in via `--coordinate` /
+> `--plugins`; see [Status](#status-implemented-vs-target)).
 
 Ash is structured as four layers. Each layer has exactly one responsibility and
 one home; every layer talks to the one below it through a single, frozen
@@ -237,9 +237,9 @@ localhost HTTP (milliseconds), which bounds the cost.
 |---|---|---|
 | Runtime (L1) | ✅ as designed | unchanged, forever |
 | Waggle kernel | ✅ `swebench/agent/waggle.py` (`WorkspaceCoordinator`), 10 unit tests + live-conflict experiment | same kernel, mounted in the proxy |
-| Waggle mounting | in-process `CoordinatedExecutor` wrapping harness executors (*transitional*) | `WaggleInterceptor` inside the MCP proxy; the executor wrapper remains as a test fixture / proxy-less lite mode |
-| Interceptor pipeline | not yet built | proxy core; guardrails/ACL/audit migrate out of the agent loop into it |
-| Policy hooks | interface defined here | implemented with the pipeline |
+| Waggle mounting | ✅ `WaggleInterceptor` inside the MCP proxy (opt-in `--coordinate` / `--plugins`); `CoordinatedExecutor` kept as test fixture / proxy-less lite mode | unchanged |
+| Interceptor pipeline | ✅ `swebench/agent/pipeline.py`, mounted in `swebench/mcp_server.py` | guardrails/ACL/audit migrate out of the agent loop into it |
+| Policy hooks | ✅ `WagglePolicy` (`on_write`/`on_conflict`/`on_drift`/`on_commit`), run inside the file's critical section | + two reference policies (ownership ACL, auto-merge-then-reject) |
 | Harnesses (L3) | `litellm`, `claude-code`, `manager-worker`, `best-of-n` | + orchestrator-worker (ledger/replan), debate |
 | Eval (L4) | SWE-bench (`extends:` configs, batch runner) | + more benchmarks; topology × coordination A/B matrix |
 
@@ -247,10 +247,10 @@ localhost HTTP (milliseconds), which bounds the cost.
 
 1. **A/B evidence** — manager-worker with Waggle on/off over a multi-file
    SWE-bench slice; publish numbers alongside the mechanism.
-2. **Pipeline + proxy mounting** — build the interceptor chain in
-   `swebench/mcp_server.py`, move Waggle behind it, migrate guardrails/output
-   truncation from the agent loop into interceptors.
+2. **Pipeline + proxy mounting** — ✅ interceptor chain built and mounted in
+   `swebench/mcp_server.py`, Waggle behind it; guardrails/output-truncation
+   migration from the agent loop still pending.
 3. **`best-of-n` harness** — parallel candidates + objective test-based
    selection (the highest-confidence score lever).
-4. **Policy hook surface** — ship `WagglePolicy` with two reference policies
-   (ownership ACL, auto-merge-then-reject).
+4. **Policy hook surface** — ✅ `WagglePolicy` shipped; the two reference
+   policies (ownership ACL, auto-merge-then-reject) still pending.

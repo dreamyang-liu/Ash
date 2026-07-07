@@ -5,10 +5,16 @@ Supports multiple sandboxes with ownership + group-based visibility:
 - A session sees: its own private sandboxes + any shared sandbox whose groups
   overlap with the session's groups
 - Runs as HTTP/SSE for multi-session, or stdio for single-session (backwards-compat)
+- Optionally routes exec tool calls through the L2 interceptor pipeline
+  (docs/ARCHITECTURE.md): OFF by default; --coordinate mounts Waggle write
+  arbitration, --plugins <file.py> replaces the pipeline assembly entirely.
 
 Usage:
     # HTTP mode (multi-session):
     python -m swebench.mcp_server --http --port 8400
+
+    # HTTP mode with Waggle coordination for shared sandboxes:
+    python -m swebench.mcp_server --http --port 8400 --coordinate
 
     # Stdio mode (single-session, backwards-compat):
     python -m swebench.mcp_server --image <docker-image> --patch-dir /tmp/patches/
@@ -17,6 +23,7 @@ Usage:
 import asyncio
 import copy
 import json
+import os
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -25,6 +32,10 @@ from typing import Any
 
 from ash_sandbox import DockerPool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
+
+from .agent.pipeline import CallContext, ToolPipeline, load_pipeline
+from .agent.waggle import WaggleInterceptor
+from .models import ToolResult
 
 
 # ---------------------------------------------------------------------------
@@ -319,13 +330,17 @@ class SessionHandler:
     # Exec tools that can mutate the filesystem — refresh the patch after these.
     _MUTATING = {"shell", "text_editor", "process"}
 
-    def __init__(self, session: Session, pool: SandboxPool, auto_extract: bool = False):
+    def __init__(self, session: Session, pool: SandboxPool, auto_extract: bool = False,
+                 pipeline: "ToolPipeline | None" = None):
         self.session = session
         self.pool = pool
         # auto_extract: re-extract the diff after every mutating tool call so the
         # patch file is always current (single-sandbox mode). Removes any reliance
         # on shutdown-time extraction, which races the harness read under load.
         self.auto_extract = auto_extract
+        # pipeline: L2 interceptor chain (shared across sessions — coordination
+        # state must span agents). None = dispatch exactly as before (default).
+        self.pipeline = pipeline
 
     def _resolve(self, sandbox_id: str | None) -> SandboxEntry | None:
         """Resolve the target sandbox by explicit id, falling back to the fixed
@@ -373,7 +388,12 @@ class SessionHandler:
                         "to you (see sandbox_create / sandbox_list).")
 
         try:
-            result: SdkToolResult = await entry.sandbox.call(name, **args)
+            if self.pipeline is not None:
+                content = await self._exec_via_pipeline(entry, name, args)
+            else:
+                result: SdkToolResult = await entry.sandbox.call(name, **args)
+                content = {"type": "text", "text": result.output,
+                           "isError": result.is_error}
         except Exception as e:
             return _err(str(e))
 
@@ -386,7 +406,33 @@ class SessionHandler:
             except Exception:
                 pass
 
-        return {"type": "text", "text": result.output, "isError": result.is_error}
+        return content
+
+    async def _exec_via_pipeline(self, entry: SandboxEntry, name: str,
+                                 args: dict) -> dict:
+        """Run one exec tool through the interceptor pipeline (L2 governance).
+
+        The pipeline contract (and Waggle's blocking reservation waits) is
+        synchronous, so it runs on a worker thread; the raw executor bridges
+        each inner/probe call back onto this event loop. agent_id is the MCP
+        session identity; sandbox_id is the resolved sandbox.
+        """
+        loop = asyncio.get_running_loop()
+
+        def raw_executor(tool: str, tool_args: dict) -> ToolResult:
+            future = asyncio.run_coroutine_threadsafe(
+                entry.sandbox.call(tool, **tool_args), loop)
+            sdk = future.result()
+            return ToolResult(success=not sdk.is_error, output=sdk.output,
+                              error="tool error" if sdk.is_error else None)
+
+        ctx = CallContext(agent_id=self.session.id, sandbox_id=entry.id,
+                          tool_name=name, args=dict(args),
+                          metadata={"executor": raw_executor})
+        result = await asyncio.to_thread(self.pipeline.execute, ctx, raw_executor)
+        text = result.output if (result.success or result.output) \
+            else f"Error: {result.error or 'unknown error'}"
+        return {"type": "text", "text": text, "isError": not result.success}
 
 
 def _ok(text: str) -> dict:
@@ -404,10 +450,12 @@ def _err(text: str) -> dict:
 class HttpMcpServer:
     """HTTP/SSE transport — one SandboxPool, multiple concurrent sessions."""
 
-    def __init__(self, pool: SandboxPool, host: str = "0.0.0.0", port: int = 8400):
+    def __init__(self, pool: SandboxPool, host: str = "0.0.0.0", port: int = 8400,
+                 pipeline: "ToolPipeline | None" = None):
         self.pool = pool
         self.host = host
         self.port = port
+        self.pipeline = pipeline
         self._sessions: dict[str, Session] = {}
 
     def _get_or_create_session(self, headers: dict) -> Session:
@@ -426,7 +474,7 @@ class HttpMcpServer:
         async def handle_mcp(request: web.Request) -> web.Response:
             headers = {k.lower(): v for k, v in request.headers.items()}
             session = self._get_or_create_session(headers)
-            handler = SessionHandler(session, self.pool)
+            handler = SessionHandler(session, self.pool, pipeline=self.pipeline)
 
             body = await request.json()
             method = body.get("method", "")
@@ -489,10 +537,12 @@ class HttpMcpServer:
 class StdioMcpServer:
     """Stdio transport — single session, backwards-compatible."""
 
-    def __init__(self, pool: SandboxPool, single_sandbox: bool = False):
+    def __init__(self, pool: SandboxPool, single_sandbox: bool = False,
+                 pipeline: "ToolPipeline | None" = None):
         self.pool = pool
         self.session = Session(id="stdio", groups=["owner:stdio", "default"])
-        self.handler = SessionHandler(self.session, pool, auto_extract=single_sandbox)
+        self.handler = SessionHandler(self.session, pool, auto_extract=single_sandbox,
+                                      pipeline=pipeline)
         # single_sandbox: expose only exec tools bound to the active sandbox
         # (lifecycle tools hidden — the harness pre-provisions the sandbox).
         self.single_sandbox = single_sandbox
@@ -552,6 +602,25 @@ class StdioMcpServer:
 # CLI
 # ---------------------------------------------------------------------------
 
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _build_pipeline(args) -> "ToolPipeline | None":
+    """Assemble the L2 interceptor pipeline (docs/ARCHITECTURE.md).
+
+    Default OFF: with no --plugins and no coordination flag the proxy
+    dispatches tool calls exactly as before. --plugins replaces the default
+    assembly entirely — the PIPELINE list in the file is the configuration.
+    """
+    if args.plugins:
+        return load_pipeline(args.plugins)
+    coordinate = args.coordinate or \
+        os.environ.get("ASH_MCP_COORDINATE", "").strip().lower() in _TRUTHY
+    if coordinate:
+        return ToolPipeline([WaggleInterceptor(ttl=args.waggle_ttl)])
+    return None
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Ash sandbox MCP server")
@@ -562,6 +631,15 @@ def main():
     parser.add_argument("--runtime-bin", default=None)
     parser.add_argument("--patch-dir", default=None, help="Directory for per-sandbox patch files")
     parser.add_argument("--patch-file", default=None, help="(deprecated) alias for --patch-dir parent")
+    parser.add_argument("--coordinate", action="store_true",
+                        help="Route tool calls through the interceptor pipeline with "
+                             "Waggle write arbitration (env: ASH_MCP_COORDINATE=1). "
+                             "Default: off.")
+    parser.add_argument("--waggle-ttl", type=float, default=120.0,
+                        help="Waggle reservation TTL in seconds (with --coordinate)")
+    parser.add_argument("--plugins", default=None,
+                        help="Python file exporting PIPELINE: list[ToolInterceptor]; "
+                             "replaces the default pipeline assembly")
     args = parser.parse_args()
 
     patch_dir = args.patch_dir
@@ -569,16 +647,21 @@ def main():
         patch_dir = str(Path(args.patch_file).parent)
 
     pool = SandboxPool(runtime_bin=args.runtime_bin, patch_dir=patch_dir)
+    pipeline = _build_pipeline(args)
+    if pipeline is not None:
+        names = ", ".join(i.name for i in pipeline.interceptors) or "(empty)"
+        sys.stderr.write(f"[ash-mcp] interceptor pipeline: {names}\n")
+        sys.stderr.flush()
 
     if args.http:
-        server = HttpMcpServer(pool, host=args.host, port=args.port)
+        server = HttpMcpServer(pool, host=args.host, port=args.port, pipeline=pipeline)
         asyncio.run(server.run())
     else:
         async def run_stdio():
             # When an image is given, pre-provision the sandbox and set it active
             # so the agent gets a ready-to-use environment and only sees exec tools.
             single = bool(args.image)
-            stdio = StdioMcpServer(pool, single_sandbox=single)
+            stdio = StdioMcpServer(pool, single_sandbox=single, pipeline=pipeline)
             if args.image:
                 try:
                     entry = await pool.create(args.image, groups=["owner:stdio", "default"])
