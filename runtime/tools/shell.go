@@ -1,11 +1,10 @@
 package tools
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"sync"
@@ -17,13 +16,12 @@ import (
 
 // Process holds state for a background process.
 type Process struct {
-	pid        string
-	cmd        *exec.Cmd
-	stdout     []string
-	stderr     []string
-	exitCode   *int
-	readCursor int
-	mu         sync.Mutex
+	pid      string
+	cmd      *exec.Cmd
+	stdout   *BoundedLog
+	stderr   *BoundedLog
+	exitCode *int
+	mu       sync.Mutex
 }
 
 var (
@@ -48,6 +46,11 @@ func (s *ShellTool) Schema() map[string]any {
 			"background":  map[string]any{"type": "boolean", "default": false, "description": "Run in background, returns pid"},
 			"timeout":     map[string]any{"type": "integer", "default": 300, "description": "Timeout in seconds"},
 			"tail":        map[string]any{"type": "integer", "description": "Only return last N lines of output"},
+			"max_output_bytes": map[string]any{
+				"type":        "integer",
+				"default":     defaultMaxOutputBytes,
+				"description": "Maximum captured bytes per output stream. Larger output keeps the first 40% and last 60%.",
+			},
 			"working_dir": map[string]any{"type": "string", "description": "Working directory"},
 		},
 		"required": []string{"command"},
@@ -70,16 +73,17 @@ func (s *ShellTool) Execute(args map[string]any) Result {
 		tail = int(n)
 	}
 	workingDir, _ := args["working_dir"].(string)
+	maxOutputBytes := outputBytesArg(args)
 
 	agentID, _ := args["agent_id"].(string)
 
 	if background {
-		return s.runBackground(command, workingDir, agentID)
+		return s.runBackground(command, workingDir, agentID, maxOutputBytes)
 	}
-	return s.runSync(command, workingDir, timeout, tail)
+	return s.runSync(command, workingDir, timeout, tail, maxOutputBytes)
 }
 
-func (s *ShellTool) runSync(command, workingDir string, timeout, tail int) Result {
+func (s *ShellTool) runSync(command, workingDir string, timeout, tail int, maxOutputBytes int) Result {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 
@@ -88,23 +92,19 @@ func (s *ShellTool) runSync(command, workingDir string, timeout, tail int) Resul
 		cmd.Dir = workingDir
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := NewBoundedLog(maxOutputBytes)
+	stderr := NewBoundedLog(maxOutputBytes)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	err := cmd.Run()
-
-	output := stdout.String()
-	if stderr.Len() > 0 {
-		output += "\n[stderr]\n" + stderr.String()
-	}
-
-	if tail > 0 {
-		output = lastNLines(output, tail)
-	}
+	output := renderCommandOutput(stdout, stderr, tail)
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
+			if output != "" {
+				return Err(output + "\ncommand timed out after " + fmt.Sprintf("%d", timeout) + "s")
+			}
 			return Err("command timed out after " + fmt.Sprintf("%d", timeout) + "s")
 		}
 		return Err(output)
@@ -112,7 +112,7 @@ func (s *ShellTool) runSync(command, workingDir string, timeout, tail int) Resul
 	return Ok(output)
 }
 
-func (s *ShellTool) runBackground(command, workingDir, agentID string) Result {
+func (s *ShellTool) runBackground(command, workingDir, agentID string, maxOutputBytes int) Result {
 	pid := uuid.New().String()[:8]
 
 	cmd := exec.Command("sh", "-c", command)
@@ -129,7 +129,12 @@ func (s *ShellTool) runBackground(command, workingDir, agentID string) Result {
 		return Err("failed to create stderr pipe: " + err.Error())
 	}
 
-	proc := &Process{pid: pid, cmd: cmd}
+	proc := &Process{
+		pid:    pid,
+		cmd:    cmd,
+		stdout: NewBoundedLog(maxOutputBytes),
+		stderr: NewBoundedLog(maxOutputBytes),
+	}
 
 	if err := cmd.Start(); err != nil {
 		return Err("failed to start: " + err.Error())
@@ -141,22 +146,12 @@ func (s *ShellTool) runBackground(command, workingDir, agentID string) Result {
 
 	// Stream stdout lines as they arrive
 	go func() {
-		scanner := bufio.NewScanner(stdoutPipe)
-		for scanner.Scan() {
-			proc.mu.Lock()
-			proc.stdout = append(proc.stdout, scanner.Text())
-			proc.mu.Unlock()
-		}
+		_, _ = io.Copy(proc.stdout, stdoutPipe)
 	}()
 
 	// Stream stderr lines as they arrive
 	go func() {
-		scanner := bufio.NewScanner(stderrPipe)
-		for scanner.Scan() {
-			proc.mu.Lock()
-			proc.stderr = append(proc.stderr, scanner.Text())
-			proc.mu.Unlock()
-		}
+		_, _ = io.Copy(proc.stderr, stderrPipe)
 	}()
 
 	// Wait for exit
