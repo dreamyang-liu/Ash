@@ -195,6 +195,14 @@ type searchResult struct {
 	Body  string
 }
 
+type searchEngine func(string, int) ([]searchResult, error)
+
+var (
+	searchGoogleEngine     searchEngine = searchGoogle
+	searchDuckDuckGoEngine searchEngine = searchDuckDuckGo
+	searchBraveEngine      searchEngine = searchBrave
+)
+
 func (w *WebSearchTool) Execute(args map[string]any) Result {
 	query, _ := args["query"].(string)
 	if query == "" {
@@ -209,15 +217,15 @@ func (w *WebSearchTool) Execute(args map[string]any) Result {
 		maxResults = clampInt(int(m), 1, 20)
 	}
 
-	engines := []func(string, int) ([]searchResult, error){searchGoogle, searchDuckDuckGo, searchBrave}
+	engines := []searchEngine{searchGoogleEngine, searchDuckDuckGoEngine, searchBraveEngine}
 	if backend != "auto" {
 		switch backend {
 		case "google":
 			engines = engines[:1]
 		case "duckduckgo":
-			engines = []func(string, int) ([]searchResult, error){searchDuckDuckGo}
+			engines = []searchEngine{searchDuckDuckGoEngine}
 		case "brave":
-			engines = []func(string, int) ([]searchResult, error){searchBrave}
+			engines = []searchEngine{searchBraveEngine}
 		default:
 			return Err("invalid backend: " + backend)
 		}
