@@ -19,6 +19,7 @@ jobs:
         with:
           go-version: "1.22"
       - run: go mod download
+      - run: go test ./...
       - run: go build -o ash-runtime .
       - run: go vet ./...
 
