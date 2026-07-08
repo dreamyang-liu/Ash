@@ -33,25 +33,9 @@ EXPECTED_REQUIRED = {
     "web_search": ["query"],
 }
 
-FORBIDDEN_SCHEMA_KEYS = {
-    "oneOf",
-    "anyOf",
-    "allOf",
-    "not",
-    "if",
-    "then",
-    "else",
-    "const",
-    "minimum",
-    "maximum",
-    "exclusiveMinimum",
-    "exclusiveMaximum",
-    "minItems",
-    "maxItems",
-    "patternProperties",
-    "dependencies",
-    "dependentRequired",
-}
+ROOT_SCHEMA_KEYS = {"type", "properties", "required", "description"}
+FIELD_SCHEMA_KEYS = {"type", "items", "enum", "default", "description"}
+SUPPORTED_SCHEMA_TYPES = {"object", "array", "string", "integer", "boolean"}
 
 
 def _function_by_name() -> dict[str, dict[str, Any]]:
@@ -69,14 +53,36 @@ def _runtime_tools_from_agent_schema() -> list[dict[str, Any]]:
     ]
 
 
-def _walk_schema(value: Any):
-    if isinstance(value, dict):
-        yield value
-        for child in value.values():
-            yield from _walk_schema(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from _walk_schema(child)
+def _assert_supported_root_schema(tool_name: str, schema: dict[str, Any]):
+    extra = set(schema) - ROOT_SCHEMA_KEYS
+    assert not extra, f"{tool_name} root schema uses unsupported keys: {sorted(extra)}"
+
+    assert schema.get("type") == "object"
+    assert isinstance(schema.get("properties"), dict)
+    assert set(schema.get("required", [])) <= set(schema["properties"])
+
+    for property_name, field_schema in schema["properties"].items():
+        _assert_supported_field_schema(tool_name, property_name, field_schema)
+
+
+def _assert_supported_field_schema(tool_name: str, path: str, schema: dict[str, Any]):
+    extra = set(schema) - FIELD_SCHEMA_KEYS
+    assert not extra, f"{tool_name}.{path} uses unsupported schema keys: {sorted(extra)}"
+
+    schema_type = schema.get("type")
+    assert schema_type in SUPPORTED_SCHEMA_TYPES, f"{tool_name}.{path} has unsupported type: {schema_type}"
+
+    if "enum" in schema:
+        assert isinstance(schema["enum"], list)
+        assert schema["enum"], f"{tool_name}.{path} enum must not be empty"
+
+    if schema_type == "array":
+        assert "items" in schema, f"{tool_name}.{path} array schema requires items"
+        items = schema["items"]
+        assert isinstance(items, dict), f"{tool_name}.{path}.items must be an object schema"
+        _assert_supported_field_schema(tool_name, f"{path}.items", items)
+    else:
+        assert "items" not in schema, f"{tool_name}.{path} non-array schema must not define items"
 
 
 def test_agent_tool_schema_matches_runtime_tool_surface():
@@ -86,19 +92,11 @@ def test_agent_tool_schema_matches_runtime_tool_surface():
     assert "read_file" not in names
 
 
-def test_agent_tool_schemas_stay_model_compatible_plain_objects():
+def test_agent_tool_schemas_use_supported_plain_object_subset():
     for tool in TOOLS_SCHEMA:
         assert tool["type"] == "function"
         function = tool["function"]
-        parameters = function["parameters"]
-
-        assert parameters["type"] == "object"
-        assert isinstance(parameters.get("properties"), dict)
-        assert set(parameters.get("required", [])) <= set(parameters["properties"])
-
-        for node in _walk_schema(parameters):
-            forbidden = FORBIDDEN_SCHEMA_KEYS & set(node)
-            assert not forbidden, f"{function['name']} uses unsupported schema keys: {sorted(forbidden)}"
+        _assert_supported_root_schema(function["name"], function["parameters"])
 
 
 def test_command_specific_text_editor_contract_is_described_not_encoded_with_oneof():
