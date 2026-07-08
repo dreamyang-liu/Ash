@@ -131,20 +131,38 @@ jobs:
           data = json.loads(sys.stdin.read())
           print(json.loads(data['result']['content'][0]['text'])['pid'])
           ")
-          sleep 1
-          # Read output — should have notification
-          curl -sf -X POST http://localhost:19878 -H 'Content-Type: application/json' \
-            -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"process\",\"arguments\":{\"pid\":\"$PID\",\"action\":\"read\"}}}" | python3 -c "
-          import sys, json
-          data = json.loads(sys.stdin.read())
-          result = data['result']
-          output = json.loads(result['content'][0]['text'])
-          assert 'bg_done' in output['stdout']
-          assert output['running'] == False
-          assert len(result['notifications']) > 0
-          assert result['notifications'][0]['kind'] == 'process_exited'
-          print('OK: background + notifications work')
-          "
+          python3 - "$PID" <<'PY'
+          import json
+          import sys
+          import time
+          import urllib.request
+
+          pid = sys.argv[1]
+          last = None
+          for _ in range(20):
+              req = urllib.request.Request(
+                  "http://localhost:19878",
+                  data=json.dumps({
+                      "jsonrpc": "2.0",
+                      "id": 2,
+                      "method": "tools/call",
+                      "params": {"name": "process", "arguments": {"pid": pid, "action": "read"}},
+                  }).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              with urllib.request.urlopen(req, timeout=5) as resp:
+                  data = json.loads(resp.read().decode())
+              result = data["result"]
+              output = json.loads(result["content"][0]["text"])
+              last = (result, output)
+              if "bg_done" in output["stdout"] and output["running"] is False and result["notifications"]:
+                  assert result["notifications"][0]["kind"] == "process_exited"
+                  print("OK: background + notifications work")
+                  break
+              time.sleep(0.25)
+          else:
+              raise AssertionError(f"process did not exit with notification: {last!r}")
+          PY
           kill %1 2>/dev/null || true
 
   python-client:
