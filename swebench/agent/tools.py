@@ -25,6 +25,24 @@ BASH_ONLY_SCHEMA = [
     },
 ]
 
+AGENT_TOOL_ROUTES = {
+    "shell": "shell",
+    "text_editor": "text_editor",
+    "grep_files": "grep_files",
+    "process": "process",
+    "web_fetch": "web_fetch",
+    "web_search": "web_search",
+}
+
+
+def route_agent_tool(name: str, args: dict) -> tuple[str, dict]:
+    """Translate an agent-facing tool call to a runtime tool call."""
+    runtime_tool = AGENT_TOOL_ROUTES.get(name)
+    if runtime_tool is None:
+        raise KeyError(f"unknown agent tool: {name}")
+    return runtime_tool, dict(args)
+
+
 def truncate_output(content: str, max_len: int = 12000) -> str:
     """Elide the middle of overly long tool output."""
     if len(content) <= max_len:

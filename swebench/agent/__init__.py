@@ -17,7 +17,7 @@ from .prompts import build_system_prompt, build_instance_message  # re-exported
 from .conversation import Conversation
 from .guardrails import Guardrails
 from .llm import LLMClient, ThinkingLoopError
-from .tools import tool_summary, TOOLS_SCHEMA, BASH_ONLY_SCHEMA
+from .tools import tool_summary, TOOLS_SCHEMA, BASH_ONLY_SCHEMA, route_agent_tool
 from . import hooks
 
 __all__ = ["AshAgent", "build_system_prompt", "build_instance_message",
@@ -64,9 +64,22 @@ class AshAgent:
             self.on_step(self.cost.api_calls, name, summary)
         self._trace(f"\n> {name} {summary}\n")
 
-        exec_name = "shell" if name == "bash" else name  # bash_only mode alias
-        warning = guardrails.check(exec_name, args)
-        result = self.executor(exec_name, args)
+        result = None
+        if name == "bash":  # bash_only mode alias
+            exec_name, exec_args = "shell", dict(args)
+        else:
+            try:
+                exec_name, exec_args = route_agent_tool(name, args)
+            except KeyError as exc:
+                exec_name, exec_args = name, dict(args)
+                result = ToolResult(success=False, output="", error=str(exc))
+        if result is None:
+            if exec_name != name:
+                self._trace(f"[runtime] {exec_name} {tool_summary(exec_name, exec_args)}\n")
+            warning = guardrails.check(exec_name, exec_args)
+            result = self.executor(exec_name, exec_args)
+        else:
+            warning = None
         content = result.output if result.success else f"Error: {result.error or 'Unknown error'}\n{result.output}"
         if warning:
             content += f"\n\n{warning}"
