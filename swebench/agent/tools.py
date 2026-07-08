@@ -88,6 +88,11 @@ TOOLS_SCHEMA = [
                     "background": {"type": "boolean", "default": False, "description": "Run in background, returns pid"},
                     "timeout": {"type": "integer", "default": 300, "description": "Timeout in seconds"},
                     "tail": {"type": "integer", "description": "Only return last N lines of output"},
+                    "max_output_bytes": {
+                        "type": "integer",
+                        "default": 1048576,
+                        "description": "Maximum captured bytes per output stream. Larger output keeps the first 40% and last 60%.",
+                    },
                     "working_dir": {"type": "string", "description": "Working directory (default: /testbed)"},
                 },
                 "required": ["command"],
@@ -111,12 +116,12 @@ TOOLS_SCHEMA = [
                 "properties": {
                     "command": {"type": "string", "enum": ["view", "str_replace", "insert", "write"], "description": "Command to execute"},
                     "path": {"type": "string", "description": "File path"},
-                    "view_range": {"type": "array", "items": {"type": "integer"}, "description": "[start, end] line range for view"},
-                    "old_str": {"type": "string", "description": "Text to find (str_replace)"},
-                    "new_str": {"type": "string", "description": "Replacement text (str_replace)"},
-                    "insert_line": {"type": "integer", "description": "Line number to insert after"},
-                    "insert_text": {"type": "string", "description": "Text to insert"},
-                    "file_text": {"type": "string", "description": "Full file content (write)"},
+                    "view_range": {"type": "array", "items": {"type": "integer"}, "description": "For view only: [start, end] inclusive line range."},
+                    "old_str": {"type": "string", "description": "Required for str_replace. Text to find; must match exactly once."},
+                    "new_str": {"type": "string", "description": "Required for str_replace. Replacement text."},
+                    "insert_line": {"type": "integer", "description": "Required for insert. Line number to insert after; use 0 to insert at the start."},
+                    "insert_text": {"type": "string", "description": "Required for insert. Text to insert."},
+                    "file_text": {"type": "string", "description": "Required for write. Full file content; creates or overwrites the file."},
                 },
                 "required": ["command", "path"],
             },
@@ -149,7 +154,7 @@ TOOLS_SCHEMA = [
             "description": (
                 "Manage a background process started with shell(background=true).\n"
                 "Actions:\n"
-                "  read: Get new output lines since last read (incremental)\n"
+                "  read: Get the current bounded output snapshot\n"
                 "  kill: Terminate the process"
             ),
             "parameters": {
@@ -160,6 +165,52 @@ TOOLS_SCHEMA = [
                     "tail": {"type": "integer", "description": "Only return last N lines (read only)"},
                 },
                 "required": ["pid", "action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": "Fetch a URL and return its content in the specified format",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to fetch"},
+                    "format": {"type": "string", "enum": ["html", "text", "markdown"], "default": "markdown"},
+                    "headers": {"type": "object", "description": "Additional HTTP headers"},
+                    "timeout": {
+                        "type": "integer",
+                        "default": 15,
+                        "description": "Request timeout in seconds. Values are clamped to the runtime maximum.",
+                    },
+                    "max_length": {
+                        "type": "integer",
+                        "default": 10000,
+                        "description": "Maximum returned characters. Values are clamped to the runtime maximum.",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web and return results from multiple engines",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "backend": {"type": "string", "enum": ["auto", "duckduckgo", "brave", "google"], "default": "auto"},
+                    "max_results": {
+                        "type": "integer",
+                        "default": 5,
+                        "description": "Maximum results. Values are clamped to the runtime maximum.",
+                    },
+                },
+                "required": ["query"],
             },
         },
     },
