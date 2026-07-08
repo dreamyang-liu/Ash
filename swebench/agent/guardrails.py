@@ -9,7 +9,7 @@ class Guardrails:
     """Stateful guardrail checker, one per agent run."""
 
     def __init__(self):
-        self._files_read: set[str] = set()          # files seen via read_file / view
+        self._files_read: set[str] = set()          # files seen via text_editor view
         self._consecutive_edits: dict[str, int] = {} # file -> edits since last test
 
     def check(self, name: str, args: dict) -> str:
@@ -18,7 +18,7 @@ class Guardrails:
         path = args.get("path", "")
 
         # Track file reads
-        if name == "read_file" or (name == "text_editor" and args.get("command") == "view"):
+        if name == "text_editor" and args.get("command") == "view":
             self._files_read.add(path)
 
         # Read-before-edit: must have read a file before editing it
@@ -26,7 +26,7 @@ class Guardrails:
             if path and path not in self._files_read:
                 warnings.append(
                     f"[Warning] You are editing {path} without reading it first. "
-                    f"Use read_file or text_editor(view) first to see the current content."
+                    f"Use text_editor(view) first to see the current content."
                 )
             self._consecutive_edits[path] = self._consecutive_edits.get(path, 0) + 1
             if self._consecutive_edits[path] >= 3:

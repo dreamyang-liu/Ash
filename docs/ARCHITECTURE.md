@@ -46,8 +46,8 @@ why topologies, coordination policies, and transports can change independently.
 
 ## L1 — Runtime (execution)
 
-`ash-runtime` runs inside every sandbox and exposes exactly seven tools
-(`shell`, `process`, `read_file`, `text_editor`, `grep_files`, `web_fetch`,
+`ash-runtime` runs inside every sandbox and exposes exactly six tools
+(`shell`, `process`, `text_editor`, `grep_files`, `web_fetch`,
 `web_search`) over JSON-RPC via HTTP, MCP, or stdio.
 
 Design rule: **the runtime only executes.** No coordination, no policy, no
@@ -101,7 +101,7 @@ Assembly is plain Python — order is semantics, a list is the configuration:
 # my_plugins.py        ash-mcp-proxy --plugins my_plugins.py
 PIPELINE = [
     GuardrailInterceptor(),                                   # safety first
-    ToolACLInterceptor({"investigator": {"read_file", "grep_files"}}),
+    ToolACLInterceptor({"investigator": {"text_editor", "grep_files"}}),
     WaggleInterceptor(policy=TeamPolicy()),                   # coordination
     AuditInterceptor("audit.jsonl"),                          # observe last
 ]
@@ -114,7 +114,7 @@ workspace, at tool-call granularity:
 
 | Event | Mechanism |
 |---|---|
-| read (`read_file` / `view`) | record per-agent snapshot of the file version seen |
+| read (`text_editor` / `view`) | record per-agent snapshot of the file version seen |
 | write (`str_replace` / `insert` / `write`) | arbitrate: stale snapshot → reject with a unified diff of what changed; the loser is granted a TTL **reservation** so it can re-read and re-apply without being overtaken |
 | writer hits a foreign reservation | wait on the file's condition; on release, waiters re-arbitrate FIFO (commit-release → all conflict; expiry-release → a still-consistent waiter wins) |
 | shell | effects detected post-hoc: registered files are fingerprinted after each call; drift from the last coordinated state is recorded as an `external` version (with an under-lock re-check so a raced coordinated commit is never misread as drift) |

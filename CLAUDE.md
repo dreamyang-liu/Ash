@@ -53,14 +53,13 @@ There are four independently-versioned pieces:
 
 ## The tool protocol (the core contract)
 
-`ash-runtime` exposes exactly **7 tools** over JSON-RPC. Changing this set is a breaking
+`ash-runtime` exposes exactly **6 tools** over JSON-RPC. Changing this set is a breaking
 change — keep the Go implementation, the SDK, and the SWE-bench agent tool list in sync.
 
 | Tool          | Purpose                                                            |
 |---------------|-------------------------------------------------------------------|
 | `shell`       | Run a command. `background: true` returns a pid.                  |
 | `process`     | Read output of / kill a background process.                       |
-| `read_file`   | Read a file with line numbers, offset, limit.                    |
 | `text_editor` | `view` / `write` / `str_replace` / `insert`.                     |
 | `grep_files`  | Ripgrep search (pattern, glob, limit). Requires `ripgrep`.        |
 | `web_fetch`   | Fetch a URL as html / text / markdown.                           |

@@ -47,19 +47,11 @@ class FakeSandbox:
     # -- dispatch --------------------------------------------------------- #
 
     def _dispatch(self, tool: str, args: dict) -> ToolResult:
-        if tool == "read_file":
-            return self._read_file(args["path"])
         if tool == "text_editor":
             return self._text_editor(args)
         if tool == "shell":
             return self._shell(args.get("command", ""))
         return ToolResult(success=True, output="")
-
-    def _read_file(self, path: str) -> ToolResult:
-        with self._lock:
-            if path not in self._files:
-                return ToolResult(success=False, output="", error="not found")
-            return ToolResult(success=True, output=self._files[path])
 
     def _text_editor(self, args: dict) -> ToolResult:
         command, path = args["command"], args["path"]
@@ -116,7 +108,7 @@ def _write(ex: CoordinatedExecutor, text: str, path: str = PATH) -> ToolResult:
 
 
 def _read(ex: CoordinatedExecutor, path: str = PATH) -> ToolResult:
-    return ex("read_file", {"path": path})
+    return ex("text_editor", {"command": "view", "path": path})
 
 
 # --------------------------------------------------------------------------- #
@@ -141,7 +133,7 @@ def test_write_without_read_is_rejected():
     _, _, make = _setup({PATH: "base"})
     result = _write(make("A"), "blind overwrite")
     assert not result.success
-    assert "read_file first" in result.output
+    assert "text_editor view first" in result.output
 
 
 def test_new_file_creation_is_allowed_without_read():

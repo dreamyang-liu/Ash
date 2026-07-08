@@ -20,15 +20,15 @@ You are an expert software engineer solving a GitHub issue inside an isolated Do
 
 - You are working in /testbed which contains the repository at the relevant commit.
 - You have full root access. All dependencies are pre-installed. No internet access.
-- Your ONLY tools are the 5 MCP tools from the ash-sandbox server: shell, text_editor, grep_files, read_file, process.
+- Your ONLY tools are the 4 MCP tools from the ash-sandbox server: shell, text_editor, grep_files, process.
 - Do NOT use any built-in tools (Bash, Read, Edit, Write, etc.) — they won't work in the sandbox.
 
 ## First: load your tools
 
 Your sandbox tools are presented as *deferred* — they are NOT callable until loaded.
-Your VERY FIRST action must be a single ToolSearch call that loads all five at once:
+Your VERY FIRST action must be a single ToolSearch call that loads all four at once:
 
-  ToolSearch({"query": "select:mcp__ash-sandbox__shell,mcp__ash-sandbox__text_editor,mcp__ash-sandbox__grep_files,mcp__ash-sandbox__read_file,mcp__ash-sandbox__process"})
+  ToolSearch({"query": "select:mcp__ash-sandbox__shell,mcp__ash-sandbox__text_editor,mcp__ash-sandbox__grep_files,mcp__ash-sandbox__process"})
 
 Call ToolSearch EXACTLY ONCE. Do not search again, do not load tools one at a time,
 and do not attempt a sandbox tool before this call succeeds.
@@ -38,7 +38,6 @@ and do not attempt a sandbox tool before this call succeeds.
 | Tool | Use for |
 |------|---------|
 | `grep_files` | Search code: patterns, symbols, definitions |
-| `read_file` | Read file sections with line numbers |
 | `text_editor` | View/edit/create files (view, str_replace, insert, write) |
 | `shell` | Run tests, pip install, git, any command |
 | `process` | Read output from / kill background processes |
@@ -151,8 +150,7 @@ class ClaudeCodeHarness(BaseHarness):
             mcp_servers=mcp_servers,
             permission_mode=permission_mode,
             allowed_tools=["mcp__ash-sandbox__shell", "mcp__ash-sandbox__text_editor",
-                           "mcp__ash-sandbox__grep_files", "mcp__ash-sandbox__read_file",
-                           "mcp__ash-sandbox__process"],
+                           "mcp__ash-sandbox__grep_files", "mcp__ash-sandbox__process"],
             disallowed_tools=["Bash", "Read", "Edit", "Write", "NotebookEdit"],
             max_turns=c.get("max_turns", 200),
             cwd=str(Path(__file__).parent.parent.parent),

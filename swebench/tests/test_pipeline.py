@@ -267,7 +267,7 @@ def test_invalid_verdict_is_a_failure_honoring_fail_mode():
 def test_tools_filter_skips_non_matching_calls():
     log = []
     pipe = ToolPipeline([Tap("shell_only", log, tools={"shell"})])
-    pipe.execute(_ctx("read_file", {"path": PATH}), _inner_recorder(log))
+    pipe.execute(_ctx("text_editor", {"command": "view", "path": PATH}), _inner_recorder(log))
     assert [e[0] for e in log] == ["inner"]                # neither hook ran
     pipe.execute(_ctx("shell", {"command": "ls"}), _inner_recorder(log))
     assert ("shell_only", "before", "shell", {"command": "ls"}) in log
@@ -338,7 +338,7 @@ def _waggle_setup(files: dict[str, str] | None = None, ttl: float = 5.0,
 
 
 def _read(call, agent: str, path: str = PATH) -> ToolResult:
-    return call(agent, "read_file", {"path": path})
+    return call(agent, "text_editor", {"command": "view", "path": path})
 
 
 def _write(call, agent: str, text: str, path: str = PATH) -> ToolResult:
@@ -360,7 +360,7 @@ def test_waggle_interceptor_rejects_blind_write():
     sandbox, _, call = _waggle_setup({PATH: "base"})
     result = _write(call, "A", "blind")
     assert not result.success
-    assert "read_file first" in result.output
+    assert "text_editor view first" in result.output
     assert sandbox.read(PATH) == "base"
 
 
@@ -406,7 +406,7 @@ def test_waggle_interceptor_matches_coordinated_executor_ledger():
         outcomes = []
         for agent, op, text in script:
             if op == "read":
-                outcomes.append(agents[agent]("read_file", {"path": PATH}).success)
+                outcomes.append(agents[agent]("text_editor", {"command": "view", "path": PATH}).success)
             else:
                 outcomes.append(agents[agent]("text_editor", {
                     "command": "write", "path": PATH, "file_text": text}).success)
@@ -533,7 +533,7 @@ def test_policy_exception_falls_back_to_default_occ(caplog):
     with caplog.at_level("WARNING", logger="ash.waggle"):
         result = _write(call, "A", "blind")                # default OCC: unread -> reject
     assert not result.success
-    assert "read_file first" in result.output
+    assert "text_editor view first" in result.output
     assert any("on_write" in r.message for r in caplog.records)
     _read(call, "A")
     assert _write(call, "A", "v2").success                 # normal path still works

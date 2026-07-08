@@ -41,7 +41,7 @@ MANAGER_SYSTEM = (
     "Your job is to EXPLORE the repository (read-only) and DECOMPOSE the work into "
     "independent subtasks that can be executed in parallel.\n\n"
     "Rules:\n"
-    "- Investigate using read_file / grep_files. Do NOT fix the bug yourself and do "
+    "- Investigate using text_editor view / grep_files. Do NOT fix the bug yourself and do "
     "NOT edit source files.\n"
     "- Partition the work so that each subtask OWNS a DISJOINT set of files "
     "(no two subtasks touch the same file). Overlapping files break parallel execution.\n"
@@ -74,7 +74,7 @@ WAGGLE_MANAGER_NOTE = (
 WAGGLE_WORKER_NOTE = (
     "\nA coordination layer arbitrates concurrent edits. If a write is rejected "
     "because a teammate changed the file, re-read it and re-apply YOUR change on "
-    "top of the latest version. Always read with read_file and edit with "
+    "top of the latest version. Always read with text_editor view and edit with "
     "text_editor (do not edit files via shell).\n"
 )
 

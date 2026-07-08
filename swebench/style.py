@@ -135,7 +135,7 @@ def summary(total: int, submitted: int, preds_path: str) -> str:
 def step(n: int, kind: str, text: str, width: int = 80) -> str:
     """Format a single-line agent step for live display.
 
-    kind: tool name ("shell", "grep_files", "read_file", "text_editor", "process")
+    kind: tool name ("shell", "grep_files", "text_editor", "process")
           or "error"/"think"/"done".
     text: summary of the call (will be truncated).
     """
@@ -146,7 +146,6 @@ def step(n: int, kind: str, text: str, width: int = 80) -> str:
         "bash":        (neon_cyan,   "$"),
         "ash":         (neon_cyan,   "$"),
         "grep_files":  (neon_purple, "grep"),
-        "read_file":   (electric_blue, "read"),
         "text_editor": (neon_orange, "edit"),
         "process":     (neon_green,  "proc"),
         "web_fetch":   (bright_cyan, "fetch"),
