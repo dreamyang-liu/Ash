@@ -15,7 +15,7 @@ type EditTool struct{}
 func (e *EditTool) Name() string { return "text_editor" }
 
 func (e *EditTool) Description() string {
-	return "View or edit files. write creates or overwrites the full file."
+	return "View or edit files. command=view reads a file or range; command=str_replace requires old_str and new_str; command=insert requires insert_line and insert_text; command=write requires file_text and creates or overwrites the full file."
 }
 
 func (e *EditTool) Schema() map[string]any {
@@ -24,32 +24,14 @@ func (e *EditTool) Schema() map[string]any {
 		"properties": map[string]any{
 			"command":     map[string]any{"type": "string", "enum": []string{"view", "str_replace", "insert", "write"}, "description": "Command to execute: view, str_replace, insert, or write"},
 			"path":        map[string]any{"type": "string", "description": "File path"},
-			"view_range":  map[string]any{"type": "array", "items": map[string]any{"type": "integer", "minimum": 1}, "minItems": 2, "maxItems": 2, "description": "[start, end] inclusive line range for view"},
-			"old_str":     map[string]any{"type": "string", "description": "Text to find (str_replace)"},
-			"new_str":     map[string]any{"type": "string", "description": "Replacement text (str_replace)"},
-			"insert_line": map[string]any{"type": "integer", "minimum": 0, "description": "Line number to insert after. Use 0 to insert at the start."},
-			"insert_text": map[string]any{"type": "string", "description": "Text to insert"},
-			"file_text":   map[string]any{"type": "string", "description": "Full file content (write creates or overwrites)"},
+			"view_range":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "For view only: [start, end] inclusive line range."},
+			"old_str":     map[string]any{"type": "string", "description": "Required for str_replace. Text to find; must match exactly once."},
+			"new_str":     map[string]any{"type": "string", "description": "Required for str_replace. Replacement text."},
+			"insert_line": map[string]any{"type": "integer", "description": "Required for insert. Line number to insert after; use 0 to insert at the start."},
+			"insert_text": map[string]any{"type": "string", "description": "Required for insert. Text to insert."},
+			"file_text":   map[string]any{"type": "string", "description": "Required for write. Full file content; creates or overwrites the file."},
 		},
 		"required": []string{"command", "path"},
-		"oneOf": []map[string]any{
-			{
-				"properties": map[string]any{"command": map[string]any{"const": "view"}},
-				"required":   []string{"command", "path"},
-			},
-			{
-				"properties": map[string]any{"command": map[string]any{"const": "str_replace"}},
-				"required":   []string{"command", "path", "old_str", "new_str"},
-			},
-			{
-				"properties": map[string]any{"command": map[string]any{"const": "insert"}},
-				"required":   []string{"command", "path", "insert_line", "insert_text"},
-			},
-			{
-				"properties": map[string]any{"command": map[string]any{"const": "write"}},
-				"required":   []string{"command", "path", "file_text"},
-			},
-		},
 	}
 }
 

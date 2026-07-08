@@ -38,8 +38,8 @@ func (w *WebFetchTool) Schema() map[string]any {
 			"url":        map[string]any{"type": "string", "description": "URL to fetch"},
 			"format":     map[string]any{"type": "string", "enum": []string{"html", "text", "markdown"}, "default": "markdown"},
 			"headers":    map[string]any{"type": "object", "description": "Additional HTTP headers"},
-			"timeout":    map[string]any{"type": "integer", "minimum": 1, "maximum": maxWebTimeoutSeconds, "default": defaultWebTimeoutSeconds, "description": "Request timeout in seconds"},
-			"max_length": map[string]any{"type": "integer", "minimum": 1, "maximum": maxWebMaxLength, "default": defaultWebMaxLength, "description": "Maximum returned characters"},
+			"timeout":    map[string]any{"type": "integer", "default": defaultWebTimeoutSeconds, "description": "Request timeout in seconds. Values are clamped to the runtime maximum."},
+			"max_length": map[string]any{"type": "integer", "default": defaultWebMaxLength, "description": "Maximum returned characters. Values are clamped to the runtime maximum."},
 		},
 		"required": []string{"url"},
 	}
@@ -183,7 +183,7 @@ func (w *WebSearchTool) Schema() map[string]any {
 		"properties": map[string]any{
 			"query":       map[string]any{"type": "string", "description": "Search query"},
 			"backend":     map[string]any{"type": "string", "enum": []string{"auto", "duckduckgo", "brave", "google"}, "default": "auto"},
-			"max_results": map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "default": 5, "description": "Maximum results"},
+			"max_results": map[string]any{"type": "integer", "default": 5, "description": "Maximum results. Values are clamped to the runtime maximum."},
 		},
 		"required": []string{"query"},
 	}

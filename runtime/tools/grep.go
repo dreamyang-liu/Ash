@@ -53,7 +53,7 @@ func (g *GrepTool) Schema() map[string]any {
 			"pattern": map[string]any{"type": "string", "description": "Regex pattern"},
 			"path":    map[string]any{"type": "string", "default": ".", "description": "Search path"},
 			"include": map[string]any{"type": "string", "description": "File glob (e.g. *.py)"},
-			"limit":   map[string]any{"type": "integer", "default": 100, "minimum": 1, "description": "Maximum number of matching lines to return globally"},
+			"limit":   map[string]any{"type": "integer", "default": 100, "description": "Maximum number of matching lines to return globally"},
 		},
 		"required": []string{"pattern"},
 	}
