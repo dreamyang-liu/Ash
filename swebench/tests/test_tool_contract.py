@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from swebench.agent.tools import TOOLS_SCHEMA
+from swebench.agent.tools import AGENT_TOOL_ROUTES, TOOLS_SCHEMA, route_agent_tool
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "sdk"))
 
@@ -23,6 +23,15 @@ EXPECTED_TOOL_NAMES = [
     "web_fetch",
     "web_search",
 ]
+
+RUNTIME_TOOL_NAMES = {
+    "shell",
+    "text_editor",
+    "grep_files",
+    "process",
+    "web_fetch",
+    "web_search",
+}
 
 EXPECTED_REQUIRED = {
     "shell": ["command"],
@@ -85,11 +94,53 @@ def _assert_supported_field_schema(tool_name: str, path: str, schema: dict[str, 
         assert "items" not in schema, f"{tool_name}.{path} non-array schema must not define items"
 
 
-def test_agent_tool_schema_matches_runtime_tool_surface():
+RUNTIME_REQUIRED = {
+    "shell": ["command"],
+    "text_editor": ["command", "path"],
+    "grep_files": ["pattern"],
+    "process": ["pid", "action"],
+    "web_fetch": ["url"],
+    "web_search": ["query"],
+}
+
+
+def test_agent_tool_schema_exposes_current_surface():
     names = [tool["function"]["name"] for tool in TOOLS_SCHEMA]
 
     assert names == EXPECTED_TOOL_NAMES
     assert "read_file" not in names
+
+
+def test_agent_tool_routes_are_explicit_and_runtime_routeable():
+    functions = _function_by_name()
+
+    assert set(AGENT_TOOL_ROUTES) == set(functions)
+    assert set(AGENT_TOOL_ROUTES.values()) <= RUNTIME_TOOL_NAMES
+
+    for agent_tool, runtime_tool in AGENT_TOOL_ROUTES.items():
+        agent_required = set(functions[agent_tool]["parameters"].get("required", []))
+        runtime_required = set(RUNTIME_REQUIRED[runtime_tool])
+        if agent_tool == runtime_tool:
+            assert agent_required >= runtime_required
+
+
+def test_route_agent_tool_identity_routes_return_runtime_call_copy():
+    args = {"command": "echo hi"}
+
+    runtime_tool, runtime_args = route_agent_tool("shell", args)
+
+    assert runtime_tool == "shell"
+    assert runtime_args == args
+    assert runtime_args is not args
+
+
+def test_route_agent_tool_rejects_unknown_tool():
+    try:
+        route_agent_tool("missing", {})
+    except KeyError as exc:
+        assert "unknown agent tool: missing" in str(exc)
+    else:
+        raise AssertionError("expected unknown agent tool to be rejected")
 
 
 def test_agent_tool_schemas_use_supported_plain_object_subset():
