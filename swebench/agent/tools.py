@@ -34,7 +34,7 @@ def truncate_output(content: str, max_len: int = 12000) -> str:
     return (
         content[:head] +
         f"\n\n... [{elided} characters truncated — output too long. Use `tail` on shell "
-        f"commands, `limit` on grep/read_file, or pipe through `grep` for targeted output] ...\n\n" +
+        f"commands, `limit` on grep, or pipe through `grep` for targeted output] ...\n\n" +
         content[-tail:]
     )
 
@@ -51,12 +51,6 @@ def tool_summary(name: str, args: dict) -> str:
         if args.get("include"):
             parts.append(f"({args['include']})")
         return " ".join(parts)
-    elif name == "read_file":
-        path = args.get("path", "")
-        offset, limit = args.get("offset"), args.get("limit")
-        if offset or limit:
-            return f"{path}:{offset or 1}+{limit or '?'}"
-        return path
     elif name == "text_editor":
         cmd = args.get("command", "")
         path = args.get("path", "")
@@ -145,25 +139,6 @@ TOOLS_SCHEMA = [
                     "limit": {"type": "integer", "description": "Max number of results"},
                 },
                 "required": ["pattern"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": (
-                "Read a file and return contents with line numbers.\n"
-                "Use for reading specific sections of files."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "File path"},
-                    "offset": {"type": "integer", "description": "Start line (1-based, default: 1)"},
-                    "limit": {"type": "integer", "description": "Number of lines to read (default: all)"},
-                },
-                "required": ["path"],
             },
         },
     },

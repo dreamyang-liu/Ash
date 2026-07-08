@@ -174,20 +174,6 @@ EXEC_TOOLS = [
         },
     },
     {
-        "name": "read_file",
-        "description": "Read a file with line numbers from a sandbox.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string"},
-                "offset": {"type": "integer"},
-                "limit": {"type": "integer"},
-                "sandbox_id": {"type": "string", "description": "Target sandbox (default: active)"},
-            },
-            "required": ["path"],
-        },
-    },
-    {
         "name": "process",
         "description": "Manage a background process (read output or kill).",
         "inputSchema": {
@@ -208,7 +194,7 @@ def _single_sandbox_tools() -> list[dict]:
 
     Used in single-sandbox stdio mode: the sandbox is pre-provisioned and bound
     at startup, so the agent should see only shell/text_editor/grep_files/
-    read_file/process — no lifecycle tools, no sandbox routing.
+    process — no lifecycle tools, no sandbox routing.
     """
     tools = copy.deepcopy(EXEC_TOOLS)
     for t in tools:

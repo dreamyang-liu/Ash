@@ -3,7 +3,7 @@
 Optimistic concurrency control (OCC) over the sandbox filesystem, enforced at
 tool-call granularity:
 
-- **read**  (``read_file`` / ``text_editor view``) records a per-agent snapshot
+- **read**  (``text_editor view``) records a per-agent snapshot
   of the file version that was seen.
 - **write** (``text_editor str_replace/insert/write``) is arbitrated: a write
   based on a stale snapshot is rejected with a unified diff of what changed,
@@ -281,7 +281,7 @@ class CoordinatedExecutor:
 
     def __call__(self, tool_name: str, args: dict) -> ToolResult:
         command = args.get("command", "")
-        if tool_name == "read_file" or (tool_name == "text_editor" and command == "view"):
+        if tool_name == "text_editor" and command == "view":
             return self._read(tool_name, args)
         if tool_name == "text_editor" and command in self.WRITE_COMMANDS:
             return self._write(args)
@@ -572,7 +572,7 @@ class CoordinatedExecutor:
     def _reject_unread(self, path: str) -> ToolResult:
         return self._reject(
             f"[WAGGLE] Write rejected: you have not read {path} in its current "
-            f"state.\nRead it with read_file first, then apply your edit."
+            f"state.\nRead it with text_editor view first, then apply your edit."
         )
 
     def _reject_contended(self, rec: _FileRecord, path: str) -> ToolResult:
@@ -593,7 +593,7 @@ class CoordinatedExecutor:
             self._diff_since(rec, path, snapshot),
             "",
             "You now hold a temporary reservation on this file. Re-read it with",
-            "read_file, then re-apply YOUR change on top of the latest version.",
+            "text_editor view, then re-apply YOUR change on top of the latest version.",
             "Do not blindly retry the same edit.",
         ]
         if rec.rejects[self._agent] >= ESCALATE_AFTER:
@@ -647,7 +647,7 @@ class WaggleInterceptor(ToolInterceptor):
     silently allow lost updates.
     """
 
-    tools = {"read_file", "text_editor", "shell"}
+    tools = {"text_editor", "shell"}
     fail_mode = "closed"
 
     def __init__(self, state: Optional[WorkspaceCoordinator] = None,
@@ -689,5 +689,4 @@ class WaggleInterceptor(ToolInterceptor):
 
     @staticmethod
     def _is_read(ctx: CallContext) -> bool:
-        return ctx.tool_name == "read_file" or (
-            ctx.tool_name == "text_editor" and ctx.args.get("command") == "view")
+        return ctx.tool_name == "text_editor" and ctx.args.get("command") == "view"

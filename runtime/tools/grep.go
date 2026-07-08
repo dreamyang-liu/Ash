@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"os/exec"
+	"strings"
 	"sync"
 )
 
@@ -51,7 +53,7 @@ func (g *GrepTool) Schema() map[string]any {
 			"pattern": map[string]any{"type": "string", "description": "Regex pattern"},
 			"path":    map[string]any{"type": "string", "default": ".", "description": "Search path"},
 			"include": map[string]any{"type": "string", "description": "File glob (e.g. *.py)"},
-			"limit":   map[string]any{"type": "integer", "default": 100, "description": "Max results"},
+			"limit":   map[string]any{"type": "integer", "default": 100, "minimum": 1, "description": "Maximum number of matching lines to return globally"},
 		},
 		"required": []string{"pattern"},
 	}
@@ -79,7 +81,6 @@ func (g *GrepTool) Execute(args map[string]any) Result {
 
 	cmdArgs := []string{
 		"--line-number", "--no-heading", "--color=never",
-		"--max-count", fmt.Sprintf("%d", limit),
 		"--regexp", pattern,
 	}
 	if include, ok := args["include"].(string); ok && include != "" {
@@ -88,16 +89,50 @@ func (g *GrepTool) Execute(args map[string]any) Result {
 	cmdArgs = append(cmdArgs, "--", path)
 
 	cmd := exec.Command("rg", cmdArgs...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return Err("failed to create stdout pipe: " + err.Error())
+	}
+	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
-	if err == nil {
-		return Ok(stdout.String())
+	if err := cmd.Start(); err != nil {
+		return Err("failed to start ripgrep: " + err.Error())
+	}
+
+	var lines []string
+	truncated := false
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		if len(lines) >= limit {
+			truncated = true
+			_ = cmd.Process.Kill()
+			break
+		}
+		lines = append(lines, scanner.Text())
+	}
+	scanErr := scanner.Err()
+	err = cmd.Wait()
+
+	if scanErr != nil {
+		return Err("read ripgrep output: " + scanErr.Error())
+	}
+	if len(lines) > 0 {
+		output := strings.Join(lines, "\n")
+		if truncated {
+			output += fmt.Sprintf("\n... (truncated at %d matches)", limit)
+		}
+		return Ok(output + "\n")
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 		return Ok("No matches found.")
+	}
+	if truncated {
+		return Ok(fmt.Sprintf("... (truncated at %d matches)\n", limit))
+	}
+	if err == nil {
+		return Ok("")
 	}
 	return Err(stderr.String())
 }

@@ -28,7 +28,6 @@ func All() []Tool {
 	return []Tool{
 		&ShellTool{},
 		&ProcessTool{},
-		&ReadFileTool{},
 		&EditTool{},
 		&GrepTool{},
 		&WebFetchTool{},

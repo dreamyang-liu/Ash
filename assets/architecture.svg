@@ -75,10 +75,10 @@
   <rect x="154" y="396" width="68" height="20" rx="3" fill="#1c2128" stroke="#30363d" stroke-width="0.5"/>
   <text x="188" y="410" text-anchor="middle" fill="#c9d1d9" font-size="9" font-family="monospace">process</text>
   <rect x="228" y="396" width="72" height="20" rx="3" fill="#1c2128" stroke="#30363d" stroke-width="0.5"/>
-  <text x="264" y="410" text-anchor="middle" fill="#c9d1d9" font-size="9" font-family="monospace">read_file</text>
+  <text x="264" y="410" text-anchor="middle" fill="#c9d1d9" font-size="9" font-family="monospace">text_editor</text>
 
   <rect x="80" y="422" width="82" height="20" rx="3" fill="#1c2128" stroke="#30363d" stroke-width="0.5"/>
-  <text x="121" y="436" text-anchor="middle" fill="#c9d1d9" font-size="9" font-family="monospace">text_editor</text>
+  <text x="121" y="436" text-anchor="middle" fill="#c9d1d9" font-size="9" font-family="monospace">grep_files</text>
   <rect x="168" y="422" width="76" height="20" rx="3" fill="#1c2128" stroke="#30363d" stroke-width="0.5"/>
   <text x="206" y="436" text-anchor="middle" fill="#c9d1d9" font-size="9" font-family="monospace">grep_files</text>
   <rect x="250" y="422" width="50" height="20" rx="3" fill="#1c2128" stroke="#30363d" stroke-width="0.5"/>

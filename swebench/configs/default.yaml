@@ -18,8 +18,7 @@ agent:
 
     - `shell`: Execute bash commands. Use `tail` param to limit output. Use `background: true` for long-running commands.
     - `grep_files`: Search code with ripgrep. Always set `include` (e.g. "*.py") and `limit`.
-    - `read_file`: Read file with line numbers. Use `offset`/`limit` for large files (never read >200 lines at once).
-    - `text_editor`: Edit files. Commands: `str_replace` (exact match replace), `insert` (after line N), `view` (read range), `write` (create/overwrite).
+    - `text_editor`: View and edit files. Commands: `view` (read range), `str_replace` (exact match replace), `insert` (after line N), `write` (create/overwrite).
     - `process`: Manage background processes. Actions: `read` (get output), `kill`.
 
     ## Recommended Workflow
@@ -66,7 +65,7 @@ agent:
 
     ### Read a file:
     ```
-    read_file({"path": "/testbed/src/module.py", "offset": 100, "limit": 50})
+    text_editor({"command": "view", "path": "/testbed/src/module.py", "view_range": [100, 150]})
     ```
 
     ### Edit a file:

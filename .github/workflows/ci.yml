@@ -42,10 +42,11 @@ jobs:
           import sys, json
           data = json.loads(sys.stdin.read())
           tools = data['result']['tools']
-          assert len(tools) == 7, f'Expected 7 tools, got {len(tools)}'
+          assert len(tools) == 6, f'Expected 6 tools, got {len(tools)}'
           names = [t['name'] for t in tools]
           assert 'shell' in names
           assert 'web_search' in names
+          assert 'read_file' not in names
           print(f'OK: {len(tools)} tools registered')
           "
 
@@ -60,17 +61,17 @@ jobs:
           print('OK: shell sync works')
           "
 
-      - name: Test read_file tool (stdio)
+      - name: Test text_editor view (stdio)
         run: |
           echo 'line1' > /tmp/ci_test.txt
           echo 'line2' >> /tmp/ci_test.txt
-          echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/ci_test.txt"}}}' | ./ash-runtime --mode stdio | python3 -c "
+          echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"text_editor","arguments":{"command":"view","path":"/tmp/ci_test.txt"}}}' | ./ash-runtime --mode stdio | python3 -c "
           import sys, json
           data = json.loads(sys.stdin.read())
           text = data['result']['content'][0]['text']
           assert 'line1' in text
           assert 'line2' in text
-          print('OK: read_file works')
+          print('OK: text_editor view works')
           "
 
       - name: Test text_editor write + str_replace (stdio)
@@ -178,7 +179,7 @@ jobs:
                   r = await sb.call('shell', command='echo client_http')
                   assert 'client_http' in r.output, f'HTTP failed: {r.output}'
                   tools = await sb.tool_schemas(format='openai')
-                  assert len(tools) == 7
+                  assert len(tools) == 6
 
               # MCP backend
               async with Sandbox.mcp('http://localhost:19879/mcp') as sb:

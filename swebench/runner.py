@@ -498,7 +498,6 @@ def run_batch(
                 tag_map = {
                     "shell":       S.neon_cyan("$"),
                     "grep_files":  S.neon_purple("grep"),
-                    "read_file":   S.electric_blue("read"),
                     "text_editor": S.neon_orange("edit"),
                     "process":     S.neon_green("proc"),
                 }

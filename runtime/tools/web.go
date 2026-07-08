@@ -14,6 +14,13 @@ import (
 
 const defaultUA = "AshRuntime/1.0 (+https://github.com/dreamyang-liu/ash)"
 
+const (
+	defaultWebTimeoutSeconds = 15
+	maxWebTimeoutSeconds     = 60
+	defaultWebMaxLength      = 10000
+	maxWebMaxLength          = 200000
+)
+
 // ---- WebFetchTool ----
 
 type WebFetchTool struct{}
@@ -31,7 +38,8 @@ func (w *WebFetchTool) Schema() map[string]any {
 			"url":        map[string]any{"type": "string", "description": "URL to fetch"},
 			"format":     map[string]any{"type": "string", "enum": []string{"html", "text", "markdown"}, "default": "markdown"},
 			"headers":    map[string]any{"type": "object", "description": "Additional HTTP headers"},
-			"max_length": map[string]any{"type": "integer", "default": 10000, "description": "Max response chars"},
+			"timeout":    map[string]any{"type": "integer", "minimum": 1, "maximum": maxWebTimeoutSeconds, "default": defaultWebTimeoutSeconds, "description": "Request timeout in seconds"},
+			"max_length": map[string]any{"type": "integer", "minimum": 1, "maximum": maxWebMaxLength, "default": defaultWebMaxLength, "description": "Maximum returned characters"},
 		},
 		"required": []string{"url"},
 	}
@@ -46,12 +54,16 @@ func (w *WebFetchTool) Execute(args map[string]any) Result {
 	if f, ok := args["format"].(string); ok && f != "" {
 		format = f
 	}
-	maxLen := 10000
+	maxLen := defaultWebMaxLength
 	if m, ok := args["max_length"].(float64); ok && int(m) > 0 {
-		maxLen = int(m)
+		maxLen = clampInt(int(m), 1, maxWebMaxLength)
+	}
+	timeoutSeconds := defaultWebTimeoutSeconds
+	if t, ok := args["timeout"].(float64); ok && int(t) > 0 {
+		timeoutSeconds = clampInt(int(t), 1, maxWebTimeoutSeconds)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: time.Duration(timeoutSeconds) * time.Second}
 	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		return Err("invalid url: " + err.Error())
@@ -71,7 +83,7 @@ func (w *WebFetchTool) Execute(args map[string]any) Result {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxLen)+1))
 	if err != nil {
 		return Err("read body: " + err.Error())
 	}
@@ -86,10 +98,14 @@ func (w *WebFetchTool) Execute(args map[string]any) Result {
 	case "markdown":
 		output = toMarkdown(html)
 	default:
-		output = stripHTML(html)
+		return Err("invalid format: " + format)
 	}
 
-	return Ok(truncate(output, maxLen))
+	prefix := fmt.Sprintf("[status] %s\n", resp.Status)
+	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+		prefix += fmt.Sprintf("[content_type] %s\n", contentType)
+	}
+	return Ok(prefix + truncate(output, maxLen))
 }
 
 func stripHTML(s string) string {
@@ -141,6 +157,16 @@ func truncate(s string, max int) string {
 	return s[:max] + fmt.Sprintf("\n... (truncated, %d total chars)", len(s))
 }
 
+func clampInt(v, min, max int) int {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
 // ---- WebSearchTool ----
 
 type WebSearchTool struct{}
@@ -157,7 +183,7 @@ func (w *WebSearchTool) Schema() map[string]any {
 		"properties": map[string]any{
 			"query":       map[string]any{"type": "string", "description": "Search query"},
 			"backend":     map[string]any{"type": "string", "enum": []string{"auto", "duckduckgo", "brave", "google"}, "default": "auto"},
-			"max_results": map[string]any{"type": "integer", "default": 5, "description": "Max results"},
+			"max_results": map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "default": 5, "description": "Maximum results"},
 		},
 		"required": []string{"query"},
 	}
@@ -180,7 +206,7 @@ func (w *WebSearchTool) Execute(args map[string]any) Result {
 	}
 	maxResults := 5
 	if m, ok := args["max_results"].(float64); ok && int(m) > 0 {
-		maxResults = int(m)
+		maxResults = clampInt(int(m), 1, 20)
 	}
 
 	engines := []func(string, int) ([]searchResult, error){searchGoogle, searchDuckDuckGo, searchBrave}
@@ -192,6 +218,8 @@ func (w *WebSearchTool) Execute(args map[string]any) Result {
 			engines = []func(string, int) ([]searchResult, error){searchDuckDuckGo}
 		case "brave":
 			engines = []func(string, int) ([]searchResult, error){searchBrave}
+		default:
+			return Err("invalid backend: " + backend)
 		}
 	}
 

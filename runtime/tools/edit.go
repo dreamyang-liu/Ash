@@ -9,29 +9,47 @@ import (
 	"github.com/dreamyang-liu/ash/runtime/events"
 )
 
-// EditTool provides file editing with view, str_replace, insert, and create commands.
+// EditTool provides file viewing and editing with one command-dispatched schema.
 type EditTool struct{}
 
 func (e *EditTool) Name() string { return "text_editor" }
 
 func (e *EditTool) Description() string {
-	return "View, create, or edit files using commands: view, str_replace, insert, create"
+	return "View or edit files. write creates or overwrites the full file."
 }
 
 func (e *EditTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"command":     map[string]any{"type": "string", "enum": []string{"view", "str_replace", "insert", "write"}, "description": "Command to execute"},
+			"command":     map[string]any{"type": "string", "enum": []string{"view", "str_replace", "insert", "write"}, "description": "Command to execute: view, str_replace, insert, or write"},
 			"path":        map[string]any{"type": "string", "description": "File path"},
-			"view_range":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "[start, end] lines for view"},
+			"view_range":  map[string]any{"type": "array", "items": map[string]any{"type": "integer", "minimum": 1}, "minItems": 2, "maxItems": 2, "description": "[start, end] inclusive line range for view"},
 			"old_str":     map[string]any{"type": "string", "description": "Text to find (str_replace)"},
 			"new_str":     map[string]any{"type": "string", "description": "Replacement text (str_replace)"},
-			"insert_line": map[string]any{"type": "integer", "description": "Line number to insert after"},
+			"insert_line": map[string]any{"type": "integer", "minimum": 0, "description": "Line number to insert after. Use 0 to insert at the start."},
 			"insert_text": map[string]any{"type": "string", "description": "Text to insert"},
-			"file_text":   map[string]any{"type": "string", "description": "Full file content (write)"},
+			"file_text":   map[string]any{"type": "string", "description": "Full file content (write creates or overwrites)"},
 		},
 		"required": []string{"command", "path"},
+		"oneOf": []map[string]any{
+			{
+				"properties": map[string]any{"command": map[string]any{"const": "view"}},
+				"required":   []string{"command", "path"},
+			},
+			{
+				"properties": map[string]any{"command": map[string]any{"const": "str_replace"}},
+				"required":   []string{"command", "path", "old_str", "new_str"},
+			},
+			{
+				"properties": map[string]any{"command": map[string]any{"const": "insert"}},
+				"required":   []string{"command", "path", "insert_line", "insert_text"},
+			},
+			{
+				"properties": map[string]any{"command": map[string]any{"const": "write"}},
+				"required":   []string{"command", "path", "file_text"},
+			},
+		},
 	}
 }
 
@@ -89,8 +107,14 @@ func (e *EditTool) view(path string, args map[string]any) Result {
 }
 
 func (e *EditTool) strReplace(path string, args map[string]any) Result {
-	oldStr, _ := args["old_str"].(string)
-	newStr, _ := args["new_str"].(string)
+	oldStr, ok := args["old_str"].(string)
+	if !ok || oldStr == "" {
+		return Err("old_str is required for str_replace")
+	}
+	newStr, ok := args["new_str"].(string)
+	if !ok {
+		return Err("new_str is required for str_replace")
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -117,11 +141,15 @@ func (e *EditTool) strReplace(path string, args map[string]any) Result {
 }
 
 func (e *EditTool) insert(path string, args map[string]any) Result {
-	insertLine := 0
-	if n, ok := args["insert_line"].(float64); ok {
-		insertLine = int(n)
+	rawInsertLine, ok := args["insert_line"].(float64)
+	if !ok {
+		return Err("insert_line is required for insert")
 	}
-	insertText, _ := args["insert_text"].(string)
+	insertLine := int(rawInsertLine)
+	insertText, ok := args["insert_text"].(string)
+	if !ok {
+		return Err("insert_text is required for insert")
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -129,6 +157,9 @@ func (e *EditTool) insert(path string, args map[string]any) Result {
 	}
 
 	lines := strings.Split(string(data), "\n")
+	if insertLine < 0 || insertLine > len(lines) {
+		return Err(fmt.Sprintf("insert_line out of range: got %d, want 0..%d", insertLine, len(lines)))
+	}
 	newLines := strings.Split(insertText, "\n")
 
 	result := make([]string, 0, len(lines)+len(newLines))
@@ -145,7 +176,10 @@ func (e *EditTool) insert(path string, args map[string]any) Result {
 }
 
 func (e *EditTool) write(path string, args map[string]any) Result {
-	fileText, _ := args["file_text"].(string)
+	fileText, ok := args["file_text"].(string)
+	if !ok {
+		return Err("file_text is required for write")
+	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return Err(err.Error())

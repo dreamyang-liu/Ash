@@ -164,8 +164,7 @@ The `ash-runtime` binary runs inside each sandbox container. Single Go binary (~
 |------|-------------|
 | `shell` | Execute commands. `background: true` returns a pid. |
 | `process` | Read output or kill background processes. |
-| `read_file` | Read files with line numbers, offset, limit. |
-| `text_editor` | View, create, str_replace, insert files. |
+| `text_editor` | View, write/create, str_replace, insert files. |
 | `grep_files` | Ripgrep search with pattern, glob, limit. |
 | `web_fetch` | Fetch URLs. Formats: html, text, markdown. |
 | `web_search` | Multi-engine search (Google, DuckDuckGo, Brave). |
