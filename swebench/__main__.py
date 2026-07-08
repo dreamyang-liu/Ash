@@ -90,6 +90,10 @@ def _flatten_config(config: dict) -> dict:
         ("manager_worker", "worker_step_limit"): "worker_step_limit",
         ("manager_worker", "waggle"): "waggle",
         ("manager_worker", "waggle_ttl"): "waggle_ttl",
+        # best_of_n harness
+        ("best_of_n", "n_candidates"): "n_candidates",
+        ("best_of_n", "selection"): "selection",
+        ("best_of_n", "temperature_jitter"): "temperature_jitter",
         # dataset
         ("dataset", "subset"): "subset",
         ("dataset", "split"): "split",
