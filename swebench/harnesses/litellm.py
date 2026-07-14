@@ -8,6 +8,7 @@ from ..dataset import resolve_image, format_task_prompt, image_registry_for_subs
 from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent
+from ..agent.trace import new_run_id
 from ..agent.tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA
 from .. import style as S
 
@@ -80,6 +81,9 @@ class LiteLLMHarness(BaseHarness):
                 executor=session.execute,
                 on_step=_on_step,
                 trace_dir=output_dir / "traces",
+                run_id=new_run_id(),
+                agent_id="agent",
+                sandbox_id=session.sandbox_id,
             )
             if quiet:
                 agent.stream = False

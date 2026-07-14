@@ -39,6 +39,11 @@ class Sandbox:
         """Use CLI backend — no server needed, calls binary directly."""
         return cls(backend=CLIBackend(bin_path))
 
+    @property
+    def sandbox_id(self) -> str | None:
+        """Stable Docker or gateway identity, when this sandbox is managed."""
+        return self._container_id
+
     @classmethod
     async def spawn(
         cls,

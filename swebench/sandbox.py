@@ -30,6 +30,13 @@ class AshSession:
             self._loop = asyncio.new_event_loop()
         return self._loop
 
+    @property
+    def sandbox_id(self) -> str:
+        """Stable identity of the active sandbox, or ``unknown`` before spawn."""
+        if not self._sandbox:
+            return "unknown"
+        return self._sandbox.sandbox_id or "unknown"
+
     def create(self, image: str) -> bool:
         return self._get_loop().run_until_complete(self._create_async(image))
 

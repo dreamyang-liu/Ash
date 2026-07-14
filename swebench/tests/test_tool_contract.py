@@ -222,3 +222,11 @@ def test_sdk_tool_schema_formats_preserve_contract_shape():
     for tool in anthropic:
         assert tool["input_schema"]["type"] == "object"
         assert tool["input_schema"]["required"] == EXPECTED_REQUIRED[tool["name"]]
+
+
+def test_sdk_sandbox_exposes_managed_sandbox_identity():
+    sandbox = Sandbox(backend=FakeBackend([]))
+    assert sandbox.sandbox_id is None
+
+    sandbox._container_id = "sandbox-123"
+    assert sandbox.sandbox_id == "sandbox-123"

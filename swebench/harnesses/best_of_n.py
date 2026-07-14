@@ -41,6 +41,7 @@ from ..dataset import resolve_image, format_task_prompt, image_registry_for_subs
 from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent, TOOLS_SCHEMA, BASH_ONLY_SCHEMA
+from ..agent.trace import new_run_id
 from .. import style as S
 
 # FAIL_TO_PASS lists are usually 1-10 entries; cap sandbox test runs per candidate.
@@ -228,11 +229,16 @@ class BestOfNHarness(BaseHarness):
                               registry=registry)
         n = max(1, int(c.get("n_candidates", 3)))
         traj_dir = output_dir / "trajectories"
+        trace_dir = output_dir / "traces"
+        run_id = new_run_id()
 
         try:
             with ThreadPoolExecutor(max_workers=n) as pool:
                 candidates = list(pool.map(
-                    lambda i: self._run_candidate(i, instance, image, traj_dir),
+                    lambda i: self._run_candidate(
+                        i, instance, image, traj_dir,
+                        trace_dir=trace_dir, run_id=run_id,
+                    ),
                     range(n),
                 ))
 
@@ -256,7 +262,8 @@ class BestOfNHarness(BaseHarness):
             return self._fail(iid, f"error: {e}")
 
     def _run_candidate(self, index: int, instance: dict, image: str,
-                       traj_dir: Path) -> Candidate:
+                       traj_dir: Path, *, trace_dir: Path,
+                       run_id: str) -> Candidate:
         """One fully-isolated rollout: own sandbox + agent, spawned and destroyed
         inside this thread (AshSession builds its event loop on first use here)."""
         c = self.config
@@ -268,7 +275,14 @@ class BestOfNHarness(BaseHarness):
             if not session.create(image):
                 return Candidate(index=index, patch="", exit_status="session_failed")
             cfg = self._agent_config(c, temp)
-            agent = AshAgent(cfg, executor=session.execute)
+            agent = AshAgent(
+                cfg,
+                executor=session.execute,
+                trace_dir=trace_dir,
+                run_id=run_id,
+                agent_id=f"candidate-{index}",
+                sandbox_id=session.sandbox_id,
+            )
             agent.stream = False
             agent.set_tools_schema(BASH_ONLY_SCHEMA if cfg.tools == "bash_only"
                                    else TOOLS_SCHEMA)
