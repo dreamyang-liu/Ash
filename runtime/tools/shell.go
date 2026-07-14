@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os/exec"
 	"strings"
 	"sync"
@@ -42,10 +41,10 @@ func (s *ShellTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"command":     map[string]any{"type": "string", "description": "Shell command to execute"},
-			"background":  map[string]any{"type": "boolean", "default": false, "description": "Run in background, returns pid"},
-			"timeout":     map[string]any{"type": "integer", "default": 300, "description": "Timeout in seconds"},
-			"tail":        map[string]any{"type": "integer", "description": "Only return last N lines of output"},
+			"command":    map[string]any{"type": "string", "description": "Shell command to execute"},
+			"background": map[string]any{"type": "boolean", "default": false, "description": "Run in background, returns pid"},
+			"timeout":    map[string]any{"type": "integer", "default": 300, "description": "Timeout in seconds"},
+			"tail":       map[string]any{"type": "integer", "description": "Only return last N lines of output"},
 			"max_output_bytes": map[string]any{
 				"type":        "integer",
 				"default":     defaultMaxOutputBytes,
@@ -120,21 +119,14 @@ func (s *ShellTool) runBackground(command, workingDir, agentID string, maxOutput
 		cmd.Dir = workingDir
 	}
 
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return Err("failed to create stdout pipe: " + err.Error())
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return Err("failed to create stderr pipe: " + err.Error())
-	}
-
 	proc := &Process{
 		pid:    pid,
 		cmd:    cmd,
 		stdout: NewBoundedLog(maxOutputBytes),
 		stderr: NewBoundedLog(maxOutputBytes),
 	}
+	cmd.Stdout = proc.stdout
+	cmd.Stderr = proc.stderr
 
 	if err := cmd.Start(); err != nil {
 		return Err("failed to start: " + err.Error())
@@ -144,17 +136,8 @@ func (s *ShellTool) runBackground(command, workingDir, agentID string, maxOutput
 	processes[pid] = proc
 	processesMu.Unlock()
 
-	// Stream stdout lines as they arrive
-	go func() {
-		_, _ = io.Copy(proc.stdout, stdoutPipe)
-	}()
-
-	// Stream stderr lines as they arrive
-	go func() {
-		_, _ = io.Copy(proc.stderr, stderrPipe)
-	}()
-
-	// Wait for exit
+	// Wait also joins os/exec's stdout/stderr copy goroutines. Publish exit only
+	// after both logs contain the process's complete captured output.
 	go func() {
 		err := cmd.Wait()
 		code := 0

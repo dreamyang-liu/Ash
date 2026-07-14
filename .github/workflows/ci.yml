@@ -140,6 +140,7 @@ jobs:
 
           pid = sys.argv[1]
           last = None
+          saw_exit_notification = False
           for _ in range(20):
               req = urllib.request.Request(
                   "http://localhost:19878",
@@ -155,9 +156,11 @@ jobs:
                   data = json.loads(resp.read().decode())
               result = data["result"]
               output = json.loads(result["content"][0]["text"])
-              last = (result, output)
-              if "bg_done" in output["stdout"] and output["running"] is False and result["notifications"]:
-                  assert result["notifications"][0]["kind"] == "process_exited"
+              saw_exit_notification = saw_exit_notification or any(
+                  event["kind"] == "process_exited" for event in result["notifications"]
+              )
+              last = (result, output, saw_exit_notification)
+              if "bg_done" in output["stdout"] and output["running"] is False and saw_exit_notification:
                   print("OK: background + notifications work")
                   break
               time.sleep(0.25)
