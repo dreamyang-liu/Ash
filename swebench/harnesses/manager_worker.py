@@ -32,6 +32,7 @@ from ..dataset import resolve_image, image_registry_for_subset
 from ..sandbox import AshSession
 from ..models import AgentConfig, ToolResult
 from ..agent import AshAgent, TOOLS_SCHEMA
+from ..agent.trace import new_run_id
 from ..agent.waggle import CoordinatedExecutor, WorkspaceCoordinator
 from .. import style as S
 
@@ -135,6 +136,7 @@ def _normalize_subtasks(plan: dict) -> list[dict]:
     if not isinstance(subtasks, list) or not subtasks:
         return []
     claimed: set[str] = set()
+    used_ids: set[str] = set()
     normalized: list[dict] = []
     for i, st in enumerate(subtasks):
         if not isinstance(st, dict):
@@ -142,8 +144,16 @@ def _normalize_subtasks(plan: dict) -> list[dict]:
         files = [f for f in (st.get("files") or []) if isinstance(f, str)]
         owned = [f for f in files if f not in claimed]  # drop overlaps
         claimed.update(owned)
+        raw_id = str(st.get("id") or f"t{i + 1}")
+        base_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw_id).strip(".-") or f"t{i + 1}"
+        task_id = base_id
+        suffix = 2
+        while task_id in used_ids:
+            task_id = f"{base_id}-{suffix}"
+            suffix += 1
+        used_ids.add(task_id)
         normalized.append({
-            "id": str(st.get("id") or f"t{i + 1}"),
+            "id": task_id,
             "description": str(st.get("description") or "").strip(),
             "files": owned,
             "acceptance": str(st.get("acceptance") or "").strip(),
@@ -181,6 +191,8 @@ class ManagerWorkerHarness(BaseHarness):
         mgr_steps = int(c.get("manager_step_limit", 60))
         wrk_steps = int(c.get("worker_step_limit", 120))
         traj_dir = output_dir / "trajectories"
+        trace_dir = output_dir / "traces"
+        run_id = new_run_id()
         waggle_state = WorkspaceCoordinator(ttl=float(c.get("waggle_ttl", 120.0))) if c.get("waggle") else None
 
         session = AshSession(runtime_bin=c.get("runtime_bin"), quiet=True)
@@ -188,9 +200,13 @@ class ManagerWorkerHarness(BaseHarness):
             if not session.create(image):
                 return self._fail(iid, c, "session_failed")
             url = session._sandbox.backend.url  # shared container URL for workers
+            sandbox_id = session.sandbox_id
 
             # --- 1. Manager: explore + decompose --------------------------------
-            subtasks = self._run_manager(session, c, problem, n_workers, mgr_steps, iid, traj_dir)
+            subtasks = self._run_manager(
+                session, c, problem, n_workers, mgr_steps, iid, traj_dir,
+                trace_dir=trace_dir, run_id=run_id, sandbox_id=sandbox_id,
+            )
             if not subtasks:
                 # Degrade to a single unrestricted worker (== plain agent).
                 subtasks = [{"id": "solo", "description": problem, "files": [], "acceptance": ""}]
@@ -209,7 +225,8 @@ class ManagerWorkerHarness(BaseHarness):
             worker_system = WORKER_SYSTEM + (WAGGLE_WORKER_NOTE if waggle_state else "")
             wrk_cfg = self._agent_config(c, worker_system, wrk_steps)
             results = self._run_workers(url, wrk_cfg, problem, subtasks, iid, traj_dir,
-                                        waggle_state)
+                                        waggle_state, trace_dir=trace_dir,
+                                        run_id=run_id, sandbox_id=sandbox_id)
 
             # --- 4. Combined patch = one tree, one diff -------------------------
             patch = session.get_patch()
@@ -231,10 +248,18 @@ class ManagerWorkerHarness(BaseHarness):
         finally:
             session.destroy()
 
-    def _run_manager(self, session, c, problem, n_workers, steps, iid, traj_dir) -> list[dict]:
+    def _run_manager(self, session, c, problem, n_workers, steps, iid, traj_dir,
+                     *, trace_dir, run_id, sandbox_id) -> list[dict]:
         system = MANAGER_SYSTEM + (WAGGLE_MANAGER_NOTE if c.get("waggle") else "")
         cfg = self._agent_config(c, system, steps)
-        agent = AshAgent(cfg, executor=session.execute)
+        agent = AshAgent(
+            cfg,
+            executor=session.execute,
+            trace_dir=trace_dir,
+            run_id=run_id,
+            agent_id="manager",
+            sandbox_id=sandbox_id,
+        )
         agent.stream = False
         agent.set_tools_schema(TOOLS_SCHEMA)
         briefing = (
@@ -253,13 +278,25 @@ class ManagerWorkerHarness(BaseHarness):
         return _normalize_subtasks(plan) if plan else []
 
     def _run_workers(self, url, cfg, problem, subtasks, iid, traj_dir,
-                     waggle_state=None) -> list[tuple]:
+                     waggle_state=None, *, trace_dir, run_id,
+                     sandbox_id) -> list[tuple]:
         def _run_one(st: dict) -> tuple:
+            worker_id = f"worker-{st['id']}"
             ex = _WorkerExecutor(url)  # created in this thread
             if waggle_state:
-                ex = CoordinatedExecutor(ex, waggle_state, agent_id=st["id"])
+                ex = CoordinatedExecutor(
+                    ex, waggle_state, agent_id=worker_id,
+                    sandbox_id=sandbox_id,
+                )
             try:
-                agent = AshAgent(cfg, executor=ex)
+                agent = AshAgent(
+                    cfg,
+                    executor=ex,
+                    trace_dir=trace_dir,
+                    run_id=run_id,
+                    agent_id=worker_id,
+                    sandbox_id=sandbox_id,
+                )
                 agent.stream = False
                 agent.set_tools_schema(TOOLS_SCHEMA)
                 owned = "\n".join(f"  - {f}" for f in st["files"]) or "  (any file needed for your subtask)"

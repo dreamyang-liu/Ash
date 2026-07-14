@@ -50,3 +50,16 @@ calls, relate agents, or reference a process. Those relationships use
 Framework-specific identifiers belong outside the core envelope. Producers may
 add namespaced `extensions`, for example `extensions.swebench.instance_id` or
 `extensions.verl.rollout_id`.
+
+## Harness identities
+
+AshAgent-based harnesses assign identities at the instance boundary:
+
+| Harness | `run_id` | `agent_id` | `sandbox_id` |
+|---|---|---|---|
+| LiteLLM | One per instance | `agent` | Spawned container ID |
+| Manager-worker | Shared by manager and workers | `manager`, `worker-<task>` | One shared container ID |
+| Best-of-N | Shared by all candidates | `candidate-<index>` | One container ID per candidate |
+
+Claude Code does not run through `AshAgent`; its tool events will be covered by
+the MCP proxy audit layer rather than this writer.

@@ -28,6 +28,7 @@ except ImportError:
     sys.exit(1)
 
 from .agent import AshAgent
+from .agent.trace import new_run_id
 from .sandbox import AshSession
 from . import style as S
 from .agent.tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA
@@ -247,7 +248,15 @@ def run_single_instance(
             sys.stdout.flush()
 
         trace_dir = output_dir / "traces"
-        agent = AshAgent(config, executor=session.execute, on_step=_on_step, trace_dir=trace_dir)
+        agent = AshAgent(
+            config,
+            executor=session.execute,
+            on_step=_on_step,
+            trace_dir=trace_dir,
+            run_id=new_run_id(),
+            agent_id="agent",
+            sandbox_id=session.sandbox_id,
+        )
         _agent_ref.append(agent)
         if quiet:
             agent.stream = False  # no streaming in parallel (avoids stdout conflicts)

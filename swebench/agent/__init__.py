@@ -20,7 +20,7 @@ from .conversation import Conversation
 from .guardrails import Guardrails
 from .llm import LLMClient, ThinkingLoopError
 from .tools import tool_summary, TOOLS_SCHEMA, BASH_ONLY_SCHEMA, route_agent_tool
-from .trace import ToolTraceWriter
+from .trace import ToolTraceWriter, new_run_id
 from . import hooks
 
 __all__ = ["AshAgent", "build_system_prompt", "build_instance_message",
@@ -180,7 +180,7 @@ class AshAgent:
         self.trajectory.instance_id = instance_id
         self.cost = CostTracker()
         self._warned = False
-        active_run_id = self.run_id or uuid4().hex
+        active_run_id = self.run_id or new_run_id()
         if self.trace_dir:
             self.trace_dir.mkdir(parents=True, exist_ok=True)
             trace_name = instance_id or "trace"

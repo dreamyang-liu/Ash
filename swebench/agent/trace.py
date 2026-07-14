@@ -6,9 +6,15 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 TRACE_SCHEMA_VERSION = 1
+
+
+def new_run_id() -> str:
+    """Return a globally unique identity for one harness run or rollout."""
+    return uuid4().hex
 
 
 class ToolTraceWriter:
