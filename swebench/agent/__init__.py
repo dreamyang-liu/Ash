@@ -9,8 +9,10 @@ model, run tool calls, repeat.
 """
 
 import json
+import time
 from pathlib import Path
 from typing import Callable, Optional
+from uuid import uuid4
 
 from ..models import AgentConfig, CostTracker, ToolResult, Trajectory
 from .prompts import build_system_prompt, build_instance_message  # re-exported
@@ -18,6 +20,7 @@ from .conversation import Conversation
 from .guardrails import Guardrails
 from .llm import LLMClient, ThinkingLoopError
 from .tools import tool_summary, TOOLS_SCHEMA, BASH_ONLY_SCHEMA, route_agent_tool
+from .trace import ToolTraceWriter
 from . import hooks
 
 __all__ = ["AshAgent", "build_system_prompt", "build_instance_message",
@@ -30,15 +33,22 @@ class AshAgent:
     def __init__(self, config: AgentConfig,
                  executor: Callable[[str, dict], ToolResult],
                  on_step: Optional[Callable[[int, str, str], None]] = None,
-                 trace_dir: Optional[Path] = None):
+                 trace_dir: Optional[Path] = None,
+                 run_id: Optional[str] = None,
+                 agent_id: str = "agent",
+                 sandbox_id: str = "default"):
         self.config = config
         self.executor = executor          # executor(tool_name, args) -> ToolResult
         self.on_step = on_step            # on_step(step_num, kind, text)
         self.trace_dir = trace_dir
+        self.run_id = run_id
+        self.agent_id = agent_id
+        self.sandbox_id = sandbox_id
         self.trajectory = Trajectory()
         self.cost = CostTracker()
         self._tools_schema: list[dict] = []
         self._trace_file = None
+        self._event_trace: Optional[ToolTraceWriter] = None
         self._warned = False
         self.stream = True                # set False to disable streaming (parallel mode)
         self.before_query_hooks = list(hooks.DEFAULT_BEFORE_QUERY)
@@ -52,7 +62,8 @@ class AshAgent:
             self._trace_file.write(text)
             self._trace_file.flush()
 
-    def _run_tool(self, tc, conv: Conversation, guardrails: Guardrails) -> None:
+    def _run_tool(self, tc, conv: Conversation, guardrails: Guardrails,
+                  turn_id: str) -> None:
         """Execute one tool call, trace it, and record its result on the conversation."""
         name = tc.function.name
         try:
@@ -65,6 +76,7 @@ class AshAgent:
         self._trace(f"\n> {name} {summary}\n")
 
         result = None
+        error_kind = None
         if name == "bash":  # bash_only mode alias
             exec_name, exec_args = "shell", dict(args)
         else:
@@ -73,18 +85,60 @@ class AshAgent:
             except KeyError as exc:
                 exec_name, exec_args = name, dict(args)
                 result = ToolResult(success=False, output="", error=str(exc))
+                error_kind = "routing"
+
+        call_id = uuid4().hex
+        if self._event_trace:
+            self._event_trace.emit(
+                "tool.started",
+                turn_id=turn_id,
+                call_id=call_id,
+                agent={"name": name, "args": args},
+                runtime={"name": exec_name, "args": exec_args},
+            )
+
+        started_at = time.perf_counter()
         if result is None:
             if exec_name != name:
                 self._trace(f"[runtime] {exec_name} {tool_summary(exec_name, exec_args)}\n")
             warning = guardrails.check(exec_name, exec_args)
             result = self.executor(exec_name, exec_args)
+            if not result.success:
+                error_kind = "runtime"
         else:
             warning = None
-        content = result.output if result.success else f"Error: {result.error or 'Unknown error'}\n{result.output}"
+        duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
+        raw_content = result.output if result.success else \
+            f"Error: {result.error or 'Unknown error'}\n{result.output}"
+        content = raw_content
         if warning:
             content += f"\n\n{warning}"
         for proc in self.result_processors:
             content = proc(content, name, args, result)
+
+        if self._event_trace:
+            output_truncated = _runtime_output_truncated(exec_name, result.output)
+            result_event = {
+                "output": result.output,
+                "error": result.error,
+                "output_bytes": len(result.output.encode("utf-8")),
+                "output_truncated": output_truncated,
+            }
+            payload = {
+                "turn_id": turn_id,
+                "call_id": call_id,
+                "status": "ok" if result.success else "error",
+                "result": result_event,
+                "duration_ms": duration_ms,
+            }
+            if error_kind:
+                payload["error_kind"] = error_kind
+            if content != result.output:
+                payload["observation"] = content
+            process_id = _background_process_id(exec_name, exec_args, result)
+            if process_id:
+                payload["process_id"] = process_id
+            self._event_trace.emit("tool.finished", **payload)
 
         self._trace(f"{content}\n")
         conv.add_tool_result(tc.id, content, tool_name=name, tool_args=args, success=result.success)
@@ -126,9 +180,17 @@ class AshAgent:
         self.trajectory.instance_id = instance_id
         self.cost = CostTracker()
         self._warned = False
+        active_run_id = self.run_id or uuid4().hex
         if self.trace_dir:
             self.trace_dir.mkdir(parents=True, exist_ok=True)
-            self._trace_file = open(self.trace_dir / f"{instance_id or 'trace'}.log", "w", encoding="utf-8")
+            trace_name = instance_id or "trace"
+            self._trace_file = open(self.trace_dir / f"{trace_name}.log", "w", encoding="utf-8")
+            self._event_trace = ToolTraceWriter(
+                self.trace_dir / f"{trace_name}.events.jsonl",
+                run_id=active_run_id,
+                agent_id=self.agent_id,
+                sandbox_id=self.sandbox_id,
+            )
 
         llm = LLMClient(self.config, self.cost, self._tools_schema, trace=self._trace, on_step=self.on_step)
         llm.stream = self.stream
@@ -153,11 +215,40 @@ class AshAgent:
                 conv.add_assistant(message)
 
                 if message.tool_calls:
+                    turn_id = f"turn-{self.cost.api_calls}"
                     for tc in message.tool_calls:
-                        self._run_tool(tc, conv, guardrails)
+                        self._run_tool(tc, conv, guardrails, turn_id)
                 elif self._nudge(conv, message) == "completed":
                     return "completed"
         finally:
             if self._trace_file:
                 self._trace_file.close()
                 self._trace_file = None
+            if self._event_trace:
+                self._event_trace.close()
+                self._event_trace = None
+
+
+def _background_process_id(name: str, args: dict, result: ToolResult) -> Optional[str]:
+    if name != "shell" or not args.get("background") or not result.success:
+        return None
+    try:
+        payload = json.loads(result.output)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    pid = payload.get("pid") if isinstance(payload, dict) else None
+    return pid if isinstance(pid, str) and pid else None
+
+
+def _runtime_output_truncated(name: str, output: str) -> bool:
+    if "[output truncated:" in output:
+        return True
+    if name != "process":
+        return False
+    try:
+        payload = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(payload, dict) and bool(
+        payload.get("stdout_truncated") or payload.get("stderr_truncated")
+    )
