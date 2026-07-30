@@ -1,0 +1,574 @@
+{
+ "normalize_text": [
+  {
+   "in": "<b>hello</b> world",
+   "out": "hello world"
+  },
+  {
+   "in": "a &amp; b &lt;c&gt; &quot;d&quot; &#39;e&#39;",
+   "out": "a & b <c> \"d\" 'e'"
+  },
+  {
+   "in": "  a \t b \n c  ",
+   "out": "a b c"
+  },
+  {
+   "in": "line1\nline2\r\nline3",
+   "out": "line1line2line3"
+  },
+  {
+   "in": "zero​width​space",
+   "out": "zerowidthspace"
+  },
+  {
+   "in": "café naïve résumé",
+   "out": "café naïve résumé"
+  },
+  {
+   "in": "éclair",
+   "out": "éclair"
+  },
+  {
+   "in": "tab\there",
+   "out": "tabhere"
+  },
+  {
+   "in": "<div class='x'>nested <span>tags</span></div>",
+   "out": "nested tags"
+  },
+  {
+   "in": "&amp;amp; double escaped",
+   "out": "&amp; double escaped"
+  },
+  {
+   "in": "control\u0001chars\u0002here",
+   "out": "controlcharshere"
+  },
+  {
+   "in": "ideographic　space",
+   "out": "ideographic space"
+  },
+  {
+   "in": "",
+   "out": ""
+  },
+  {
+   "in": "   ",
+   "out": ""
+  },
+  {
+   "in": "普通话 中文 测试",
+   "out": "普通话 中文 测试"
+  },
+  {
+   "in": "emoji 🎉 test",
+   "out": "emoji 🎉 test"
+  },
+  {
+   "in": "<p>Multi</p><p>Paragraph</p>",
+   "out": "MultiParagraph"
+  },
+  {
+   "in": "a&nbsp;b",
+   "out": "a b"
+  },
+  {
+   "in": "quote &ldquo;smart&rdquo; quotes",
+   "out": "quote “smart” quotes"
+  },
+  {
+   "in": "mixed <b>HTML &amp; entities</b> ​  whitespace",
+   "out": "mixed HTML & entities whitespace"
+  }
+ ],
+ "normalize_url": [
+  {
+   "in": "https://x.com/a%20b",
+   "out": "https://x.com/a+b"
+  },
+  {
+   "in": "https://x.com/a b",
+   "out": "https://x.com/a+b"
+  },
+  {
+   "in": "https://example.com/path?q=hello%20world&x=%2Fslash",
+   "out": "https://example.com/path?q=hello+world&x=/slash"
+  },
+  {
+   "in": "https://en.wikipedia.org/wiki/G%C3%B6del",
+   "out": "https://en.wikipedia.org/wiki/Gödel"
+  },
+  {
+   "in": "",
+   "out": ""
+  },
+  {
+   "in": "https://x.com/%E4%B8%AD%E6%96%87",
+   "out": "https://x.com/中文"
+  },
+  {
+   "in": "https://x.com/already+plus",
+   "out": "https://x.com/already+plus"
+  },
+  {
+   "in": "http://a.b/c%2Bd",
+   "out": "http://a.b/c+d"
+  },
+  {
+   "in": "https://x.com/double%2520encoded",
+   "out": "https://x.com/double%20encoded"
+  }
+ ],
+ "normalize_date": [
+  {
+   "in": 0,
+   "int": true,
+   "out": "1970-01-01T00:00:00+00:00"
+  },
+  {
+   "in": 86400,
+   "int": true,
+   "out": "1970-01-02T00:00:00+00:00"
+  },
+  {
+   "in": 1700000000,
+   "int": true,
+   "out": "2023-11-14T22:13:20+00:00"
+  },
+  {
+   "in": 1234567890,
+   "int": true,
+   "out": "2009-02-13T23:31:30+00:00"
+  },
+  {
+   "in": "2024-01-01",
+   "int": false,
+   "out": "2024-01-01"
+  },
+  {
+   "in": "3 days ago",
+   "int": false,
+   "out": "3 days ago"
+  },
+  {
+   "in": "",
+   "int": false,
+   "out": ""
+  }
+ ],
+ "extract_vqd": [
+  {
+   "in": "x vqd=\"4-12345\" y",
+   "out": "4-12345",
+   "err": false
+  },
+  {
+   "in": "href=\"?q=x&vqd=4-999&other=1\"",
+   "out": "4-999",
+   "err": false
+  },
+  {
+   "in": "vqd='4-abc'",
+   "out": "4-abc",
+   "err": false
+  },
+  {
+   "in": "a vqd=\"first\" b vqd=\"second\"",
+   "out": "first",
+   "err": false
+  },
+  {
+   "in": "vqd=4-noquote&next",
+   "out": "4-noquote",
+   "err": false
+  },
+  {
+   "in": "no token",
+   "out": "",
+   "err": true
+  }
+ ],
+ "ranker": [
+  {
+   "query": "golang",
+   "docs": [
+    {
+     "title": "unrelated stuff",
+     "href": "https://a.com",
+     "body": "nothing here"
+    },
+    {
+     "title": "",
+     "href": "https://b.com",
+     "body": "golang tutorial content"
+    },
+    {
+     "title": "golang guide",
+     "href": "https://c.com",
+     "body": "nothing"
+    },
+    {
+     "title": "golang docs",
+     "href": "https://d.com",
+     "body": "golang reference"
+    },
+    {
+     "title": "Go language",
+     "href": "https://en.wikipedia.org/wiki/Go",
+     "body": "x"
+    },
+    {
+     "title": "Category: Golang - Wikimedia Commons",
+     "href": "https://commons.wikimedia.org/x",
+     "body": "y"
+    },
+    {
+     "title": "GOLANG UPPERCASE",
+     "href": "https://e.com",
+     "body": "GOLANG BODY"
+    },
+    {
+     "title": "short go",
+     "href": "https://f.com",
+     "body": "the go language"
+    },
+    {
+     "title": "concurrency",
+     "href": "https://g.com",
+     "body": "with golang"
+    },
+    {
+     "title": "description fallback",
+     "href": "https://h.com",
+     "description": "golang described"
+    }
+   ],
+   "order": [
+    "https://en.wikipedia.org/wiki/Go",
+    "https://d.com",
+    "https://e.com",
+    "https://c.com",
+    "https://b.com",
+    "https://g.com",
+    "https://h.com",
+    "https://a.com",
+    "https://f.com"
+   ]
+  },
+  {
+   "query": "golang concurrency",
+   "docs": [
+    {
+     "title": "unrelated stuff",
+     "href": "https://a.com",
+     "body": "nothing here"
+    },
+    {
+     "title": "",
+     "href": "https://b.com",
+     "body": "golang tutorial content"
+    },
+    {
+     "title": "golang guide",
+     "href": "https://c.com",
+     "body": "nothing"
+    },
+    {
+     "title": "golang docs",
+     "href": "https://d.com",
+     "body": "golang reference"
+    },
+    {
+     "title": "Go language",
+     "href": "https://en.wikipedia.org/wiki/Go",
+     "body": "x"
+    },
+    {
+     "title": "Category: Golang - Wikimedia Commons",
+     "href": "https://commons.wikimedia.org/x",
+     "body": "y"
+    },
+    {
+     "title": "GOLANG UPPERCASE",
+     "href": "https://e.com",
+     "body": "GOLANG BODY"
+    },
+    {
+     "title": "short go",
+     "href": "https://f.com",
+     "body": "the go language"
+    },
+    {
+     "title": "concurrency",
+     "href": "https://g.com",
+     "body": "with golang"
+    },
+    {
+     "title": "description fallback",
+     "href": "https://h.com",
+     "description": "golang described"
+    }
+   ],
+   "order": [
+    "https://en.wikipedia.org/wiki/Go",
+    "https://d.com",
+    "https://e.com",
+    "https://g.com",
+    "https://c.com",
+    "https://b.com",
+    "https://h.com",
+    "https://a.com",
+    "https://f.com"
+   ]
+  },
+  {
+   "query": "go",
+   "docs": [
+    {
+     "title": "unrelated stuff",
+     "href": "https://a.com",
+     "body": "nothing here"
+    },
+    {
+     "title": "",
+     "href": "https://b.com",
+     "body": "golang tutorial content"
+    },
+    {
+     "title": "golang guide",
+     "href": "https://c.com",
+     "body": "nothing"
+    },
+    {
+     "title": "golang docs",
+     "href": "https://d.com",
+     "body": "golang reference"
+    },
+    {
+     "title": "Go language",
+     "href": "https://en.wikipedia.org/wiki/Go",
+     "body": "x"
+    },
+    {
+     "title": "Category: Golang - Wikimedia Commons",
+     "href": "https://commons.wikimedia.org/x",
+     "body": "y"
+    },
+    {
+     "title": "GOLANG UPPERCASE",
+     "href": "https://e.com",
+     "body": "GOLANG BODY"
+    },
+    {
+     "title": "short go",
+     "href": "https://f.com",
+     "body": "the go language"
+    },
+    {
+     "title": "concurrency",
+     "href": "https://g.com",
+     "body": "with golang"
+    },
+    {
+     "title": "description fallback",
+     "href": "https://h.com",
+     "description": "golang described"
+    }
+   ],
+   "order": [
+    "https://en.wikipedia.org/wiki/Go",
+    "https://a.com",
+    "https://b.com",
+    "https://c.com",
+    "https://d.com",
+    "https://e.com",
+    "https://f.com",
+    "https://g.com",
+    "https://h.com"
+   ]
+  },
+  {
+   "query": "GOLANG TUTORIAL",
+   "docs": [
+    {
+     "title": "unrelated stuff",
+     "href": "https://a.com",
+     "body": "nothing here"
+    },
+    {
+     "title": "",
+     "href": "https://b.com",
+     "body": "golang tutorial content"
+    },
+    {
+     "title": "golang guide",
+     "href": "https://c.com",
+     "body": "nothing"
+    },
+    {
+     "title": "golang docs",
+     "href": "https://d.com",
+     "body": "golang reference"
+    },
+    {
+     "title": "Go language",
+     "href": "https://en.wikipedia.org/wiki/Go",
+     "body": "x"
+    },
+    {
+     "title": "Category: Golang - Wikimedia Commons",
+     "href": "https://commons.wikimedia.org/x",
+     "body": "y"
+    },
+    {
+     "title": "GOLANG UPPERCASE",
+     "href": "https://e.com",
+     "body": "GOLANG BODY"
+    },
+    {
+     "title": "short go",
+     "href": "https://f.com",
+     "body": "the go language"
+    },
+    {
+     "title": "concurrency",
+     "href": "https://g.com",
+     "body": "with golang"
+    },
+    {
+     "title": "description fallback",
+     "href": "https://h.com",
+     "description": "golang described"
+    }
+   ],
+   "order": [
+    "https://en.wikipedia.org/wiki/Go",
+    "https://d.com",
+    "https://e.com",
+    "https://c.com",
+    "https://b.com",
+    "https://g.com",
+    "https://h.com",
+    "https://a.com",
+    "https://f.com"
+   ]
+  },
+  {
+   "query": "xyz-nonexistent",
+   "docs": [
+    {
+     "title": "unrelated stuff",
+     "href": "https://a.com",
+     "body": "nothing here"
+    },
+    {
+     "title": "",
+     "href": "https://b.com",
+     "body": "golang tutorial content"
+    },
+    {
+     "title": "golang guide",
+     "href": "https://c.com",
+     "body": "nothing"
+    },
+    {
+     "title": "golang docs",
+     "href": "https://d.com",
+     "body": "golang reference"
+    },
+    {
+     "title": "Go language",
+     "href": "https://en.wikipedia.org/wiki/Go",
+     "body": "x"
+    },
+    {
+     "title": "Category: Golang - Wikimedia Commons",
+     "href": "https://commons.wikimedia.org/x",
+     "body": "y"
+    },
+    {
+     "title": "GOLANG UPPERCASE",
+     "href": "https://e.com",
+     "body": "GOLANG BODY"
+    },
+    {
+     "title": "short go",
+     "href": "https://f.com",
+     "body": "the go language"
+    },
+    {
+     "title": "concurrency",
+     "href": "https://g.com",
+     "body": "with golang"
+    },
+    {
+     "title": "description fallback",
+     "href": "https://h.com",
+     "description": "golang described"
+    }
+   ],
+   "order": [
+    "https://en.wikipedia.org/wiki/Go",
+    "https://a.com",
+    "https://b.com",
+    "https://c.com",
+    "https://d.com",
+    "https://e.com",
+    "https://f.com",
+    "https://g.com",
+    "https://h.com"
+   ]
+  }
+ ],
+ "aggregator": {
+  "input": [
+   {
+    "title": "B",
+    "href": "https://b.com",
+    "body": "short b"
+   },
+   {
+    "title": "A",
+    "href": "https://a.com",
+    "body": "short"
+   },
+   {
+    "title": "A2",
+    "href": "https://a.com",
+    "body": "a much longer body text here"
+   },
+   {
+    "title": "C",
+    "href": "https://c.com",
+    "body": "c body"
+   },
+   {
+    "title": "B2",
+    "href": "https://b.com",
+    "body": "b"
+   },
+   {
+    "title": "A3",
+    "href": "https://a.com",
+    "body": "mid body"
+   }
+  ],
+  "output": [
+   {
+    "title": "A2",
+    "href": "https://a.com",
+    "body": "a much longer body text here"
+   },
+   {
+    "title": "B",
+    "href": "https://b.com",
+    "body": "short b"
+   },
+   {
+    "title": "C",
+    "href": "https://c.com",
+    "body": "c body"
+   }
+  ]
+ }
+}
