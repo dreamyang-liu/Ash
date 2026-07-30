@@ -7,11 +7,12 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
 	"github.com/PuerkitoBio/goquery"
-	"github.com/dreamyang-liu/ash/runtime/internal/ddgs"
+	ddgs "github.com/dreamyang-liu/ddgs-go"
 )
 
 const defaultUA = "AshRuntime/1.0 (+https://github.com/dreamyang-liu/ash)"
@@ -171,9 +172,9 @@ func clampInt(v, min, max int) int {
 
 // ---- WebSearchTool ----
 
-// WebSearchTool searches the web via the embedded ddgs metasearch library
-// (a Go port of github.com/deedy5/ddgs): multi-engine fan-out, dedup,
-// frequency-based ranking.
+// WebSearchTool searches the web via the ddgs-go metasearch library
+// (github.com/dreamyang-liu/ddgs-go): multi-engine fan-out, dedup,
+// frequency-based ranking, engine-failure cooldown.
 type WebSearchTool struct{}
 
 func (w *WebSearchTool) Name() string { return "web_search" }
@@ -207,10 +208,17 @@ type searchResult struct {
 	Body  string
 }
 
+// ddgsClient is the shared metasearch client. Reusing one instance keeps
+// ddgs's in-memory engine-failure cooldown effective across tool calls
+// (blocked engines are skipped for a few minutes instead of retried).
+var ddgsClient = sync.OnceValues(func() (*ddgs.DDGS, error) {
+	return ddgs.New(&ddgs.Config{Timeout: 15 * time.Second})
+})
+
 // ddgsTextSearch runs a ddgs text search; a package variable so tests can
 // stub the network access.
 var ddgsTextSearch = func(query, backend string, maxResults int) ([]searchResult, error) {
-	client, err := ddgs.New(&ddgs.Config{Timeout: 15 * time.Second})
+	client, err := ddgsClient()
 	if err != nil {
 		return nil, err
 	}
