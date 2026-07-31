@@ -157,6 +157,9 @@ def main():
     parser.add_argument("--output", "-o", default=None)
     parser.add_argument("--workers", "-w", type=int, default=None)
     parser.add_argument("--runtime-bin", default=None)
+    parser.add_argument("--custom-tools-dir", default=None,
+                        help="Directory of custom tool manifests (*.yaml/*.json). "
+                             "Defaults to configs/custom_tools if present.")
 
     # LiteLLM-specific
     parser.add_argument("--max-tokens", type=int, default=None)
@@ -203,7 +206,7 @@ def main():
     for key in ["model", "provider", "api_base", "api_key", "max_tokens",
                 "step_limit", "cost_limit", "temperature", "reasoning_effort",
                 "prompt_cache", "max_budget", "timeout", "runtime_bin",
-                "image_template", "subset", "workers"]:
+                "image_template", "subset", "workers", "custom_tools_dir"]:
         cli_val = getattr(args, key.replace("-", "_"), None)
         if cli_val is not None:
             harness_config[key] = cli_val

@@ -228,6 +228,26 @@ def register(spec: CustomToolSpec) -> None:
     CUSTOM_TOOL_SPECS[spec.name] = spec
 
 
+# Default manifest location (repo-relative), overridable per run.
+DEFAULT_MANIFEST_DIR = Path(__file__).resolve().parents[2] / "configs" / "custom_tools"
+
+
+def load_custom_tools(directory: str | Path | None = None) -> list[CustomToolSpec]:
+    """Load manifests from `directory`, or the default location.
+
+    - explicit directory: must exist (typo of a user-passed path is an error)
+    - default location: silently skipped when absent (opt-in feature)
+    """
+    if directory is not None:
+        directory = Path(directory)
+        if not directory.is_dir():
+            raise ManifestError(f"custom tools dir not found: {directory}")
+        return load_manifests(directory)
+    if DEFAULT_MANIFEST_DIR.is_dir():
+        return load_manifests(DEFAULT_MANIFEST_DIR)
+    return []
+
+
 def load_manifests(directory: str | Path) -> list[CustomToolSpec]:
     """Load and register all *.json / *.yaml manifests in a directory."""
     directory = Path(directory)
