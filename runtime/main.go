@@ -14,6 +14,11 @@ import (
 	"syscall"
 	"time"
 
+	// Embedded CA roots: TLS (artifact downloads, web_search/web_fetch)
+	// works even in images without ca-certificates (debian-slim,
+	// distroless). Only used when no system roots are present.
+	_ "golang.org/x/crypto/x509roots/fallback"
+
 	"github.com/dreamyang-liu/ash/runtime/events"
 	"github.com/dreamyang-liu/ash/runtime/tools"
 )
