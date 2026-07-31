@@ -88,12 +88,22 @@ def test_arg_validation():
         spec.compile_argv("/b", {"file": "x", "threshold": "high"})
 
 
+def test_path_source_manifest():
+    spec = parse_manifest(make_manifest(binary={"path": "/opt/tools/analyzer"}))
+    assert spec.path == "/opt/tools/analyzer"
+    assert spec.url == ""
+
+
 @pytest.mark.parametrize(
     "mutate, err",
     [
         ({"name": "Bad Name!"}, "invalid tool name"),
         ({"binary": {"url": "ftp://x", "sha256": SHA}}, "must be http"),
         ({"binary": {"url": "https://x", "sha256": "zz"}}, "sha256"),
+        ({"binary": {}}, "exactly one of url/path"),
+        ({"binary": {"url": "https://x", "sha256": SHA, "path": "/b"}}, "exactly one of url/path"),
+        ({"binary": {"path": "relative/path"}}, "must be absolute"),
+        ({"binary": {"path": "/b", "sha256": SHA}}, "only valid with url"),
         ({"timeout": 0}, "timeout"),
         ({"parameters": {"p": {"type": "string", "map": {}}}}, "exactly one"),
         (

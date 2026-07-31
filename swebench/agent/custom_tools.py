@@ -74,8 +74,12 @@ class ParamSpec:
 class CustomToolSpec:
     name: str
     description: str
-    url: str
-    sha256: str
+    # Binary source — exactly one is set:
+    #   url+sha256: downloaded at first use via the artifact primitive
+    #   path:       absolute path already present in the sandbox image
+    url: str = ""
+    sha256: str = ""
+    path: str = ""
     params: dict[str, ParamSpec] = field(default_factory=dict)
     timeout: int = DEFAULT_TIMEOUT_SECONDS
 
@@ -156,10 +160,19 @@ def parse_manifest(raw: dict) -> CustomToolSpec:
     binary = raw.get("binary") or {}
     url = binary.get("url", "")
     sha256 = str(binary.get("sha256", "")).lower()
-    if not url.startswith(("http://", "https://")):
-        raise ManifestError(f"{name}: binary.url must be http(s)")
-    if not _SHA256_RE.match(sha256):
-        raise ManifestError(f"{name}: binary.sha256 must be a 64-char hex digest")
+    path = binary.get("path", "")
+    if bool(url) == bool(path):
+        raise ManifestError(f"{name}: binary must set exactly one of url/path")
+    if url:
+        if not url.startswith(("http://", "https://")):
+            raise ManifestError(f"{name}: binary.url must be http(s)")
+        if not _SHA256_RE.match(sha256):
+            raise ManifestError(f"{name}: binary.sha256 must be a 64-char hex digest")
+    else:
+        if not path.startswith("/"):
+            raise ManifestError(f"{name}: binary.path must be absolute")
+        if sha256:
+            raise ManifestError(f"{name}: binary.sha256 is only valid with url")
 
     params: dict[str, ParamSpec] = {}
     positions_seen: set[int] = set()
@@ -210,6 +223,7 @@ def parse_manifest(raw: dict) -> CustomToolSpec:
         description=raw.get("description", name),
         url=url,
         sha256=sha256,
+        path=path,
         params=params,
         timeout=timeout,
     )
@@ -278,17 +292,20 @@ def custom_agent_schemas() -> list[dict]:
 class CustomToolPlan:
     """Execution plan for one custom tool call.
 
-    The executor runs artifact_call first; its Output is the verified
-    binary path, which it feeds to shell_call() for the second step.
-    Args are validated eagerly (at plan time) so bad calls fail before
-    any download happens.
+    url-sourced tools: run artifact_call first; its Output is the verified
+    binary path, fed to shell_call() for the second step. path-sourced
+    tools (binary already in the image): artifact_call is None and the
+    executor goes straight to shell_call(spec.path). Args are validated
+    eagerly (at plan time) so bad calls fail before any download happens.
     """
 
     spec: CustomToolSpec
     args: dict
 
     @property
-    def artifact_call(self) -> tuple[str, dict]:
+    def artifact_call(self) -> tuple[str, dict] | None:
+        if not self.spec.url:
+            return None  # image-local binary: no download step
         return "artifact", {"url": self.spec.url, "sha256": self.spec.sha256}
 
     def shell_call(self, binary_path: str) -> tuple[str, dict]:

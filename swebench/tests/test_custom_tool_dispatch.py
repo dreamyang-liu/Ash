@@ -142,3 +142,29 @@ def test_load_custom_tools_default_absent_is_noop(monkeypatch, tmp_path):
     import swebench.agent.custom_tools as ct
     monkeypatch.setattr(ct, "DEFAULT_MANIFEST_DIR", tmp_path / "missing")
     assert ct.load_custom_tools(None) == []
+
+
+def test_path_sourced_tool_skips_artifact_step():
+    register(parse_manifest({
+        "name": "imagetool",
+        "description": "binary baked into the image",
+        "binary": {"path": "/opt/tools/analyzer"},
+        "parameters": {
+            "file": {"type": "string", "required": True, "map": {"positional": 0}},
+        },
+        "timeout": 20,
+    }))
+    calls = []
+
+    def executor(name, args):
+        calls.append((name, dict(args)))
+        return ToolResult(success=True, output="ok", error="")
+
+    agent = make_agent(executor)
+    agent._run_tool(make_tool_call("imagetool", {"file": "a.py"}),
+                    FakeConversation(), NoopGuardrails(), "turn1")
+
+    # Single step: shell only, no artifact download.
+    assert [c[0] for c in calls] == ["shell"]
+    assert calls[0][1]["command"] == "/opt/tools/analyzer a.py"
+    assert calls[0][1]["timeout"] == 20

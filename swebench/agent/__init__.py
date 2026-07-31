@@ -81,11 +81,16 @@ class AshAgent:
         if name == "bash":  # bash_only mode alias
             exec_name, exec_args = "shell", dict(args)
         elif is_custom_tool(name):
-            # Manifest-defined tool: expand to artifact -> shell.
+            # Manifest-defined tool: artifact -> shell (url source) or
+            # straight to shell (image-local path source).
             from .custom_tools import plan_custom_tool
             try:
                 custom_plan = plan_custom_tool(name, args)
-                exec_name, exec_args = custom_plan.artifact_call
+                if custom_plan.artifact_call is not None:
+                    exec_name, exec_args = custom_plan.artifact_call
+                else:
+                    exec_name, exec_args = custom_plan.shell_call(custom_plan.spec.path)
+                    custom_plan = None  # single-step: no follow-up needed
             except (ValueError, KeyError) as exc:
                 exec_name, exec_args = name, dict(args)
                 result = ToolResult(success=False, output="", error=str(exc))

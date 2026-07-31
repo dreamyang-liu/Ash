@@ -12,8 +12,11 @@ one agent-facing tool backed by a static binary:
 name: code_complexity                 # tool name the agent sees
 description: Analyze cyclomatic complexity of a source file
 binary:
-  url: https://example.com/analyzer-linux-amd64   # static binary (CGO_ENABLED=0 / musl)
-  sha256: "ab34..."                   # REQUIRED — content is verified before execution
+  # Source 1: remote static binary (CGO_ENABLED=0 / musl), downloaded once
+  url: https://example.com/analyzer-linux-amd64
+  sha256: "ab34..."                   # REQUIRED with url — verified before execution
+  # Source 2 (alternative): binary already baked into the sandbox image
+  # path: /opt/tools/analyzer          # absolute path; mutually exclusive with url
 parameters:
   file:      {type: string, required: true, map: {positional: 0}}
   threshold: {type: integer, default: 10, map: {flag: "--threshold"}}
@@ -21,9 +24,10 @@ parameters:
 timeout: 30                           # seconds, max 600
 ```
 
-How it executes: the runtime downloads the binary once (cached by sha256,
-hash-verified before install), then runs it with arguments compiled into
-discrete argv slots — agent input is never interpreted by the shell.
+How it executes: url-sourced binaries are downloaded once (cached by
+sha256, hash-verified before install); path-sourced binaries run directly
+from the image. Either way, arguments are compiled into discrete argv
+slots — agent input is never interpreted by the shell.
 
 Manifests in this directory are loaded automatically when the run uses the
 default tools mode; the directory being absent or empty is fine.
