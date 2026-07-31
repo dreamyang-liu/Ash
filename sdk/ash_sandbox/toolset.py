@@ -51,6 +51,7 @@ BUILTIN_ROUTES: dict[str, str] = {
     "process": "process",
     "web_fetch": "web_fetch",
     "web_search": "web_search",
+    "wait_for_events": "wait_for_events",
 }
 
 

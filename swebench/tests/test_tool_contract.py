@@ -22,6 +22,7 @@ EXPECTED_TOOL_NAMES = [
     "process",
     "web_fetch",
     "web_search",
+    "wait_for_events",
 ]
 
 RUNTIME_TOOL_NAMES = {
@@ -31,6 +32,7 @@ RUNTIME_TOOL_NAMES = {
     "process",
     "web_fetch",
     "web_search",
+    "wait_for_events",
 }
 
 EXPECTED_REQUIRED = {
@@ -40,6 +42,7 @@ EXPECTED_REQUIRED = {
     "process": ["pid", "action"],
     "web_fetch": ["url"],
     "web_search": ["query"],
+    "wait_for_events": [],
 }
 
 ROOT_SCHEMA_KEYS = {"type", "properties", "required", "description"}
@@ -101,6 +104,7 @@ RUNTIME_REQUIRED = {
     "process": ["pid", "action"],
     "web_fetch": ["url"],
     "web_search": ["query"],
+    "wait_for_events": [],
 }
 
 

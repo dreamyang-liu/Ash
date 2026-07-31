@@ -257,4 +257,34 @@ TOOLS_SCHEMA = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait_for_events",
+            "description": (
+                "Block until the sandbox reports an event (e.g. a background process "
+                "exits or a file changes), or until the timeout elapses. Use this "
+                "instead of polling in a loop when waiting on background work."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kinds": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            'Event kinds to wait for, e.g. ["process_exited", '
+                            '"file_change"]. Omit to wait for any event.'
+                        ),
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "default": 30,
+                        "description": "Seconds to wait. Values are clamped to the runtime maximum.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
 ]
