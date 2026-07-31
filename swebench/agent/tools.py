@@ -43,6 +43,17 @@ def route_agent_tool(name: str, args: dict) -> tuple[str, dict]:
     return runtime_tool, dict(args)
 
 
+def is_custom_tool(name: str) -> bool:
+    """Whether name is a registered manifest-defined custom tool.
+
+    Custom tools don't go through route_agent_tool; the session executor
+    uses custom_tools.plan_custom_tool to expand them into artifact+shell.
+    """
+    from .custom_tools import CUSTOM_TOOL_SPECS
+
+    return name in CUSTOM_TOOL_SPECS
+
+
 def truncate_output(content: str, max_len: int = 12000) -> str:
     """Elide the middle of overly long tool output."""
     if len(content) <= max_len:

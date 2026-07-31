@@ -32,6 +32,7 @@ func All() []Tool {
 		&GrepTool{},
 		&WebFetchTool{},
 		&WebSearchTool{},
+		&ArtifactTool{}, // primitive for SDK-side custom tools (binary download+verify)
 	}
 }
 
