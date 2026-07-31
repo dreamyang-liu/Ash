@@ -43,10 +43,11 @@ jobs:
           import sys, json
           data = json.loads(sys.stdin.read())
           tools = data['result']['tools']
-          assert len(tools) == 6, f'Expected 6 tools, got {len(tools)}'
+          assert len(tools) == 7, f'Expected 7 tools, got {len(tools)}'
           names = [t['name'] for t in tools]
           assert 'shell' in names
           assert 'web_search' in names
+          assert 'artifact' in names
           assert 'read_file' not in names
           print(f'OK: {len(tools)} tools registered')
           "
@@ -201,7 +202,7 @@ jobs:
                   r = await sb.call('shell', command='echo client_http')
                   assert 'client_http' in r.output, f'HTTP failed: {r.output}'
                   tools = await sb.tool_schemas(format='openai')
-                  assert len(tools) == 6
+                  assert len(tools) == 7
 
               # MCP backend
               async with Sandbox.mcp('http://localhost:19879/mcp') as sb:
