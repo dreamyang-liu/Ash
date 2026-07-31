@@ -2,6 +2,14 @@ from .result import ToolResult
 from .backends import Backend, HTTPBackend, MCPBackend, CLIBackend, GatewayBackend
 from .sandbox import Sandbox
 from .pool import DockerPool, SandboxPool
+from .toolset import (
+    BUILTIN_ROUTES,
+    CustomToolPlan,
+    CustomToolSpec,
+    ManifestError,
+    ToolRegistry,
+    parse_manifest,
+)
 
 __all__ = [
     "ToolResult",
@@ -13,4 +21,10 @@ __all__ = [
     "Sandbox",
     "DockerPool",
     "SandboxPool",
+    "BUILTIN_ROUTES",
+    "CustomToolPlan",
+    "CustomToolSpec",
+    "ManifestError",
+    "ToolRegistry",
+    "parse_manifest",
 ]

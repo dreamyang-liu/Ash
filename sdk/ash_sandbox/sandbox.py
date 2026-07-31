@@ -11,6 +11,7 @@ import httpx
 
 from .backends import Backend, CLIBackend, HTTPBackend, MCPBackend
 from .result import ToolResult
+from .toolset import ToolRegistry
 
 
 @dataclass
@@ -18,6 +19,7 @@ class Sandbox:
     """Manages lifecycle + delegates execution to a Backend."""
 
     backend: Backend
+    tools: ToolRegistry = field(default_factory=ToolRegistry)
     _container_id: str | None = field(default=None, repr=False)
     _process: asyncio.subprocess.Process | None = field(default=None, repr=False)
     _tools_cache: list[dict] | None = field(default=None, repr=False)
@@ -106,6 +108,30 @@ class Sandbox:
     async def call(self, tool_name: str, **kwargs) -> ToolResult:
         """Call a tool by name."""
         return await self.backend.call(tool_name, kwargs)
+
+    async def call_agent_tool(self, name: str, args: dict,
+                              registry: ToolRegistry | None = None) -> ToolResult:
+        """Call an agent-facing tool through a ToolRegistry.
+
+        Builtin tools route by name; manifest-defined custom tools expand
+        into their execution plan (artifact download -> shell, or direct
+        shell for image-local binaries). This is the single place custom
+        tool dispatch lives — any harness gets it via this method.
+        """
+        registry = registry or self.tools
+        if registry.is_custom_tool(name):
+            plan = registry.plan_custom_tool(name, args)  # validates args
+            binary_path = plan.spec.path
+            if plan.artifact_call is not None:
+                tool, call_args = plan.artifact_call
+                result = await self.backend.call(tool, call_args)
+                if result.is_error:
+                    return result
+                binary_path = result.output.strip()
+            tool, call_args = plan.shell_call(binary_path)
+            return await self.backend.call(tool, call_args)
+        runtime_tool, runtime_args = registry.route(name, args)
+        return await self.backend.call(runtime_tool, runtime_args)
 
     async def execute_tool_call(self, tool_call: dict) -> ToolResult:
         """Execute an LLM tool_call (OpenAI or Anthropic format)."""

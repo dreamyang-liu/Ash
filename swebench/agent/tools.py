@@ -25,14 +25,13 @@ BASH_ONLY_SCHEMA = [
     },
 ]
 
-AGENT_TOOL_ROUTES = {
-    "shell": "shell",
-    "text_editor": "text_editor",
-    "grep_files": "grep_files",
-    "process": "process",
-    "web_fetch": "web_fetch",
-    "web_search": "web_search",
-}
+# Derived from the SDK's data-driven route table (single source of truth,
+# ash_sandbox.toolset.BUILTIN_ROUTES). "bash" is excluded here: the
+# executor handles the bash_only alias itself. Consumers unchanged:
+# route_agent_tool below, agent/__init__.py, tests.
+from ash_sandbox.toolset import BUILTIN_ROUTES as _BUILTIN_ROUTES
+
+AGENT_TOOL_ROUTES = {k: v for k, v in _BUILTIN_ROUTES.items() if k != "bash"}
 
 
 def route_agent_tool(name: str, args: dict) -> tuple[str, dict]:
