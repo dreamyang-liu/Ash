@@ -50,16 +50,26 @@ func (a *ArtifactTool) Schema() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"url":        map[string]any{"type": "string", "description": "HTTP(S) URL to download the artifact from if not cached"},
-			"sha256":     map[string]any{"type": "string", "description": "Expected sha256 hex digest; download fails if the content does not match"},
+			"sha256":     map[string]any{"type": "string", "description": "Optional expected sha256 hex digest; when set, download fails if the content does not match"},
 			"executable": map[string]any{"type": "boolean", "default": true, "description": "chmod +x the cached file"},
 		},
-		"required": []string{"url", "sha256"},
+		"required": []string{"url"},
 	}
 }
 
-// artifactPath returns the cache location for a hash.
-func artifactPath(sum string) string {
-	return filepath.Join(artifactCacheDir, sum[:16], "artifact")
+// artifactPath returns the cache location for a cache key.
+func artifactPath(key string) string {
+	return filepath.Join(artifactCacheDir, key[:16], "artifact")
+}
+
+// artifactCacheKey derives the cache key: the content hash when pinned,
+// otherwise a URL-derived hash (unverified artifacts are cached per URL).
+func artifactCacheKey(rawURL, sum string) string {
+	if sum != "" {
+		return sum
+	}
+	h := sha256.Sum256([]byte("url:" + rawURL))
+	return hex.EncodeToString(h[:])
 }
 
 func (a *ArtifactTool) Execute(args map[string]any) Result {
@@ -74,42 +84,43 @@ func (a *ArtifactTool) Execute(args map[string]any) Result {
 		return Err("url is required")
 	}
 	sum = strings.ToLower(strings.TrimSpace(sum))
-	if len(sum) != 64 || !isHex(sum) {
+	if sum != "" && (len(sum) != 64 || !isHex(sum)) {
 		return Err("sha256 must be a 64-char hex digest")
 	}
 	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
 		return Err("url must be http(s)")
 	}
 
-	dest := artifactPath(sum)
+	key := artifactCacheKey(rawURL, sum)
+	dest := artifactPath(key)
 
 	// Fast path: verified artifact already cached.
 	if _, err := os.Stat(dest); err == nil {
 		return Ok(dest)
 	}
 
-	// Singleflight: one download per hash, concurrent callers wait.
+	// Singleflight: one download per cache key, concurrent callers wait.
 	artifactFlights.mu.Lock()
-	once, ok := artifactFlights.m[sum]
+	once, ok := artifactFlights.m[key]
 	if !ok {
 		once = &sync.Once{}
-		artifactFlights.m[sum] = once
+		artifactFlights.m[key] = once
 	}
 	artifactFlights.mu.Unlock()
 
 	once.Do(func() {
 		err := downloadAndVerify(rawURL, sum, dest, executable)
 		artifactFlights.mu.Lock()
-		artifactFlights.res[sum] = err
+		artifactFlights.res[key] = err
 		if err != nil {
 			// Allow retry on a later call.
-			delete(artifactFlights.m, sum)
+			delete(artifactFlights.m, key)
 		}
 		artifactFlights.mu.Unlock()
 	})
 
 	artifactFlights.mu.Lock()
-	err := artifactFlights.res[sum]
+	err := artifactFlights.res[key]
 	artifactFlights.mu.Unlock()
 	if err != nil {
 		return Err(err.Error())
@@ -118,7 +129,8 @@ func (a *ArtifactTool) Execute(args map[string]any) Result {
 }
 
 // downloadAndVerify streams the URL to a temp file while hashing, verifies
-// the digest, then atomically installs it at dest.
+// the digest when one is pinned (sum != ""), then atomically installs it
+// at dest.
 func downloadAndVerify(rawURL, sum, dest string, executable bool) error {
 	client := &http.Client{Timeout: artifactDownloadTimeout}
 	req, err := http.NewRequest("GET", rawURL, nil)
@@ -159,9 +171,11 @@ func downloadAndVerify(rawURL, sum, dest string, executable bool) error {
 		return fmt.Errorf("artifact exceeds size limit (%d bytes)", maxArtifactBytes)
 	}
 
-	got := hex.EncodeToString(hasher.Sum(nil))
-	if got != sum {
-		return fmt.Errorf("sha256 mismatch: got %s, want %s", got, sum)
+	if sum != "" {
+		got := hex.EncodeToString(hasher.Sum(nil))
+		if got != sum {
+			return fmt.Errorf("sha256 mismatch: got %s, want %s", got, sum)
+		}
 	}
 
 	mode := os.FileMode(0o644)

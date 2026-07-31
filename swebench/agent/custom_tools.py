@@ -166,8 +166,12 @@ def parse_manifest(raw: dict) -> CustomToolSpec:
     if url:
         if not url.startswith(("http://", "https://")):
             raise ManifestError(f"{name}: binary.url must be http(s)")
-        if not _SHA256_RE.match(sha256):
+        # sha256 is optional (recommended): when set, content is verified
+        # before execution; when omitted, the download is trusted as-is.
+        if binary.get("sha256") is not None and not _SHA256_RE.match(sha256):
             raise ManifestError(f"{name}: binary.sha256 must be a 64-char hex digest")
+        if binary.get("sha256") is None:
+            sha256 = ""
     else:
         if not path.startswith("/"):
             raise ManifestError(f"{name}: binary.path must be absolute")
@@ -306,7 +310,10 @@ class CustomToolPlan:
     def artifact_call(self) -> tuple[str, dict] | None:
         if not self.spec.url:
             return None  # image-local binary: no download step
-        return "artifact", {"url": self.spec.url, "sha256": self.spec.sha256}
+        args = {"url": self.spec.url}
+        if self.spec.sha256:
+            args["sha256"] = self.spec.sha256
+        return "artifact", args
 
     def shell_call(self, binary_path: str) -> tuple[str, dict]:
         argv = self.spec.compile_argv(binary_path, self.args)

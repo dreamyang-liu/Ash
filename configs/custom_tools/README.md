@@ -14,7 +14,9 @@ description: Analyze cyclomatic complexity of a source file
 binary:
   # Source 1: remote static binary (CGO_ENABLED=0 / musl), downloaded once
   url: https://example.com/analyzer-linux-amd64
-  sha256: "ab34..."                   # REQUIRED with url — verified before execution
+  sha256: "ab34..."                   # optional but recommended — when set, content
+                                      # is verified before execution; when omitted,
+                                      # the download is trusted as-is (cached per URL)
   # Source 2 (alternative): binary already baked into the sandbox image
   # path: /opt/tools/analyzer          # absolute path; mutually exclusive with url
 parameters:

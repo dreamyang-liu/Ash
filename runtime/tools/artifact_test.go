@@ -78,6 +78,38 @@ func TestArtifactHashMismatchRejected(t *testing.T) {
 	}
 }
 
+func TestArtifactUnpinnedDownload(t *testing.T) {
+	content := []byte("unpinned tool body")
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Write(content)
+	}))
+	defer server.Close()
+	key := artifactCacheKey(server.URL, "")
+	t.Cleanup(func() { os.RemoveAll(artifactPath(key)) })
+
+	tool := &ArtifactTool{}
+	// No sha256: download is trusted as-is, cached by URL hash.
+	r := tool.Execute(map[string]any{"url": server.URL})
+	if !r.Success {
+		t.Fatalf("unpinned artifact failed: %s", r.Error)
+	}
+	got, err := os.ReadFile(r.Output)
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("cached file wrong: %v", err)
+	}
+	// Cache hit on second call.
+	r2 := tool.Execute(map[string]any{"url": server.URL})
+	if !r2.Success || r2.Output != r.Output || hits.Load() != 1 {
+		t.Fatalf("unpinned cache miss: hits=%d %#v", hits.Load(), r2)
+	}
+	// Same URL with a pinned hash uses a different cache slot.
+	if artifactCacheKey(server.URL, sha256Hex(content)) == key {
+		t.Fatal("pinned and unpinned cache keys must differ")
+	}
+}
+
 func TestArtifactValidation(t *testing.T) {
 	tool := &ArtifactTool{}
 	cases := []struct {
@@ -88,6 +120,7 @@ func TestArtifactValidation(t *testing.T) {
 		{map[string]any{"url": "https://x.com", "sha256": "short"}, "sha256 must be"},
 		{map[string]any{"url": "https://x.com", "sha256": strings.Repeat("Z", 64)}, "sha256 must be"},
 		{map[string]any{"url": "ftp://x.com/f", "sha256": strings.Repeat("a", 64)}, "must be http"},
+		{map[string]any{"url": "ftp://x.com/f"}, "must be http"},
 	}
 	for _, c := range cases {
 		r := tool.Execute(c.args)

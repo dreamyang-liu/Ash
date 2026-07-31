@@ -94,6 +94,17 @@ def test_path_source_manifest():
     assert spec.url == ""
 
 
+def test_url_without_sha256_is_valid():
+    spec = parse_manifest(make_manifest(binary={"url": "https://example.com/t"}))
+    assert spec.url == "https://example.com/t"
+    assert spec.sha256 == ""
+    register(spec)
+    plan = plan_custom_tool("code_complexity", {"file": "x"})
+    tool, args = plan.artifact_call
+    assert tool == "artifact"
+    assert args == {"url": "https://example.com/t"}  # no sha256 key sent
+
+
 @pytest.mark.parametrize(
     "mutate, err",
     [
