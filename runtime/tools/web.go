@@ -1,15 +1,18 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
 	"github.com/PuerkitoBio/goquery"
+	ddgs "github.com/dreamyang-liu/ddgs-go"
 )
 
 const defaultUA = "AshRuntime/1.0 (+https://github.com/dreamyang-liu/ash)"
@@ -169,6 +172,9 @@ func clampInt(v, min, max int) int {
 
 // ---- WebSearchTool ----
 
+// WebSearchTool searches the web via the ddgs-go metasearch library
+// (github.com/dreamyang-liu/ddgs-go): multi-engine fan-out, dedup,
+// frequency-based ranking, engine-failure cooldown.
 type WebSearchTool struct{}
 
 func (w *WebSearchTool) Name() string { return "web_search" }
@@ -177,12 +183,19 @@ func (w *WebSearchTool) Description() string {
 	return "Search the web and return results from multiple engines"
 }
 
+// webSearchBackends are the accepted backend values, mirroring the ddgs
+// text-engine registry plus the "auto" aggregate mode.
+var webSearchBackends = []string{
+	"auto", "brave", "duckduckgo", "google", "grokipedia",
+	"mojeek", "startpage", "wikipedia", "yahoo", "yandex",
+}
+
 func (w *WebSearchTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"query":       map[string]any{"type": "string", "description": "Search query"},
-			"backend":     map[string]any{"type": "string", "enum": []string{"auto", "duckduckgo", "brave", "google"}, "default": "auto"},
+			"backend":     map[string]any{"type": "string", "enum": webSearchBackends, "default": "auto"},
 			"max_results": map[string]any{"type": "integer", "default": 5, "description": "Maximum results. Values are clamped to the runtime maximum."},
 		},
 		"required": []string{"query"},
@@ -195,13 +208,38 @@ type searchResult struct {
 	Body  string
 }
 
-type searchEngine func(string, int) ([]searchResult, error)
+// ddgsClient is the shared metasearch client. Reusing one instance keeps
+// ddgs's in-memory engine-failure cooldown effective across tool calls
+// (blocked engines are skipped for a few minutes instead of retried).
+var ddgsClient = sync.OnceValues(func() (*ddgs.DDGS, error) {
+	return ddgs.New(&ddgs.Config{Timeout: 15 * time.Second})
+})
 
-var (
-	searchGoogleEngine     searchEngine = searchGoogle
-	searchDuckDuckGoEngine searchEngine = searchDuckDuckGo
-	searchBraveEngine      searchEngine = searchBrave
-)
+// ddgsTextSearch runs a ddgs text search; a package variable so tests can
+// stub the network access.
+var ddgsTextSearch = func(query, backend string, maxResults int) ([]searchResult, error) {
+	client, err := ddgsClient()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	raw, err := client.Text(ctx, query, &ddgs.SearchOptions{
+		Backend:    backend,
+		MaxResults: maxResults,
+	})
+	if err != nil {
+		return nil, err
+	}
+	results := make([]searchResult, 0, len(raw))
+	for _, r := range raw {
+		title, _ := r["title"].(string)
+		href, _ := r["href"].(string)
+		body, _ := r["body"].(string)
+		results = append(results, searchResult{Title: title, URL: href, Body: body})
+	}
+	return results, nil
+}
 
 func (w *WebSearchTool) Execute(args map[string]any) Result {
 	query, _ := args["query"].(string)
@@ -212,37 +250,19 @@ func (w *WebSearchTool) Execute(args map[string]any) Result {
 	if b, ok := args["backend"].(string); ok && b != "" {
 		backend = b
 	}
+	if !slices.Contains(webSearchBackends, backend) {
+		return Err("invalid backend: " + backend)
+	}
 	maxResults := 5
 	if m, ok := args["max_results"].(float64); ok && int(m) > 0 {
 		maxResults = clampInt(int(m), 1, 20)
 	}
 
-	engines := []searchEngine{searchGoogleEngine, searchDuckDuckGoEngine, searchBraveEngine}
-	if backend != "auto" {
-		switch backend {
-		case "google":
-			engines = engines[:1]
-		case "duckduckgo":
-			engines = []searchEngine{searchDuckDuckGoEngine}
-		case "brave":
-			engines = []searchEngine{searchBraveEngine}
-		default:
-			return Err("invalid backend: " + backend)
-		}
-	}
-
-	var results []searchResult
-	var lastErr error
-	for _, eng := range engines {
-		results, lastErr = eng(query, maxResults)
-		if lastErr == nil && len(results) > 0 {
-			break
-		}
-	}
-	if len(results) == 0 {
+	results, err := ddgsTextSearch(query, backend, maxResults)
+	if err != nil || len(results) == 0 {
 		msg := "all search engines failed"
-		if lastErr != nil {
-			msg += ": " + lastErr.Error()
+		if err != nil {
+			msg += ": " + err.Error()
 		}
 		return Err(msg)
 	}
@@ -260,137 +280,4 @@ func (w *WebSearchTool) Execute(args map[string]any) Result {
 		b.WriteString("\n")
 	}
 	return Ok(strings.TrimSpace(b.String()))
-}
-
-func searchDuckDuckGo(query string, max int) ([]searchResult, error) {
-	form := url.Values{"q": {query}, "b": {""}, "l": {"us-en"}, "s": {""}, "df": {""}}
-	client := &http.Client{Timeout: 15 * time.Second}
-	req, _ := http.NewRequest("POST", "https://html.duckduckgo.com/html/", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", defaultUA)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var results []searchResult
-	doc.Find("a.result__a").Each(func(i int, s *goquery.Selection) {
-		if i >= max {
-			return
-		}
-		title := strings.TrimSpace(s.Text())
-		href, _ := s.Attr("href")
-		href = decodeDDGURL(href)
-		body := ""
-		parent := s.Closest(".result")
-		if parent.Length() > 0 {
-			snippet := parent.Find("a.result__snippet, span.result__snippet").First()
-			body = strings.TrimSpace(snippet.Text())
-		}
-		results = append(results, searchResult{Title: title, URL: href, Body: body})
-	})
-	return results, nil
-}
-
-func decodeDDGURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return raw
-	}
-	if uddg := u.Query().Get("uddg"); uddg != "" {
-		decoded, err := url.QueryUnescape(uddg)
-		if err == nil {
-			return decoded
-		}
-	}
-	return raw
-}
-
-func searchGoogle(query string, max int) ([]searchResult, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
-	u := "https://www.google.com/search?q=" + url.QueryEscape(query) + "&num=10&hl=en"
-	req, _ := http.NewRequest("GET", u, nil)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
-	req.Header.Set("Cookie", "CONSENT=YES+")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var results []searchResult
-	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
-		if len(results) >= max {
-			return
-		}
-		href, _ := s.Attr("href")
-		if !strings.Contains(href, "/url?q=") {
-			return
-		}
-		parsed, err := url.Parse(href)
-		if err != nil {
-			return
-		}
-		realURL := parsed.Query().Get("q")
-		if realURL == "" || !strings.HasPrefix(realURL, "http") {
-			return
-		}
-		title := strings.TrimSpace(s.Text())
-		if title == "" {
-			return
-		}
-		results = append(results, searchResult{Title: title, URL: realURL})
-	})
-	return results, nil
-}
-
-func searchBrave(query string, max int) ([]searchResult, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
-	u := "https://search.brave.com/search?q=" + url.QueryEscape(query) + "&source=web"
-	req, _ := http.NewRequest("GET", u, nil)
-	req.Header.Set("User-Agent", defaultUA)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var results []searchResult
-	doc.Find("[data-type=\"web\"]").Each(func(i int, s *goquery.Selection) {
-		if len(results) >= max {
-			return
-		}
-		link := s.Find("a[href]").First()
-		href, _ := link.Attr("href")
-		if !strings.HasPrefix(href, "http") {
-			return
-		}
-		title := s.Find(".title, h2, h3").First().Text()
-		if title == "" {
-			title = link.Text()
-		}
-		title = strings.TrimSpace(title)
-		body := strings.TrimSpace(s.Find(".snippet").First().Text())
-		results = append(results, searchResult{Title: title, URL: href, Body: body})
-	})
-	return results, nil
 }

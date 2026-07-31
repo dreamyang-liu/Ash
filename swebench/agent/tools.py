@@ -221,7 +221,22 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
-                    "backend": {"type": "string", "enum": ["auto", "duckduckgo", "brave", "google"], "default": "auto"},
+                    "backend": {
+                        "type": "string",
+                        "enum": [
+                            "auto",
+                            "brave",
+                            "duckduckgo",
+                            "google",
+                            "grokipedia",
+                            "mojeek",
+                            "startpage",
+                            "wikipedia",
+                            "yahoo",
+                            "yandex",
+                        ],
+                        "default": "auto",
+                    },
                     "max_results": {
                         "type": "integer",
                         "default": 5,

@@ -89,38 +89,27 @@ func TestWebFetchValidationAndTruncation(t *testing.T) {
 }
 
 func TestWebSearchValidationBackendSelectionAndClamp(t *testing.T) {
-	origGoogle := searchGoogleEngine
-	origDuckDuckGo := searchDuckDuckGoEngine
-	origBrave := searchBraveEngine
-	defer func() {
-		searchGoogleEngine = origGoogle
-		searchDuckDuckGoEngine = origDuckDuckGo
-		searchBraveEngine = origBrave
-	}()
+	origSearch := ddgsTextSearch
+	defer func() { ddgsTextSearch = origSearch }()
 
 	type call struct {
-		engine string
-		query  string
-		max    int
+		query   string
+		backend string
+		max     int
 	}
 	var calls []call
-	fake := func(name string) searchEngine {
-		return func(query string, max int) ([]searchResult, error) {
-			calls = append(calls, call{engine: name, query: query, max: max})
-			results := make([]searchResult, 25)
-			for i := range results {
-				results[i] = searchResult{
-					Title: fmt.Sprintf("%s title %02d", name, i+1),
-					URL:   fmt.Sprintf("https://example.com/%s/%02d", name, i+1),
-					Body:  "body",
-				}
+	ddgsTextSearch = func(query, backend string, maxResults int) ([]searchResult, error) {
+		calls = append(calls, call{query: query, backend: backend, max: maxResults})
+		results := make([]searchResult, 25)
+		for i := range results {
+			results[i] = searchResult{
+				Title: fmt.Sprintf("%s title %02d", backend, i+1),
+				URL:   fmt.Sprintf("https://example.com/%s/%02d", backend, i+1),
+				Body:  "body",
 			}
-			return results, nil
 		}
+		return results, nil
 	}
-	searchGoogleEngine = fake("google")
-	searchDuckDuckGoEngine = fake("duckduckgo")
-	searchBraveEngine = fake("brave")
 
 	tool := &WebSearchTool{}
 
@@ -133,6 +122,9 @@ func TestWebSearchValidationBackendSelectionAndClamp(t *testing.T) {
 	if invalidBackend.Success || !strings.Contains(invalidBackend.Error, "invalid backend: bad") {
 		t.Fatalf("expected invalid backend error, got: %#v", invalidBackend)
 	}
+	if len(calls) != 0 {
+		t.Fatalf("invalid backend should not reach the search layer: %#v", calls)
+	}
 
 	result := tool.Execute(map[string]any{
 		"query":       "ash runtime",
@@ -142,12 +134,34 @@ func TestWebSearchValidationBackendSelectionAndClamp(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("web search failed: %s", result.Error)
 	}
-	if len(calls) != 1 || calls[0] != (call{engine: "duckduckgo", query: "ash runtime", max: 20}) {
+	if len(calls) != 1 || calls[0] != (call{query: "ash runtime", backend: "duckduckgo", max: 20}) {
 		t.Fatalf("unexpected search calls: %#v", calls)
 	}
 	if !strings.Contains(result.Output, "1. duckduckgo title 01") ||
 		!strings.Contains(result.Output, "20. duckduckgo title 20") ||
 		strings.Contains(result.Output, "21. duckduckgo title 21") {
 		t.Fatalf("unexpected search output:\n%s", result.Output)
+	}
+
+	// New ddgs backends are accepted by schema validation.
+	for _, backend := range []string{"wikipedia", "startpage", "yandex"} {
+		r := tool.Execute(map[string]any{"query": "ash", "backend": backend})
+		if !r.Success {
+			t.Fatalf("backend %s rejected: %s", backend, r.Error)
+		}
+	}
+}
+
+func TestWebSearchErrorPropagation(t *testing.T) {
+	origSearch := ddgsTextSearch
+	defer func() { ddgsTextSearch = origSearch }()
+
+	ddgsTextSearch = func(string, string, int) ([]searchResult, error) {
+		return nil, fmt.Errorf("boom")
+	}
+	tool := &WebSearchTool{}
+	r := tool.Execute(map[string]any{"query": "ash"})
+	if r.Success || !strings.Contains(r.Error, "all search engines failed: boom") {
+		t.Fatalf("expected propagated error, got: %#v", r)
 	}
 }
