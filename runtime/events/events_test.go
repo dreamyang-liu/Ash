@@ -71,7 +71,7 @@ func TestPiggybackLeavesReservedKindForWaiter(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		waited = WaitFor("", []string{"process_exited"}, 5*time.Second)
+		waited = WaitFor("", []string{"process_exited"}, nil, 5*time.Second)
 	}()
 	awaitWaiterRegistered(t)
 
@@ -94,7 +94,7 @@ func TestPiggybackRespectsAnyKindWaiter(t *testing.T) {
 	reset()
 
 	done := make(chan []Event, 1)
-	go func() { done <- WaitFor("", nil, 5*time.Second) }() // nil kinds = any
+	go func() { done <- WaitFor("", nil, nil, 5*time.Second) }() // nil kinds = any
 	awaitWaiterRegistered(t)
 
 	Push("anything", "src", nil)
@@ -111,7 +111,7 @@ func TestReservationEndsWhenWaiterReturns(t *testing.T) {
 	reset()
 
 	// Waiter times out quickly and unregisters.
-	if got := WaitFor("", []string{"process_exited"}, 50*time.Millisecond); len(got) != 0 {
+	if got := WaitFor("", []string{"process_exited"}, nil, 50*time.Millisecond); len(got) != 0 {
 		t.Fatalf("expected timeout, got %v", kindsOf(got))
 	}
 	mu.Lock()
@@ -128,11 +128,64 @@ func TestReservationEndsWhenWaiterReturns(t *testing.T) {
 	}
 }
 
+func TestWaitForSpecificSource(t *testing.T) {
+	reset()
+
+	// Two background processes; we only care about pid-b.
+	done := make(chan []Event, 1)
+	go func() {
+		done <- WaitFor("", []string{"process_exited"}, []string{"pid-b"}, 5*time.Second)
+	}()
+	awaitWaiterRegistered(t)
+
+	// The uninteresting process exits first: must NOT wake the waiter, and
+	// must stay available to piggyback (nobody reserved it).
+	Push("process_exited", "pid-a", nil)
+	select {
+	case got := <-done:
+		t.Fatalf("waiter woke on the wrong source: %+v", got)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if got := DrainFor(""); len(got) != 1 || got[0].Source != "pid-a" {
+		t.Fatalf("unreserved source should piggyback, got %+v", got)
+	}
+
+	// The awaited process exits: waiter gets exactly that one.
+	Push("process_exited", "pid-b", nil)
+	got := <-done
+	if len(got) != 1 || got[0].Source != "pid-b" {
+		t.Fatalf("expected only pid-b, got %+v", got)
+	}
+}
+
+func TestSourceReservationIsPreciseAgainstPiggyback(t *testing.T) {
+	reset()
+
+	done := make(chan []Event, 1)
+	go func() {
+		done <- WaitFor("", []string{"process_exited"}, []string{"pid-b"}, 5*time.Second)
+	}()
+	awaitWaiterRegistered(t)
+
+	// Same kind, different sources, queued together.
+	Push("process_exited", "pid-a", nil)
+	Push("process_exited", "pid-b", nil)
+
+	// Piggyback may take pid-a but must leave pid-b for its waiter.
+	got := DrainFor("")
+	if len(got) != 1 || got[0].Source != "pid-a" {
+		t.Fatalf("piggyback should take only pid-a, got %+v", got)
+	}
+	if w := <-done; len(w) != 1 || w[0].Source != "pid-b" {
+		t.Fatalf("waiter should still receive pid-b, got %+v", w)
+	}
+}
+
 func TestReservationIsPerAgent(t *testing.T) {
 	reset()
 
 	done := make(chan []Event, 1)
-	go func() { done <- WaitFor("agent-a", []string{"process_exited"}, 5*time.Second) }()
+	go func() { done <- WaitFor("agent-a", []string{"process_exited"}, nil, 5*time.Second) }()
 	awaitWaiterRegistered(t)
 
 	// An event for a *different* agent is not reserved by agent-a's waiter.

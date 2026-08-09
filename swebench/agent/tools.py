@@ -277,6 +277,15 @@ TOOLS_SCHEMA = [
                             '"file_change"]. Omit to wait for any event.'
                         ),
                     },
+                    "sources": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Wait only for events from these handles: a pid returned by a "
+                            "background shell call, or a file path. Omit to accept any "
+                            "source. Use this to wait on one specific background process."
+                        ),
+                    },
                     "timeout": {
                         "type": "integer",
                         "default": 30,

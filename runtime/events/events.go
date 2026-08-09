@@ -26,6 +26,7 @@ const maxQueueLen = 100
 type waiter struct {
 	agentID string
 	kinds   []string      // empty = any kind
+	sources []string      // empty = any source (pid, path, ...)
 	signal  chan struct{} // buffered(1): coalesces wakeups
 }
 
@@ -51,9 +52,14 @@ func notifyWaitersLocked() {
 }
 
 // registerWaiterLocked records a blocked waiter. Must hold mu.
-func registerWaiterLocked(agentID string, kinds []string) (uint64, chan struct{}) {
+func registerWaiterLocked(agentID string, kinds, sources []string) (uint64, chan struct{}) {
 	id := waiterSeq.Add(1)
-	w := &waiter{agentID: agentID, kinds: kinds, signal: make(chan struct{}, 1)}
+	w := &waiter{
+		agentID: agentID,
+		kinds:   kinds,
+		sources: sources,
+		signal:  make(chan struct{}, 1),
+	}
 	waiters[id] = w
 	return id, w.signal
 }
@@ -74,7 +80,7 @@ func reservedLocked(evt Event) bool {
 		if evt.AgentID != "" && evt.AgentID != w.agentID {
 			continue
 		}
-		if matches(evt, w.kinds) {
+		if matches(evt, w.kinds) && matchesSource(evt, w.sources) {
 			return true
 		}
 	}
@@ -186,24 +192,39 @@ func matches(evt Event, kinds []string) bool {
 	return false
 }
 
+// matchesSource reports whether evt came from one of the requested sources.
+// An empty sources slice matches everything. Source is the handle the
+// emitter used: a pid for process_exited, a path for file_change.
+func matchesSource(evt Event, sources []string) bool {
+	if len(sources) == 0 {
+		return true
+	}
+	for _, s := range sources {
+		if evt.Source == s {
+			return true
+		}
+	}
+	return false
+}
+
 // drainMatchingLocked removes and returns events for agentID (plus
 // broadcasts) whose Kind is in kinds, leaving non-matching events queued so
 // a later call still delivers them. Must hold mu.
-func drainMatchingLocked(agentID string, kinds []string) []Event {
-	sources := []string{""} // broadcast queue
+func drainMatchingLocked(agentID string, kinds, sources []string) []Event {
+	queueKeys := []string{""} // broadcast queue
 	if agentID != "" {
-		sources = append(sources, agentID)
+		queueKeys = append(queueKeys, agentID)
 	}
 
 	var taken []Event
-	for _, q := range sources {
+	for _, q := range queueKeys {
 		pending := queues[q]
 		if len(pending) == 0 {
 			continue
 		}
 		var kept []Event
 		for _, evt := range pending {
-			if matches(evt, kinds) {
+			if matches(evt, kinds) && matchesSource(evt, sources) {
 				taken = append(taken, evt)
 			} else {
 				kept = append(kept, evt)
@@ -214,27 +235,35 @@ func drainMatchingLocked(agentID string, kinds []string) []Event {
 	return taken
 }
 
-// WaitFor blocks until at least one event matching kinds is available for
-// agentID (broadcast events included), or until timeout elapses. It is a
-// long-poll: the sandbox never initiates a connection, so the transport
-// stays a plain one-way request/response protocol.
+// WaitFor blocks until at least one matching event is available for agentID
+// (broadcast events included), or until timeout elapses. It is a long-poll:
+// the sandbox never initiates a connection, so the transport stays a plain
+// one-way request/response protocol.
+//
+// Matching is the conjunction of two filters, each matching everything when
+// empty:
+//   - kinds:   event type, e.g. "process_exited"
+//   - sources: the emitter's handle, e.g. a specific pid or file path
+//
+// So waiting on one particular background process is
+// WaitFor(agent, []string{"process_exited"}, []string{pid}, timeout).
 //
 // Only matching events are consumed; anything else stays queued and rides
 // along with a later tool response.
-func WaitFor(agentID string, kinds []string, timeout time.Duration) []Event {
+func WaitFor(agentID string, kinds, sources []string, timeout time.Duration) []Event {
 	deadline := time.Now().Add(timeout)
 
 	// Register before the first check and stay registered for the whole
 	// wait: this both guarantees no wakeup is missed and reserves the
-	// requested kinds against piggyback delivery (see reservedLocked).
+	// requested events against piggyback delivery (see reservedLocked).
 	mu.Lock()
-	id, signal := registerWaiterLocked(agentID, kinds)
+	id, signal := registerWaiterLocked(agentID, kinds, sources)
 	mu.Unlock()
 	defer unregisterWaiter(id)
 
 	for {
 		mu.Lock()
-		taken := drainMatchingLocked(agentID, kinds)
+		taken := drainMatchingLocked(agentID, kinds, sources)
 		mu.Unlock()
 		if len(taken) > 0 {
 			return taken
