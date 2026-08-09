@@ -2,6 +2,8 @@ package events
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,9 +18,56 @@ type Event struct {
 	Timestamp string         `json:"timestamp"`
 }
 
-// maxQueueLen bounds each per-agent queue; overflow increments a dropped
-// counter that is reported to the agent rather than silently discarded.
-const maxQueueLen = 100
+// Queue bounds. Event payloads are delivered in full — truncating them is a
+// consumer-side policy decision (an SDK or post-processing pipeline may want
+// the complete data, while a harness renders a shortened form into the LLM
+// context). The runtime only enforces what it must to stay alive: this queue
+// lives inside the sandbox's runtime process, and letting it grow without
+// limit would OOM-kill the runtime, taking the whole sandbox — and the
+// rollout — with it. That loss is unrecoverable, unlike a truncated payload.
+//
+// The budget is byte-based rather than count-based because payload sizes vary
+// by orders of magnitude (a pid versus a file's full contents); a fixed event
+// count is a meaningless bound when one event can be megabytes.
+//
+// Override with ASH_EVENT_QUEUE_BYTES / ASH_EVENT_QUEUE_MAX_EVENTS.
+const (
+	defaultQueueBytes = 8 << 20 // 8 MiB per queue
+	defaultQueueLen   = 1000    // backstop against many tiny events
+)
+
+var (
+	maxQueueBytes = envInt("ASH_EVENT_QUEUE_BYTES", defaultQueueBytes)
+	maxQueueLen   = envInt("ASH_EVENT_QUEUE_MAX_EVENTS", defaultQueueLen)
+)
+
+// envInt reads a positive integer from the environment, falling back to def.
+func envInt(name string, def int) int {
+	if raw := os.Getenv(name); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+// approxSize estimates an event's memory footprint for the byte budget. It is
+// deliberately cheap: exact accounting would mean serializing every event.
+func approxSize(evt Event) int {
+	n := len(evt.ID) + len(evt.Kind) + len(evt.Source) + len(evt.AgentID) + len(evt.Timestamp)
+	for k, v := range evt.Data {
+		n += len(k)
+		switch tv := v.(type) {
+		case string:
+			n += len(tv)
+		case []byte:
+			n += len(tv)
+		default:
+			n += 8 // numbers, bools, pointers to nested values
+		}
+	}
+	return n
+}
 
 // waiter records a blocked WaitFor call. It stays registered for the whole
 // wait so that piggyback delivery (DrainFor) can tell which kinds are
@@ -108,15 +157,32 @@ func PushTo(agentID, kind, source string, data map[string]any) {
 	}
 
 	queues[agentID] = append(queues[agentID], evt)
+	trimQueueLocked(agentID)
+	notifyWaitersLocked()
+}
 
-	// Cap per-agent queue, counting what fell off the front so the loss
-	// can be reported instead of silently vanishing.
-	if overflow := len(queues[agentID]) - maxQueueLen; overflow > 0 {
-		queues[agentID] = queues[agentID][overflow:]
-		dropped[agentID] += overflow
+// trimQueueLocked drops oldest events until the queue fits both the byte
+// budget and the event-count backstop, counting the loss so it can be
+// reported instead of silently vanishing. Must hold mu.
+func trimQueueLocked(agentID string) {
+	q := queues[agentID]
+
+	total := 0
+	for _, evt := range q {
+		total += approxSize(evt)
 	}
 
-	notifyWaitersLocked()
+	cut := 0
+	for cut < len(q)-1 && (total > maxQueueBytes || len(q)-cut > maxQueueLen) {
+		total -= approxSize(q[cut])
+		cut++
+	}
+	// Keep at least the newest event even if it alone exceeds the budget:
+	// dropping it would lose the most relevant information.
+	if cut > 0 {
+		queues[agentID] = q[cut:]
+		dropped[agentID] += cut
+	}
 }
 
 // Drain returns pending events for a specific agent (+ broadcasts), clears them.
@@ -280,5 +346,19 @@ func WaitFor(agentID string, kinds, sources []string, timeout time.Duration) []E
 		case <-timer.C:
 			return []Event{}
 		}
+	}
+}
+
+// SetQueueBoundsForTest overrides the queue bounds and returns a function
+// restoring the previous values. Exported for tests in sibling packages.
+func SetQueueBoundsForTest(bytes, count int) func() {
+	mu.Lock()
+	prevBytes, prevCount := maxQueueBytes, maxQueueLen
+	maxQueueBytes, maxQueueLen = bytes, count
+	mu.Unlock()
+	return func() {
+		mu.Lock()
+		maxQueueBytes, maxQueueLen = prevBytes, prevCount
+		mu.Unlock()
 	}
 }

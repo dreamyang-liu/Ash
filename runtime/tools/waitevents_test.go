@@ -15,9 +15,6 @@ import (
 	"github.com/dreamyang-liu/ash/runtime/events"
 )
 
-// maxQueueLenForTest mirrors events.maxQueueLen (unexported there).
-const maxQueueLenForTest = 100
-
 type waitPayload struct {
 	Events []struct {
 		Kind    string `json:"kind"`
@@ -143,16 +140,20 @@ func TestWaitForEventsReportsDropped(t *testing.T) {
 	drainAll(t)
 	t.Cleanup(func() { drainAll(t) })
 
-	// Overflow the queue: 5 more than the cap.
-	for i := 0; i < maxQueueLenForTest+5; i++ {
+	// Shrink the queue bound for this test so overflow is cheap to trigger.
+	const capEvents = 10
+	restore := events.SetQueueBoundsForTest(1<<30, capEvents)
+	t.Cleanup(restore)
+
+	for i := 0; i < capEvents+5; i++ {
 		events.Push("flood", "src", map[string]any{"i": i})
 	}
 	p := runWait(t, map[string]any{"kinds": []any{"flood"}, "timeout": float64(2)})
 	if p.Dropped != 5 {
 		t.Errorf("expected 5 dropped events reported, got %d", p.Dropped)
 	}
-	if len(p.Events) != maxQueueLenForTest {
-		t.Errorf("expected %d retained events, got %d", maxQueueLenForTest, len(p.Events))
+	if len(p.Events) != capEvents {
+		t.Errorf("expected %d retained events, got %d", capEvents, len(p.Events))
 	}
 }
 

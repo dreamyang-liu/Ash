@@ -128,6 +128,80 @@ func TestReservationEndsWhenWaiterReturns(t *testing.T) {
 	}
 }
 
+func TestByteBudgetTrimsLargePayloads(t *testing.T) {
+	reset()
+	// Budget fits roughly two 1KiB payloads; the count backstop is generous
+	// so only the byte budget can trigger trimming.
+	restore := SetQueueBoundsForTest(3000, 1000)
+	t.Cleanup(restore)
+
+	big := string(make([]byte, 1024))
+	for i := 0; i < 6; i++ {
+		Push("file_change", "/f", map[string]any{"content": big})
+	}
+
+	mu.Lock()
+	queued := len(queues[""])
+	mu.Unlock()
+	if queued >= 6 {
+		t.Fatalf("byte budget should have trimmed large payloads, %d still queued", queued)
+	}
+	if n := TakeDropped(""); n == 0 {
+		t.Error("trimming must be reported as dropped, got 0")
+	}
+}
+
+func TestSmallEventsAreNotTrimmedByByteBudget(t *testing.T) {
+	reset()
+	restore := SetQueueBoundsForTest(1<<20, 1000) // 1MiB, plenty for tiny events
+	t.Cleanup(restore)
+
+	for i := 0; i < 200; i++ {
+		Push("process_exited", "pid", map[string]any{"exit_code": 0})
+	}
+	mu.Lock()
+	queued := len(queues[""])
+	mu.Unlock()
+	if queued != 200 {
+		t.Errorf("small events should all fit the byte budget, got %d/200", queued)
+	}
+	if n := TakeDropped(""); n != 0 {
+		t.Errorf("nothing should have been dropped, got %d", n)
+	}
+}
+
+func TestNewestEventSurvivesEvenIfOversized(t *testing.T) {
+	reset()
+	restore := SetQueueBoundsForTest(100, 1000) // smaller than one payload
+	t.Cleanup(restore)
+
+	Push("file_change", "/f", map[string]any{"content": string(make([]byte, 4096))})
+	mu.Lock()
+	queued := len(queues[""])
+	mu.Unlock()
+	if queued != 1 {
+		t.Errorf("the newest event must be kept even when oversized, got %d", queued)
+	}
+}
+
+func TestEnvIntParsing(t *testing.T) {
+	t.Setenv("ASH_TEST_EVENT_BOUND", "4096")
+	if got := envInt("ASH_TEST_EVENT_BOUND", 7); got != 4096 {
+		t.Errorf("env override = %d, want 4096", got)
+	}
+	t.Setenv("ASH_TEST_EVENT_BOUND", "not-a-number")
+	if got := envInt("ASH_TEST_EVENT_BOUND", 7); got != 7 {
+		t.Errorf("invalid value should fall back to default, got %d", got)
+	}
+	t.Setenv("ASH_TEST_EVENT_BOUND", "-5")
+	if got := envInt("ASH_TEST_EVENT_BOUND", 7); got != 7 {
+		t.Errorf("non-positive value should fall back to default, got %d", got)
+	}
+	if got := envInt("ASH_TEST_EVENT_BOUND_UNSET", 42); got != 42 {
+		t.Errorf("unset should use default, got %d", got)
+	}
+}
+
 func TestWaitForSpecificSource(t *testing.T) {
 	reset()
 
