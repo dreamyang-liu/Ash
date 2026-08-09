@@ -48,7 +48,12 @@ func (s *ShellTool) Schema() map[string]any {
 			"max_output_bytes": map[string]any{
 				"type":        "integer",
 				"default":     defaultMaxOutputBytes,
-				"description": "Maximum captured bytes per output stream. Larger output keeps the first 40% and last 60%.",
+				"description": "Total captured bytes per output stream. Larger output is truncated per truncate_mode.",
+			},
+			"truncate_mode": map[string]any{
+				"type":        "string",
+				"default":     defaultTruncateMode,
+				"description": "How to divide the byte budget when output is too long: \"H<n>E<n>\" with weights for the head and end sections. H2E3 keeps the first 40% and last 60%; E1 keeps only the tail (useful for build/test errors); H1 keeps only the beginning.",
 			},
 			"working_dir": map[string]any{"type": "string", "description": "Working directory"},
 		},
@@ -73,16 +78,17 @@ func (s *ShellTool) Execute(args map[string]any) Result {
 	}
 	workingDir, _ := args["working_dir"].(string)
 	maxOutputBytes := outputBytesArg(args)
+	mode := truncateModeArg(args)
 
 	agentID, _ := args["agent_id"].(string)
 
 	if background {
-		return s.runBackground(command, workingDir, agentID, maxOutputBytes)
+		return s.runBackground(command, workingDir, agentID, maxOutputBytes, mode)
 	}
-	return s.runSync(command, workingDir, timeout, tail, maxOutputBytes)
+	return s.runSync(command, workingDir, timeout, tail, maxOutputBytes, mode)
 }
 
-func (s *ShellTool) runSync(command, workingDir string, timeout, tail int, maxOutputBytes int) Result {
+func (s *ShellTool) runSync(command, workingDir string, timeout, tail int, maxOutputBytes int, mode truncateMode) Result {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 
@@ -91,8 +97,8 @@ func (s *ShellTool) runSync(command, workingDir string, timeout, tail int, maxOu
 		cmd.Dir = workingDir
 	}
 
-	stdout := NewBoundedLog(maxOutputBytes)
-	stderr := NewBoundedLog(maxOutputBytes)
+	stdout := NewBoundedLogMode(maxOutputBytes, mode)
+	stderr := NewBoundedLogMode(maxOutputBytes, mode)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -111,7 +117,7 @@ func (s *ShellTool) runSync(command, workingDir string, timeout, tail int, maxOu
 	return Ok(output)
 }
 
-func (s *ShellTool) runBackground(command, workingDir, agentID string, maxOutputBytes int) Result {
+func (s *ShellTool) runBackground(command, workingDir, agentID string, maxOutputBytes int, mode truncateMode) Result {
 	pid := uuid.New().String()[:8]
 
 	cmd := exec.Command("sh", "-c", command)
@@ -122,8 +128,8 @@ func (s *ShellTool) runBackground(command, workingDir, agentID string, maxOutput
 	proc := &Process{
 		pid:    pid,
 		cmd:    cmd,
-		stdout: NewBoundedLog(maxOutputBytes),
-		stderr: NewBoundedLog(maxOutputBytes),
+		stdout: NewBoundedLogMode(maxOutputBytes, mode),
+		stderr: NewBoundedLogMode(maxOutputBytes, mode),
 	}
 	cmd.Stdout = proc.stdout
 	cmd.Stderr = proc.stderr
