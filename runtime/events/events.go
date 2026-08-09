@@ -20,20 +20,65 @@ type Event struct {
 // counter that is reported to the agent rather than silently discarded.
 const maxQueueLen = 100
 
+// waiter records a blocked WaitFor call. It stays registered for the whole
+// wait so that piggyback delivery (DrainFor) can tell which kinds are
+// reserved and must be left queued.
+type waiter struct {
+	agentID string
+	kinds   []string      // empty = any kind
+	signal  chan struct{} // buffered(1): coalesces wakeups
+}
+
 var (
-	mu      sync.Mutex
-	queues  = make(map[string][]Event) // per-agent queues, "" = broadcast
-	dropped = make(map[string]int)     // per-queue overflow counts
-	waiters []chan struct{}            // signalled on every Push (see WaitFor)
-	counter atomic.Uint64
+	mu        sync.Mutex
+	queues    = make(map[string][]Event) // per-agent queues, "" = broadcast
+	dropped   = make(map[string]int)     // per-queue overflow counts
+	waiters   = make(map[uint64]*waiter) // blocked WaitFor calls
+	waiterSeq atomic.Uint64
+	counter   atomic.Uint64
 )
 
-// notifyWaitersLocked wakes every blocked WaitFor caller. Must hold mu.
+// notifyWaitersLocked nudges every blocked WaitFor caller to re-check the
+// queues. Sends are non-blocking: a pending signal already means "re-check".
+// Must hold mu.
 func notifyWaitersLocked() {
-	for _, ch := range waiters {
-		close(ch)
+	for _, w := range waiters {
+		select {
+		case w.signal <- struct{}{}:
+		default:
+		}
 	}
-	waiters = nil
+}
+
+// registerWaiterLocked records a blocked waiter. Must hold mu.
+func registerWaiterLocked(agentID string, kinds []string) (uint64, chan struct{}) {
+	id := waiterSeq.Add(1)
+	w := &waiter{agentID: agentID, kinds: kinds, signal: make(chan struct{}, 1)}
+	waiters[id] = w
+	return id, w.signal
+}
+
+func unregisterWaiter(id uint64) {
+	mu.Lock()
+	delete(waiters, id)
+	mu.Unlock()
+}
+
+// reservedLocked reports whether some blocked waiter is waiting for evt.
+// Such events must survive piggyback delivery: consuming them there would
+// strand the waiter until its timeout even though its event did occur.
+// Must hold mu.
+func reservedLocked(evt Event) bool {
+	for _, w := range waiters {
+		// A waiter receives broadcasts plus its own agent's events.
+		if evt.AgentID != "" && evt.AgentID != w.agentID {
+			continue
+		}
+		if matches(evt, w.kinds) {
+			return true
+		}
+	}
+	return false
 }
 
 // Push adds an event. If agentID is empty, event goes to all agents.
@@ -73,25 +118,38 @@ func Drain() []Event {
 	return DrainFor("")
 }
 
-// DrainFor returns events targeted at agentID plus any broadcast events.
+// DrainFor returns events targeted at agentID plus any broadcast events,
+// for piggyback delivery on a tool response.
+//
+// Events that a blocked WaitFor caller is waiting for are left queued: the
+// waiter asked for them explicitly, and handing them to an unrelated tool
+// response would strand that waiter until its timeout. Everything else is
+// delivered opportunistically, so environment changes reach the agent
+// without it having to ask.
 func DrainFor(agentID string) []Event {
 	mu.Lock()
 	defer mu.Unlock()
 
-	var result []Event
-
-	// Broadcast events (agentID = "")
-	if broadcasts, ok := queues[""]; ok && len(broadcasts) > 0 {
-		result = append(result, broadcasts...)
-		queues[""] = nil
+	sources := []string{""} // broadcast queue
+	if agentID != "" {
+		sources = append(sources, agentID)
 	}
 
-	// Agent-specific events
-	if agentID != "" {
-		if agentEvents, ok := queues[agentID]; ok && len(agentEvents) > 0 {
-			result = append(result, agentEvents...)
-			queues[agentID] = nil
+	var result []Event
+	for _, q := range sources {
+		pending := queues[q]
+		if len(pending) == 0 {
+			continue
 		}
+		var reserved []Event
+		for _, evt := range pending {
+			if reservedLocked(evt) {
+				reserved = append(reserved, evt)
+			} else {
+				result = append(result, evt)
+			}
+		}
+		queues[q] = reserved
 	}
 
 	if result == nil {
@@ -165,17 +223,22 @@ func drainMatchingLocked(agentID string, kinds []string) []Event {
 // along with a later tool response.
 func WaitFor(agentID string, kinds []string, timeout time.Duration) []Event {
 	deadline := time.Now().Add(timeout)
+
+	// Register before the first check and stay registered for the whole
+	// wait: this both guarantees no wakeup is missed and reserves the
+	// requested kinds against piggyback delivery (see reservedLocked).
+	mu.Lock()
+	id, signal := registerWaiterLocked(agentID, kinds)
+	mu.Unlock()
+	defer unregisterWaiter(id)
+
 	for {
 		mu.Lock()
-		if taken := drainMatchingLocked(agentID, kinds); len(taken) > 0 {
-			mu.Unlock()
+		taken := drainMatchingLocked(agentID, kinds)
+		mu.Unlock()
+		if len(taken) > 0 {
 			return taken
 		}
-		// Register for a wakeup before releasing the lock, so an event
-		// pushed between the check and the wait cannot be missed.
-		signal := make(chan struct{})
-		waiters = append(waiters, signal)
-		mu.Unlock()
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -184,7 +247,7 @@ func WaitFor(agentID string, kinds []string, timeout time.Duration) []Event {
 		timer := time.NewTimer(remaining)
 		select {
 		case <-signal:
-			timer.Stop() // an event arrived: re-check the queues
+			timer.Stop() // something arrived: re-check the queues
 		case <-timer.C:
 			return []Event{}
 		}
