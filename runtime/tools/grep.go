@@ -47,15 +47,20 @@ func (g *GrepTool) Description() string {
 }
 
 func (g *GrepTool) Schema() map[string]any {
+	props := map[string]any{
+		"pattern": map[string]any{"type": "string", "description": "Regex pattern"},
+		"path":    map[string]any{"type": "string", "default": ".", "description": "Search path"},
+		"include": map[string]any{"type": "string", "description": "File glob (e.g. *.py)"},
+		"limit":   map[string]any{"type": "integer", "default": 100, "description": "Maximum number of matching lines to return globally"},
+	}
+	// Matches are bounded by `limit` (count) and by the shared byte budget.
+	for k, v := range outputBoundSchema() {
+		props[k] = v
+	}
 	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"pattern": map[string]any{"type": "string", "description": "Regex pattern"},
-			"path":    map[string]any{"type": "string", "default": ".", "description": "Search path"},
-			"include": map[string]any{"type": "string", "description": "File glob (e.g. *.py)"},
-			"limit":   map[string]any{"type": "integer", "default": 100, "description": "Maximum number of matching lines to return globally"},
-		},
-		"required": []string{"pattern"},
+		"type":       "object",
+		"properties": props,
+		"required":   []string{"pattern"},
 	}
 }
 
@@ -123,7 +128,9 @@ func (g *GrepTool) Execute(args map[string]any) Result {
 		if truncated {
 			output += fmt.Sprintf("\n... (truncated at %d matches)", limit)
 		}
-		return Ok(output + "\n")
+		// `limit` bounds the number of matches; the shared byte bound also
+		// applies, since a few very long lines can still be huge.
+		return Ok(boundToolOutput(output+"\n", args))
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 		return Ok("No matches found.")

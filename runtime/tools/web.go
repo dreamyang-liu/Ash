@@ -20,8 +20,6 @@ const defaultUA = "AshRuntime/1.0 (+https://github.com/dreamyang-liu/ash)"
 const (
 	defaultWebTimeoutSeconds = 15
 	maxWebTimeoutSeconds     = 60
-	defaultWebMaxLength      = 10000
-	maxWebMaxLength          = 200000
 )
 
 // ---- WebFetchTool ----
@@ -35,16 +33,20 @@ func (w *WebFetchTool) Description() string {
 }
 
 func (w *WebFetchTool) Schema() map[string]any {
+	props := map[string]any{
+		"url":     map[string]any{"type": "string", "description": "URL to fetch"},
+		"format":  map[string]any{"type": "string", "enum": []string{"html", "text", "markdown"}, "default": "markdown"},
+		"headers": map[string]any{"type": "object", "description": "Additional HTTP headers"},
+		"timeout": map[string]any{"type": "integer", "default": defaultWebTimeoutSeconds, "description": "Request timeout in seconds. Values are clamped to the runtime maximum."},
+	}
+	// Page content is byte output: same bounds as every other such tool.
+	for k, v := range outputBoundSchema() {
+		props[k] = v
+	}
 	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"url":        map[string]any{"type": "string", "description": "URL to fetch"},
-			"format":     map[string]any{"type": "string", "enum": []string{"html", "text", "markdown"}, "default": "markdown"},
-			"headers":    map[string]any{"type": "object", "description": "Additional HTTP headers"},
-			"timeout":    map[string]any{"type": "integer", "default": defaultWebTimeoutSeconds, "description": "Request timeout in seconds. Values are clamped to the runtime maximum."},
-			"max_length": map[string]any{"type": "integer", "default": defaultWebMaxLength, "description": "Maximum returned characters. Values are clamped to the runtime maximum."},
-		},
-		"required": []string{"url"},
+		"type":       "object",
+		"properties": props,
+		"required":   []string{"url"},
 	}
 }
 
@@ -57,10 +59,8 @@ func (w *WebFetchTool) Execute(args map[string]any) Result {
 	if f, ok := args["format"].(string); ok && f != "" {
 		format = f
 	}
-	maxLen := defaultWebMaxLength
-	if m, ok := args["max_length"].(float64); ok && int(m) > 0 {
-		maxLen = clampInt(int(m), 1, maxWebMaxLength)
-	}
+	maxLen := outputBytesArg(args)
+	mode := truncateModeArg(args)
 	timeoutSeconds := defaultWebTimeoutSeconds
 	if t, ok := args["timeout"].(float64); ok && int(t) > 0 {
 		timeoutSeconds = clampInt(int(t), 1, maxWebTimeoutSeconds)
@@ -108,7 +108,8 @@ func (w *WebFetchTool) Execute(args map[string]any) Result {
 	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
 		prefix += fmt.Sprintf("[content_type] %s\n", contentType)
 	}
-	return Ok(prefix + truncate(output, maxLen))
+	bounded, _ := boundText(output, maxLen, mode)
+	return Ok(prefix + bounded)
 }
 
 func stripHTML(s string) string {
@@ -151,13 +152,6 @@ func toMarkdown(html string) string {
 		return stripHTML(html)
 	}
 	return strings.TrimSpace(md)
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + fmt.Sprintf("\n... (truncated, %d total chars)", len(s))
 }
 
 func clampInt(v, min, max int) int {

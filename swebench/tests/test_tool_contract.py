@@ -179,9 +179,12 @@ def test_process_and_shell_descriptions_match_runtime_log_contract():
 
     assert "current bounded output snapshot" in functions["process"]["description"]
     assert "max_output_bytes" in functions["shell"]["parameters"]["properties"]
+    # The head/tail split is described by truncate_mode; max_output_bytes
+    # only carries the total budget.
+    assert "truncate_mode" in functions["shell"]["parameters"]["properties"]
     assert (
         "first 40% and last 60%"
-        in functions["shell"]["parameters"]["properties"]["max_output_bytes"]["description"]
+        in functions["shell"]["parameters"]["properties"]["truncate_mode"]["description"]
     )
 
 

@@ -53,7 +53,7 @@ func (s *ShellTool) Schema() map[string]any {
 			"truncate_mode": map[string]any{
 				"type":        "string",
 				"default":     defaultTruncateMode,
-				"description": "How to divide the byte budget when output is too long: \"H<n>E<n>\" with weights for the head and end sections. H2E3 keeps the first 40% and last 60%; E1 keeps only the tail (useful for build/test errors); H1 keeps only the beginning.",
+				"description": "How to divide the byte budget when output is too long: \"H<n>T<n>\" with weights for the head and tail sections. H2T3 keeps the first 40% and last 60%; T1 keeps only the tail (useful for build/test errors); H1 keeps only the beginning.",
 			},
 			"working_dir": map[string]any{"type": "string", "description": "Working directory"},
 		},

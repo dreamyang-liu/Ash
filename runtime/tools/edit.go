@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,19 +20,24 @@ func (e *EditTool) Description() string {
 }
 
 func (e *EditTool) Schema() map[string]any {
+	props := map[string]any{
+		"command":     map[string]any{"type": "string", "enum": []string{"view", "str_replace", "insert", "write"}, "description": "Command to execute: view, str_replace, insert, or write"},
+		"path":        map[string]any{"type": "string", "description": "File path"},
+		"view_range":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "For view only: [start, end] inclusive line range."},
+		"old_str":     map[string]any{"type": "string", "description": "Required for str_replace. Text to find; must match exactly once."},
+		"new_str":     map[string]any{"type": "string", "description": "Required for str_replace. Replacement text."},
+		"insert_line": map[string]any{"type": "integer", "description": "Required for insert. Line number to insert after; use 0 to insert at the start."},
+		"insert_text": map[string]any{"type": "string", "description": "Required for insert. Text to insert."},
+		"file_text":   map[string]any{"type": "string", "description": "Required for write. Full file content; creates or overwrites the file."},
+	}
+	// view produces byte output, so it accepts the shared output bounds.
+	for k, v := range outputBoundSchema() {
+		props[k] = v
+	}
 	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"command":     map[string]any{"type": "string", "enum": []string{"view", "str_replace", "insert", "write"}, "description": "Command to execute: view, str_replace, insert, or write"},
-			"path":        map[string]any{"type": "string", "description": "File path"},
-			"view_range":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "For view only: [start, end] inclusive line range."},
-			"old_str":     map[string]any{"type": "string", "description": "Required for str_replace. Text to find; must match exactly once."},
-			"new_str":     map[string]any{"type": "string", "description": "Required for str_replace. Replacement text."},
-			"insert_line": map[string]any{"type": "integer", "description": "Required for insert. Line number to insert after; use 0 to insert at the start."},
-			"insert_text": map[string]any{"type": "string", "description": "Required for insert. Text to insert."},
-			"file_text":   map[string]any{"type": "string", "description": "Required for write. Full file content; creates or overwrites the file."},
-		},
-		"required": []string{"command", "path"},
+		"type":       "object",
+		"properties": props,
+		"required":   []string{"command", "path"},
 	}
 }
 
@@ -57,9 +63,23 @@ func (e *EditTool) Execute(args map[string]any) Result {
 }
 
 func (e *EditTool) view(path string, args map[string]any) Result {
-	data, err := os.ReadFile(path)
+	maxBytes := outputBytesArg(args)
+
+	// Read at most one budget worth of file plus a probe byte: viewing a
+	// multi-gigabyte log must not pull it all into memory just to throw
+	// most of it away.
+	f, err := os.Open(path)
 	if err != nil {
 		return Err(err.Error())
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, int64(maxBytes)+1))
+	if err != nil {
+		return Err(err.Error())
+	}
+	fileTruncated := len(data) > maxBytes
+	if fileTruncated {
+		data = data[:maxBytes]
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -85,7 +105,16 @@ func (e *EditTool) view(path string, args map[string]any) Result {
 	for i := start - 1; i < end; i++ {
 		fmt.Fprintf(&b, "  %6d | %s\n", i+1, lines[i])
 	}
-	return Ok(b.String())
+
+	// Bound the rendered view with the shared mechanism, then say so if the
+	// file itself was cut short at read time.
+	out, _ := boundText(b.String(), maxBytes, truncateModeArg(args))
+	if fileTruncated {
+		out += fmt.Sprintf(
+			"\n... [file larger than %d bytes: only the first %d bytes were read; "+
+				"use view_range, or raise max_output_bytes] ...\n", maxBytes, maxBytes)
+	}
+	return Ok(out)
 }
 
 func (e *EditTool) strReplace(path string, args map[string]any) Result {

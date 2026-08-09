@@ -65,21 +65,35 @@ func TestWebFetchValidationAndTruncation(t *testing.T) {
 		t.Fatalf("expected missing url error, got: %#v", missingURL)
 	}
 
+	// Body larger than the requested budget: web_fetch now uses the shared
+	// output bounds (max_output_bytes + truncate_mode), so truncation is
+	// reported by the same self-describing marker as every other tool.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, strings.Repeat("x", 40))
+		fmt.Fprint(w, strings.Repeat("x", 4000))
 	}))
 	defer server.Close()
 
 	truncated := tool.Execute(map[string]any{
-		"url":        server.URL,
-		"format":     "text",
-		"max_length": float64(5),
+		"url":              server.URL,
+		"format":           "text",
+		"max_output_bytes": float64(1024), // minimum accepted budget
 	})
 	if !truncated.Success {
 		t.Fatalf("truncated fetch failed: %s", truncated.Error)
 	}
-	if !strings.Contains(truncated.Output, "xxxxx") || !strings.Contains(truncated.Output, "... (truncated,") {
-		t.Fatalf("expected truncated output, got:\n%s", truncated.Output)
+	if !strings.Contains(truncated.Output, "xxxxx") || !strings.Contains(truncated.Output, "truncated") {
+		t.Fatalf("expected truncated output, got:\n%.200s", truncated.Output)
+	}
+
+	// Tail-only mode is available here too, like on shell.
+	tailOnly := tool.Execute(map[string]any{
+		"url":              server.URL,
+		"format":           "text",
+		"max_output_bytes": float64(1024),
+		"truncate_mode":    "T1",
+	})
+	if !tailOnly.Success {
+		t.Fatalf("tail-mode fetch failed: %s", tailOnly.Error)
 	}
 
 	invalidFormat := tool.Execute(map[string]any{"url": server.URL, "format": "pdf"})

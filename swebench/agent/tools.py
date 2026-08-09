@@ -118,8 +118,17 @@ TOOLS_SCHEMA = [
                     "tail": {"type": "integer", "description": "Only return last N lines of output"},
                     "max_output_bytes": {
                         "type": "integer",
-                        "default": 1048576,
-                        "description": "Maximum captured bytes per output stream. Larger output keeps the first 40% and last 60%.",
+                        "description": "Total bytes of output to return. Larger output is truncated per truncate_mode.",
+                    },
+                    "truncate_mode": {
+                        "type": "string",
+                        "default": "H2T3",
+                        "description": (
+                            'How to divide the byte budget when output is too long: "H<n>T<n>" '
+                            "with weights for the head and tail sections. H2T3 keeps the first "
+                            "40% and last 60%; T1 keeps only the tail (useful for build/test "
+                            "errors); H1 keeps only the beginning."
+                        ),
                     },
                     "working_dir": {"type": "string", "description": "Working directory (default: /testbed)"},
                 },
