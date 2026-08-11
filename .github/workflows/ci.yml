@@ -190,8 +190,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ../sdk
+      - run: pip install ../sdk pytest
       - run: go build -o ash-runtime .
+
+      # The SDK's own tests, against the package as installed above rather than
+      # the source tree (sdk/tests/conftest.py prefers an installed
+      # ash_sandbox), so a module missing from the wheel fails here.
+      - name: Test SDK
+        run: python3 -m pytest ../sdk/tests -q
 
       - name: Test Python client (HTTP + CLI + MCP backends)
         run: |

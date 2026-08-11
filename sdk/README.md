@@ -12,6 +12,16 @@ offered, who gets to be an agent — stays in the harness.
 pip install ash-sandbox
 ```
 
+## Tests
+
+```bash
+pip install ./sdk pytest && pytest sdk/tests
+```
+
+They run against the *installed* package when there is one, so a module missing
+from the wheel fails a test rather than passing on the source tree. A fake
+backend stands in for the runtime, so no container or network is needed.
+
 ## Connecting
 
 ```python
