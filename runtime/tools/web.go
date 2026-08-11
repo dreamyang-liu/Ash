@@ -20,6 +20,12 @@ const defaultUA = "AshRuntime/1.0 (+https://github.com/dreamyang-liu/ash)"
 const (
 	defaultWebTimeoutSeconds = 15
 	maxWebTimeoutSeconds     = 60
+	// How much of a document is read before conversion. Independent of the
+	// output budget, which applies to the converted result: stripping HTML to
+	// text routinely shrinks it tenfold, so budgeting the raw bytes threw away
+	// content that would have fit. This ceiling exists only to bound memory,
+	// like every other limit in the runtime.
+	maxFetchBodyBytes = 8 << 20
 )
 
 // ---- WebFetchTool ----
@@ -86,9 +92,18 @@ func (w *WebFetchTool) Execute(args map[string]any) Result {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxLen)+1))
+	// Read up to a generous ceiling rather than the output budget: text and
+	// markdown conversion shrink a document by a large factor, so cutting the
+	// raw body at maxLen discarded content that would have fit, and handed
+	// boundText an already-short string -- which then reported no truncation at
+	// all. Losing half a page silently is worse than losing it loudly.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBodyBytes+1))
 	if err != nil {
 		return Err("read body: " + err.Error())
+	}
+	bodyTruncated := len(body) > maxFetchBodyBytes
+	if bodyTruncated {
+		body = body[:maxFetchBodyBytes]
 	}
 	html := string(body)
 
@@ -107,6 +122,13 @@ func (w *WebFetchTool) Execute(args map[string]any) Result {
 	prefix := fmt.Sprintf("[status] %s\n", resp.Status)
 	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
 		prefix += fmt.Sprintf("[content_type] %s\n", contentType)
+	}
+	if bodyTruncated {
+		// The document itself exceeded what this tool will read, so even an
+		// unbounded output would be incomplete. Say so separately from the
+		// output budget's own notice.
+		prefix += fmt.Sprintf("[source_truncated] read the first %d bytes of the document\n",
+			maxFetchBodyBytes)
 	}
 	bounded, _ := boundText(output, maxLen, mode)
 	return Ok(prefix + bounded)

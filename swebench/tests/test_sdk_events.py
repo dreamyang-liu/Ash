@@ -32,8 +32,12 @@ class EventBackend(Backend):
 
     async def call(self, tool_name, args, agent_id=""):
         self.calls.append((tool_name, dict(args), agent_id))
+        # Notifications ride on EVERY response, wait_for_events included: the
+        # runtime drains an identity's owed events on every tool call, so a
+        # fake that omits them here cannot exercise the two-channel case.
         if tool_name == "wait_for_events":
-            return ToolResult(output=json.dumps(self.payload), is_error=False)
+            return ToolResult(output=json.dumps(self.payload), is_error=False,
+                              notifications=self.notifications)
         return ToolResult(output="ok", is_error=False, notifications=self.notifications)
 
     async def list_tools(self):
@@ -162,6 +166,35 @@ def test_as_agent_shares_the_sandbox_but_not_the_identity():
 
     asyncio.run(reviewer.poll_events())
     assert backend.calls[-1][2] == "reviewer", "its own cursor over the log"
+
+
+def test_wait_returns_both_delivery_channels():
+    """A wait_for_events response carries two sets of events, not one.
+
+    The runtime drains an identity's owed events onto every tool response --
+    including this one -- and marks them delivered. Returning only the matched
+    batch dropped them permanently, and because they were gone from the log
+    they were never counted as missed either: silent loss.
+    """
+    backend = EventBackend({"events": [PROCESS_EXITED], "timed_out": False},
+                           notifications=[TOOL_CALL])
+    sb = Sandbox(backend=backend, agent_id="main")
+
+    batch = asyncio.run(sb.wait_for_events())
+    kinds = sorted(e.kind for e in batch)
+    assert kinds == ["process_exited", "tool:web_search"], \
+        f"both channels must survive, got {kinds}"
+
+
+def test_wait_does_not_report_an_event_twice():
+    # The channels are disjoint today; if that ever changes, a caller must not
+    # see one event on both.
+    backend = EventBackend({"events": [PROCESS_EXITED], "timed_out": False},
+                           notifications=[dict(PROCESS_EXITED)])
+    sb = Sandbox(backend=backend)
+
+    batch = asyncio.run(sb.wait_for_events())
+    assert len(batch) == 1, f"deduplicate by id, got {[e.id for e in batch]}"
 
 
 def test_per_call_identity_is_the_simple_path():

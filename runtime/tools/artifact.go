@@ -112,10 +112,14 @@ func (a *ArtifactTool) Execute(args map[string]any) Result {
 		err := downloadAndVerify(rawURL, sum, dest, executable)
 		artifactFlights.mu.Lock()
 		artifactFlights.res[key] = err
-		if err != nil {
-			// Allow retry on a later call.
-			delete(artifactFlights.m, key)
-		}
+		// Retire the flight either way. Keeping a succeeded Once meant a later
+		// call for an artifact that had since been deleted got a spent Once:
+		// once.Do no-opped, res[key] was nil, and the tool answered Ok with a
+		// path to a file that was not there -- which also defeats a caller's
+		// stale-path retry, since re-resolving hands back the same phantom.
+		// Anyone reaching here has already failed os.Stat, so a retired flight
+		// has no result left worth sharing.
+		delete(artifactFlights.m, key)
 		artifactFlights.mu.Unlock()
 	})
 
@@ -124,6 +128,12 @@ func (a *ArtifactTool) Execute(args map[string]any) Result {
 	artifactFlights.mu.Unlock()
 	if err != nil {
 		return Err(err.Error())
+	}
+	// Never claim success for a file that is not on disk: a caller sharing a
+	// flight whose install was removed in between would otherwise be told the
+	// artifact is ready.
+	if _, statErr := os.Stat(dest); statErr != nil {
+		return Err(fmt.Sprintf("artifact missing after install at %s: %v", dest, statErr))
 	}
 	return Ok(dest)
 }

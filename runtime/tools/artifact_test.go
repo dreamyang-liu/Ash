@@ -60,6 +60,43 @@ func TestArtifactDownloadVerifyCache(t *testing.T) {
 	}
 }
 
+func TestArtifactReinstallsAfterTheCachedFileIsRemoved(t *testing.T) {
+	// A cached artifact can disappear -- a cleaned /tmp, a recycled sandbox.
+	// The singleflight used to keep its spent Once after succeeding, so the
+	// next call no-opped and answered Ok with a path to a missing file. That
+	// also defeats a caller's stale-path retry: re-resolving returns the same
+	// phantom, and the agent sees "not found" from the shell instead.
+	content := []byte("#!/bin/sh\necho reinstall-ok\n")
+	sum := sha256Hex(content)
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Write(content)
+	}))
+	defer server.Close()
+	t.Cleanup(func() { os.RemoveAll(artifactPath(sum)) })
+
+	tool := &ArtifactTool{}
+	first := tool.Execute(map[string]any{"url": server.URL, "sha256": sum})
+	if !first.Success {
+		t.Fatalf("first install failed: %s", first.Error)
+	}
+	if err := os.Remove(first.Output); err != nil {
+		t.Fatalf("could not remove the cached artifact: %v", err)
+	}
+
+	second := tool.Execute(map[string]any{"url": server.URL, "sha256": sum})
+	if !second.Success {
+		t.Fatalf("re-install failed: %s", second.Error)
+	}
+	if _, err := os.Stat(second.Output); err != nil {
+		t.Fatalf("reported success for a missing file: %v", err)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("expected a second download, got %d hit(s)", hits.Load())
+	}
+}
+
 func TestArtifactHashMismatchRejected(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("malicious content"))

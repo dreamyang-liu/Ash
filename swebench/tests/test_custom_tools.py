@@ -111,6 +111,32 @@ def test_injection_is_inert():
     assert shlex.split(joined)[-1] == evil
 
 
+def test_shell_command_keeps_payloads_quoted():
+    """The argv list is not the boundary -- the command string is.
+
+    shell_call joins argv with shlex.join, and that join is the only thing
+    between an agent-supplied argument and the shell. Replacing it with
+    " ".join leaves every other test green while creating a live command
+    injection, so assert on the joined command itself.
+    """
+    register(parse_manifest(make_manifest()))
+    payloads = [
+        "x; touch /tmp/pwned",
+        "$(touch /tmp/pwned)",
+        "`touch /tmp/pwned`",
+        "a && touch /tmp/pwned",
+        "a | tee /tmp/pwned",
+        "a\ntouch /tmp/pwned",
+    ]
+    for payload in payloads:
+        command = plan_custom_tool("code_complexity", {"file": payload})\
+            .shell_call("/bin/analyzer")[1]["command"]
+        # The shell must see one word, and it must be the payload verbatim.
+        assert shlex.split(command)[-1] == payload, command
+        # And no metacharacter may survive unquoted anywhere in the command.
+        assert "touch /tmp/pwned" not in shlex.split(command)[:-1], command
+
+
 def test_arg_validation():
     spec = parse_manifest(make_manifest())
     with pytest.raises(ValueError, match="missing required"):

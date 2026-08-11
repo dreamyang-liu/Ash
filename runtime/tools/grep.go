@@ -9,32 +9,74 @@ import (
 	"sync"
 )
 
-var rgOnce sync.Once
-var rgErr error
+const (
+	rgDir     = "ripgrep-14.1.1-x86_64-unknown-linux-musl"
+	rgTarball = "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/" + rgDir + ".tar.gz"
+)
+
+// Provisioning ripgrep is retried until it succeeds, and only success is
+// remembered. A sync.Once here cached the *failure*: one attempt in a bare
+// image disabled grep_files for the runtime's whole life, even after rg was
+// installed by other means moments later. The mutex is held across the install
+// so concurrent callers wait for one attempt instead of racing several.
+var (
+	rgMu    sync.Mutex
+	rgReady bool
+)
+
+// rgInstallAttempts are tried in order. Each is a full shell command because
+// the apt route needs its index refreshed first -- without `apt-get update` a
+// slim image reports "Unable to locate package ripgrep" and the tool looked
+// broken -- and because the static fallback needs whichever fetcher exists.
+var rgInstallAttempts = []string{
+	"apt-get update -qq && apt-get install -y -qq ripgrep",
+	"apk add --no-cache ripgrep",
+	"yum install -y -q ripgrep",
+	"curl -fsSL " + rgTarball + " | tar xz -C /tmp && cp /tmp/" + rgDir + "/rg /usr/local/bin/rg",
+	"wget -qO- " + rgTarball + " | tar xz -C /tmp && cp /tmp/" + rgDir + "/rg /usr/local/bin/rg",
+}
 
 func ensureRipgrep() error {
-	rgOnce.Do(func() {
-		if _, err := exec.LookPath("rg"); err == nil {
-			return
-		}
-		// Try package managers, then static binary download.
-		attempts := [][]string{
-			{"apt-get", "install", "-y", "ripgrep"},
-			{"apk", "add", "ripgrep"},
-			{"yum", "install", "-y", "ripgrep"},
-		}
-		for _, cmd := range attempts {
-			if err := exec.Command(cmd[0], cmd[1:]...).Run(); err == nil {
-				return
+	rgMu.Lock()
+	defer rgMu.Unlock()
+
+	if rgReady {
+		return nil
+	}
+	// Re-checked on every attempt, so an rg that appeared since the last
+	// failure is picked up instead of being ignored for good.
+	if _, err := exec.LookPath("rg"); err == nil {
+		rgReady = true
+		return nil
+	}
+
+	var failures []string
+	for _, attempt := range rgInstallAttempts {
+		out, err := exec.Command("sh", "-c", attempt).CombinedOutput()
+		if err == nil {
+			if _, lookErr := exec.LookPath("rg"); lookErr == nil {
+				rgReady = true
+				return nil
 			}
+			err = fmt.Errorf("completed but rg still not on PATH")
 		}
-		// Fallback: download static musl binary.
-		dl := "curl -fsSL https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz | tar xz -C /tmp && cp /tmp/ripgrep-14.1.1-x86_64-unknown-linux-musl/rg /usr/local/bin/rg"
-		if err := exec.Command("sh", "-c", dl).Run(); err != nil {
-			rgErr = fmt.Errorf("failed to install ripgrep: %w", err)
-		}
-	})
-	return rgErr
+		failures = append(failures, fmt.Sprintf("%s: %v (%s)",
+			strings.Fields(attempt)[0], err, lastLine(out)))
+	}
+	// Say what was tried: "failed to install ripgrep" alone gives an operator
+	// nothing to act on.
+	return fmt.Errorf("failed to install ripgrep; tried %d methods: %s",
+		len(rgInstallAttempts), strings.Join(failures, "; "))
+}
+
+// lastLine is the most informative part of a package manager's noise.
+func lastLine(out []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	last := lines[len(lines)-1]
+	if len(last) > 200 {
+		return last[:200]
+	}
+	return last
 }
 
 // GrepTool searches files using ripgrep.

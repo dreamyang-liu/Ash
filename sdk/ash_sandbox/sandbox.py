@@ -303,7 +303,12 @@ class Sandbox:
                                          self._whoami(agent_id))
         if result.is_error:
             raise RuntimeError(f"wait_for_events failed: {result.output}")
-        return parse_batch(result.output)
+        # This response carries two channels: the events the wait matched, and
+        # any others already owed to this identity, piggybacked as every tool
+        # response is. The runtime marks both delivered, so dropping the second
+        # would lose them permanently -- and silently, since they are gone from
+        # the log and therefore never counted as missed.
+        return parse_batch(result.output, result.notifications)
 
     async def poll_events(self, kinds: list[str] | None = None,
                           sources: list[str] | None = None,

@@ -88,18 +88,29 @@ def parse_events(raw: list[dict] | None) -> list[Event]:
     return [Event.from_dict(item) for item in (raw or [])]
 
 
-def parse_batch(tool_output: str) -> EventBatch:
+def parse_batch(tool_output: str, extra: list[dict] | None = None) -> EventBatch:
     """Parse a wait_for_events payload.
 
     The runtime returns it as JSON text inside the tool result, since a tool
     result is text; unpacking it is this layer's job, not every caller's.
+
+    `extra` carries the events piggybacked on that same response. A response
+    delivers two channels -- the events the wait matched, and any others owed
+    to this identity -- and the runtime marks BOTH delivered, so anything not
+    merged here is gone for good and not even counted as missed. They are
+    deduplicated by id: the channels are disjoint today, but a caller must not
+    see one event twice if that ever changes.
     """
     try:
         payload = json.loads(tool_output or "{}")
     except json.JSONDecodeError:
-        return EventBatch()
+        payload = {}
+    events = parse_events(payload.get("events"))
+    if extra:
+        seen = {e.id for e in events}
+        events = events + [e for e in parse_events(extra) if e.id not in seen]
     return EventBatch(
-        events=parse_events(payload.get("events")),
+        events=events,
         timed_out=bool(payload.get("timed_out")),
         missed=int(payload.get("missed") or 0),
     )
