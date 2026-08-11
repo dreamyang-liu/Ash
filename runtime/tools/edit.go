@@ -11,6 +11,17 @@ import (
 )
 
 // EditTool provides file viewing and editing with one command-dispatched schema.
+//
+// Its mutating commands emit "file_change" events. Coverage is deliberately
+// partial: a file written through shell (a redirect, git checkout, a build)
+// produces no such event, because catching those would mean watching the
+// filesystem itself (inotify/fanotify over the workspace) rather than
+// reporting what a tool did. Completeness is instead a harness concern --
+// prompting agents to edit through this tool rather than through shell -- so
+// a consumer subscribed to file_change should read it as "edits made via
+// text_editor", not as filesystem-wide monitoring. The tool:text_editor
+// event carries the same path, making file_change the narrower,
+// more intention-revealing of the two.
 type EditTool struct{}
 
 func (e *EditTool) Name() string { return "text_editor" }

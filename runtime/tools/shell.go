@@ -236,7 +236,9 @@ func (s *ShellTool) runBackground(command, agentID string, opts runOpts) Result 
 		proc.exitCode = &code
 		proc.mu.Unlock()
 
-		data := map[string]any{"pid": pid, "exitCode": code}
+		// snake_case to match every other field the runtime emits, including
+		// process read's own "exit_code".
+		data := map[string]any{"pid": pid, "exit_code": code}
 		events.PushTo(agentID, "process_exited", pid, data)
 	}()
 
