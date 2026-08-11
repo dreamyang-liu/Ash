@@ -108,6 +108,117 @@ def test_per_call_registry_override():
     assert backend.calls[-1][0] == "shell"
 
 
+def test_artifact_resolved_once_then_memoised():
+    backend = FakeBackend(responses={
+        "artifact": ToolResult(output="/cache/bin\n", is_error=False),
+    })
+    sb = Sandbox(backend=backend, tools=make_registry())
+
+    for _ in range(3):
+        asyncio.run(sb.call_agent_tool("analyzer", {"file": "m.py"}))
+
+    names = [c[0] for c in backend.calls]
+    # One artifact resolution, then execution only: the redundant round-trip
+    # to a cache that already holds the binary is skipped.
+    assert names == ["artifact", "shell", "shell", "shell"]
+
+
+def test_memo_is_per_sandbox_not_per_registry():
+    # A registry is reusable across sandboxes, so a path learned in one must
+    # not be assumed present in another.
+    registry = make_registry()
+    first = FakeBackend(responses={"artifact": ToolResult(output="/cache/a", is_error=False)})
+    second = FakeBackend(responses={"artifact": ToolResult(output="/cache/b", is_error=False)})
+
+    asyncio.run(Sandbox(backend=first, tools=registry).call_agent_tool("analyzer", {"file": "x"}))
+    asyncio.run(Sandbox(backend=second, tools=registry).call_agent_tool("analyzer", {"file": "x"}))
+
+    # The second sandbox resolves the artifact itself rather than reusing the
+    # first sandbox's path.
+    assert [c[0] for c in second.calls] == ["artifact", "shell"]
+    assert second.calls[1][1]["command"].startswith("/cache/b")
+
+
+def test_stale_memo_is_reresolved_once():
+    class StalePathBackend(FakeBackend):
+        """Fails the first execution after memoisation, as if /tmp was cleaned."""
+
+        def __init__(self):
+            super().__init__()
+            self.shell_calls = 0
+
+        async def call(self, tool_name, args):
+            self.calls.append((tool_name, dict(args)))
+            if tool_name == "artifact":
+                return ToolResult(output="/cache/bin", is_error=False)
+            self.shell_calls += 1
+            if self.shell_calls == 2:
+                return ToolResult(output="sh: /cache/bin: No such file or directory",
+                                  is_error=True)
+            return ToolResult(output="ok", is_error=False)
+
+    backend = StalePathBackend()
+    sb = Sandbox(backend=backend, tools=make_registry())
+
+    asyncio.run(sb.call_agent_tool("analyzer", {"file": "x"}))  # resolves + runs
+    r = asyncio.run(sb.call_agent_tool("analyzer", {"file": "x"}))  # memo gone stale
+
+    assert not r.is_error, "a stale path should be re-resolved, not surfaced as an error"
+    assert [c[0] for c in backend.calls] == ["artifact", "shell", "shell", "artifact", "shell"]
+
+
+def test_genuine_failure_is_not_retried():
+    backend = FakeBackend(responses={
+        "artifact": ToolResult(output="/cache/bin", is_error=False),
+        "shell": ToolResult(output="analyzer: invalid threshold", is_error=True),
+    })
+    sb = Sandbox(backend=backend, tools=make_registry())
+
+    asyncio.run(sb.call_agent_tool("analyzer", {"file": "x"}))
+    backend.calls.clear()
+    r = asyncio.run(sb.call_agent_tool("analyzer", {"file": "x"}))
+
+    assert r.is_error
+    # A real tool error must not be mistaken for a stale path.
+    assert [c[0] for c in backend.calls] == ["shell"]
+
+
+def test_prepare_tools_resolves_up_front():
+    backend = FakeBackend(responses={
+        "artifact": ToolResult(output="/cache/bin", is_error=False),
+    })
+    sb = Sandbox(backend=backend, tools=make_registry())
+
+    paths = asyncio.run(sb.prepare_tools())
+    assert paths == {"analyzer": "/cache/bin"}
+    assert [c[0] for c in backend.calls] == ["artifact"]
+
+    # The first agent call then needs no artifact round-trip at all.
+    backend.calls.clear()
+    asyncio.run(sb.call_agent_tool("analyzer", {"file": "x"}))
+    assert [c[0] for c in backend.calls] == ["shell"]
+
+
+def test_prepare_tools_fails_fast_on_bad_binary():
+    backend = FakeBackend(responses={
+        "artifact": ToolResult(output="download failed: HTTP 404", is_error=True),
+    })
+    sb = Sandbox(backend=backend, tools=make_registry())
+
+    with pytest.raises(RuntimeError, match="cannot prepare custom tool"):
+        asyncio.run(sb.prepare_tools())
+
+
+def test_prepare_tools_handles_image_local_binaries():
+    backend = FakeBackend()
+    sb = Sandbox(backend=backend, tools=make_registry(binary={"path": "/opt/a"}))
+
+    paths = asyncio.run(sb.prepare_tools())
+    assert paths == {"analyzer": "/opt/a"}
+    # Nothing to download for a binary already in the image.
+    assert backend.calls == []
+
+
 def test_registries_are_isolated():
     r1, r2 = make_registry(), ToolRegistry()
     assert r1.is_custom_tool("analyzer")

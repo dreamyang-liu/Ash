@@ -319,6 +319,18 @@ class ToolRegistry:
         spec.compile_argv("/placeholder", dict(args))
         return CustomToolPlan(spec=spec, args=dict(args))
 
+    def plan_custom_tool_for_prepare(self, name: str) -> CustomToolPlan:
+        """Plan used to resolve a tool's binary ahead of any real call.
+
+        Argument validation is skipped deliberately: preparing a binary is
+        about fetching and verifying it, and there are no agent arguments yet.
+        Only the artifact half of the plan is meaningful here.
+        """
+        spec = self.custom_specs.get(name)
+        if spec is None:
+            raise KeyError(f"unknown custom tool: {name}")
+        return CustomToolPlan(spec=spec, args={})
+
     def custom_agent_schemas(self) -> list[dict]:
         """Function-calling schemas for all registered custom tools."""
         return [spec.agent_schema() for spec in self.custom_specs.values()]

@@ -20,6 +20,11 @@ class Sandbox:
 
     backend: Backend
     tools: ToolRegistry = field(default_factory=ToolRegistry)
+    # Custom tool name -> verified binary path inside *this* sandbox, learned
+    # from the artifact step. Memoised per sandbox, never on the registry: a
+    # registry is deliberately reusable across sandboxes, so caching a path
+    # there would make one sandbox execute a path that exists only in another.
+    _artifact_paths: dict[str, str] = field(default_factory=dict, repr=False)
     _container_id: str | None = field(default=None, repr=False)
     _process: asyncio.subprocess.Process | None = field(default=None, repr=False)
     _tools_cache: list[dict] | None = field(default=None, repr=False)
@@ -120,18 +125,74 @@ class Sandbox:
         """
         registry = registry or self.tools
         if registry.is_custom_tool(name):
-            plan = registry.plan_custom_tool(name, args)  # validates args
-            binary_path = plan.spec.path
-            if plan.artifact_call is not None:
-                tool, call_args = plan.artifact_call
-                result = await self.backend.call(tool, call_args)
-                if result.is_error:
-                    return result
-                binary_path = result.output.strip()
-            tool, call_args = plan.shell_call(binary_path)
-            return await self.backend.call(tool, call_args)
+            return await self._call_custom_tool(name, args, registry)
         runtime_tool, runtime_args = registry.route(name, args)
         return await self.backend.call(runtime_tool, runtime_args)
+
+    async def _call_custom_tool(self, name: str, args: dict,
+                                registry: ToolRegistry) -> ToolResult:
+        """Run a manifest-defined tool: resolve its binary, then execute it.
+
+        The artifact step is idempotent and cached inside the sandbox, so
+        after the first resolution only the execution round-trip is needed.
+        """
+        plan = registry.plan_custom_tool(name, args)  # validates args first
+
+        binary_path = plan.spec.path or self._artifact_paths.get(name, "")
+        memoised = bool(binary_path) and not plan.spec.path
+        if not binary_path:
+            resolved = await self._resolve_artifact(plan)
+            if isinstance(resolved, ToolResult):
+                return resolved  # download or verification failed
+            binary_path = resolved
+            self._artifact_paths[name] = binary_path
+
+        tool, call_args = plan.shell_call(binary_path)
+        result = await self.backend.call(tool, call_args)
+
+        # A memoised path can go stale (a cleaned /tmp, a recycled sandbox).
+        # Re-resolve once rather than surfacing a confusing "not found".
+        if memoised and result.is_error and _looks_missing(result.output):
+            self._artifact_paths.pop(name, None)
+            resolved = await self._resolve_artifact(plan)
+            if isinstance(resolved, ToolResult):
+                return resolved
+            self._artifact_paths[name] = resolved
+            tool, call_args = plan.shell_call(resolved)
+            return await self.backend.call(tool, call_args)
+        return result
+
+    async def _resolve_artifact(self, plan) -> str | ToolResult:
+        """Return the local binary path, or the failing ToolResult."""
+        tool, call_args = plan.artifact_call
+        result = await self.backend.call(tool, call_args)
+        if result.is_error:
+            return result
+        return result.output.strip()
+
+    async def prepare_tools(self, registry: ToolRegistry | None = None) -> dict[str, str]:
+        """Resolve every custom tool's binary up front.
+
+        Worth calling when a session starts: downloads happen once instead of
+        during the first agent call, and a binary that cannot be fetched or
+        fails verification surfaces immediately rather than mid-rollout.
+
+        Returns the tool name -> local path mapping. Raises RuntimeError on the
+        first tool that cannot be prepared.
+        """
+        registry = registry or self.tools
+        for name, spec in registry.custom_specs.items():
+            if spec.path:
+                self._artifact_paths[name] = spec.path
+                continue
+            plan = registry.plan_custom_tool_for_prepare(name)
+            resolved = await self._resolve_artifact(plan)
+            if isinstance(resolved, ToolResult):
+                raise RuntimeError(
+                    f"cannot prepare custom tool {name!r}: {resolved.output}"
+                )
+            self._artifact_paths[name] = resolved
+        return dict(self._artifact_paths)
 
     async def execute_tool_call(self, tool_call: dict) -> ToolResult:
         """Execute an LLM tool_call (OpenAI or Anthropic format)."""
@@ -187,6 +248,21 @@ class Sandbox:
         finally:
             await client.aclose()
         raise TimeoutError(f"ash-runtime not ready after {timeout}s")
+
+
+def _looks_missing(output: str) -> bool:
+    """Whether a shell failure reads like the binary was not there.
+
+    Used to decide whether a memoised artifact path has gone stale and is
+    worth re-resolving once. Deliberately narrow: a genuine tool failure must
+    not trigger a pointless retry.
+    """
+    lowered = output.lower()
+    return (
+        "no such file" in lowered
+        or "not found" in lowered
+        or "cannot execute" in lowered
+    )
 
 
 def _find_free_port() -> int:
