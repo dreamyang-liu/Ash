@@ -48,6 +48,48 @@ class Pool(ABC):
         """Sandboxes this pool currently holds."""
         return list(self._sandboxes.values())
 
+    # --- Optional capabilities ---
+    #
+    # Some sources of sandboxes can do more than create and destroy: a microVM
+    # host can suspend one in milliseconds, or split a running one into
+    # independent copies. Containers cannot. Rather than force every caller to
+    # know which implementation it holds, capabilities are declared and the
+    # base refuses them, so a harness can write "fork if you can, otherwise
+    # rebuild" without a type check.
+
+    def supports_pause(self) -> bool:
+        """Whether this pool can suspend and resume a sandbox."""
+        return False
+
+    def supports_fork(self) -> bool:
+        """Whether this pool can split a running sandbox into copies."""
+        return False
+
+    async def pause(self, sandbox: Sandbox) -> None:
+        """Suspend a sandbox, releasing its compute until resumed."""
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot pause sandboxes; "
+            "check supports_pause() first"
+        )
+
+    async def resume(self, sandbox: Sandbox) -> None:
+        """Bring a paused sandbox back."""
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot resume sandboxes; "
+            "check supports_pause() first"
+        )
+
+    async def fork(self, sandbox: Sandbox, count: int = 1) -> list[Sandbox]:
+        """Split a running sandbox into `count` independent copies.
+
+        Each copy continues from the source's current state, which is what
+        makes speculative branches cheap: the shared prefix is paid for once.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot fork sandboxes; "
+            "check supports_fork() first"
+        )
+
     async def close(self) -> None:
         await self.destroy_all()
 
@@ -161,6 +203,145 @@ class DockerPool(Pool):
             )
             await proc.wait()
         self._sandboxes.clear()
+
+
+class MicroVMPool(Pool):
+    """Sandboxes as Firecracker microVMs, provisioned by an AgentENV server.
+
+    Ash does not manage Firecracker itself; that is an entire storage stack
+    (layered block devices, memory snapshots) and AgentENV already provides it
+    behind an HTTP API. This pool is a client of that API: it asks for VMs from
+    a template and reaches the runtime inside them through AgentENV's per-node
+    proxy, which routes on a sandbox id and a target port.
+
+    The template image must already contain ash-runtime, started on
+    `runtime_port`. That is why the runtime is a static binary with embedded CA
+    roots: it drops into any OCI image without further dependencies.
+
+    What this buys over containers is the state operations -- pause, resume and
+    fork all run in the tens of milliseconds -- which is why they are declared
+    as supported capabilities here and refused by the base class elsewhere.
+    """
+
+    #: AgentENV's proxy routing headers (it also accepts E2B-compatible aliases).
+    SANDBOX_ID_HEADER = "x-agentenv-sandbox-id"
+    TARGET_PORT_HEADER = "x-agentenv-target-port"
+
+    def __init__(self, server_url: str, default_template: str = "ubuntu",
+                 runtime_port: int = 3000, api_key: str = "",
+                 request_timeout: float = 120):
+        self.server_url = server_url.rstrip("/")
+        self.default_template = default_template
+        self.runtime_port = runtime_port
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._client = httpx.AsyncClient(timeout=request_timeout, headers=headers)
+        self._sandboxes: dict[str, Sandbox] = {}
+
+    # --- Capabilities ---
+
+    def supports_pause(self) -> bool:
+        return True
+
+    def supports_fork(self) -> bool:
+        return True
+
+    # --- Lifecycle ---
+
+    async def spawn(
+        self,
+        image: str | None = None,
+        entrypoint: str | None = None,
+        env: dict[str, str] | None = None,
+        resources: dict | None = None,
+    ) -> Sandbox:
+        """Start a microVM from a template and attach to its runtime."""
+        payload: dict = {"templateID": image or self.default_template}
+        if entrypoint:
+            payload["entrypoint"] = entrypoint
+        if env:
+            payload["envVars"] = env
+        if resources:
+            payload.update(resources)
+
+        resp = await self._client.post(f"{self.server_url}/sandboxes", json=payload)
+        resp.raise_for_status()
+        return self._attach(_sandbox_id(resp.json()))
+
+    async def destroy(self, *sandboxes: Sandbox) -> None:
+        for sb in sandboxes:
+            sid = sb._container_id
+            if not sid or sid not in self._sandboxes:
+                continue
+            await self._client.delete(f"{self.server_url}/sandboxes/{sid}")
+            del self._sandboxes[sid]
+            sb._container_id = None
+
+    async def destroy_all(self) -> None:
+        await self.destroy(*self.list())
+        self._sandboxes.clear()
+
+    async def close(self) -> None:
+        await self.destroy_all()
+        await self._client.aclose()
+
+    # --- State operations ---
+
+    async def pause(self, sandbox: Sandbox) -> None:
+        """Suspend a VM. Its memory and disk state are snapshotted."""
+        await self._post_state(sandbox, "pause")
+
+    async def resume(self, sandbox: Sandbox) -> None:
+        """Restore a paused VM from its snapshot."""
+        await self._post_state(sandbox, "resume")
+
+    async def fork(self, sandbox: Sandbox, count: int = 1) -> list[Sandbox]:
+        """Split a running VM into `count` copies of its current state.
+
+        Useful for speculative work: every branch starts from the same
+        prepared environment without repeating the setup that produced it.
+        The source keeps running.
+        """
+        sid = _require_id(sandbox)
+        resp = await self._client.post(
+            f"{self.server_url}/sandboxes/{sid}/fork", json={"count": count})
+        resp.raise_for_status()
+        body = resp.json()
+        children = body.get("sandboxes") or body.get("children") or []
+        return [self._attach(_sandbox_id(child)) for child in children]
+
+    # --- Internals ---
+
+    def _attach(self, sandbox_id: str) -> Sandbox:
+        """Wrap an AgentENV sandbox id as a Sandbox reachable via the proxy."""
+        sb = Sandbox(backend=GatewayBackend(
+            self.server_url, sandbox_id,
+            sandbox_id_header=self.SANDBOX_ID_HEADER,
+            target_port=self.runtime_port,
+            target_port_header=self.TARGET_PORT_HEADER,
+        ))
+        sb._container_id = sandbox_id
+        self._sandboxes[sandbox_id] = sb
+        return sb
+
+    async def _post_state(self, sandbox: Sandbox, action: str) -> None:
+        sid = _require_id(sandbox)
+        resp = await self._client.post(f"{self.server_url}/sandboxes/{sid}/{action}")
+        resp.raise_for_status()
+
+
+def _sandbox_id(body: dict) -> str:
+    """Read a sandbox id from an AgentENV response, whichever name it used."""
+    for key in ("sandboxID", "sandbox_id", "id"):
+        if body.get(key):
+            return str(body[key])
+    raise RuntimeError(f"no sandbox id in response: {body}")
+
+
+def _require_id(sandbox: Sandbox) -> str:
+    sid = sandbox._container_id
+    if not sid:
+        raise RuntimeError("sandbox has no id (already destroyed?)")
+    return sid
 
 
 class SandboxPool(Pool):

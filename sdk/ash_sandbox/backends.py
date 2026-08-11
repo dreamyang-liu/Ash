@@ -185,19 +185,40 @@ class CLIBackend(Backend):
 
 
 class GatewayBackend(Backend):
-    """Calls tools via a gateway that routes by sandbox_id (X-Sandbox-ID header).
-    Used in K8s deployments where a shared gateway proxies to many sandbox pods."""
+    """Calls tools through a gateway that routes requests to one sandbox.
 
-    def __init__(self, gateway_url: str, sandbox_id: str):
+    Every such gateway does the same thing -- read a sandbox id from a header
+    and forward the body -- but they disagree on the header's name, and some
+    also need the port the runtime listens on inside the sandbox. Both are
+    therefore configurable, so a new gateway (a microVM host, another proxy)
+    is a different set of header names rather than a different Backend.
+
+    Used in K8s deployments where a shared gateway proxies to many sandbox
+    pods, and by provisioners whose sandboxes are only reachable that way.
+    """
+
+    def __init__(self, gateway_url: str, sandbox_id: str,
+                 sandbox_id_header: str = "X-Sandbox-ID",
+                 target_port: int | None = None,
+                 target_port_header: str = "X-Target-Port"):
         self.gateway_url = gateway_url.rstrip("/")
         self.sandbox_id = sandbox_id
+        self.sandbox_id_header = sandbox_id_header
+        self.target_port = target_port
+        self.target_port_header = target_port_header
         self._client = httpx.AsyncClient(timeout=360)
+
+    def _routing_headers(self) -> dict[str, str]:
+        headers = {self.sandbox_id_header: self.sandbox_id}
+        if self.target_port is not None:
+            headers[self.target_port_header] = str(self.target_port)
+        return headers
 
     async def call(self, tool_name: str, args: dict,
                    agent_id: str = "") -> ToolResult:
         resp = await self._client.post(
             self.gateway_url,
-            headers={"X-Sandbox-ID": self.sandbox_id},
+            headers=self._routing_headers(),
             json={
                 "jsonrpc": "2.0", "id": 1,
                 "method": "tools/call",
@@ -219,7 +240,7 @@ class GatewayBackend(Backend):
     async def list_tools(self) -> list[dict]:
         resp = await self._client.post(
             self.gateway_url,
-            headers={"X-Sandbox-ID": self.sandbox_id},
+            headers=self._routing_headers(),
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
         )
         resp.raise_for_status()
