@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from . import schemas
 from .backends import Backend, CLIBackend, HTTPBackend, MCPBackend
 from .result import ToolResult
 from .toolset import ToolRegistry
@@ -211,20 +212,24 @@ class Sandbox:
 
     # --- Schemas ---
 
-    async def tool_schemas(self, format: str = "openai") -> list[dict]:
-        """Get tool schemas for LLM function calling.
+    async def tool_schemas(self, format: str = "openai",
+                           registry: ToolRegistry | None = None) -> list[dict]:
+        """Get the complete tool panel for LLM function calling.
+
+        Includes both the runtime's builtin tools and the registry's
+        manifest-defined ones. The runtime knows nothing about custom tools --
+        they exist only as manifests on this side -- so assembling the full
+        panel is the SDK's job, not something a harness should have to stitch
+        together itself.
 
         format: "openai" | "anthropic" | "raw"
         """
-        tools = await self._get_tools()
-
-        if format == "anthropic":
-            return [{"name": t["name"], "description": t["description"], "input_schema": t["inputSchema"]} for t in tools]
-        if format == "raw":
-            return tools
-
-        # OpenAI format
-        return [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["inputSchema"]}} for t in tools]
+        registry = registry or self.tools
+        builtin = [
+            schemas.render_runtime_tool(t, format)
+            for t in await self._get_tools()
+        ]
+        return builtin + registry.custom_agent_schemas(format)
 
     # --- Internal ---
 

@@ -219,6 +219,60 @@ def test_prepare_tools_handles_image_local_binaries():
     assert backend.calls == []
 
 
+class SchemaBackend(FakeBackend):
+    """Reports one builtin tool the way the runtime's tools/list does."""
+
+    async def list_tools(self):
+        return [{
+            "name": "shell",
+            "description": "Execute a shell command",
+            "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}},
+                            "required": ["command"]},
+        }]
+
+
+def test_tool_schemas_include_custom_tools():
+    # The runtime does not know custom tools exist -- they are manifests on
+    # this side -- so assembling the full panel is the SDK's job.
+    sb = Sandbox(backend=SchemaBackend(), tools=make_registry(binary={"path": "/opt/a"}))
+    panel = asyncio.run(sb.tool_schemas())
+    names = [t["function"]["name"] for t in panel]
+    assert names == ["shell", "analyzer"]
+
+
+def test_tool_schemas_render_anthropic_for_both_sources():
+    sb = Sandbox(backend=SchemaBackend(), tools=make_registry(binary={"path": "/opt/a"}))
+    panel = asyncio.run(sb.tool_schemas(format="anthropic"))
+    # Anthropic names the argument schema differently; a custom tool used to
+    # be hardcoded to OpenAI's shape and silently came out wrong here.
+    assert [t["name"] for t in panel] == ["shell", "analyzer"]
+    for tool in panel:
+        assert "input_schema" in tool, f"{tool['name']} missing input_schema"
+        assert "parameters" not in tool
+
+
+def test_tool_schemas_raw_keeps_runtime_shape():
+    sb = Sandbox(backend=SchemaBackend(), tools=make_registry(binary={"path": "/opt/a"}))
+    panel = asyncio.run(sb.tool_schemas(format="raw"))
+    assert [t["name"] for t in panel] == ["shell", "analyzer"]
+    for tool in panel:
+        assert "inputSchema" in tool
+
+
+def test_tool_schemas_accepts_per_call_registry():
+    sb = Sandbox(backend=SchemaBackend())  # default registry: no custom tools
+    assert len(asyncio.run(sb.tool_schemas())) == 1
+
+    panel = asyncio.run(sb.tool_schemas(registry=make_registry(binary={"path": "/opt/a"})))
+    assert len(panel) == 2
+
+
+def test_unsupported_schema_format_is_rejected():
+    sb = Sandbox(backend=SchemaBackend())
+    with pytest.raises(ValueError, match="unsupported schema format"):
+        asyncio.run(sb.tool_schemas(format="gemini"))
+
+
 def test_registries_are_isolated():
     r1, r2 = make_registry(), ToolRegistry()
     assert r1.is_custom_tool("analyzer")

@@ -27,6 +27,8 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import schemas
+
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _FLAG_RE = re.compile(r"^--?[A-Za-z][A-Za-z0-9_-]*$")
@@ -84,8 +86,8 @@ class CustomToolSpec:
     params: dict[str, ParamSpec] = field(default_factory=dict)
     timeout: int = DEFAULT_TIMEOUT_SECONDS
 
-    def agent_schema(self) -> dict:
-        """OpenAI function-calling schema for this tool."""
+    def parameters_schema(self) -> dict:
+        """JSON-Schema object describing this tool's call arguments."""
         properties: dict[str, dict] = {}
         required: list[str] = []
         for p in self.params.values():
@@ -97,18 +99,17 @@ class CustomToolSpec:
             properties[p.name] = prop
             if p.required:
                 required.append(p.name)
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                },
-            },
-        }
+        return {"type": "object", "properties": properties, "required": required}
+
+    def agent_schema(self, format: str = "openai") -> dict:
+        """Function-calling schema for this tool, in a provider's shape.
+
+        Rendering is shared with the runtime's builtin tools (see schemas.py),
+        so a custom tool is available in every format the SDK supports rather
+        than only OpenAI's.
+        """
+        return schemas.render(self.name, self.description,
+                              self.parameters_schema(), format)
 
     def compile_argv(self, binary_path: str, args: dict) -> list[str]:
         """Validate args against the schema and render an argv list."""
@@ -331,6 +332,6 @@ class ToolRegistry:
             raise KeyError(f"unknown custom tool: {name}")
         return CustomToolPlan(spec=spec, args={})
 
-    def custom_agent_schemas(self) -> list[dict]:
+    def custom_agent_schemas(self, format: str = "openai") -> list[dict]:
         """Function-calling schemas for all registered custom tools."""
-        return [spec.agent_schema() for spec in self.custom_specs.values()]
+        return [spec.agent_schema(format) for spec in self.custom_specs.values()]
