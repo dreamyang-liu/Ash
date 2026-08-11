@@ -19,7 +19,6 @@ import (
 	// distroless). Only used when no system roots are present.
 	_ "golang.org/x/crypto/x509roots/fallback"
 
-	"github.com/dreamyang-liu/ash/runtime/events"
 	"github.com/dreamyang-liu/ash/runtime/tools"
 )
 
@@ -115,11 +114,7 @@ func main() {
 				return
 			}
 
-			if params.AgentID != "" {
-				params.Arguments["agent_id"] = params.AgentID
-			}
-			result := target.Execute(params.Arguments)
-			notifications := events.DrainFor(params.AgentID)
+			result, notifications := executeTool(target, params.Arguments, params.AgentID)
 
 			text := result.Output
 			isError := !result.Success
@@ -188,6 +183,7 @@ func main() {
 			var params struct {
 				Name      string         `json:"name"`
 				Arguments map[string]any `json:"arguments"`
+				AgentID   string         `json:"agent_id"`
 			}
 			if err := json.Unmarshal(req.Params, &params); err != nil {
 				writeMCP(w, req.ID, nil, &RPCError{Code: -32602, Message: "invalid params"})
@@ -204,8 +200,7 @@ func main() {
 				writeMCP(w, req.ID, nil, &RPCError{Code: -32602, Message: "unknown tool: " + params.Name})
 				return
 			}
-			result := target.Execute(params.Arguments)
-			notifications := events.Drain()
+			result, notifications := executeTool(target, params.Arguments, params.AgentID)
 			text := result.Output
 			if !result.Success && result.Error != "" {
 				text = result.Error
@@ -301,6 +296,7 @@ func runStdio(allTools []tools.Tool) {
 			var params struct {
 				Name      string         `json:"name"`
 				Arguments map[string]any `json:"arguments"`
+				AgentID   string         `json:"agent_id"`
 			}
 			if err := json.Unmarshal(req.Params, &params); err != nil {
 				writeStdio(req.ID, nil, &RPCError{Code: -32602, Message: "invalid params"})
@@ -317,8 +313,7 @@ func runStdio(allTools []tools.Tool) {
 				writeStdio(req.ID, nil, &RPCError{Code: -32602, Message: "unknown tool: " + params.Name})
 				continue
 			}
-			result := target.Execute(params.Arguments)
-			notifications := events.Drain()
+			result, notifications := executeTool(target, params.Arguments, params.AgentID)
 			text := result.Output
 			if !result.Success && result.Error != "" {
 				text = result.Error

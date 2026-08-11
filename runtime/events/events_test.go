@@ -202,6 +202,51 @@ func TestEnvIntParsing(t *testing.T) {
 	}
 }
 
+func TestOwnActionIsNotEchoedToItsAgent(t *testing.T) {
+	reset()
+
+	// agent-a performed this action itself.
+	PushAction("agent-a", "tool:web_search", "golang", map[string]any{"ok": true})
+
+	// Its own piggyback must not carry it back...
+	if got := DrainFor("agent-a"); len(got) != 0 {
+		t.Fatalf("own action should not be echoed to its agent, got %v", kindsOf(got))
+	}
+	// ...and it is consumed, not left to pile up across a rollout.
+	mu.Lock()
+	remaining := len(queues["agent-a"])
+	mu.Unlock()
+	if remaining != 0 {
+		t.Errorf("own action should be consumed, %d still queued", remaining)
+	}
+}
+
+func TestOwnActionIsVisibleToOtherAgents(t *testing.T) {
+	reset()
+
+	// A broadcast own-action (no agent id) is visible to any observer: this
+	// is how a subagent learns what a sibling did.
+	PushAction("", "tool:shell", "make build", map[string]any{"ok": true})
+	if got := DrainFor("agent-b"); len(got) != 1 || got[0].Kind != "tool:shell" {
+		t.Fatalf("another agent should see the action, got %v", kindsOf(got))
+	}
+}
+
+func TestOwnActionStillSatisfiesExplicitWait(t *testing.T) {
+	reset()
+
+	done := make(chan []Event, 1)
+	go func() { done <- WaitFor("agent-a", []string{"tool:web_fetch"}, nil, 5*time.Second) }()
+	awaitWaiterRegistered(t)
+
+	// Even though it is agent-a's own action, an explicit wait for it
+	// resolves: asking for it is different from having it pushed at you.
+	PushAction("agent-a", "tool:web_fetch", "https://example.com", map[string]any{"ok": true})
+	if got := <-done; len(got) != 1 || got[0].Source != "https://example.com" {
+		t.Fatalf("explicit wait should receive the own action, got %+v", got)
+	}
+}
+
 func TestWaitForSpecificSource(t *testing.T) {
 	reset()
 

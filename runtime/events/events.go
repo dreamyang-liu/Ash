@@ -10,10 +10,17 @@ import (
 )
 
 type Event struct {
-	ID        string         `json:"id"`
-	Kind      string         `json:"kind"`
-	Source    string         `json:"source"`
-	AgentID   string         `json:"agent_id,omitempty"`
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Source  string `json:"source"`
+	AgentID string `json:"agent_id,omitempty"`
+	// Origin identifies the agent whose action produced this event, for
+	// events that describe an action rather than an external fact. Piggyback
+	// delivery skips an event for its own originator -- telling a caller
+	// about its own just-completed call is noise, and the call's result
+	// already reported it -- while every other observer, and any explicit
+	// wait_for_events, still receives it.
+	Origin    string         `json:"origin,omitempty"`
 	Data      map[string]any `json:"data"`
 	Timestamp string         `json:"timestamp"`
 }
@@ -143,6 +150,18 @@ func Push(kind, source string, data map[string]any) {
 
 // PushTo adds an event targeted at a specific agent. Empty agentID = broadcast.
 func PushTo(agentID, kind, source string, data map[string]any) {
+	push(agentID, kind, source, data, "")
+}
+
+// PushAction records an action performed by origin. The event goes to the
+// broadcast queue so every observer can see it, while origin lets piggyback
+// delivery skip the actor itself (its call result already said what happened).
+// An explicit WaitFor still returns it, even to the originator.
+func PushAction(origin, kind, source string, data map[string]any) {
+	push("", kind, source, data, origin)
+}
+
+func push(agentID, kind, source string, data map[string]any, origin string) {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -152,6 +171,7 @@ func PushTo(agentID, kind, source string, data map[string]any) {
 		Kind:      kind,
 		Source:    source,
 		AgentID:   agentID,
+		Origin:    origin,
 		Data:      data,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -213,15 +233,22 @@ func DrainFor(agentID string) []Event {
 		if len(pending) == 0 {
 			continue
 		}
-		var reserved []Event
+		var kept []Event
 		for _, evt := range pending {
-			if reservedLocked(evt) {
-				reserved = append(reserved, evt)
-			} else {
+			switch {
+			case reservedLocked(evt):
+				// Someone is explicitly waiting for this one: leave it.
+				kept = append(kept, evt)
+			case evt.Origin != "" && evt.Origin == agentID:
+				// The caller's own action. Drop it rather than echo it: the
+				// call's own result already reported the outcome. Retaining
+				// it would pile up across a rollout and eventually surface as
+				// a misleading "dropped" count.
+			default:
 				result = append(result, evt)
 			}
 		}
-		queues[q] = reserved
+		queues[q] = kept
 	}
 
 	if result == nil {
