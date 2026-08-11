@@ -248,13 +248,14 @@ def run_single_instance(
             sys.stdout.flush()
 
         trace_dir = output_dir / "traces"
+        agent_id = "agent"
         agent = AshAgent(
             config,
-            executor=session.execute,
+            executor=session.executor_for(agent_id),
             on_step=_on_step,
             trace_dir=trace_dir,
             run_id=new_run_id(),
-            agent_id="agent",
+            agent_id=agent_id,
             sandbox_id=session.sandbox_id,
         )
         _agent_ref.append(agent)

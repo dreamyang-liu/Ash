@@ -65,9 +65,12 @@ func eventKindForTool(name string) string { return "tool:" + name }
 // events for piggyback delivery. It is the single dispatch path shared by
 // every transport.
 func executeTool(target tools.Tool, args map[string]any, agentID string) (tools.Result, []events.Event) {
-	if agentID != "" {
-		args["agent_id"] = agentID
-	}
+	// Identity comes from the transport, never from the arguments. A caller
+	// supplying its own agent_id would otherwise be able to read events
+	// addressed to another agent by simply naming it, so the argument is
+	// overwritten unconditionally -- including with "" for an anonymous
+	// transport, which is why this is not guarded by agentID != "".
+	args["agent_id"] = agentID
 
 	result := target.Execute(args)
 

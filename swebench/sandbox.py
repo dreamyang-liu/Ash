@@ -4,7 +4,7 @@ Provides synchronous interface for spawning containers and executing tools.
 """
 
 import asyncio
-from typing import Optional
+from typing import Callable, Optional
 
 from ash_sandbox import DockerPool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
@@ -13,8 +13,21 @@ from . import style as S
 from .models import ToolResult
 
 
+#: Identity for the harness's own traffic (patch extraction, resets, test
+#: runs). Distinct from any agent's id so that bookkeeping does not appear in
+#: an agent's event stream, and does not consume its cursor over the log.
+HARNESS_AGENT_ID = "harness"
+
+
 class AshSession:
-    """Manages an ash sandbox for SWE-bench evaluation."""
+    """Manages an ash sandbox for SWE-bench evaluation.
+
+    ``execute`` is the harness's own channel, attributed to
+    ``HARNESS_AGENT_ID``. An agent gets its own channel from
+    :meth:`executor_for`, which binds that agent's identity -- the identity
+    belongs to the channel rather than to each call, so a call site cannot
+    forget it and an agent cannot act as another.
+    """
 
     def __init__(self, runtime_bin: str | None = None, timeout: float = 300.0, quiet: bool = False):
         self.runtime_bin = runtime_bin
@@ -77,20 +90,51 @@ class AshSession:
             self._sandbox = None
             self._pool = None
 
+    def executor_for(self, agent_id: str) -> Callable[[str, dict], ToolResult]:
+        """An executor for one agent, with that agent's identity bound in.
+
+        Hand this to an agent instead of :meth:`execute`: its calls are then
+        attributed to it, it keeps its own cursor over the event log, and it
+        has no way to act under another agent's name. The signature stays
+        ``(tool_name, args) -> ToolResult``, so it drops into anything taking
+        an executor -- including the interceptor pipeline.
+        """
+        def run(tool_name: str, args: dict, timeout: float | None = None) -> ToolResult:
+            return self._run(tool_name, args,
+                             timeout if timeout is not None else self.timeout,
+                             agent_id)
+        return run
+
     def execute(self, tool_name: str, args: dict, timeout: float = 300.0) -> ToolResult:
+        """Run a tool as the harness itself (resets, patch extraction, tests).
+
+        Agent traffic should go through :meth:`executor_for` so it is not
+        attributed to the harness.
+        """
+        return self._run(tool_name, args, timeout, HARNESS_AGENT_ID)
+
+    def _run(self, tool_name: str, args: dict, timeout: float,
+             agent_id: str) -> ToolResult:
         if not self._sandbox:
             return ToolResult(success=False, output="", error="No active sandbox")
         try:
             return self._get_loop().run_until_complete(
-                self._execute_async(tool_name, args, timeout)
+                self._execute_async(tool_name, args, timeout, agent_id)
             )
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e))
 
-    async def _execute_async(self, tool_name: str, args: dict, timeout: float) -> ToolResult:
+    async def _execute_async(self, tool_name: str, args: dict, timeout: float,
+                             agent_id: str = HARNESS_AGENT_ID) -> ToolResult:
         if "timeout" not in args and tool_name == "shell":
             args["timeout"] = int(timeout)
-        sdk_result: SdkToolResult = await self._sandbox.call(tool_name, **args)
+        # Never splat an agent_id out of args: a model that emits one would
+        # otherwise collide with the bound identity (TypeError, surfaced as a
+        # baffling tool failure). The channel's identity is the only one that
+        # counts, so drop any that arrived in the arguments.
+        call_args = {k: v for k, v in args.items() if k != "agent_id"}
+        sdk_result: SdkToolResult = await self._sandbox.call(
+            tool_name, agent_id=agent_id, **call_args)
         if sdk_result.is_error:
             return ToolResult(success=False, output=sdk_result.output, error=sdk_result.output)
         return ToolResult(success=True, output=sdk_result.output)

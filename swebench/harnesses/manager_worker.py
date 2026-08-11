@@ -87,12 +87,18 @@ class _WorkerExecutor:
 
     Constructed INSIDE the worker thread so the loop and httpx client belong to that
     thread. Multiple instances share one container via HTTP (disjoint-file safe).
+
+    ``agent_id`` is bound here rather than passed per call: this executor then
+    physically cannot act as anyone else, and the identity cannot be forgotten
+    at a call site. The runtime keys each consumer's cursor over the event log
+    by that id, so two workers sharing one would silently split events between
+    them instead of each seeing all of theirs.
     """
 
-    def __init__(self, url: str):
+    def __init__(self, url: str, agent_id: str = ""):
         import asyncio
         self._loop = asyncio.new_event_loop()
-        self._sb = Sandbox.connect(url)
+        self._sb = Sandbox.connect(url, agent_id=agent_id)
 
     def __call__(self, tool_name: str, args: dict) -> ToolResult:
         try:
@@ -252,9 +258,13 @@ class ManagerWorkerHarness(BaseHarness):
                      *, trace_dir, run_id, sandbox_id) -> list[dict]:
         system = MANAGER_SYSTEM + (WAGGLE_MANAGER_NOTE if c.get("waggle") else "")
         cfg = self._agent_config(c, system, steps)
+        # The manager's own channel. The bookkeeping calls in this method (the
+        # reset above, reading the plan below) deliberately stay on
+        # session.execute so they are attributed to the harness rather than
+        # appearing in the manager's event stream.
         agent = AshAgent(
             cfg,
-            executor=session.execute,
+            executor=session.executor_for("manager"),
             trace_dir=trace_dir,
             run_id=run_id,
             agent_id="manager",
@@ -282,7 +292,10 @@ class ManagerWorkerHarness(BaseHarness):
                      sandbox_id) -> list[tuple]:
         def _run_one(st: dict) -> tuple:
             worker_id = f"worker-{st['id']}"
-            ex = _WorkerExecutor(url)  # created in this thread
+            # Identity is bound to the executor, so every runtime call this
+            # worker makes is attributed to it and it keeps its own cursor
+            # over the event log.
+            ex = _WorkerExecutor(url, agent_id=worker_id)  # created in this thread
             if waggle_state:
                 ex = CoordinatedExecutor(
                     ex, waggle_state, agent_id=worker_id,

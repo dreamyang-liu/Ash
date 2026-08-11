@@ -108,6 +108,11 @@ class EpisodeDeps:
     reward_mode: str = REWARD_FRACTION
 
 
+#: The single agent an episode runs. Named once so the executor's bound
+#: identity and the agent's declared one cannot disagree.
+AGENT_ID = "agent"
+
+
 class CountingExecutor:
     """Wraps a session executor, counting agent tool invocations for metrics."""
 
@@ -149,7 +154,9 @@ def _run_and_grade(request: dict[str, Any], instance: dict, session: Any,
                    deps: EpisodeDeps, started_at: float) -> dict[str, Any]:
     """Agent loop, then patch extraction + FAIL_TO_PASS grading in-sandbox."""
     config = _agent_config(request, deps)
-    executor = CountingExecutor(session.execute)
+    # Wrap the agent's own channel, not the harness's: grading traffic below
+    # runs on session.execute and should not be attributed to the agent.
+    executor = CountingExecutor(session.executor_for(AGENT_ID))
     agent = deps.make_agent(config, executor)
 
     agent_started = time.monotonic()
@@ -374,7 +381,7 @@ def build_default_deps(subset: str, runtime_bin: Optional[str], step_limit: int,
 
     def make_agent(config: AgentConfig,
                    executor: Callable[[str, dict], Any]) -> AshAgent:
-        agent = AshAgent(config, executor=executor)
+        agent = AshAgent(config, executor=executor, agent_id=AGENT_ID)
         agent.stream = False
         agent.set_tools_schema(TOOLS_SCHEMA)
         return agent

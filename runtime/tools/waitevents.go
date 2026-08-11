@@ -64,10 +64,10 @@ func (w *WaitEventsTool) Schema() map[string]any {
 				"default":     defaultWaitTimeoutSeconds,
 				"description": "Seconds to wait before giving up. Clamped to the runtime maximum.",
 			},
-			"agent_id": map[string]any{
-				"type":        "string",
-				"description": "Only receive events targeted at this agent (plus broadcasts).",
-			},
+			// No agent_id property: the caller's identity is supplied by the
+			// transport and injected by executeTool. Advertising it here would
+			// invite a model to name another agent and read events addressed
+			// to it.
 		},
 	}
 }

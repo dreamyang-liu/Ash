@@ -76,13 +76,14 @@ class LiteLLMHarness(BaseHarness):
                     line = S.step(n, kind, text)
                     print(line, flush=True)
 
+            agent_id = "agent"
             agent = AshAgent(
                 agent_config,
-                executor=session.execute,
+                executor=session.executor_for(agent_id),
                 on_step=_on_step,
                 trace_dir=output_dir / "traces",
                 run_id=new_run_id(),
-                agent_id="agent",
+                agent_id=agent_id,
                 sandbox_id=session.sandbox_id,
             )
             if quiet:
