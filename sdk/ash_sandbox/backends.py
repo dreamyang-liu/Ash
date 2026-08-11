@@ -10,11 +10,27 @@ import httpx
 from .result import ToolResult
 
 
+def call_params(tool_name: str, args: dict, agent_id: str = "") -> dict:
+    """Build the JSON-RPC params for a tools/call request.
+
+    agent_id travels beside the arguments rather than inside them: the runtime
+    uses it to decide whose event subscriptions a response carries and who
+    caused an action, which is transport-level addressing rather than an
+    argument to the tool. Omitted when empty, so an anonymous caller sends the
+    same request it always did.
+    """
+    params: dict = {"name": tool_name, "arguments": args}
+    if agent_id:
+        params["agent_id"] = agent_id
+    return params
+
+
 class Backend(ABC):
     """Abstract execution backend."""
 
     @abstractmethod
-    async def call(self, tool_name: str, args: dict) -> ToolResult:
+    async def call(self, tool_name: str, args: dict,
+                   agent_id: str = "") -> ToolResult:
         ...
 
     @abstractmethod
@@ -32,11 +48,12 @@ class HTTPBackend(Backend):
         self.url = url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=360)
 
-    async def call(self, tool_name: str, args: dict) -> ToolResult:
+    async def call(self, tool_name: str, args: dict,
+                   agent_id: str = "") -> ToolResult:
         resp = await self._client.post(self.url, json={
             "jsonrpc": "2.0", "id": 1,
             "method": "tools/call",
-            "params": {"name": tool_name, "arguments": args},
+            "params": call_params(tool_name, args, agent_id),
         })
         resp.raise_for_status()
         data = resp.json()
@@ -83,12 +100,13 @@ class MCPBackend(Backend):
         })
         self._initialized = True
 
-    async def call(self, tool_name: str, args: dict) -> ToolResult:
+    async def call(self, tool_name: str, args: dict,
+                   agent_id: str = "") -> ToolResult:
         await self._ensure_init()
         resp = await self._client.post(self.url, json={
             "jsonrpc": "2.0", "id": 1,
             "method": "tools/call",
-            "params": {"name": tool_name, "arguments": args},
+            "params": call_params(tool_name, args, agent_id),
         })
         resp.raise_for_status()
         data = resp.json()
@@ -125,11 +143,12 @@ class CLIBackend(Backend):
         if not self.bin_path:
             raise RuntimeError("ash-runtime not found in PATH")
 
-    async def call(self, tool_name: str, args: dict) -> ToolResult:
+    async def call(self, tool_name: str, args: dict,
+                   agent_id: str = "") -> ToolResult:
         request = json.dumps({
             "jsonrpc": "2.0", "id": 1,
             "method": "tools/call",
-            "params": {"name": tool_name, "arguments": args},
+            "params": call_params(tool_name, args, agent_id),
         })
         proc = await asyncio.create_subprocess_exec(
             self.bin_path, "--mode", "stdio",
@@ -174,14 +193,15 @@ class GatewayBackend(Backend):
         self.sandbox_id = sandbox_id
         self._client = httpx.AsyncClient(timeout=360)
 
-    async def call(self, tool_name: str, args: dict) -> ToolResult:
+    async def call(self, tool_name: str, args: dict,
+                   agent_id: str = "") -> ToolResult:
         resp = await self._client.post(
             self.gateway_url,
             headers={"X-Sandbox-ID": self.sandbox_id},
             json={
                 "jsonrpc": "2.0", "id": 1,
                 "method": "tools/call",
-                "params": {"name": tool_name, "arguments": args},
+                "params": call_params(tool_name, args, agent_id),
             },
         )
         resp.raise_for_status()

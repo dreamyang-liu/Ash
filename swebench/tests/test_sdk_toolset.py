@@ -27,7 +27,7 @@ class FakeBackend(Backend):
         self.calls = []
         self.responses = responses or {}
 
-    async def call(self, tool_name, args):
+    async def call(self, tool_name, args, agent_id=""):
         self.calls.append((tool_name, dict(args)))
         if tool_name in self.responses:
             return self.responses[tool_name]
@@ -147,7 +147,7 @@ def test_stale_memo_is_reresolved_once():
             super().__init__()
             self.shell_calls = 0
 
-        async def call(self, tool_name, args):
+        async def call(self, tool_name, args, agent_id=""):
             self.calls.append((tool_name, dict(args)))
             if tool_name == "artifact":
                 return ToolResult(output="/cache/bin", is_error=False)
@@ -217,6 +217,78 @@ def test_prepare_tools_handles_image_local_binaries():
     assert paths == {"analyzer": "/opt/a"}
     # Nothing to download for a binary already in the image.
     assert backend.calls == []
+
+
+class IdentityBackend(FakeBackend):
+    """Records the agent_id each call arrived with."""
+
+    def __init__(self, responses=None):
+        super().__init__(responses)
+        self.identities = []
+
+    async def call(self, tool_name, args, agent_id=""):
+        self.identities.append((tool_name, agent_id))
+        return await super().call(tool_name, args, agent_id)
+
+
+def test_agent_id_reaches_the_backend():
+    backend = IdentityBackend()
+    sb = Sandbox(backend=backend)
+
+    asyncio.run(sb.call_agent_tool("shell", {"command": "ls"}, agent_id="agent-a"))
+    assert backend.identities == [("shell", "agent-a")]
+
+    # Omitting it stays anonymous rather than inventing an identity.
+    asyncio.run(sb.call_agent_tool("shell", {"command": "ls"}))
+    assert backend.identities[-1] == ("shell", "")
+
+
+def test_agent_id_forwarded_to_every_step_of_a_custom_tool():
+    backend = IdentityBackend(responses={
+        "artifact": ToolResult(output="/cache/bin", is_error=False),
+    })
+    sb = Sandbox(backend=backend, tools=make_registry())
+
+    asyncio.run(sb.call_agent_tool("analyzer", {"file": "x"}, agent_id="agent-b"))
+    # Download and execution are attributed to the same caller, so the
+    # runtime's event origin is consistent across the pair.
+    assert backend.identities == [("artifact", "agent-b"), ("shell", "agent-b")]
+
+
+def test_agent_id_on_call_and_prepare_tools():
+    backend = IdentityBackend(responses={
+        "artifact": ToolResult(output="/cache/bin", is_error=False),
+    })
+    sb = Sandbox(backend=backend, tools=make_registry())
+
+    asyncio.run(sb.prepare_tools(agent_id="preparer"))
+    assert backend.identities == [("artifact", "preparer")]
+
+    asyncio.run(sb.call("shell", agent_id="agent-c", command="ls"))
+    assert backend.identities[-1] == ("shell", "agent-c")
+
+
+def test_agent_id_is_not_passed_as_a_tool_argument():
+    # It is transport-level addressing, not something the tool should see.
+    backend = IdentityBackend()
+    sb = Sandbox(backend=backend)
+    asyncio.run(sb.call("shell", agent_id="agent-a", command="ls"))
+    assert backend.calls[-1][1] == {"command": "ls"}
+
+
+def test_call_params_places_agent_id_beside_arguments():
+    from ash_sandbox.backends import call_params
+
+    assert call_params("shell", {"command": "ls"}, "agent-a") == {
+        "name": "shell",
+        "arguments": {"command": "ls"},
+        "agent_id": "agent-a",
+    }
+    # Anonymous calls send exactly what they always did.
+    assert call_params("shell", {"command": "ls"}) == {
+        "name": "shell",
+        "arguments": {"command": "ls"},
+    }
 
 
 class SchemaBackend(FakeBackend):

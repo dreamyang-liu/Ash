@@ -193,7 +193,7 @@ class FakeBackend(Backend):
         self.tools = tools
         self.list_calls = 0
 
-    async def call(self, tool_name: str, args: dict) -> ToolResult:
+    async def call(self, tool_name: str, args: dict, agent_id: str = "") -> ToolResult:
         return ToolResult(output=f"{tool_name}:{args}", is_error=False)
 
     async def list_tools(self) -> list[dict]:

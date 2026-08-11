@@ -111,27 +111,38 @@ class Sandbox:
 
     # --- Execution ---
 
-    async def call(self, tool_name: str, **kwargs) -> ToolResult:
-        """Call a tool by name."""
-        return await self.backend.call(tool_name, kwargs)
+    async def call(self, tool_name: str, agent_id: str = "", **kwargs) -> ToolResult:
+        """Call a tool by name.
+
+        agent_id identifies the caller to the runtime, which uses it to decide
+        whose event subscriptions this response carries and who is recorded as
+        having caused the action. Harnesses assign these identities; the SDK
+        only forwards them.
+        """
+        return await self.backend.call(tool_name, kwargs, agent_id)
 
     async def call_agent_tool(self, name: str, args: dict,
-                              registry: ToolRegistry | None = None) -> ToolResult:
+                              registry: ToolRegistry | None = None,
+                              agent_id: str = "") -> ToolResult:
         """Call an agent-facing tool through a ToolRegistry.
 
         Builtin tools route by name; manifest-defined custom tools expand
         into their execution plan (artifact download -> shell, or direct
         shell for image-local binaries). This is the single place custom
         tool dispatch lives — any harness gets it via this method.
+
+        agent_id is forwarded to every runtime call the dispatch makes, so a
+        custom tool's download and execution are attributed to the same caller.
         """
         registry = registry or self.tools
         if registry.is_custom_tool(name):
-            return await self._call_custom_tool(name, args, registry)
+            return await self._call_custom_tool(name, args, registry, agent_id)
         runtime_tool, runtime_args = registry.route(name, args)
-        return await self.backend.call(runtime_tool, runtime_args)
+        return await self.backend.call(runtime_tool, runtime_args, agent_id)
 
     async def _call_custom_tool(self, name: str, args: dict,
-                                registry: ToolRegistry) -> ToolResult:
+                                registry: ToolRegistry,
+                                agent_id: str = "") -> ToolResult:
         """Run a manifest-defined tool: resolve its binary, then execute it.
 
         The artifact step is idempotent and cached inside the sandbox, so
@@ -142,36 +153,37 @@ class Sandbox:
         binary_path = plan.spec.path or self._artifact_paths.get(name, "")
         memoised = bool(binary_path) and not plan.spec.path
         if not binary_path:
-            resolved = await self._resolve_artifact(plan)
+            resolved = await self._resolve_artifact(plan, agent_id)
             if isinstance(resolved, ToolResult):
                 return resolved  # download or verification failed
             binary_path = resolved
             self._artifact_paths[name] = binary_path
 
         tool, call_args = plan.shell_call(binary_path)
-        result = await self.backend.call(tool, call_args)
+        result = await self.backend.call(tool, call_args, agent_id)
 
         # A memoised path can go stale (a cleaned /tmp, a recycled sandbox).
         # Re-resolve once rather than surfacing a confusing "not found".
         if memoised and result.is_error and _looks_missing(result.output):
             self._artifact_paths.pop(name, None)
-            resolved = await self._resolve_artifact(plan)
+            resolved = await self._resolve_artifact(plan, agent_id)
             if isinstance(resolved, ToolResult):
                 return resolved
             self._artifact_paths[name] = resolved
             tool, call_args = plan.shell_call(resolved)
-            return await self.backend.call(tool, call_args)
+            return await self.backend.call(tool, call_args, agent_id)
         return result
 
-    async def _resolve_artifact(self, plan) -> str | ToolResult:
+    async def _resolve_artifact(self, plan, agent_id: str = "") -> str | ToolResult:
         """Return the local binary path, or the failing ToolResult."""
         tool, call_args = plan.artifact_call
-        result = await self.backend.call(tool, call_args)
+        result = await self.backend.call(tool, call_args, agent_id)
         if result.is_error:
             return result
         return result.output.strip()
 
-    async def prepare_tools(self, registry: ToolRegistry | None = None) -> dict[str, str]:
+    async def prepare_tools(self, registry: ToolRegistry | None = None,
+                            agent_id: str = "") -> dict[str, str]:
         """Resolve every custom tool's binary up front.
 
         Worth calling when a session starts: downloads happen once instead of
@@ -187,7 +199,7 @@ class Sandbox:
                 self._artifact_paths[name] = spec.path
                 continue
             plan = registry.plan_custom_tool_for_prepare(name)
-            resolved = await self._resolve_artifact(plan)
+            resolved = await self._resolve_artifact(plan, agent_id)
             if isinstance(resolved, ToolResult):
                 raise RuntimeError(
                     f"cannot prepare custom tool {name!r}: {resolved.output}"
@@ -195,7 +207,7 @@ class Sandbox:
             self._artifact_paths[name] = resolved
         return dict(self._artifact_paths)
 
-    async def execute_tool_call(self, tool_call: dict) -> ToolResult:
+    async def execute_tool_call(self, tool_call: dict, agent_id: str = "") -> ToolResult:
         """Execute an LLM tool_call (OpenAI or Anthropic format)."""
         if "function" in tool_call:
             name = tool_call["function"]["name"]
@@ -204,11 +216,16 @@ class Sandbox:
         else:
             name = tool_call["name"]
             args = tool_call.get("input", {})
-        return await self.backend.call(name, args)
+        return await self.backend.call(name, args, agent_id)
 
-    async def execute_tool_calls(self, tool_calls: list[dict]) -> list[ToolResult]:
-        """Execute multiple tool_calls sequentially."""
-        return [await self.execute_tool_call(tc) for tc in tool_calls]
+    async def execute_tool_calls(self, tool_calls: list[dict],
+                                 agent_id: str = "") -> list[ToolResult]:
+        """Execute multiple tool_calls sequentially.
+
+        Sequential is only the default: a harness that knows its calls are
+        independent can await them concurrently itself.
+        """
+        return [await self.execute_tool_call(tc, agent_id) for tc in tool_calls]
 
     # --- Schemas ---
 
