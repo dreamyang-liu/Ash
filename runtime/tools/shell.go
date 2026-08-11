@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +58,15 @@ func (s *ShellTool) Schema() map[string]any {
 				"description": "How to divide the byte budget when output is too long: \"H<n>T<n>\" with weights for the head and tail sections. H2T3 keeps the first 40% and last 60%; T1 keeps only the tail (useful for build/test errors); H1 keeps only the beginning.",
 			},
 			"working_dir": map[string]any{"type": "string", "description": "Working directory"},
+			"stdin": map[string]any{
+				"type":        "string",
+				"description": "Data to feed the command on standard input, then close it. Lets you run 'python -', 'patch -p1', or 'sh -s' without first writing a temporary file.",
+			},
+			"env": map[string]any{
+				"type":                 "object",
+				"additionalProperties": map[string]any{"type": "string"},
+				"description":          "Extra environment variables, e.g. {\"PYTHONPATH\": \"/testbed\"}. Added to the existing environment rather than replacing it. Prefer this over a 'KEY=value cmd' prefix: values needing quotes or spaces are handled correctly.",
+			},
 		},
 		"required": []string{"command"},
 	}
@@ -79,26 +90,86 @@ func (s *ShellTool) Execute(args map[string]any) Result {
 	workingDir, _ := args["working_dir"].(string)
 	maxOutputBytes := outputBytesArg(args)
 	mode := truncateModeArg(args)
+	stdin, _ := args["stdin"].(string)
+	env, err := envArg(args)
+	if err != nil {
+		return Err(err.Error())
+	}
 
 	agentID, _ := args["agent_id"].(string)
 
-	if background {
-		return s.runBackground(command, workingDir, agentID, maxOutputBytes, mode)
+	opts := runOpts{
+		workingDir:     workingDir,
+		stdin:          stdin,
+		env:            env,
+		maxOutputBytes: maxOutputBytes,
+		mode:           mode,
 	}
-	return s.runSync(command, workingDir, timeout, tail, maxOutputBytes, mode)
+	if background {
+		return s.runBackground(command, agentID, opts)
+	}
+	return s.runSync(command, timeout, tail, opts)
 }
 
-func (s *ShellTool) runSync(command, workingDir string, timeout, tail int, maxOutputBytes int, mode truncateMode) Result {
+// runOpts carries the shared per-call execution settings, so adding another
+// one does not mean threading a new parameter through both run paths.
+type runOpts struct {
+	workingDir     string
+	stdin          string
+	env            []string // extra KEY=VALUE entries, appended to the host env
+	maxOutputBytes int
+	mode           truncateMode
+}
+
+// apply wires the options onto a command, leaving stdout/stderr to the caller.
+func (o runOpts) apply(cmd *exec.Cmd) {
+	if o.workingDir != "" {
+		cmd.Dir = o.workingDir
+	}
+	if o.stdin != "" {
+		cmd.Stdin = strings.NewReader(o.stdin)
+	}
+	if len(o.env) > 0 {
+		// Append rather than replace: an agent that wanted PYTHONPATH set
+		// should not lose PATH and break every subsequent command.
+		cmd.Env = append(os.Environ(), o.env...)
+	}
+}
+
+// envArg converts the env object into KEY=VALUE entries. Passing them
+// structurally avoids the quoting hazards of prefixing the command string.
+func envArg(args map[string]any) ([]string, error) {
+	raw, ok := args["env"].(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	out := make([]string, 0, len(raw))
+	for k, v := range raw {
+		if k == "" || strings.ContainsAny(k, "=\x00") {
+			return nil, fmt.Errorf("invalid env name: %q", k)
+		}
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("env value for %q must be a string", k)
+		}
+		if strings.ContainsRune(s, 0) {
+			return nil, fmt.Errorf("env value for %q must not contain NUL", k)
+		}
+		out = append(out, k+"="+s)
+	}
+	sort.Strings(out) // deterministic for traces and tests
+	return out, nil
+}
+
+func (s *ShellTool) runSync(command string, timeout, tail int, opts runOpts) Result {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	if workingDir != "" {
-		cmd.Dir = workingDir
-	}
+	opts.apply(cmd)
 
-	stdout := NewBoundedLogMode(maxOutputBytes, mode)
-	stderr := NewBoundedLogMode(maxOutputBytes, mode)
+	stdout := NewBoundedLogMode(opts.maxOutputBytes, opts.mode)
+	stderr := NewBoundedLogMode(opts.maxOutputBytes, opts.mode)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -117,19 +188,17 @@ func (s *ShellTool) runSync(command, workingDir string, timeout, tail int, maxOu
 	return Ok(output)
 }
 
-func (s *ShellTool) runBackground(command, workingDir, agentID string, maxOutputBytes int, mode truncateMode) Result {
+func (s *ShellTool) runBackground(command, agentID string, opts runOpts) Result {
 	pid := uuid.New().String()[:8]
 
 	cmd := exec.Command("sh", "-c", command)
-	if workingDir != "" {
-		cmd.Dir = workingDir
-	}
+	opts.apply(cmd)
 
 	proc := &Process{
 		pid:    pid,
 		cmd:    cmd,
-		stdout: NewBoundedLogMode(maxOutputBytes, mode),
-		stderr: NewBoundedLogMode(maxOutputBytes, mode),
+		stdout: NewBoundedLogMode(opts.maxOutputBytes, opts.mode),
+		stderr: NewBoundedLogMode(opts.maxOutputBytes, opts.mode),
 	}
 	cmd.Stdout = proc.stdout
 	cmd.Stderr = proc.stderr

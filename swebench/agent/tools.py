@@ -131,6 +131,23 @@ TOOLS_SCHEMA = [
                         ),
                     },
                     "working_dir": {"type": "string", "description": "Working directory (default: /testbed)"},
+                    "stdin": {
+                        "type": "string",
+                        "description": (
+                            "Data to feed the command on standard input, then close it. "
+                            "Lets you run 'python -', 'patch -p1', or 'sh -s' without "
+                            "first writing a temporary file."
+                        ),
+                    },
+                    "env": {
+                        "type": "object",
+                        "description": (
+                            'Extra environment variables, e.g. {"PYTHONPATH": "/testbed"}. '
+                            "Added to the existing environment rather than replacing it. "
+                            "Prefer this over a 'KEY=value cmd' prefix: values needing "
+                            "quotes or spaces are handled correctly."
+                        ),
+                    },
                 },
                 "required": ["command"],
             },
