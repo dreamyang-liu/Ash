@@ -80,17 +80,24 @@ func (p *ProcessTool) read(proc *Process, tail int) Result {
 
 func (p *ProcessTool) kill(proc *Process) Result {
 	proc.mu.Lock()
-	defer proc.mu.Unlock()
-
 	if proc.exitCode != nil {
+		proc.mu.Unlock()
 		return Ok("process already exited")
 	}
+	cmd := proc.cmd
+	proc.mu.Unlock()
 
-	_ = proc.cmd.Process.Kill()
-	code := -9
-	proc.exitCode = &code
+	// Signal the whole group: a backgrounded or piped command leaves
+	// grandchildren that outlive their sh, and those held the output pipes open
+	// so cmd.Wait() never returned.
+	killProcessGroup(cmd)
 
-	resp := map[string]any{"killed": true, "exit_code": code}
+	// The exit code is deliberately NOT recorded here. cmd.Wait() is the single
+	// authority and is already waiting; writing a guess meant the same pid
+	// reported one code right after kill and a different one once Wait
+	// overwrote it. Callers read the settled value from `process read` or from
+	// the process_exited event.
+	resp := map[string]any{"killed": true}
 	out, _ := json.Marshal(resp)
 	return Ok(string(out))
 }

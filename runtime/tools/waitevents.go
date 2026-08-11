@@ -47,7 +47,7 @@ func (w *WaitEventsTool) Schema() map[string]any {
 			"kinds": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": "Event kinds, e.g. [\"process_exited\", \"file_change\", \"tool:web_fetch\"]. Required for subscribe; omit when waiting to accept any kind.",
+				"description": "Event kinds, e.g. [\"process_exited\", \"tool:text_editor\", \"tool:web_fetch\"]. Any tool call is observable as \"tool:<name>\". Required for subscribe; omit when waiting to accept any kind.",
 			},
 			"include_own": map[string]any{
 				"type":        "boolean",

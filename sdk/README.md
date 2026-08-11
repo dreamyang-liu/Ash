@@ -25,6 +25,11 @@ async with Sandbox.connect("http://localhost:3000") as sb:
 `Sandbox.connect(url)` speaks HTTP; `Sandbox.mcp(url)` speaks MCP;
 `Sandbox.local(bin)` runs the runtime binary directly with no server.
 
+All three behave alike, including events and background processes: each keeps
+one runtime process for the life of the handle. A sandbox's state -- its event
+log, its running jobs, its artifact cache -- lives inside that process, so
+`close()` ends it. Call it, or use the handle as a context manager.
+
 ## Identity
 
 Pass `agent_id` whenever more than one agent shares a sandbox. The runtime

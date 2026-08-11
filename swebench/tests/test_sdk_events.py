@@ -168,6 +168,38 @@ def test_as_agent_shares_the_sandbox_but_not_the_identity():
     assert backend.calls[-1][2] == "reviewer", "its own cursor over the log"
 
 
+def test_cli_backend_keeps_one_runtime_across_calls():
+    """A sandbox's state lives in the runtime process, so it must persist.
+
+    CLIBackend used to spawn a process per call. The filesystem survived
+    (shared host fs) but the event log, background processes and artifact cache
+    did not, so events silently never arrived -- through this backend only,
+    while the README promised every transport behaves alike.
+    """
+    import shutil
+
+    from ash_sandbox.backends import CLIBackend
+
+    binary = shutil.which("ash-runtime") or "/tmp/ash-pg"
+    if not Path(binary).exists():
+        pytest.skip("no ash-runtime binary available")
+
+    backend = CLIBackend(binary)
+
+    async def scenario():
+        first = await backend.call("shell", {"command": "echo $PPID"}, "cli")
+        second = await backend.call("shell", {"command": "echo $PPID"}, "cli")
+        proc = backend._proc
+        await backend.close()
+        return first.output.strip(), second.output.strip(), proc
+
+    first, second, proc = asyncio.run(scenario())
+    assert first and first == second, \
+        f"one runtime should serve both calls, got {first!r} then {second!r}"
+    assert proc is not None and proc.returncode is not None, \
+        "close() must reap the runtime rather than leaking it"
+
+
 def test_wait_returns_both_delivery_channels():
     """A wait_for_events response carries two sets of events, not one.
 

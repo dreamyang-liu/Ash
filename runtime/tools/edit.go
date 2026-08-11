@@ -6,22 +6,22 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/dreamyang-liu/ash/runtime/events"
 )
 
 // EditTool provides file viewing and editing with one command-dispatched schema.
 //
-// Its mutating commands emit "file_change" events. Coverage is deliberately
-// partial: a file written through shell (a redirect, git checkout, a build)
-// produces no such event, because catching those would mean watching the
-// filesystem itself (inotify/fanotify over the workspace) rather than
-// reporting what a tool did. Completeness is instead a harness concern --
-// prompting agents to edit through this tool rather than through shell -- so
-// a consumer subscribed to file_change should read it as "edits made via
-// text_editor", not as filesystem-wide monitoring. The tool:text_editor
-// event carries the same path, making file_change the narrower,
-// more intention-revealing of the two.
+// It emits no events of its own. Every call already produces a
+// "tool:text_editor" event from the shared dispatch path, carrying the same
+// path as its source plus the command in args -- and, unlike the "file_change"
+// event this used to push, the originating agent and whether the call
+// succeeded. Two events per action meant a consumer had to know that only one
+// of them could answer "who changed this file".
+//
+// Watch "tool:text_editor" to observe edits. A file written through shell (a
+// redirect, git checkout, a build) produces no such event either: catching
+// those would mean watching the filesystem itself (inotify/fanotify over the
+// workspace) rather than reporting what a tool did. Completeness is a harness
+// concern -- prompting agents to edit through this tool rather than shell.
 type EditTool struct{}
 
 func (e *EditTool) Name() string { return "text_editor" }
@@ -158,7 +158,6 @@ func (e *EditTool) strReplace(path string, args map[string]any) Result {
 		return Err(err.Error())
 	}
 
-	events.Push("file_change", path, map[string]any{"path": path, "operation": "str_replace"})
 	return Ok("OK")
 }
 
@@ -193,7 +192,6 @@ func (e *EditTool) insert(path string, args map[string]any) Result {
 		return Err(err.Error())
 	}
 
-	events.Push("file_change", path, map[string]any{"path": path, "operation": "insert"})
 	return Ok("OK")
 }
 
@@ -210,6 +208,5 @@ func (e *EditTool) write(path string, args map[string]any) Result {
 		return Err(err.Error())
 	}
 
-	events.Push("file_change", path, map[string]any{"path": path, "operation": "write"})
 	return Ok("OK")
 }

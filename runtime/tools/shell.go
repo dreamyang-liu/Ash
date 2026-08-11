@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dreamyang-liu/ash/runtime/events"
@@ -170,11 +171,56 @@ func envArg(args map[string]any) ([]string, error) {
 	return out, nil
 }
 
+// setProcessGroup puts the command in its own process group, so the whole job
+// can be signalled later. Killing only the direct child left grandchildren
+// running -- and a `cmd &` or a pipeline is the usual shape of a long job --
+// which also held the output pipes open and stalled cmd.Wait() indefinitely.
+func setProcessGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+
+// killProcessGroup signals the entire job, falling back to the direct child if
+// the group is already gone.
+func killProcessGroup(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	// Negative pid means "the group with this leader". Setpgid made the child
+	// its own leader, so this reaches its descendants too.
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
+// waitExitCode reports how a command ended, using the shell convention a
+// caller already knows: 128+signal for a signalled death. Go's ExitCode()
+// returns -1 there, which says only "not a normal exit" -- and it collided
+// with the -9 that kill used to write itself, so the same process could report
+// two different codes depending on which happened last.
+func waitExitCode(cmd *exec.Cmd) int {
+	err := cmd.Wait()
+	if err == nil {
+		return 0
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		return 1
+	}
+	if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return 128 + int(status.Signal())
+	}
+	return exitErr.ExitCode()
+}
+
 func (s *ShellTool) runSync(command string, timeout, tail int, opts runOpts) Result {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	setProcessGroup(cmd)
 	opts.apply(cmd)
 
 	stdout := NewBoundedLogMode(opts.maxOutputBytes, opts.mode)
@@ -201,6 +247,7 @@ func (s *ShellTool) runBackground(command, agentID string, opts runOpts) Result 
 	pid := uuid.New().String()[:8]
 
 	cmd := exec.Command("sh", "-c", command)
+	setProcessGroup(cmd)
 	opts.apply(cmd)
 
 	proc := &Process{
@@ -223,15 +270,7 @@ func (s *ShellTool) runBackground(command, agentID string, opts runOpts) Result 
 	// Wait also joins os/exec's stdout/stderr copy goroutines. Publish exit only
 	// after both logs contain the process's complete captured output.
 	go func() {
-		err := cmd.Wait()
-		code := 0
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				code = exitErr.ExitCode()
-			} else {
-				code = 1
-			}
-		}
+		code := waitExitCode(cmd)
 		proc.mu.Lock()
 		proc.exitCode = &code
 		proc.mu.Unlock()

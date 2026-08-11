@@ -314,9 +314,10 @@ TOOLS_SCHEMA = [
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            'Event kinds, e.g. ["process_exited", "file_change", '
-                            '"tool:web_fetch"]. Required for subscribe; omit when '
-                            "waiting to accept any kind."
+                            'Event kinds, e.g. ["process_exited", '
+                            '"tool:text_editor", "tool:web_fetch"]. Any tool '
+                            'call is observable as "tool:<name>". Required for '
+                            "subscribe; omit when waiting to accept any kind."
                         ),
                     },
                     "sources": {
