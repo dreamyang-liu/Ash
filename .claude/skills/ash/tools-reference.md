@@ -299,11 +299,13 @@ ash buffer from-clip <clip_name> --append
 
 ## Events
 
-Subscribe to and poll events (process completions, file changes, etc.).
+Subscribe to and poll events. The kinds are `process_exited` (a background
+process ended) and `tool:<name>` for any tool call — `tool:text_editor` is how
+you observe file edits, and it reports which agent made them.
 
 ```bash
-ash events subscribe process_complete file_change
-ash events subscribe process_complete --unsubscribe
+ash events subscribe process_exited tool:text_editor
+ash events subscribe process_exited --unsubscribe
 ash events poll --limit 10
 ash events poll --peek           # peek without consuming
 ash events push custom --source agent --data '{"key":"value"}'

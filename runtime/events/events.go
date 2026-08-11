@@ -14,8 +14,11 @@
 // it first.
 //
 // Callers: runtime/toolevents.go (tool-call events + piggyback delivery),
-// runtime/tools/shell.go (process_exited), runtime/tools/edit.go
-// (file_change), runtime/tools/waitevents.go (the events tool).
+// runtime/tools/shell.go (process_exited), runtime/tools/waitevents.go (the
+// events tool). Tools do not emit their own events: every call is already
+// announced as "tool:<name>" from the shared dispatch path, with the calling
+// agent recorded, so a second per-tool event only created two answers to
+// "who did this".
 package events
 
 import (
