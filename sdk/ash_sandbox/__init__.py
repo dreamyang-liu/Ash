@@ -1,3 +1,4 @@
+from .events import Event, EventBatch
 from .result import ToolResult
 from .backends import Backend, HTTPBackend, MCPBackend, CLIBackend, GatewayBackend
 from .sandbox import Sandbox
@@ -13,6 +14,8 @@ from .toolset import (
 
 __all__ = [
     "ToolResult",
+    "Event",
+    "EventBatch",
     "Backend",
     "HTTPBackend",
     "MCPBackend",

@@ -11,6 +11,7 @@ import httpx
 
 from . import schemas
 from .backends import Backend, CLIBackend, HTTPBackend, MCPBackend
+from .events import EventBatch, parse_batch, parse_events
 from .result import ToolResult
 from .toolset import ToolRegistry
 
@@ -21,6 +22,13 @@ class Sandbox:
 
     backend: Backend
     tools: ToolRegistry = field(default_factory=ToolRegistry)
+    # Who this handle acts as. Identity belongs to the connection rather than
+    # to each call: the runtime keeps a per-agent cursor over the event log, so
+    # forgetting it on one call silently shares the anonymous cursor with every
+    # other anonymous caller and events start looking lost. Two handles onto
+    # the same sandbox with different ids are two independent consumers, which
+    # is what a parent and its subagent want.
+    agent_id: str = ""
     # Custom tool name -> verified binary path inside *this* sandbox, learned
     # from the artifact step. Memoised per sandbox, never on the registry: a
     # registry is deliberately reusable across sandboxes, so caching a path
@@ -33,19 +41,32 @@ class Sandbox:
     # --- Constructors ---
 
     @classmethod
-    def connect(cls, url: str) -> Sandbox:
+    def connect(cls, url: str, agent_id: str = "") -> Sandbox:
         """Connect to a running ash-runtime via HTTP."""
-        return cls(backend=HTTPBackend(url))
+        return cls(backend=HTTPBackend(url), agent_id=agent_id)
 
     @classmethod
-    def mcp(cls, url: str) -> Sandbox:
+    def mcp(cls, url: str, agent_id: str = "") -> Sandbox:
         """Connect via MCP protocol."""
-        return cls(backend=MCPBackend(url))
+        return cls(backend=MCPBackend(url), agent_id=agent_id)
 
     @classmethod
-    def local(cls, bin_path: str | None = None) -> Sandbox:
+    def local(cls, bin_path: str | None = None, agent_id: str = "") -> Sandbox:
         """Use CLI backend — no server needed, calls binary directly."""
-        return cls(backend=CLIBackend(bin_path))
+        return cls(backend=CLIBackend(bin_path), agent_id=agent_id)
+
+    def as_agent(self, agent_id: str) -> Sandbox:
+        """A handle onto the same sandbox acting as a different agent.
+
+        Shares the backend and tool panel but keeps its own identity, so a
+        subagent gets its own cursor over the event log instead of competing
+        with its parent for the same one.
+        """
+        return Sandbox(backend=self.backend, tools=self.tools, agent_id=agent_id)
+
+    def _whoami(self, agent_id: str = "") -> str:
+        """An explicit per-call identity wins over the handle's own."""
+        return agent_id or self.agent_id
 
     @property
     def sandbox_id(self) -> str | None:
@@ -59,6 +80,7 @@ class Sandbox:
         port: int = 3000,
         runtime_bin: str | None = None,
         docker_args: list[str] | None = None,
+        agent_id: str = "",
     ) -> Sandbox:
         """Spawn a Docker container with ash-runtime injected."""
         if runtime_bin is None:
@@ -81,7 +103,7 @@ class Sandbox:
 
         container_id = result.stdout.strip()
         url = f"http://localhost:{host_port}"
-        sb = cls(backend=HTTPBackend(url))
+        sb = cls(backend=HTTPBackend(url), agent_id=agent_id)
         sb._container_id = container_id
 
         await sb._wait_ready()
@@ -119,7 +141,7 @@ class Sandbox:
         having caused the action. Harnesses assign these identities; the SDK
         only forwards them.
         """
-        return await self.backend.call(tool_name, kwargs, agent_id)
+        return await self.backend.call(tool_name, kwargs, self._whoami(agent_id))
 
     async def call_agent_tool(self, name: str, args: dict,
                               registry: ToolRegistry | None = None,
@@ -135,6 +157,7 @@ class Sandbox:
         custom tool's download and execution are attributed to the same caller.
         """
         registry = registry or self.tools
+        agent_id = self._whoami(agent_id)
         if registry.is_custom_tool(name):
             return await self._call_custom_tool(name, args, registry, agent_id)
         runtime_tool, runtime_args = registry.route(name, args)
@@ -194,6 +217,7 @@ class Sandbox:
         first tool that cannot be prepared.
         """
         registry = registry or self.tools
+        agent_id = self._whoami(agent_id)
         for name, spec in registry.custom_specs.items():
             if spec.path:
                 self._artifact_paths[name] = spec.path
@@ -216,7 +240,7 @@ class Sandbox:
         else:
             name = tool_call["name"]
             args = tool_call.get("input", {})
-        return await self.backend.call(name, args, agent_id)
+        return await self.backend.call(name, args, self._whoami(agent_id))
 
     async def execute_tool_calls(self, tool_calls: list[dict],
                                  agent_id: str = "") -> list[ToolResult]:
@@ -226,6 +250,49 @@ class Sandbox:
         independent can await them concurrently itself.
         """
         return [await self.execute_tool_call(tc, agent_id) for tc in tool_calls]
+
+    # --- Events ---
+
+    async def wait_for_events(self, kinds: list[str] | None = None,
+                              sources: list[str] | None = None,
+                              timeout: int = 30,
+                              agent_id: str = "") -> EventBatch:
+        """Block until a matching event occurs, or the timeout elapses.
+
+        Filters are ANDed and each matches everything when omitted: `kinds`
+        selects event types ("process_exited", "tool:web_fetch"), `sources`
+        narrows to specific handles, so waiting on one background process is
+        wait_for_events(["process_exited"], [pid]).
+
+        Every event is delivered once per identity. A second call will not
+        repeat what this handle already received -- and handles sharing an
+        agent_id share that cursor, which is why an identity is worth setting
+        when more than one consumer must each see everything.
+
+        Prefer this over polling in a loop: it returns as soon as the event
+        happens rather than on a timer.
+        """
+        args: dict = {"timeout": timeout}
+        if kinds:
+            args["kinds"] = kinds
+        if sources:
+            args["sources"] = sources
+        result = await self.backend.call("wait_for_events", args,
+                                         self._whoami(agent_id))
+        if result.is_error:
+            raise RuntimeError(f"wait_for_events failed: {result.output}")
+        return parse_batch(result.output)
+
+    async def poll_events(self, kinds: list[str] | None = None,
+                          sources: list[str] | None = None,
+                          agent_id: str = "") -> EventBatch:
+        """Take whatever matching events are already available, without waiting.
+
+        The non-blocking form of wait_for_events, for a harness that wants to
+        check for environment changes at a convenient point in its own loop.
+        """
+        return await self.wait_for_events(kinds, sources, timeout=0,
+                                          agent_id=agent_id)
 
     # --- Schemas ---
 
