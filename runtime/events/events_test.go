@@ -1,25 +1,18 @@
 package events
 
-// Tests for the reservation contract between the two consumption paths of the
-// event queue (run by `go test ./events`; tools/waitevents_test.go covers the
-// tool-level surface). Piggyback (DrainFor) must not consume events that a
-// blocked WaitFor caller is waiting for; everything else it still delivers
-// opportunistically.
-// User instruction: "piggyback 每次拿的时候要看一下是否有wait for 这个event".
+// Tests for the opt-in delivery model (run by `go test ./events`;
+// tools/waitevents_test.go covers the tool surface). Nothing is delivered
+// without a subscription; a subscription may narrow to specific sources;
+// reading does not consume, so several observers each get the event; events
+// expire on their TTL and the loss is reported.
+// User instruction: "默认是谁都看不到，至于监听了kind 才能看到，然后如果
+// source 也制定了，只监听指定的event，然后这个event 有一个最长存活时间，
+// 比如10分钟之后就会自动删除".
 
 import (
-	"sync"
 	"testing"
 	"time"
 )
-
-func reset() {
-	mu.Lock()
-	queues = make(map[string][]Event)
-	dropped = make(map[string]int)
-	waiters = make(map[uint64]*waiter)
-	mu.Unlock()
-}
 
 func kindsOf(evts []Event) []string {
 	out := make([]string, 0, len(evts))
@@ -29,7 +22,15 @@ func kindsOf(evts []Event) []string {
 	return out
 }
 
-// awaitWaiterRegistered blocks until at least one WaitFor call has registered.
+func sourcesOf(evts []Event) []string {
+	out := make([]string, 0, len(evts))
+	for _, e := range evts {
+		out = append(out, e.Source)
+	}
+	return out
+}
+
+// awaitWaiterRegistered blocks until a WaitFor call has registered.
 func awaitWaiterRegistered(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -47,93 +48,243 @@ func awaitWaiterRegistered(t *testing.T) {
 	}
 }
 
-func TestPiggybackTakesEverythingWhenNobodyWaits(t *testing.T) {
-	reset()
+func TestNothingDeliveredWithoutSubscription(t *testing.T) {
+	ResetForTest()
+
 	Push("file_change", "/a", nil)
 	Push("process_exited", "pid1", nil)
 
-	got := kindsOf(DrainFor(""))
-	if len(got) != 2 {
-		t.Fatalf("piggyback should deliver both events, got %v", got)
-	}
-	if len(DrainFor("")) != 0 {
-		t.Fatal("queue should be empty after drain")
+	if got := DrainFor("agent-a"); len(got) != 0 {
+		t.Fatalf("delivery must be opt-in, got %v", kindsOf(got))
 	}
 }
 
-func TestPiggybackLeavesReservedKindForWaiter(t *testing.T) {
-	reset()
+func TestSubscriptionSelectsByKind(t *testing.T) {
+	ResetForTest()
+	Subscribe("agent-a", Filter{Kinds: []string{"process_exited"}})
 
-	var (
-		wg     sync.WaitGroup
-		waited []Event
-	)
-	wg.Add(1)
+	Push("file_change", "/a", nil)
+	Push("process_exited", "pid1", nil)
+
+	got := DrainFor("agent-a")
+	if len(got) != 1 || got[0].Kind != "process_exited" {
+		t.Fatalf("only the subscribed kind should arrive, got %v", kindsOf(got))
+	}
+}
+
+func TestSubscriptionCanNarrowToSource(t *testing.T) {
+	ResetForTest()
+	Subscribe("agent-a", Filter{Kinds: []string{"process_exited"}, Sources: []string{"pid-b"}})
+
+	Push("process_exited", "pid-a", nil)
+	Push("process_exited", "pid-b", nil)
+
+	got := DrainFor("agent-a")
+	if len(got) != 1 || got[0].Source != "pid-b" {
+		t.Fatalf("source filter should select one event, got %v", sourcesOf(got))
+	}
+}
+
+func TestDeliveryIsPerAgentAndNotConsumed(t *testing.T) {
+	ResetForTest()
+	Subscribe("agent-a", Filter{Kinds: []string{"file_change"}})
+	Subscribe("agent-b", Filter{Kinds: []string{"file_change"}})
+
+	Push("file_change", "/shared", nil)
+
+	// Reading does not consume: both observers see it.
+	if got := DrainFor("agent-a"); len(got) != 1 {
+		t.Fatalf("agent-a should receive it, got %v", kindsOf(got))
+	}
+	if got := DrainFor("agent-b"); len(got) != 1 {
+		t.Fatalf("agent-b should receive it too, got %v", kindsOf(got))
+	}
+	// But no agent gets the same event twice.
+	if got := DrainFor("agent-a"); len(got) != 0 {
+		t.Fatalf("second read should be empty, got %v", kindsOf(got))
+	}
+}
+
+func TestTargetedEventsStayPrivate(t *testing.T) {
+	ResetForTest()
+	Subscribe("agent-a", Filter{Kinds: []string{"process_exited"}})
+	Subscribe("agent-b", Filter{Kinds: []string{"process_exited"}})
+
+	PushTo("agent-a", "process_exited", "pid1", nil)
+
+	if got := DrainFor("agent-b"); len(got) != 0 {
+		t.Fatalf("a targeted event must not reach another agent, got %v", kindsOf(got))
+	}
+	if got := DrainFor("agent-a"); len(got) != 1 {
+		t.Fatalf("the addressed agent should receive it, got %v", kindsOf(got))
+	}
+}
+
+func TestOwnActionsAreNotEchoedButAreVisibleToOthers(t *testing.T) {
+	ResetForTest()
+	Subscribe("agent-a", Filter{Kinds: []string{"tool:web_fetch"}})
+	Subscribe("agent-b", Filter{Kinds: []string{"tool:web_fetch"}})
+
+	PushAction("agent-a", "tool:web_fetch", "https://example.com", nil)
+
+	if got := DrainFor("agent-a"); len(got) != 0 {
+		t.Fatalf("an agent's own action should not be echoed back, got %v", kindsOf(got))
+	}
+	if got := DrainFor("agent-b"); len(got) != 1 {
+		t.Fatalf("another observer should see it, got %v", kindsOf(got))
+	}
+}
+
+func TestIncludeOwnOptsIntoSelfEvents(t *testing.T) {
+	ResetForTest()
+	Subscribe("agent-a", Filter{Kinds: []string{"tool:shell"}, IncludeOwn: true})
+
+	PushAction("agent-a", "tool:shell", "make", nil)
+
+	if got := DrainFor("agent-a"); len(got) != 1 {
+		t.Fatalf("include_own should deliver self-caused events, got %v", kindsOf(got))
+	}
+}
+
+func TestExplicitWaitNeedsNoSubscription(t *testing.T) {
+	ResetForTest()
+
+	done := make(chan []Event, 1)
 	go func() {
-		defer wg.Done()
-		waited = WaitFor("", []string{"process_exited"}, nil, 5*time.Second)
+		done <- WaitFor("agent-a", Filter{Kinds: []string{"process_exited"}, Sources: []string{"pid-b"}}, 5*time.Second)
 	}()
 	awaitWaiterRegistered(t)
 
-	// Both events arrive; a tool call piggybacks in between.
+	Push("process_exited", "pid-a", nil) // wrong source: must not wake
+	select {
+	case got := <-done:
+		t.Fatalf("woke on the wrong source: %v", sourcesOf(got))
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	Push("process_exited", "pid-b", nil)
+	got := <-done
+	if len(got) != 1 || got[0].Source != "pid-b" {
+		t.Fatalf("expected pid-b, got %v", sourcesOf(got))
+	}
+}
+
+func TestWaitReturnsOwnActionsToo(t *testing.T) {
+	ResetForTest()
+
+	// No subscription, and it is the agent's own action: asking explicitly
+	// is still enough.
+	PushAction("agent-a", "tool:web_search", "golang", nil)
+	got := WaitFor("agent-a", Filter{Kinds: []string{"tool:web_search"}}, time.Second)
+	if len(got) != 1 {
+		t.Fatalf("an explicit wait should return own actions, got %v", kindsOf(got))
+	}
+}
+
+func TestPiggybackLeavesEventsReservedByOwnWait(t *testing.T) {
+	ResetForTest()
+	Subscribe("agent-a", Filter{Kinds: []string{"process_exited", "file_change"}})
+
+	done := make(chan []Event, 1)
+	go func() { done <- WaitFor("agent-a", Filter{Kinds: []string{"process_exited"}}, 5*time.Second) }()
+	awaitWaiterRegistered(t)
+
 	Push("file_change", "/a", nil)
 	Push("process_exited", "pid1", nil)
 
-	got := kindsOf(DrainFor(""))
-	if len(got) != 1 || got[0] != "file_change" {
-		t.Fatalf("piggyback must take only the unreserved event, got %v", got)
+	// The subscribed-but-unrequested event arrives; the awaited one is held.
+	got := DrainFor("agent-a")
+	if len(got) != 1 || got[0].Kind != "file_change" {
+		t.Fatalf("piggyback should take only the unreserved event, got %v", kindsOf(got))
 	}
-
-	wg.Wait()
-	if len(waited) != 1 || waited[0].Kind != "process_exited" {
-		t.Fatalf("waiter should have received its reserved event, got %v", kindsOf(waited))
+	if w := <-done; len(w) != 1 || w[0].Kind != "process_exited" {
+		t.Fatalf("the waiter should still receive its event, got %v", kindsOf(w))
 	}
 }
 
-func TestPiggybackRespectsAnyKindWaiter(t *testing.T) {
-	reset()
+func TestAnotherAgentsWaitDoesNotBlockDelivery(t *testing.T) {
+	ResetForTest()
+	Subscribe("agent-b", Filter{Kinds: []string{"process_exited"}})
 
 	done := make(chan []Event, 1)
-	go func() { done <- WaitFor("", nil, nil, 5*time.Second) }() // nil kinds = any
+	go func() { done <- WaitFor("agent-a", Filter{Kinds: []string{"process_exited"}}, 3*time.Second) }()
 	awaitWaiterRegistered(t)
 
-	Push("anything", "src", nil)
-	// An any-kind waiter reserves everything, so piggyback gets nothing.
-	if got := DrainFor(""); len(got) != 0 {
-		t.Fatalf("piggyback should be empty while an any-kind waiter blocks, got %v", kindsOf(got))
+	Push("process_exited", "pid1", nil)
+
+	// agent-a's wait must not withhold agent-b's subscription delivery.
+	if got := DrainFor("agent-b"); len(got) != 1 {
+		t.Fatalf("agent-b should still receive it, got %v", kindsOf(got))
 	}
 	if got := <-done; len(got) != 1 {
-		t.Fatalf("any-kind waiter should receive the event, got %v", kindsOf(got))
+		t.Fatalf("agent-a's wait should also resolve, got %v", kindsOf(got))
 	}
 }
 
-func TestReservationEndsWhenWaiterReturns(t *testing.T) {
-	reset()
+func TestEventsExpireAfterTTL(t *testing.T) {
+	ResetForTest()
+	restore := SetTTLForTest(80 * time.Millisecond)
+	t.Cleanup(restore)
 
-	// Waiter times out quickly and unregisters.
-	if got := WaitFor("", []string{"process_exited"}, nil, 50*time.Millisecond); len(got) != 0 {
-		t.Fatalf("expected timeout, got %v", kindsOf(got))
+	Subscribe("agent-a", Filter{Kinds: []string{"file_change"}})
+	Push("file_change", "/a", nil)
+
+	time.Sleep(200 * time.Millisecond)
+
+	if got := DrainFor("agent-a"); len(got) != 0 {
+		t.Fatalf("expired events must not be delivered, got %v", kindsOf(got))
 	}
 	mu.Lock()
-	n := len(waiters)
+	remaining := len(log)
 	mu.Unlock()
-	if n != 0 {
-		t.Fatalf("waiter should be unregistered after returning, %d left", n)
+	if remaining != 0 {
+		t.Errorf("expired event should be removed from the log, %d left", remaining)
 	}
-
-	// With no waiter, piggyback may take the event again.
-	Push("process_exited", "pid1", nil)
-	if got := kindsOf(DrainFor("")); len(got) != 1 || got[0] != "process_exited" {
-		t.Fatalf("piggyback should take the event once nobody waits, got %v", got)
+	// The loss is reported rather than hidden.
+	if n := TakeMissed("agent-a"); n != 1 {
+		t.Errorf("expected 1 missed event reported, got %d", n)
 	}
 }
 
-func TestByteBudgetTrimsLargePayloads(t *testing.T) {
-	reset()
-	// Budget fits roughly two 1KiB payloads; the count backstop is generous
-	// so only the byte budget can trigger trimming.
-	restore := SetQueueBoundsForTest(3000, 1000)
+func TestFreshEventsSurviveGC(t *testing.T) {
+	ResetForTest()
+	restore := SetTTLForTest(5 * time.Second)
 	t.Cleanup(restore)
+
+	Subscribe("agent-a", Filter{Kinds: []string{"file_change"}})
+	Push("file_change", "/old", nil)
+	time.Sleep(30 * time.Millisecond)
+	Push("file_change", "/new", nil)
+
+	if got := DrainFor("agent-a"); len(got) != 2 {
+		t.Fatalf("both fresh events should be delivered, got %v", sourcesOf(got))
+	}
+	if n := TakeMissed("agent-a"); n != 0 {
+		t.Errorf("nothing should be reported missed, got %d", n)
+	}
+}
+
+func TestUnsubscribeStopsDelivery(t *testing.T) {
+	ResetForTest()
+	Subscribe("agent-a", Filter{Kinds: []string{"file_change"}})
+	if n := len(Subscriptions("agent-a")); n != 1 {
+		t.Fatalf("expected 1 subscription, got %d", n)
+	}
+
+	if removed := Unsubscribe("agent-a", []string{"file_change"}); removed != 1 {
+		t.Errorf("expected 1 removed, got %d", removed)
+	}
+	Push("file_change", "/a", nil)
+	if got := DrainFor("agent-a"); len(got) != 0 {
+		t.Fatalf("no delivery after unsubscribe, got %v", kindsOf(got))
+	}
+}
+
+func TestBudgetTrimReportsMissed(t *testing.T) {
+	ResetForTest()
+	restore := SetQueueBoundsForTest(3000, 1000) // ~2 KiB payloads fit twice
+	t.Cleanup(restore)
+	Subscribe("agent-a", Filter{Kinds: []string{"file_change"}})
 
 	big := string(make([]byte, 1024))
 	for i := 0; i < 6; i++ {
@@ -141,46 +292,31 @@ func TestByteBudgetTrimsLargePayloads(t *testing.T) {
 	}
 
 	mu.Lock()
-	queued := len(queues[""])
+	remaining := len(log)
 	mu.Unlock()
-	if queued >= 6 {
-		t.Fatalf("byte budget should have trimmed large payloads, %d still queued", queued)
+	if remaining >= 6 {
+		t.Fatalf("byte budget should have trimmed the log, %d still held", remaining)
 	}
-	if n := TakeDropped(""); n == 0 {
-		t.Error("trimming must be reported as dropped, got 0")
+	DrainFor("agent-a")
+	if n := TakeMissed("agent-a"); n == 0 {
+		t.Error("trimmed-away events must be reported as missed")
 	}
 }
 
-func TestSmallEventsAreNotTrimmedByByteBudget(t *testing.T) {
-	reset()
-	restore := SetQueueBoundsForTest(1<<20, 1000) // 1MiB, plenty for tiny events
+func TestSmallEventsAreNotTrimmed(t *testing.T) {
+	ResetForTest()
+	restore := SetQueueBoundsForTest(1<<20, 1000)
 	t.Cleanup(restore)
+	Subscribe("agent-a", Filter{Kinds: []string{"process_exited"}})
 
 	for i := 0; i < 200; i++ {
 		Push("process_exited", "pid", map[string]any{"exit_code": 0})
 	}
-	mu.Lock()
-	queued := len(queues[""])
-	mu.Unlock()
-	if queued != 200 {
-		t.Errorf("small events should all fit the byte budget, got %d/200", queued)
+	if got := DrainFor("agent-a"); len(got) != 200 {
+		t.Errorf("all small events should fit, got %d/200", len(got))
 	}
-	if n := TakeDropped(""); n != 0 {
-		t.Errorf("nothing should have been dropped, got %d", n)
-	}
-}
-
-func TestNewestEventSurvivesEvenIfOversized(t *testing.T) {
-	reset()
-	restore := SetQueueBoundsForTest(100, 1000) // smaller than one payload
-	t.Cleanup(restore)
-
-	Push("file_change", "/f", map[string]any{"content": string(make([]byte, 4096))})
-	mu.Lock()
-	queued := len(queues[""])
-	mu.Unlock()
-	if queued != 1 {
-		t.Errorf("the newest event must be kept even when oversized, got %d", queued)
+	if n := TakeMissed("agent-a"); n != 0 {
+		t.Errorf("nothing should be missed, got %d", n)
 	}
 }
 
@@ -191,134 +327,13 @@ func TestEnvIntParsing(t *testing.T) {
 	}
 	t.Setenv("ASH_TEST_EVENT_BOUND", "not-a-number")
 	if got := envInt("ASH_TEST_EVENT_BOUND", 7); got != 7 {
-		t.Errorf("invalid value should fall back to default, got %d", got)
+		t.Errorf("invalid value should fall back, got %d", got)
 	}
 	t.Setenv("ASH_TEST_EVENT_BOUND", "-5")
 	if got := envInt("ASH_TEST_EVENT_BOUND", 7); got != 7 {
-		t.Errorf("non-positive value should fall back to default, got %d", got)
+		t.Errorf("non-positive should fall back, got %d", got)
 	}
 	if got := envInt("ASH_TEST_EVENT_BOUND_UNSET", 42); got != 42 {
 		t.Errorf("unset should use default, got %d", got)
-	}
-}
-
-func TestOwnActionIsNotEchoedToItsAgent(t *testing.T) {
-	reset()
-
-	// agent-a performed this action itself.
-	PushAction("agent-a", "tool:web_search", "golang", map[string]any{"ok": true})
-
-	// Its own piggyback must not carry it back...
-	if got := DrainFor("agent-a"); len(got) != 0 {
-		t.Fatalf("own action should not be echoed to its agent, got %v", kindsOf(got))
-	}
-	// ...and it is consumed, not left to pile up across a rollout.
-	mu.Lock()
-	remaining := len(queues["agent-a"])
-	mu.Unlock()
-	if remaining != 0 {
-		t.Errorf("own action should be consumed, %d still queued", remaining)
-	}
-}
-
-func TestOwnActionIsVisibleToOtherAgents(t *testing.T) {
-	reset()
-
-	// A broadcast own-action (no agent id) is visible to any observer: this
-	// is how a subagent learns what a sibling did.
-	PushAction("", "tool:shell", "make build", map[string]any{"ok": true})
-	if got := DrainFor("agent-b"); len(got) != 1 || got[0].Kind != "tool:shell" {
-		t.Fatalf("another agent should see the action, got %v", kindsOf(got))
-	}
-}
-
-func TestOwnActionStillSatisfiesExplicitWait(t *testing.T) {
-	reset()
-
-	done := make(chan []Event, 1)
-	go func() { done <- WaitFor("agent-a", []string{"tool:web_fetch"}, nil, 5*time.Second) }()
-	awaitWaiterRegistered(t)
-
-	// Even though it is agent-a's own action, an explicit wait for it
-	// resolves: asking for it is different from having it pushed at you.
-	PushAction("agent-a", "tool:web_fetch", "https://example.com", map[string]any{"ok": true})
-	if got := <-done; len(got) != 1 || got[0].Source != "https://example.com" {
-		t.Fatalf("explicit wait should receive the own action, got %+v", got)
-	}
-}
-
-func TestWaitForSpecificSource(t *testing.T) {
-	reset()
-
-	// Two background processes; we only care about pid-b.
-	done := make(chan []Event, 1)
-	go func() {
-		done <- WaitFor("", []string{"process_exited"}, []string{"pid-b"}, 5*time.Second)
-	}()
-	awaitWaiterRegistered(t)
-
-	// The uninteresting process exits first: must NOT wake the waiter, and
-	// must stay available to piggyback (nobody reserved it).
-	Push("process_exited", "pid-a", nil)
-	select {
-	case got := <-done:
-		t.Fatalf("waiter woke on the wrong source: %+v", got)
-	case <-time.After(150 * time.Millisecond):
-	}
-	if got := DrainFor(""); len(got) != 1 || got[0].Source != "pid-a" {
-		t.Fatalf("unreserved source should piggyback, got %+v", got)
-	}
-
-	// The awaited process exits: waiter gets exactly that one.
-	Push("process_exited", "pid-b", nil)
-	got := <-done
-	if len(got) != 1 || got[0].Source != "pid-b" {
-		t.Fatalf("expected only pid-b, got %+v", got)
-	}
-}
-
-func TestSourceReservationIsPreciseAgainstPiggyback(t *testing.T) {
-	reset()
-
-	done := make(chan []Event, 1)
-	go func() {
-		done <- WaitFor("", []string{"process_exited"}, []string{"pid-b"}, 5*time.Second)
-	}()
-	awaitWaiterRegistered(t)
-
-	// Same kind, different sources, queued together.
-	Push("process_exited", "pid-a", nil)
-	Push("process_exited", "pid-b", nil)
-
-	// Piggyback may take pid-a but must leave pid-b for its waiter.
-	got := DrainFor("")
-	if len(got) != 1 || got[0].Source != "pid-a" {
-		t.Fatalf("piggyback should take only pid-a, got %+v", got)
-	}
-	if w := <-done; len(w) != 1 || w[0].Source != "pid-b" {
-		t.Fatalf("waiter should still receive pid-b, got %+v", w)
-	}
-}
-
-func TestReservationIsPerAgent(t *testing.T) {
-	reset()
-
-	done := make(chan []Event, 1)
-	go func() { done <- WaitFor("agent-a", []string{"process_exited"}, nil, 5*time.Second) }()
-	awaitWaiterRegistered(t)
-
-	// An event for a *different* agent is not reserved by agent-a's waiter.
-	PushTo("agent-b", "process_exited", "pid-b", nil)
-	if got := kindsOf(DrainFor("agent-b")); len(got) != 1 {
-		t.Fatalf("agent-b's event should not be reserved by agent-a's waiter, got %v", got)
-	}
-
-	// agent-a's own event is reserved and reaches the waiter.
-	PushTo("agent-a", "process_exited", "pid-a", nil)
-	if got := DrainFor("agent-a"); len(got) != 0 {
-		t.Fatalf("agent-a's event should be reserved, got %v", kindsOf(got))
-	}
-	if got := <-done; len(got) != 1 || got[0].Source != "pid-a" {
-		t.Fatalf("waiter should get its own agent's event, got %+v", got)
 	}
 }

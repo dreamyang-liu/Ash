@@ -1,3 +1,21 @@
+// Package events is the sandbox's channel for asynchronous facts: a
+// background process exited, a file changed, some agent ran a tool.
+//
+// Delivery is opt-in. Nothing reaches an agent unless that agent subscribed
+// to a kind (and optionally narrowed it to specific sources), because in a
+// sandbox shared by several actors most events are irrelevant to any given
+// one, and unrequested notifications are pure context noise.
+//
+// Events live in one append-only log with a time-to-live, not in per-consumer
+// queues. Reading does not consume: each agent tracks what it has already
+// been given, so two observers subscribed to the same kind both see it. An
+// event leaves the log when its TTL expires (or when the log has to be
+// trimmed to stay within its memory budget), never because someone else read
+// it first.
+//
+// Callers: runtime/toolevents.go (tool-call events + piggyback delivery),
+// runtime/tools/shell.go (process_exited), runtime/tools/edit.go
+// (file_change), runtime/tools/waitevents.go (the events tool).
 package events
 
 import (
@@ -10,42 +28,68 @@ import (
 )
 
 type Event struct {
-	ID      string `json:"id"`
-	Kind    string `json:"kind"`
-	Source  string `json:"source"`
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Source string `json:"source"`
+	// AgentID restricts the audience: when set, only that agent may receive
+	// the event (a background process's exit concerns whoever started it).
 	AgentID string `json:"agent_id,omitempty"`
-	// Origin identifies the agent whose action produced this event, for
-	// events that describe an action rather than an external fact. Piggyback
-	// delivery skips an event for its own originator -- telling a caller
-	// about its own just-completed call is noise, and the call's result
-	// already reported it -- while every other observer, and any explicit
-	// wait_for_events, still receives it.
+	// Origin names the agent whose action produced the event. Piggyback
+	// delivery skips an event for its own originator -- its call result
+	// already reported the outcome -- unless the subscription asks for own
+	// actions. An explicit wait always returns it.
 	Origin    string         `json:"origin,omitempty"`
 	Data      map[string]any `json:"data"`
 	Timestamp string         `json:"timestamp"`
+
+	seq    uint64
+	expiry time.Time
 }
 
-// Queue bounds. Event payloads are delivered in full — truncating them is a
-// consumer-side policy decision (an SDK or post-processing pipeline may want
-// the complete data, while a harness renders a shortened form into the LLM
-// context). The runtime only enforces what it must to stay alive: this queue
-// lives inside the sandbox's runtime process, and letting it grow without
-// limit would OOM-kill the runtime, taking the whole sandbox — and the
-// rollout — with it. That loss is unrecoverable, unlike a truncated payload.
+// Filter selects events by kind and, optionally, by source handle. An empty
+// list matches everything, so {} matches all events and
+// {Kinds: ["process_exited"], Sources: ["pid7"]} matches exactly one process.
+type Filter struct {
+	Kinds   []string `json:"kinds,omitempty"`
+	Sources []string `json:"sources,omitempty"`
+	// IncludeOwn also delivers events the subscribing agent itself caused.
+	IncludeOwn bool `json:"include_own,omitempty"`
+}
+
+func (f Filter) matches(evt Event) bool {
+	return matchesAny(evt.Kind, f.Kinds) && matchesAny(evt.Source, f.Sources)
+}
+
+func matchesAny(value string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, a := range allowed {
+		if value == a {
+			return true
+		}
+	}
+	return false
+}
+
+// Bounds. The log lives inside the sandbox's runtime process: unbounded
+// growth would OOM-kill it and take the whole sandbox -- and its rollout --
+// with it, which nothing downstream can recover. Payloads themselves are
+// delivered in full, since shortening them is a consumer-side decision.
 //
-// The budget is byte-based rather than count-based because payload sizes vary
-// by orders of magnitude (a pid versus a file's full contents); a fixed event
-// count is a meaningless bound when one event can be megabytes.
-//
-// Override with ASH_EVENT_QUEUE_BYTES / ASH_EVENT_QUEUE_MAX_EVENTS.
+// The byte budget is byte-based rather than count-based because payload sizes
+// span orders of magnitude (a pid versus a file's contents). TTL is the
+// primary reclaim mechanism; the budget is a backstop for bursts.
 const (
-	defaultQueueBytes = 8 << 20 // 8 MiB per queue
+	defaultQueueBytes = 8 << 20 // 8 MiB
 	defaultQueueLen   = 1000    // backstop against many tiny events
+	defaultTTLSeconds = 600     // 10 minutes
 )
 
 var (
 	maxQueueBytes = envInt("ASH_EVENT_QUEUE_BYTES", defaultQueueBytes)
 	maxQueueLen   = envInt("ASH_EVENT_QUEUE_MAX_EVENTS", defaultQueueLen)
+	eventTTL      = time.Duration(envInt("ASH_EVENT_TTL_SECONDS", defaultTTLSeconds)) * time.Second
 )
 
 // envInt reads a positive integer from the environment, falling back to def.
@@ -58,10 +102,11 @@ func envInt(name string, def int) int {
 	return def
 }
 
-// approxSize estimates an event's memory footprint for the byte budget. It is
-// deliberately cheap: exact accounting would mean serializing every event.
+// approxSize estimates an event's memory footprint. Deliberately cheap:
+// exact accounting would mean serializing every event.
 func approxSize(evt Event) int {
-	n := len(evt.ID) + len(evt.Kind) + len(evt.Source) + len(evt.AgentID) + len(evt.Timestamp)
+	n := len(evt.ID) + len(evt.Kind) + len(evt.Source) + len(evt.AgentID) +
+		len(evt.Origin) + len(evt.Timestamp)
 	for k, v := range evt.Data {
 		n += len(k)
 		switch tv := v.(type) {
@@ -70,34 +115,305 @@ func approxSize(evt Event) int {
 		case []byte:
 			n += len(tv)
 		default:
-			n += 8 // numbers, bools, pointers to nested values
+			n += 8
 		}
 	}
 	return n
 }
 
 // waiter records a blocked WaitFor call. It stays registered for the whole
-// wait so that piggyback delivery (DrainFor) can tell which kinds are
-// reserved and must be left queued.
+// wait so piggyback delivery can tell which events are reserved.
 type waiter struct {
 	agentID string
-	kinds   []string      // empty = any kind
-	sources []string      // empty = any source (pid, path, ...)
+	filter  Filter
 	signal  chan struct{} // buffered(1): coalesces wakeups
 }
 
 var (
-	mu        sync.Mutex
-	queues    = make(map[string][]Event) // per-agent queues, "" = broadcast
-	dropped   = make(map[string]int)     // per-queue overflow counts
-	waiters   = make(map[uint64]*waiter) // blocked WaitFor calls
+	mu  sync.Mutex
+	log []Event // append-only, TTL- and budget-bounded
+
+	subs      = map[string][]Filter{}        // agent -> subscriptions
+	delivered = map[string]map[string]bool{} // agent -> event id -> given
+	missed    = map[string]int{}             // agent -> matching events lost before delivery
+	waiters   = map[uint64]*waiter{}
 	waiterSeq atomic.Uint64
 	counter   atomic.Uint64
 )
 
-// notifyWaitersLocked nudges every blocked WaitFor caller to re-check the
-// queues. Sends are non-blocking: a pending signal already means "re-check".
-// Must hold mu.
+// --- subscriptions ---
+
+// Subscribe adds a delivery filter for an agent. Without one, piggyback
+// delivery gives that agent nothing.
+func Subscribe(agentID string, f Filter) {
+	mu.Lock()
+	defer mu.Unlock()
+	subs[agentID] = append(subs[agentID], f)
+}
+
+// Unsubscribe removes filters mentioning any of kinds, or all of the agent's
+// filters when kinds is empty.
+func Unsubscribe(agentID string, kinds []string) int {
+	mu.Lock()
+	defer mu.Unlock()
+	if len(kinds) == 0 {
+		n := len(subs[agentID])
+		delete(subs, agentID)
+		return n
+	}
+	var kept []Filter
+	removed := 0
+	for _, f := range subs[agentID] {
+		if mentionsAny(f.Kinds, kinds) {
+			removed++
+			continue
+		}
+		kept = append(kept, f)
+	}
+	if len(kept) == 0 {
+		delete(subs, agentID)
+	} else {
+		subs[agentID] = kept
+	}
+	return removed
+}
+
+func mentionsAny(have, wanted []string) bool {
+	for _, h := range have {
+		for _, w := range wanted {
+			if h == w {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Subscriptions returns an agent's current filters.
+func Subscriptions(agentID string) []Filter {
+	mu.Lock()
+	defer mu.Unlock()
+	out := make([]Filter, len(subs[agentID]))
+	copy(out, subs[agentID])
+	return out
+}
+
+// --- producing ---
+
+// Push records an external fact visible to any subscriber.
+func Push(kind, source string, data map[string]any) {
+	add(Event{Kind: kind, Source: source, Data: data})
+}
+
+// PushTo records a fact addressed to one agent; others never receive it.
+func PushTo(agentID, kind, source string, data map[string]any) {
+	add(Event{AgentID: agentID, Kind: kind, Source: source, Data: data})
+}
+
+// PushAction records an action performed by origin, visible to other
+// subscribers but not echoed back to the actor itself.
+func PushAction(origin, kind, source string, data map[string]any) {
+	add(Event{Origin: origin, Kind: kind, Source: source, Data: data})
+}
+
+func add(evt Event) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	now := time.Now()
+	evt.seq = counter.Add(1)
+	evt.ID = fmt.Sprintf("evt_%d", evt.seq)
+	evt.Timestamp = now.UTC().Format(time.RFC3339)
+	evt.expiry = now.Add(eventTTL)
+
+	log = append(log, evt)
+	gcLocked(now)
+	notifyWaitersLocked()
+}
+
+// --- consuming ---
+
+// DrainFor returns the events an agent is subscribed to and has not been
+// given yet, for piggyback delivery on a tool response.
+//
+// Events a blocked WaitFor of the same agent is waiting for are left alone:
+// it asked for them explicitly, and handing them to an unrelated response
+// would strand that wait until its timeout.
+func DrainFor(agentID string) []Event {
+	mu.Lock()
+	defer mu.Unlock()
+	gcLocked(time.Now())
+
+	filters := subs[agentID]
+	if len(filters) == 0 {
+		return []Event{} // opt-in: no subscription, no delivery
+	}
+
+	var out []Event
+	for _, evt := range log {
+		if !audienceAllows(evt, agentID) || wasDelivered(agentID, evt.ID) {
+			continue
+		}
+		f, ok := matchingFilter(filters, evt)
+		if !ok {
+			continue
+		}
+		if evt.Origin != "" && evt.Origin == agentID && !f.IncludeOwn {
+			continue // the caller's own action: its result already said so
+		}
+		if reservedLocked(evt, agentID) {
+			continue
+		}
+		markDelivered(agentID, evt.ID)
+		out = append(out, evt)
+	}
+	if out == nil {
+		return []Event{}
+	}
+	return out
+}
+
+// Drain is DrainFor with no agent identity.
+func Drain() []Event { return DrainFor("") }
+
+// WaitFor blocks until an event matching filter is available for agentID, or
+// until timeout. It is a long poll: the sandbox never initiates a connection,
+// so the transport stays a plain one-way request/response protocol.
+//
+// A wait is independent of subscriptions -- asking explicitly is enough --
+// and returns own actions too, since the caller asked for them by name.
+func WaitFor(agentID string, filter Filter, timeout time.Duration) []Event {
+	deadline := time.Now().Add(timeout)
+
+	// Register before the first check and stay registered for the whole wait:
+	// no wakeup can be missed, and piggyback delivery leaves these events be.
+	mu.Lock()
+	id, signal := registerWaiterLocked(agentID, filter)
+	mu.Unlock()
+	defer unregisterWaiter(id)
+
+	for {
+		if got := takeMatching(agentID, filter); len(got) > 0 {
+			return got
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return []Event{}
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-signal:
+			timer.Stop()
+		case <-timer.C:
+			return []Event{}
+		}
+	}
+}
+
+func takeMatching(agentID string, filter Filter) []Event {
+	mu.Lock()
+	defer mu.Unlock()
+	gcLocked(time.Now())
+
+	var out []Event
+	for _, evt := range log {
+		if !audienceAllows(evt, agentID) || wasDelivered(agentID, evt.ID) {
+			continue
+		}
+		if !filter.matches(evt) {
+			continue
+		}
+		markDelivered(agentID, evt.ID)
+		out = append(out, evt)
+	}
+	return out
+}
+
+// TakeMissed returns and clears the number of events that matched an agent's
+// subscriptions but left the log before it received them (TTL expiry or a
+// budget trim), so loss is reported instead of hidden.
+func TakeMissed(agentID string) int {
+	mu.Lock()
+	defer mu.Unlock()
+	n := missed[agentID]
+	delete(missed, agentID)
+	return n
+}
+
+// --- internals ---
+
+func audienceAllows(evt Event, agentID string) bool {
+	return evt.AgentID == "" || evt.AgentID == agentID
+}
+
+func matchingFilter(filters []Filter, evt Event) (Filter, bool) {
+	for _, f := range filters {
+		if f.matches(evt) {
+			return f, true
+		}
+	}
+	return Filter{}, false
+}
+
+func wasDelivered(agentID, eventID string) bool {
+	return delivered[agentID][eventID]
+}
+
+func markDelivered(agentID, eventID string) {
+	if delivered[agentID] == nil {
+		delivered[agentID] = map[string]bool{}
+	}
+	delivered[agentID][eventID] = true
+}
+
+// gcLocked drops expired events, then trims the oldest until the log fits its
+// budget. Anything a subscriber would have wanted but never got is counted as
+// missed for that subscriber. Must hold mu.
+func gcLocked(now time.Time) {
+	cut := 0
+	for cut < len(log) && now.After(log[cut].expiry) {
+		cut++
+	}
+
+	total := 0
+	for _, evt := range log[cut:] {
+		total += approxSize(evt)
+	}
+	for cut < len(log)-1 && (total > maxQueueBytes || len(log)-cut > maxQueueLen) {
+		total -= approxSize(log[cut])
+		cut++
+	}
+	if cut == 0 {
+		return
+	}
+
+	for _, evt := range log[:cut] {
+		accountMissedLocked(evt)
+		for agentID := range delivered {
+			delete(delivered[agentID], evt.ID)
+		}
+	}
+	log = append([]Event(nil), log[cut:]...)
+}
+
+// accountMissedLocked credits a lost event to every subscriber that matched
+// it and never received it. Must hold mu.
+func accountMissedLocked(evt Event) {
+	for agentID, filters := range subs {
+		if !audienceAllows(evt, agentID) || wasDelivered(agentID, evt.ID) {
+			continue
+		}
+		f, ok := matchingFilter(filters, evt)
+		if !ok {
+			continue
+		}
+		if evt.Origin != "" && evt.Origin == agentID && !f.IncludeOwn {
+			continue
+		}
+		missed[agentID]++
+	}
+}
+
 func notifyWaitersLocked() {
 	for _, w := range waiters {
 		select {
@@ -107,17 +423,10 @@ func notifyWaitersLocked() {
 	}
 }
 
-// registerWaiterLocked records a blocked waiter. Must hold mu.
-func registerWaiterLocked(agentID string, kinds, sources []string) (uint64, chan struct{}) {
+func registerWaiterLocked(agentID string, filter Filter) (uint64, chan struct{}) {
 	id := waiterSeq.Add(1)
-	w := &waiter{
-		agentID: agentID,
-		kinds:   kinds,
-		sources: sources,
-		signal:  make(chan struct{}, 1),
-	}
-	waiters[id] = w
-	return id, w.signal
+	waiters[id] = &waiter{agentID: agentID, filter: filter, signal: make(chan struct{}, 1)}
+	return id, waiters[id].signal
 }
 
 func unregisterWaiter(id uint64) {
@@ -126,258 +435,21 @@ func unregisterWaiter(id uint64) {
 	mu.Unlock()
 }
 
-// reservedLocked reports whether some blocked waiter is waiting for evt.
-// Such events must survive piggyback delivery: consuming them there would
-// strand the waiter until its timeout even though its event did occur.
-// Must hold mu.
-func reservedLocked(evt Event) bool {
+// reservedLocked reports whether the same agent has a blocked wait for evt.
+// Another agent's wait does not hold back this agent's delivery.
+func reservedLocked(evt Event, agentID string) bool {
 	for _, w := range waiters {
-		// A waiter receives broadcasts plus its own agent's events.
-		if evt.AgentID != "" && evt.AgentID != w.agentID {
-			continue
-		}
-		if matches(evt, w.kinds) && matchesSource(evt, w.sources) {
+		if w.agentID == agentID && w.filter.matches(evt) {
 			return true
 		}
 	}
 	return false
 }
 
-// Push adds an event. If agentID is empty, event goes to all agents.
-func Push(kind, source string, data map[string]any) {
-	PushTo("", kind, source, data)
-}
+// --- test hooks ---
 
-// PushTo adds an event targeted at a specific agent. Empty agentID = broadcast.
-func PushTo(agentID, kind, source string, data map[string]any) {
-	push(agentID, kind, source, data, "")
-}
-
-// PushAction records an action performed by origin. The event goes to the
-// broadcast queue so every observer can see it, while origin lets piggyback
-// delivery skip the actor itself (its call result already said what happened).
-// An explicit WaitFor still returns it, even to the originator.
-func PushAction(origin, kind, source string, data map[string]any) {
-	push("", kind, source, data, origin)
-}
-
-func push(agentID, kind, source string, data map[string]any, origin string) {
-	mu.Lock()
-	defer mu.Unlock()
-
-	id := counter.Add(1)
-	evt := Event{
-		ID:        fmt.Sprintf("evt_%d", id),
-		Kind:      kind,
-		Source:    source,
-		AgentID:   agentID,
-		Origin:    origin,
-		Data:      data,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	}
-
-	queues[agentID] = append(queues[agentID], evt)
-	trimQueueLocked(agentID)
-	notifyWaitersLocked()
-}
-
-// trimQueueLocked drops oldest events until the queue fits both the byte
-// budget and the event-count backstop, counting the loss so it can be
-// reported instead of silently vanishing. Must hold mu.
-func trimQueueLocked(agentID string) {
-	q := queues[agentID]
-
-	total := 0
-	for _, evt := range q {
-		total += approxSize(evt)
-	}
-
-	cut := 0
-	for cut < len(q)-1 && (total > maxQueueBytes || len(q)-cut > maxQueueLen) {
-		total -= approxSize(q[cut])
-		cut++
-	}
-	// Keep at least the newest event even if it alone exceeds the budget:
-	// dropping it would lose the most relevant information.
-	if cut > 0 {
-		queues[agentID] = q[cut:]
-		dropped[agentID] += cut
-	}
-}
-
-// Drain returns pending events for a specific agent (+ broadcasts), clears them.
-func Drain() []Event {
-	return DrainFor("")
-}
-
-// DrainFor returns events targeted at agentID plus any broadcast events,
-// for piggyback delivery on a tool response.
-//
-// Events that a blocked WaitFor caller is waiting for are left queued: the
-// waiter asked for them explicitly, and handing them to an unrelated tool
-// response would strand that waiter until its timeout. Everything else is
-// delivered opportunistically, so environment changes reach the agent
-// without it having to ask.
-func DrainFor(agentID string) []Event {
-	mu.Lock()
-	defer mu.Unlock()
-
-	sources := []string{""} // broadcast queue
-	if agentID != "" {
-		sources = append(sources, agentID)
-	}
-
-	var result []Event
-	for _, q := range sources {
-		pending := queues[q]
-		if len(pending) == 0 {
-			continue
-		}
-		var kept []Event
-		for _, evt := range pending {
-			switch {
-			case reservedLocked(evt):
-				// Someone is explicitly waiting for this one: leave it.
-				kept = append(kept, evt)
-			case evt.Origin != "" && evt.Origin == agentID:
-				// The caller's own action. Drop it rather than echo it: the
-				// call's own result already reported the outcome. Retaining
-				// it would pile up across a rollout and eventually surface as
-				// a misleading "dropped" count.
-			default:
-				result = append(result, evt)
-			}
-		}
-		queues[q] = kept
-	}
-
-	if result == nil {
-		return []Event{}
-	}
-	return result
-}
-
-// TakeDropped returns and clears the overflow count for an agent's queues
-// (its own plus broadcast), so loss can be surfaced instead of hidden.
-func TakeDropped(agentID string) int {
-	mu.Lock()
-	defer mu.Unlock()
-	n := dropped[""]
-	delete(dropped, "")
-	if agentID != "" {
-		n += dropped[agentID]
-		delete(dropped, agentID)
-	}
-	return n
-}
-
-// matches reports whether evt is of one of the requested kinds. An empty
-// kinds slice matches everything.
-func matches(evt Event, kinds []string) bool {
-	if len(kinds) == 0 {
-		return true
-	}
-	for _, k := range kinds {
-		if evt.Kind == k {
-			return true
-		}
-	}
-	return false
-}
-
-// matchesSource reports whether evt came from one of the requested sources.
-// An empty sources slice matches everything. Source is the handle the
-// emitter used: a pid for process_exited, a path for file_change.
-func matchesSource(evt Event, sources []string) bool {
-	if len(sources) == 0 {
-		return true
-	}
-	for _, s := range sources {
-		if evt.Source == s {
-			return true
-		}
-	}
-	return false
-}
-
-// drainMatchingLocked removes and returns events for agentID (plus
-// broadcasts) whose Kind is in kinds, leaving non-matching events queued so
-// a later call still delivers them. Must hold mu.
-func drainMatchingLocked(agentID string, kinds, sources []string) []Event {
-	queueKeys := []string{""} // broadcast queue
-	if agentID != "" {
-		queueKeys = append(queueKeys, agentID)
-	}
-
-	var taken []Event
-	for _, q := range queueKeys {
-		pending := queues[q]
-		if len(pending) == 0 {
-			continue
-		}
-		var kept []Event
-		for _, evt := range pending {
-			if matches(evt, kinds) && matchesSource(evt, sources) {
-				taken = append(taken, evt)
-			} else {
-				kept = append(kept, evt)
-			}
-		}
-		queues[q] = kept
-	}
-	return taken
-}
-
-// WaitFor blocks until at least one matching event is available for agentID
-// (broadcast events included), or until timeout elapses. It is a long-poll:
-// the sandbox never initiates a connection, so the transport stays a plain
-// one-way request/response protocol.
-//
-// Matching is the conjunction of two filters, each matching everything when
-// empty:
-//   - kinds:   event type, e.g. "process_exited"
-//   - sources: the emitter's handle, e.g. a specific pid or file path
-//
-// So waiting on one particular background process is
-// WaitFor(agent, []string{"process_exited"}, []string{pid}, timeout).
-//
-// Only matching events are consumed; anything else stays queued and rides
-// along with a later tool response.
-func WaitFor(agentID string, kinds, sources []string, timeout time.Duration) []Event {
-	deadline := time.Now().Add(timeout)
-
-	// Register before the first check and stay registered for the whole
-	// wait: this both guarantees no wakeup is missed and reserves the
-	// requested events against piggyback delivery (see reservedLocked).
-	mu.Lock()
-	id, signal := registerWaiterLocked(agentID, kinds, sources)
-	mu.Unlock()
-	defer unregisterWaiter(id)
-
-	for {
-		mu.Lock()
-		taken := drainMatchingLocked(agentID, kinds, sources)
-		mu.Unlock()
-		if len(taken) > 0 {
-			return taken
-		}
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return []Event{}
-		}
-		timer := time.NewTimer(remaining)
-		select {
-		case <-signal:
-			timer.Stop() // something arrived: re-check the queues
-		case <-timer.C:
-			return []Event{}
-		}
-	}
-}
-
-// SetQueueBoundsForTest overrides the queue bounds and returns a function
-// restoring the previous values. Exported for tests in sibling packages.
+// SetQueueBoundsForTest overrides the byte and count budgets, returning a
+// function that restores the previous values.
 func SetQueueBoundsForTest(bytes, count int) func() {
 	mu.Lock()
 	prevBytes, prevCount := maxQueueBytes, maxQueueLen
@@ -388,4 +460,28 @@ func SetQueueBoundsForTest(bytes, count int) func() {
 		maxQueueBytes, maxQueueLen = prevBytes, prevCount
 		mu.Unlock()
 	}
+}
+
+// SetTTLForTest overrides the event TTL, returning a restore function.
+func SetTTLForTest(ttl time.Duration) func() {
+	mu.Lock()
+	prev := eventTTL
+	eventTTL = ttl
+	mu.Unlock()
+	return func() {
+		mu.Lock()
+		eventTTL = prev
+		mu.Unlock()
+	}
+}
+
+// ResetForTest clears all state.
+func ResetForTest() {
+	mu.Lock()
+	defer mu.Unlock()
+	log = nil
+	subs = map[string][]Filter{}
+	delivered = map[string]map[string]bool{}
+	missed = map[string]int{}
+	waiters = map[uint64]*waiter{}
 }

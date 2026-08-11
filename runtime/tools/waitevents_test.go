@@ -1,11 +1,13 @@
 package tools
 
-// Tests for waitevents.go / events.WaitFor (run by `go test ./tools`; no
-// other file covers blocking event delivery). Verifies: already-queued
-// events return immediately, a wait wakes on a concurrent push, timeout is
-// reported rather than hanging, non-matching kinds stay queued for the
-// piggyback path, and queue overflow is surfaced as a dropped count.
-// User instruction: "我觉得可以搞一个 wait_for_events 这个东西".
+// Tests for waitevents.go, the tool surface over the event log (run by
+// `go test ./tools`; events/events_test.go covers the delivery model).
+// Verifies: an existing event returns immediately, a wait wakes on a
+// concurrent push, a timeout is reported rather than hanging, an unrequested
+// event is left for other consumers, and events lost before delivery are
+// reported as missed.
+// User instruction: "我觉得可以搞一个 wait_for_events 这个东西" and the later
+// opt-in model ("默认是谁都看不到...监听了kind 才能看到").
 
 import (
 	"encoding/json"
@@ -23,7 +25,7 @@ type waitPayload struct {
 	} `json:"events"`
 	TimedOut  bool `json:"timed_out"`
 	WaitedFor int  `json:"waited_for"`
-	Dropped   int  `json:"dropped"`
+	Missed    int  `json:"missed"`
 }
 
 func runWait(t *testing.T, args map[string]any) waitPayload {
@@ -39,15 +41,10 @@ func runWait(t *testing.T, args map[string]any) waitPayload {
 	return p
 }
 
-// drainAll clears queues so tests don't leak events into each other.
+// drainAll clears all event state so tests don't leak into each other.
 func drainAll(t *testing.T) {
 	t.Helper()
-	events.Drain()
-	events.DrainFor("agent-a")
-	events.DrainFor("agent-b")
-	events.TakeDropped("")
-	events.TakeDropped("agent-a")
-	events.TakeDropped("agent-b")
+	events.ResetForTest()
 }
 
 func TestWaitForEventsReturnsQueuedImmediately(t *testing.T) {
@@ -118,10 +115,12 @@ func TestWaitForEventsLeavesNonMatchingQueued(t *testing.T) {
 	if len(p.Events) != 1 || p.Events[0].Kind != "file_change" {
 		t.Fatalf("should take only the requested kind, got %+v", p)
 	}
-	// The unrequested event must survive for the piggyback path.
-	remaining := events.Drain()
+	// The unrequested event is untouched: a subscriber to it still gets it,
+	// since a wait consumes only what it asked for.
+	events.Subscribe("observer", events.Filter{Kinds: []string{"other_kind"}})
+	remaining := events.DrainFor("observer")
 	if len(remaining) != 1 || remaining[0].Kind != "other_kind" {
-		t.Fatalf("non-matching event was consumed: %+v", remaining)
+		t.Fatalf("the unrequested event should still be available: %+v", remaining)
 	}
 }
 
@@ -136,24 +135,68 @@ func TestWaitForEventsAnyKind(t *testing.T) {
 	}
 }
 
-func TestWaitForEventsReportsDropped(t *testing.T) {
+func TestWaitForEventsReportsMissed(t *testing.T) {
 	drainAll(t)
 	t.Cleanup(func() { drainAll(t) })
 
-	// Shrink the queue bound for this test so overflow is cheap to trigger.
+	// Shrink the log bound so overflow is cheap to trigger. `missed` is
+	// per-subscriber -- an event lost before anyone wanted it is nobody's
+	// loss -- so the agent subscribes first.
 	const capEvents = 10
 	restore := events.SetQueueBoundsForTest(1<<30, capEvents)
 	t.Cleanup(restore)
+	events.Subscribe("agent-a", events.Filter{Kinds: []string{"flood"}})
 
 	for i := 0; i < capEvents+5; i++ {
 		events.Push("flood", "src", map[string]any{"i": i})
 	}
-	p := runWait(t, map[string]any{"kinds": []any{"flood"}, "timeout": float64(2)})
-	if p.Dropped != 5 {
-		t.Errorf("expected 5 dropped events reported, got %d", p.Dropped)
+	p := runWait(t, map[string]any{
+		"kinds":    []any{"flood"},
+		"timeout":  float64(2),
+		"agent_id": "agent-a",
+	})
+	if p.Missed != 5 {
+		t.Errorf("expected 5 missed events reported, got %d", p.Missed)
 	}
 	if len(p.Events) != capEvents {
 		t.Errorf("expected %d retained events, got %d", capEvents, len(p.Events))
+	}
+}
+
+func TestSubscribeAndUnsubscribeActions(t *testing.T) {
+	drainAll(t)
+	t.Cleanup(func() { drainAll(t) })
+
+	tool := &WaitEventsTool{}
+
+	// subscribe requires kinds: subscribing to everything is rarely meant.
+	if r := tool.Execute(map[string]any{"action": "subscribe", "agent_id": "a"}); r.Success {
+		t.Error("subscribe without kinds should fail")
+	}
+
+	if r := tool.Execute(map[string]any{
+		"action": "subscribe", "kinds": []any{"file_change"}, "agent_id": "a",
+	}); !r.Success {
+		t.Fatalf("subscribe failed: %s", r.Error)
+	}
+	if n := len(events.Subscriptions("a")); n != 1 {
+		t.Fatalf("expected 1 active subscription, got %d", n)
+	}
+
+	// Subscribed events now arrive with ordinary tool responses.
+	events.Push("file_change", "/x", nil)
+	if got := events.DrainFor("a"); len(got) != 1 {
+		t.Fatalf("subscribed event should be delivered, got %d", len(got))
+	}
+
+	if r := tool.Execute(map[string]any{
+		"action": "unsubscribe", "kinds": []any{"file_change"}, "agent_id": "a",
+	}); !r.Success {
+		t.Fatalf("unsubscribe failed: %s", r.Error)
+	}
+	events.Push("file_change", "/y", nil)
+	if got := events.DrainFor("a"); len(got) != 0 {
+		t.Fatalf("nothing should arrive after unsubscribe, got %d", len(got))
 	}
 }
 

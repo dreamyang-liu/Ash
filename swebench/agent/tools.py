@@ -271,19 +271,35 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "wait_for_events",
             "description": (
-                "Block until the sandbox reports an event (e.g. a background process "
-                "exits or a file changes), or until the timeout elapses. Use this "
-                "instead of polling in a loop when waiting on background work."
+                "Observe asynchronous sandbox facts. Delivery is opt-in: "
+                "action=subscribe registers interest in event kinds (optionally "
+                "narrowed to specific sources) so they arrive with later tool "
+                "responses; action=wait (the default) blocks until a matching event "
+                "occurs or the timeout elapses -- use it instead of polling in a "
+                "loop when waiting on background work. Events expire automatically "
+                "after their time-to-live."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["wait", "subscribe", "unsubscribe", "subscriptions"],
+                        "default": "wait",
+                        "description": (
+                            "wait: block for a matching event. subscribe: receive these "
+                            "kinds with later tool responses (nothing is delivered "
+                            "without a subscription). unsubscribe: stop receiving them. "
+                            "subscriptions: list active ones."
+                        ),
+                    },
                     "kinds": {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            'Event kinds to wait for, e.g. ["process_exited", '
-                            '"file_change"]. Omit to wait for any event.'
+                            'Event kinds, e.g. ["process_exited", "file_change", '
+                            '"tool:web_fetch"]. Required for subscribe; omit when '
+                            "waiting to accept any kind."
                         ),
                     },
                     "sources": {

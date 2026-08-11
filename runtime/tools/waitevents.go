@@ -31,17 +31,28 @@ type WaitEventsTool struct{}
 func (w *WaitEventsTool) Name() string { return "wait_for_events" }
 
 func (w *WaitEventsTool) Description() string {
-	return "Block until the sandbox emits an event (e.g. a background process exits or a file changes), or until the timeout elapses. Returns the matching events as JSON."
+	return "Observe asynchronous sandbox facts. Delivery is opt-in: action=subscribe registers interest in event kinds (optionally narrowed to specific sources) so they arrive with later tool responses; action=wait (the default) blocks until a matching event occurs or the timeout elapses. Events expire automatically after their time-to-live."
 }
 
 func (w *WaitEventsTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
+			"action": map[string]any{
+				"type":        "string",
+				"enum":        []string{"wait", "subscribe", "unsubscribe", "subscriptions"},
+				"default":     "wait",
+				"description": "wait: block for a matching event. subscribe: receive these kinds with later tool responses (nothing is delivered without a subscription). unsubscribe: stop receiving them. subscriptions: list active ones.",
+			},
 			"kinds": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": "Event kinds to wait for, e.g. [\"process_exited\", \"file_change\"]. Omit to wait for any event.",
+				"description": "Event kinds, e.g. [\"process_exited\", \"file_change\", \"tool:web_fetch\"]. Required for subscribe; omit when waiting to accept any kind.",
+			},
+			"include_own": map[string]any{
+				"type":        "boolean",
+				"default":     false,
+				"description": "Also receive events caused by your own tool calls. Off by default: your call's result already reported them.",
 			},
 			"sources": map[string]any{
 				"type":        "array",
@@ -78,26 +89,58 @@ func stringList(v any) []string {
 }
 
 func (w *WaitEventsTool) Execute(args map[string]any) Result {
-	kinds := stringList(args["kinds"])
-	sources := stringList(args["sources"])
+	agentID, _ := args["agent_id"].(string)
+	filter := events.Filter{
+		Kinds:      stringList(args["kinds"]),
+		Sources:    stringList(args["sources"]),
+		IncludeOwn: args["include_own"] == true,
+	}
+
+	switch action, _ := args["action"].(string); action {
+	case "subscribe":
+		if len(filter.Kinds) == 0 {
+			return Err("subscribe requires kinds (subscribing to everything is rarely intended)")
+		}
+		events.Subscribe(agentID, filter)
+		return okJSON(map[string]any{
+			"subscribed": filter,
+			"active":     events.Subscriptions(agentID),
+		})
+	case "unsubscribe":
+		removed := events.Unsubscribe(agentID, filter.Kinds)
+		return okJSON(map[string]any{
+			"unsubscribed": removed,
+			"active":       events.Subscriptions(agentID),
+		})
+	case "subscriptions":
+		return okJSON(map[string]any{"active": events.Subscriptions(agentID)})
+	case "", "wait":
+		// fall through to waiting
+	default:
+		return Err("unknown action: " + action)
+	}
+
 	timeoutSeconds := defaultWaitTimeoutSeconds
 	if t, ok := args["timeout"].(float64); ok && int(t) > 0 {
 		timeoutSeconds = clampInt(int(t), 1, maxWaitTimeoutSeconds)
 	}
-	agentID, _ := args["agent_id"].(string)
 
-	matched := events.WaitFor(agentID, kinds, sources, time.Duration(timeoutSeconds)*time.Second)
+	matched := events.WaitFor(agentID, filter, time.Duration(timeoutSeconds)*time.Second)
 
 	payload := map[string]any{
 		"events":     matched,
 		"timed_out":  len(matched) == 0,
 		"waited_for": timeoutSeconds,
 	}
-	// Surface queue overflow instead of losing events silently.
-	if n := events.TakeDropped(agentID); n > 0 {
-		payload["dropped"] = n
+	// Report subscribed events that expired or were trimmed before delivery,
+	// instead of losing them silently.
+	if n := events.TakeMissed(agentID); n > 0 {
+		payload["missed"] = n
 	}
+	return okJSON(payload)
+}
 
+func okJSON(payload map[string]any) Result {
 	out, err := json.Marshal(payload)
 	if err != nil {
 		return Err(fmt.Sprintf("encoding events: %v", err))
