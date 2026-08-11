@@ -58,11 +58,20 @@ class Sandbox:
     def as_agent(self, agent_id: str) -> Sandbox:
         """A handle onto the same sandbox acting as a different agent.
 
-        Shares the backend and tool panel but keeps its own identity, so a
-        subagent gets its own cursor over the event log instead of competing
-        with its parent for the same one.
+        Useful when a subagent should be handed a handle it cannot use under
+        the wrong identity; passing agent_id per call is equally valid and is
+        the simpler choice when one component dispatches for several agents.
+
+        Everything describing the sandbox is shared -- the backend, the tool
+        panel, and the resolved artifact paths, since a binary cached in this
+        sandbox is cached for every identity using it. Only the identity, and
+        therefore the cursor over the event log, differs.
         """
-        return Sandbox(backend=self.backend, tools=self.tools, agent_id=agent_id)
+        clone = Sandbox(backend=self.backend, tools=self.tools, agent_id=agent_id)
+        clone._artifact_paths = self._artifact_paths
+        clone._tools_cache = self._tools_cache
+        clone._container_id = self._container_id
+        return clone
 
     def _whoami(self, agent_id: str = "") -> str:
         """An explicit per-call identity wins over the handle's own."""

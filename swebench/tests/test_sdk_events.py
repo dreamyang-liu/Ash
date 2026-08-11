@@ -164,6 +164,54 @@ def test_as_agent_shares_the_sandbox_but_not_the_identity():
     assert backend.calls[-1][2] == "reviewer", "its own cursor over the log"
 
 
+def test_per_call_identity_is_the_simple_path():
+    # A component dispatching for several agents does not need a handle each:
+    # the identity is a dispatch-time argument, invisible to the tool itself.
+    backend = EventBackend()
+    sb = Sandbox(backend=backend)
+
+    asyncio.run(sb.call("shell", agent_id="parent", command="ls"))
+    asyncio.run(sb.call("shell", agent_id="child", command="ls"))
+    asyncio.run(sb.wait_for_events(agent_id="child"))
+
+    assert [c[2] for c in backend.calls] == ["parent", "child", "child"]
+    # None of it leaked into the arguments the tool sees.
+    assert all("agent_id" not in args for _, args, _ in backend.calls)
+
+
+def test_as_agent_shares_sandbox_state_not_just_the_connection():
+    # Resolved binaries describe the sandbox, not the caller: a second
+    # identity must not re-download what is already cached there.
+    from ash_sandbox import ToolRegistry, parse_manifest
+
+    registry = ToolRegistry()
+    registry.register(parse_manifest({
+        "name": "analyzer", "description": "d",
+        "binary": {"url": "https://example.com/a", "sha256": "c" * 64},
+        "parameters": {"file": {"type": "string", "required": True,
+                                "map": {"positional": 0}}},
+    }))
+
+    class ArtifactBackend(EventBackend):
+        async def call(self, tool_name, args, agent_id=""):
+            self.calls.append((tool_name, dict(args), agent_id))
+            output = "/cache/bin" if tool_name == "artifact" else "ok"
+            return ToolResult(output=output, is_error=False)
+
+    backend = ArtifactBackend()
+    parent = Sandbox(backend=backend, tools=registry, agent_id="parent")
+    asyncio.run(parent.call_agent_tool("analyzer", {"file": "x"}))
+    assert [c[0] for c in backend.calls] == ["artifact", "shell"]
+
+    child = parent.as_agent("child")
+    backend.calls.clear()
+    asyncio.run(child.call_agent_tool("analyzer", {"file": "x"}))
+
+    assert [c[0] for c in backend.calls] == ["shell"], \
+        "a second identity should reuse the sandbox's cached binary"
+    assert backend.calls[0][2] == "child", "but act under its own identity"
+
+
 def test_piggybacked_events_are_available_typed():
     backend = EventBackend(notifications=[TOOL_CALL])
     sb = Sandbox(backend=backend, agent_id="observer")
