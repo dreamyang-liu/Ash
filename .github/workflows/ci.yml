@@ -127,6 +127,10 @@ jobs:
         run: |
           ./ash-runtime --port 19878 &
           sleep 2
+          # Event delivery is opt-in: nothing is retained for an identity that
+          # asked for nothing, so subscribe before producing the event.
+          curl -sf -X POST http://localhost:19878 -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":"wait_for_events","arguments":{"action":"subscribe","kinds":["process_exited"]}}}' > /dev/null
           # Start background process
           PID=$(curl -sf -X POST http://localhost:19878 -H 'Content-Type: application/json' \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"shell","arguments":{"command":"echo bg_done","background":true}}}' | python3 -c "
