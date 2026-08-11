@@ -67,6 +67,39 @@ def test_argv_compilation_order_and_defaults():
     assert "--verbose" not in argv
 
 
+def test_boolean_behind_a_flag_is_a_switch_by_default():
+    # The obvious manifest -- boolean + flag, no style -- used to compile to
+    # "--fix True", and a tool reads that stray "True" as a filename.
+    spec = parse_manifest(make_manifest(parameters={
+        "path": {"type": "string", "required": True, "map": {"positional": 0}},
+        "fix": {"type": "boolean", "map": {"flag": "--fix"}},
+    }))
+    assert spec.compile_argv("/bin/ruff", {"path": "src/", "fix": True}) == \
+        ["/bin/ruff", "--fix", "src/"]
+    assert spec.compile_argv("/bin/ruff", {"path": "src/", "fix": False}) == \
+        ["/bin/ruff", "src/"]
+
+
+def test_value_style_renders_booleans_the_way_a_cli_reads_them():
+    # For the rare --flag=true interface, opting out must still not emit
+    # Python's "True": no CLI or JSON parser accepts it.
+    spec = parse_manifest(make_manifest(parameters={
+        "color": {"type": "boolean", "map": {"flag": "--color", "style": "value"}},
+        "shown": {"type": "boolean", "map": {"positional": 0}},
+    }))
+    assert spec.compile_argv("/b", {"color": True, "shown": False}) == \
+        ["/b", "--color", "true", "false"]
+
+
+def test_unknown_style_is_rejected_at_parse_time():
+    # A typo would otherwise silently fall through to value style and surface
+    # as a stray argument at runtime, far from the manifest.
+    with pytest.raises(ManifestError, match="unknown style"):
+        parse_manifest(make_manifest(parameters={
+            "v": {"type": "boolean", "map": {"flag": "-v", "style": "swtich"}},
+        }))
+
+
 def test_injection_is_inert():
     spec = parse_manifest(make_manifest())
     evil = "x; rm -rf / #"

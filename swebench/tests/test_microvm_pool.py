@@ -199,3 +199,69 @@ def test_microvm_pool_satisfies_the_pool_interface():
     for name in ("spawn", "destroy", "destroy_all", "list", "close",
                  "pause", "resume", "fork"):
         assert hasattr(pool, name)
+
+
+def test_spawn_binds_an_identity_to_the_handle(aenv):
+    # A pool-provisioned sandbox must be able to come out named. Without this
+    # every agent reaches the runtime anonymously and they share one cursor
+    # over the event log, silently splitting events between them.
+    pool = MicroVMPool(aenv)
+
+    async def scenario():
+        sb = await pool.spawn(agent_id="reviewer")
+        await sb.call("shell", command="true")
+        await pool.close()
+
+    asyncio.run(scenario())
+    tool_calls = [body for m, p, body, _ in FakeAenv.requests
+                  if m == "POST" and p.rstrip("/") == ""]
+    assert tool_calls, "no proxied tool call was made"
+    params = tool_calls[0]["params"]
+    assert params["agent_id"] == "reviewer"
+    # Identity is transport plumbing, not something the tool (or a model
+    # reading the call) should see among the arguments.
+    assert "agent_id" not in params.get("arguments", {})
+
+
+def test_spawn_without_an_identity_stays_anonymous(aenv):
+    # The parameter is optional: a single-agent sandbox need not name anyone.
+    pool = MicroVMPool(aenv)
+
+    async def scenario():
+        sb = await pool.spawn()
+        assert sb.agent_id == ""
+        await pool.close()
+
+    asyncio.run(scenario())
+
+
+def test_forked_children_inherit_the_source_identity(aenv):
+    # A fork is a separate VM with its own event log, so children may reuse
+    # the name without competing for a cursor.
+    pool = MicroVMPool(aenv)
+
+    async def scenario():
+        parent = await pool.spawn(agent_id="explorer")
+        children = await pool.fork(parent, count=2)
+        assert [c.agent_id for c in children] == ["explorer", "explorer"]
+
+        # ...unless the branches should be distinguishable in traces.
+        named = await pool.fork(parent, count=2, agent_ids=["branch-a", "branch-b"])
+        assert [c.agent_id for c in named] == ["branch-a", "branch-b"]
+        await pool.close()
+
+    asyncio.run(scenario())
+
+
+def test_pool_contract_carries_identity():
+    # Python's ABC checks method names, not signatures, so an implementation
+    # can silently drop a parameter. Assert the contract explicitly.
+    import inspect
+
+    from ash_sandbox import SandboxPool
+
+    for cls in (Pool, DockerPool, MicroVMPool, SandboxPool):
+        params = inspect.signature(cls.spawn).parameters
+        assert "agent_id" in params, f"{cls.__name__}.spawn lost agent_id"
+        assert params["agent_id"].default == "", \
+            f"{cls.__name__}.spawn should make agent_id optional"

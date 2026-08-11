@@ -241,8 +241,9 @@ def test_a_new_pool_needs_only_the_three_abstract_steps():
         def __init__(self):
             self._sandboxes = {}
 
-        async def spawn(self, image=None, entrypoint=None, env=None, resources=None):
-            sb = Sandbox(backend=FakeBackend())
+        async def spawn(self, image=None, entrypoint=None, env=None,
+                        resources=None, agent_id=""):
+            sb = Sandbox(backend=FakeBackend(), agent_id=agent_id)
             sb._container_id = f"sb-{len(self._sandboxes)}"
             self._sandboxes[sb._container_id] = sb
             return sb

@@ -33,8 +33,19 @@ class Pool(ABC):
         entrypoint: str | None = None,
         env: dict[str, str] | None = None,
         resources: dict | None = None,
+        agent_id: str = "",
     ) -> Sandbox:
-        """Obtain a new sandbox."""
+        """Obtain a new sandbox.
+
+        agent_id binds the returned handle's identity, so every call made
+        through it is attributed to that agent. Worth passing whenever more
+        than one agent will share the sandbox: the runtime keeps a per-identity
+        cursor over the event log and anonymous callers share one, so two
+        unnamed agents silently split events between them.
+
+        Ids need only be distinct within a sandbox -- each runtime owns its own
+        event log -- so one agent per sandbox may reuse the same name.
+        """
 
     @abstractmethod
     async def destroy(self, *sandboxes: Sandbox) -> None:
@@ -116,6 +127,7 @@ class DockerPool(Pool):
         entrypoint: str | None = None,
         env: dict[str, str] | None = None,
         resources: dict | None = None,
+        agent_id: str = "",
     ) -> Sandbox:
         """Spawn a new sandbox.
 
@@ -124,6 +136,7 @@ class DockerPool(Pool):
             entrypoint: Setup command run before ash-runtime starts.
             env: Environment variables for the container.
             resources: {"cpu": "2", "memory": "4g"} — mapped to Docker limits.
+            agent_id: Identity bound to the returned handle (see Pool.spawn).
         """
         host_port = _find_free_port()
 
@@ -173,7 +186,8 @@ class DockerPool(Pool):
             raise RuntimeError(f"docker run failed: {result.stderr}")
 
         container_id = result.stdout.strip()
-        sb = Sandbox(backend=HTTPBackend(f"http://localhost:{host_port}"))
+        sb = Sandbox(backend=HTTPBackend(f"http://localhost:{host_port}"),
+                     agent_id=agent_id)
         sb._container_id = container_id
         self._sandboxes[container_id] = sb
 
@@ -253,6 +267,7 @@ class MicroVMPool(Pool):
         entrypoint: str | None = None,
         env: dict[str, str] | None = None,
         resources: dict | None = None,
+        agent_id: str = "",
     ) -> Sandbox:
         """Start a microVM from a template and attach to its runtime."""
         payload: dict = {"templateID": image or self.default_template}
@@ -265,7 +280,7 @@ class MicroVMPool(Pool):
 
         resp = await self._client.post(f"{self.server_url}/sandboxes", json=payload)
         resp.raise_for_status()
-        return self._attach(_sandbox_id(resp.json()))
+        return self._attach(_sandbox_id(resp.json()), agent_id)
 
     async def destroy(self, *sandboxes: Sandbox) -> None:
         for sb in sandboxes:
@@ -294,12 +309,18 @@ class MicroVMPool(Pool):
         """Restore a paused VM from its snapshot."""
         await self._post_state(sandbox, "resume")
 
-    async def fork(self, sandbox: Sandbox, count: int = 1) -> list[Sandbox]:
+    async def fork(self, sandbox: Sandbox, count: int = 1,
+                   agent_ids: list[str] | None = None) -> list[Sandbox]:
         """Split a running VM into `count` copies of its current state.
 
         Useful for speculative work: every branch starts from the same
         prepared environment without repeating the setup that produced it.
         The source keeps running.
+
+        Each child inherits the source's identity unless `agent_ids` names them
+        individually. Inheriting is safe because a fork is a separate VM with
+        its own event log, so two children called "worker" do not compete for a
+        cursor -- pass agent_ids when the branches need telling apart in traces.
         """
         sid = _require_id(sandbox)
         resp = await self._client.post(
@@ -307,18 +328,24 @@ class MicroVMPool(Pool):
         resp.raise_for_status()
         body = resp.json()
         children = body.get("sandboxes") or body.get("children") or []
-        return [self._attach(_sandbox_id(child)) for child in children]
+        return [
+            self._attach(
+                _sandbox_id(child),
+                agent_ids[i] if agent_ids and i < len(agent_ids) else sandbox.agent_id,
+            )
+            for i, child in enumerate(children)
+        ]
 
     # --- Internals ---
 
-    def _attach(self, sandbox_id: str) -> Sandbox:
+    def _attach(self, sandbox_id: str, agent_id: str = "") -> Sandbox:
         """Wrap an AgentENV sandbox id as a Sandbox reachable via the proxy."""
         sb = Sandbox(backend=GatewayBackend(
             self.server_url, sandbox_id,
             sandbox_id_header=self.SANDBOX_ID_HEADER,
             target_port=self.runtime_port,
             target_port_header=self.TARGET_PORT_HEADER,
-        ))
+        ), agent_id=agent_id)
         sb._container_id = sandbox_id
         self._sandboxes[sandbox_id] = sb
         return sb
@@ -360,6 +387,7 @@ class SandboxPool(Pool):
         entrypoint: str | None = None,
         env: dict[str, str] | None = None,
         resources: dict | None = None,
+        agent_id: str = "",
     ) -> Sandbox:
         """Spawn a new sandbox.
 
@@ -368,6 +396,7 @@ class SandboxPool(Pool):
             entrypoint: Setup command run before ash-runtime starts.
             env: Environment variables for the container.
             resources: {"cpu": "1", "memory": "2Gi"} — K8s resource requests.
+            agent_id: Identity bound to the returned handle (see Pool.spawn).
         """
         body: dict[str, Any] = {
             "image": image or self.default_image,
@@ -387,7 +416,8 @@ class SandboxPool(Pool):
         data = resp.json()
 
         sandbox_id = data["uuid"]
-        sb = Sandbox(backend=GatewayBackend(self.gateway_url, sandbox_id))
+        sb = Sandbox(backend=GatewayBackend(self.gateway_url, sandbox_id),
+                     agent_id=agent_id)
         sb._container_id = sandbox_id
         self._sandboxes[sandbox_id] = sb
 

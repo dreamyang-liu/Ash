@@ -138,15 +138,26 @@ class CustomToolSpec:
                 continue
             value = resolved[p.name]
             if p.positional is not None:
-                positionals.append((p.positional, str(value)))
+                positionals.append((p.positional, _as_argv(value)))
             elif p.switch:
                 if value is True:
                     flags.append(p.flag)  # presence only
             elif p.flag:
-                flags.extend([p.flag, str(value)])
+                flags.extend([p.flag, _as_argv(value)])
 
         positionals.sort(key=lambda t: t[0])
         return [binary_path, *flags, *[v for _, v in positionals]]
+
+
+def _as_argv(value) -> str:
+    """Render one argument the way a command-line tool expects to read it.
+
+    Python's str() gives "True", which no CLI or JSON parser accepts; every
+    other type is already faithful.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 def parse_manifest(raw: dict) -> CustomToolSpec:
@@ -187,7 +198,20 @@ def parse_manifest(raw: dict) -> CustomToolSpec:
         mapping = praw.get("map") or {}
         positional = mapping.get("positional")
         flag = mapping.get("flag")
-        switch = mapping.get("style") == "switch"
+        # A boolean behind a flag is a switch: the flag's presence *is* the
+        # value, so "--fix" rather than "--fix True". Requiring an explicit
+        # style: switch meant the obvious manifest emitted a literal "True" as
+        # a separate argument, which most tools then read as a filename.
+        # style: value opts out, for the rare --flag=true interface.
+        style = mapping.get("style")
+        if style is not None and style not in ("switch", "value"):
+            # A typo would otherwise fall through to value style and emit a
+            # stray "True" argument at runtime, far from the manifest.
+            raise ManifestError(
+                f"{name}.{pname}: unknown style {style!r} (switch|value)")
+        switch = style == "switch" or (
+            style is None and ptype == "boolean" and flag is not None
+        )
         if (positional is None) == (flag is None):
             raise ManifestError(
                 f"{name}.{pname}: map must set exactly one of positional/flag"

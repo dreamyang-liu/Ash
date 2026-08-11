@@ -22,9 +22,14 @@ binary:
 parameters:
   file:      {type: string, required: true, map: {positional: 0}}
   threshold: {type: integer, default: 10, map: {flag: "--threshold"}}
-  verbose:   {type: boolean, map: {flag: "--verbose", style: switch}}
+  verbose:   {type: boolean, map: {flag: "--verbose"}}
 timeout: 30                           # seconds, max 600
 ```
+
+A boolean behind a flag is a switch: `verbose: true` emits `--verbose` and
+`false` emits nothing. Add `style: value` for the rare tool that wants
+`--flag true` instead. Anything else in `style` is rejected when the manifest
+is parsed, rather than becoming a stray argument at run time.
 
 How it executes: url-sourced binaries are downloaded once (cached by
 sha256, hash-verified before install); path-sourced binaries run directly

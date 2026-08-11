@@ -40,20 +40,31 @@ class Sandbox:
 
     # --- Constructors ---
 
+    # Each constructor takes the same two optional extras as the dataclass:
+    # `agent_id` (who this handle acts as) and `tools` (the manifest-defined
+    # tools reachable through it). Without the latter, a caller holding a
+    # registry would have to build the backend by hand just to attach it.
+
     @classmethod
-    def connect(cls, url: str, agent_id: str = "") -> Sandbox:
+    def connect(cls, url: str, agent_id: str = "",
+                tools: ToolRegistry | None = None) -> Sandbox:
         """Connect to a running ash-runtime via HTTP."""
-        return cls(backend=HTTPBackend(url), agent_id=agent_id)
+        return cls(backend=HTTPBackend(url), agent_id=agent_id,
+                   tools=tools or ToolRegistry())
 
     @classmethod
-    def mcp(cls, url: str, agent_id: str = "") -> Sandbox:
+    def mcp(cls, url: str, agent_id: str = "",
+            tools: ToolRegistry | None = None) -> Sandbox:
         """Connect via MCP protocol."""
-        return cls(backend=MCPBackend(url), agent_id=agent_id)
+        return cls(backend=MCPBackend(url), agent_id=agent_id,
+                   tools=tools or ToolRegistry())
 
     @classmethod
-    def local(cls, bin_path: str | None = None, agent_id: str = "") -> Sandbox:
+    def local(cls, bin_path: str | None = None, agent_id: str = "",
+              tools: ToolRegistry | None = None) -> Sandbox:
         """Use CLI backend — no server needed, calls binary directly."""
-        return cls(backend=CLIBackend(bin_path), agent_id=agent_id)
+        return cls(backend=CLIBackend(bin_path), agent_id=agent_id,
+                   tools=tools or ToolRegistry())
 
     def as_agent(self, agent_id: str) -> Sandbox:
         """A handle onto the same sandbox acting as a different agent.
@@ -90,6 +101,7 @@ class Sandbox:
         runtime_bin: str | None = None,
         docker_args: list[str] | None = None,
         agent_id: str = "",
+        tools: ToolRegistry | None = None,
     ) -> Sandbox:
         """Spawn a Docker container with ash-runtime injected."""
         if runtime_bin is None:
@@ -112,7 +124,8 @@ class Sandbox:
 
         container_id = result.stdout.strip()
         url = f"http://localhost:{host_port}"
-        sb = cls(backend=HTTPBackend(url), agent_id=agent_id)
+        sb = cls(backend=HTTPBackend(url), agent_id=agent_id,
+                 tools=tools or ToolRegistry())
         sb._container_id = container_id
 
         await sb._wait_ready()
