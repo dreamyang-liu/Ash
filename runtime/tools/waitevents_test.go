@@ -200,6 +200,49 @@ func TestSubscribeAndUnsubscribeActions(t *testing.T) {
 	}
 }
 
+func TestZeroTimeoutPollsWithoutBlocking(t *testing.T) {
+	drainAll(t)
+	t.Cleanup(func() { drainAll(t) })
+
+	// An explicit 0 means "whatever is already there". Treating it as unset
+	// would fall back to the default and block for half a minute.
+	start := time.Now()
+	p := runWait(t, map[string]any{"kinds": []any{"never_happens"}, "timeout": float64(0)})
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("a zero timeout must not block, took %v", elapsed)
+	}
+	if !p.TimedOut || len(p.Events) != 0 {
+		t.Fatalf("expected an empty result, got %+v", p)
+	}
+	if p.WaitedFor != 0 {
+		t.Errorf("waited_for should report 0, got %d", p.WaitedFor)
+	}
+}
+
+func TestZeroTimeoutStillReturnsQueuedEvents(t *testing.T) {
+	drainAll(t)
+	t.Cleanup(func() { drainAll(t) })
+
+	events.Push("file_change", "/tmp/x", map[string]any{"path": "/tmp/x"})
+
+	p := runWait(t, map[string]any{"kinds": []any{"file_change"}, "timeout": float64(0)})
+	if len(p.Events) != 1 {
+		t.Fatalf("polling should take what is already available, got %+v", p)
+	}
+}
+
+func TestNegativeTimeoutFallsBackToTheDefault(t *testing.T) {
+	drainAll(t)
+	t.Cleanup(func() { drainAll(t) })
+
+	// Nonsense input should not be honoured as a duration.
+	events.Push("file_change", "/tmp/x", nil)
+	p := runWait(t, map[string]any{"kinds": []any{"file_change"}, "timeout": float64(-5)})
+	if p.WaitedFor != defaultWaitTimeoutSeconds {
+		t.Errorf("negative timeout should use the default, got %d", p.WaitedFor)
+	}
+}
+
 func TestWaitEventsRegistered(t *testing.T) {
 	if Find("wait_for_events") == nil {
 		t.Fatal("wait_for_events should be registered in All()")

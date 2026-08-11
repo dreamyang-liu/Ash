@@ -120,9 +120,12 @@ func (w *WaitEventsTool) Execute(args map[string]any) Result {
 		return Err("unknown action: " + action)
 	}
 
+	// A timeout of 0 is meaningful: check what is already there and return.
+	// Treating it as "unset" would silently block for the default instead,
+	// turning a poll into a 30-second wait.
 	timeoutSeconds := defaultWaitTimeoutSeconds
-	if t, ok := args["timeout"].(float64); ok && int(t) > 0 {
-		timeoutSeconds = clampInt(int(t), 1, maxWaitTimeoutSeconds)
+	if t, ok := args["timeout"].(float64); ok && int(t) >= 0 {
+		timeoutSeconds = clampInt(int(t), 0, maxWaitTimeoutSeconds)
 	}
 
 	matched := events.WaitFor(agentID, filter, time.Duration(timeoutSeconds)*time.Second)
