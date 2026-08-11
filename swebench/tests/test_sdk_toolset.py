@@ -219,6 +219,68 @@ def test_prepare_tools_handles_image_local_binaries():
     assert backend.calls == []
 
 
+def test_both_pools_share_one_interface():
+    from ash_sandbox import DockerPool, Pool, SandboxPool
+
+    assert issubclass(DockerPool, Pool)
+    assert issubclass(SandboxPool, Pool)
+    # The shared surface a harness may rely on regardless of where sandboxes
+    # come from.
+    for name in ("spawn", "destroy", "destroy_all", "list", "close",
+                 "__aenter__", "__aexit__"):
+        assert hasattr(DockerPool, name), f"DockerPool missing {name}"
+        assert hasattr(SandboxPool, name), f"SandboxPool missing {name}"
+
+
+def test_a_new_pool_needs_only_the_three_abstract_steps():
+    from ash_sandbox import Pool
+
+    class FakePool(Pool):
+        """What a future backend (microVM, remote host) has to supply."""
+
+        def __init__(self):
+            self._sandboxes = {}
+
+        async def spawn(self, image=None, entrypoint=None, env=None, resources=None):
+            sb = Sandbox(backend=FakeBackend())
+            sb._container_id = f"sb-{len(self._sandboxes)}"
+            self._sandboxes[sb._container_id] = sb
+            return sb
+
+        async def destroy(self, *sandboxes):
+            for sb in sandboxes:
+                self._sandboxes.pop(sb._container_id, None)
+
+        async def destroy_all(self):
+            self._sandboxes.clear()
+
+    pool = FakePool()
+
+    async def scenario():
+        async with pool:
+            a = await pool.spawn()
+            await pool.spawn()
+            assert len(pool.list()) == 2       # bookkeeping comes from the base
+            await pool.destroy(a)
+            assert len(pool.list()) == 1
+        return pool.list()
+
+    # close() (via the context manager) tears the rest down.
+    assert asyncio.run(scenario()) == []
+
+
+def test_incomplete_pool_cannot_be_instantiated():
+    from ash_sandbox import Pool
+
+    class Missing(Pool):
+        async def spawn(self, image=None, entrypoint=None, env=None, resources=None):
+            ...
+        # destroy / destroy_all not implemented
+
+    with pytest.raises(TypeError):
+        Missing()
+
+
 class IdentityBackend(FakeBackend):
     """Records the agent_id each call arrived with."""
 

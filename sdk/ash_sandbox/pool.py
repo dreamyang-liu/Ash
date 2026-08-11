@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from abc import ABC, abstractmethod
 import shutil
 import subprocess
 from typing import Any
@@ -12,7 +13,52 @@ from .result import ToolResult
 from .sandbox import Sandbox, _find_free_port
 
 
-class DockerPool:
+class Pool(ABC):
+    """A source of sandboxes.
+
+    Implementations differ in where a sandbox comes from -- a local Docker
+    daemon, a control plane, a microVM host later on -- but a harness that
+    only needs "give me a sandbox, and tear it down afterwards" should not
+    have to know which. Bookkeeping lives here so an implementation supplies
+    just the create and remove steps for its own transport.
+    """
+
+    #: Live sandboxes by id, maintained by implementations.
+    _sandboxes: dict[str, Sandbox]
+
+    @abstractmethod
+    async def spawn(
+        self,
+        image: str | None = None,
+        entrypoint: str | None = None,
+        env: dict[str, str] | None = None,
+        resources: dict | None = None,
+    ) -> Sandbox:
+        """Obtain a new sandbox."""
+
+    @abstractmethod
+    async def destroy(self, *sandboxes: Sandbox) -> None:
+        """Tear down specific sandboxes."""
+
+    @abstractmethod
+    async def destroy_all(self) -> None:
+        """Tear down everything this pool created."""
+
+    def list(self) -> list[Sandbox]:
+        """Sandboxes this pool currently holds."""
+        return list(self._sandboxes.values())
+
+    async def close(self) -> None:
+        await self.destroy_all()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        await self.close()
+
+
+class DockerPool(Pool):
     """Manages multiple sandboxes locally via Docker."""
 
     BOOTSTRAP_URL = "https://raw.githubusercontent.com/dreamyang-liu/Ash/main/runtime/bootstrap.sh"
@@ -92,9 +138,11 @@ class DockerPool:
         await sb._wait_ready(timeout=60)
         return sb
 
-    async def destroy(self, sandbox: Sandbox):
-        cid = sandbox._container_id
-        if cid and cid in self._sandboxes:
+    async def destroy(self, *sandboxes: Sandbox) -> None:
+        for sandbox in sandboxes:
+            cid = sandbox._container_id
+            if not cid or cid not in self._sandboxes:
+                continue
             proc = await asyncio.create_subprocess_exec(
                 "docker", "rm", "-f", cid,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -114,20 +162,8 @@ class DockerPool:
             await proc.wait()
         self._sandboxes.clear()
 
-    def list(self) -> list[Sandbox]:
-        return list(self._sandboxes.values())
 
-    async def close(self):
-        await self.destroy_all()
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_):
-        await self.close()
-
-
-class SandboxPool:
+class SandboxPool(Pool):
     """Manages multiple sandboxes via K8s control-plane + gateway."""
 
     def __init__(self, control_plane_url: str, gateway_url: str, default_image: str = "ubuntu:24.04"):
@@ -194,12 +230,6 @@ class SandboxPool:
         await self._client.request("DELETE", f"{self.control_plane_url}/destroy", json={"all": True})
         self._sandboxes.clear()
 
-    async def close(self):
+    async def close(self) -> None:
         await self.destroy_all()
         await self._client.aclose()
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_):
-        await self.close()
