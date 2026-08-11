@@ -122,6 +122,16 @@ func truncateModeArg(args map[string]any) truncateMode {
 	return envTruncateMode
 }
 
+// hasTruncateModeArg reports whether the caller named a mode explicitly, so a
+// tool can pick a better default without overriding a stated preference.
+func hasTruncateModeArg(args map[string]any) bool {
+	s, ok := args["truncate_mode"].(string)
+	return ok && s != ""
+}
+
+// tailOnlyMode keeps the whole budget at the end of the output.
+var tailOnlyMode = truncateMode{tailWeight: 1}
+
 // BoundedLog stores command output with a fixed memory ceiling. Once the
 // output exceeds the limit, Render keeps the head and tail sections in the
 // proportion given by its truncate mode.

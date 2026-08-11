@@ -19,7 +19,10 @@ func (p *ProcessTool) Schema() map[string]any {
 		"properties": map[string]any{
 			"pid":    map[string]any{"type": "string", "description": "Process ID from shell(background=true)"},
 			"action": map[string]any{"type": "string", "enum": []string{"read", "kill"}, "description": "read: get current bounded output snapshot. kill: terminate."},
-			"tail":   map[string]any{"type": "integer", "description": "Only return last N lines from each stream (read only)"},
+			"tail": map[string]any{
+				"type":        "integer",
+				"description": "Return only the last N lines from each stream (read only). Applied to what the process captured, which was bounded by the max_output_bytes and truncate_mode given when it was started.",
+			},
 		},
 		"required": []string{"pid", "action"},
 	}

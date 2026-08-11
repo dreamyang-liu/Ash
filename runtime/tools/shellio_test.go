@@ -109,6 +109,47 @@ func TestShellEnvValidation(t *testing.T) {
 	}
 }
 
+func TestTailImpliesTailOnlyCapture(t *testing.T) {
+	// Output far exceeding the budget. With the default H2T3 the capture
+	// would spend 40% of the budget on the beginning, which `tail` then
+	// discards -- so asking for the last lines should switch the capture to
+	// the tail.
+	args := map[string]any{
+		"command":          "seq 1 200000",
+		"max_output_bytes": float64(4096),
+		"tail":             float64(5),
+	}
+	r := runShell(t, args)
+	if !r.Success {
+		t.Fatalf("command failed: %s", r.Error)
+	}
+	// The last lines of the whole output must be present, not the last lines
+	// of a head-biased capture.
+	if !strings.Contains(r.Output, "200000") {
+		t.Errorf("tail should show the end of the output, got:\n%s", r.Output)
+	}
+	if strings.Contains(r.Output, "\n     1\n") || strings.HasPrefix(strings.TrimSpace(r.Output), "1\n") {
+		t.Errorf("head content should not survive a tail request, got:\n%s", r.Output)
+	}
+}
+
+func TestExplicitTruncateModeBeatsTailDefault(t *testing.T) {
+	// A stated preference wins: H1 keeps the beginning even with tail set,
+	// so the last captured lines are early lines.
+	r := runShell(t, map[string]any{
+		"command":          "seq 1 200000",
+		"max_output_bytes": float64(4096),
+		"tail":             float64(5),
+		"truncate_mode":    "H1",
+	})
+	if !r.Success {
+		t.Fatalf("command failed: %s", r.Error)
+	}
+	if strings.Contains(r.Output, "200000") {
+		t.Errorf("explicit H1 should not keep the end of the output, got:\n%s", r.Output)
+	}
+}
+
 func TestShellStdinAndEnvWorkInBackground(t *testing.T) {
 	r := runShell(t, map[string]any{
 		"command":    "cat; echo \"env=$BG_VAR\"",
