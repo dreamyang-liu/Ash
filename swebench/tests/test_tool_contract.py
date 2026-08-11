@@ -22,6 +22,7 @@ EXPECTED_TOOL_NAMES = [
     "process",
     "web_fetch",
     "web_search",
+    "wait_for_events",
 ]
 
 RUNTIME_TOOL_NAMES = {
@@ -31,6 +32,7 @@ RUNTIME_TOOL_NAMES = {
     "process",
     "web_fetch",
     "web_search",
+    "wait_for_events",
 }
 
 EXPECTED_REQUIRED = {
@@ -40,6 +42,7 @@ EXPECTED_REQUIRED = {
     "process": ["pid", "action"],
     "web_fetch": ["url"],
     "web_search": ["query"],
+    "wait_for_events": [],
 }
 
 ROOT_SCHEMA_KEYS = {"type", "properties", "required", "description"}
@@ -101,6 +104,7 @@ RUNTIME_REQUIRED = {
     "process": ["pid", "action"],
     "web_fetch": ["url"],
     "web_search": ["query"],
+    "wait_for_events": [],
 }
 
 
@@ -175,9 +179,12 @@ def test_process_and_shell_descriptions_match_runtime_log_contract():
 
     assert "current bounded output snapshot" in functions["process"]["description"]
     assert "max_output_bytes" in functions["shell"]["parameters"]["properties"]
+    # The head/tail split is described by truncate_mode; max_output_bytes
+    # only carries the total budget.
+    assert "truncate_mode" in functions["shell"]["parameters"]["properties"]
     assert (
         "first 40% and last 60%"
-        in functions["shell"]["parameters"]["properties"]["max_output_bytes"]["description"]
+        in functions["shell"]["parameters"]["properties"]["truncate_mode"]["description"]
     )
 
 
@@ -186,7 +193,7 @@ class FakeBackend(Backend):
         self.tools = tools
         self.list_calls = 0
 
-    async def call(self, tool_name: str, args: dict) -> ToolResult:
+    async def call(self, tool_name: str, args: dict, agent_id: str = "") -> ToolResult:
         return ToolResult(output=f"{tool_name}:{args}", is_error=False)
 
     async def list_tools(self) -> list[dict]:

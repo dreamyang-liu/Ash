@@ -275,12 +275,13 @@ class BestOfNHarness(BaseHarness):
             if not session.create(image):
                 return Candidate(index=index, patch="", exit_status="session_failed")
             cfg = self._agent_config(c, temp)
+            agent_id = f"candidate-{index}"
             agent = AshAgent(
                 cfg,
-                executor=session.execute,
+                executor=session.executor_for(agent_id),
                 trace_dir=trace_dir,
                 run_id=run_id,
-                agent_id=f"candidate-{index}",
+                agent_id=agent_id,
                 sandbox_id=session.sandbox_id,
             )
             agent.stream = False

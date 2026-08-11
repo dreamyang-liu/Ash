@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dreamyang-liu/ash/runtime/events"
@@ -44,13 +47,30 @@ func (s *ShellTool) Schema() map[string]any {
 			"command":    map[string]any{"type": "string", "description": "Shell command to execute"},
 			"background": map[string]any{"type": "boolean", "default": false, "description": "Run in background, returns pid"},
 			"timeout":    map[string]any{"type": "integer", "default": 300, "description": "Timeout in seconds"},
-			"tail":       map[string]any{"type": "integer", "description": "Only return last N lines of output"},
+			"tail": map[string]any{
+				"type":        "integer",
+				"description": "Return only the last N lines of each stream. Applied after the byte budget, so if the command produced more than max_output_bytes these are the last N lines of what was captured. Setting this makes the capture keep the tail of the output (truncate_mode T1) unless you name a mode yourself.",
+			},
 			"max_output_bytes": map[string]any{
 				"type":        "integer",
 				"default":     defaultMaxOutputBytes,
-				"description": "Maximum captured bytes per output stream. Larger output keeps the first 40% and last 60%.",
+				"description": "Total captured bytes per output stream. Larger output is truncated per truncate_mode.",
+			},
+			"truncate_mode": map[string]any{
+				"type":        "string",
+				"default":     defaultTruncateMode,
+				"description": "How to divide the byte budget when output is too long: \"H<n>T<n>\" with weights for the head and tail sections. H2T3 keeps the first 40% and last 60%; T1 keeps only the tail (useful for build/test errors); H1 keeps only the beginning.",
 			},
 			"working_dir": map[string]any{"type": "string", "description": "Working directory"},
+			"stdin": map[string]any{
+				"type":        "string",
+				"description": "Data to feed the command on standard input, then close it. Lets you run 'python -', 'patch -p1', or 'sh -s' without first writing a temporary file.",
+			},
+			"env": map[string]any{
+				"type":                 "object",
+				"additionalProperties": map[string]any{"type": "string"},
+				"description":          "Extra environment variables, e.g. {\"PYTHONPATH\": \"/testbed\"}. Added to the existing environment rather than replacing it. Prefer this over a 'KEY=value cmd' prefix: values needing quotes or spaces are handled correctly.",
+			},
 		},
 		"required": []string{"command"},
 	}
@@ -73,26 +93,138 @@ func (s *ShellTool) Execute(args map[string]any) Result {
 	}
 	workingDir, _ := args["working_dir"].(string)
 	maxOutputBytes := outputBytesArg(args)
+	mode := truncateModeArg(args)
+	// Asking for the last N lines means the head of the output is going to be
+	// discarded at render time, so spending part of the byte budget keeping it
+	// would be waste. An explicit truncate_mode still wins.
+	if tail > 0 && !hasTruncateModeArg(args) {
+		mode = tailOnlyMode
+	}
+	stdin, _ := args["stdin"].(string)
+	env, err := envArg(args)
+	if err != nil {
+		return Err(err.Error())
+	}
 
 	agentID, _ := args["agent_id"].(string)
 
-	if background {
-		return s.runBackground(command, workingDir, agentID, maxOutputBytes)
+	opts := runOpts{
+		workingDir:     workingDir,
+		stdin:          stdin,
+		env:            env,
+		maxOutputBytes: maxOutputBytes,
+		mode:           mode,
 	}
-	return s.runSync(command, workingDir, timeout, tail, maxOutputBytes)
+	if background {
+		return s.runBackground(command, agentID, opts)
+	}
+	return s.runSync(command, timeout, tail, opts)
 }
 
-func (s *ShellTool) runSync(command, workingDir string, timeout, tail int, maxOutputBytes int) Result {
+// runOpts carries the shared per-call execution settings, so adding another
+// one does not mean threading a new parameter through both run paths.
+type runOpts struct {
+	workingDir     string
+	stdin          string
+	env            []string // extra KEY=VALUE entries, appended to the host env
+	maxOutputBytes int
+	mode           truncateMode
+}
+
+// apply wires the options onto a command, leaving stdout/stderr to the caller.
+func (o runOpts) apply(cmd *exec.Cmd) {
+	if o.workingDir != "" {
+		cmd.Dir = o.workingDir
+	}
+	if o.stdin != "" {
+		cmd.Stdin = strings.NewReader(o.stdin)
+	}
+	if len(o.env) > 0 {
+		// Append rather than replace: an agent that wanted PYTHONPATH set
+		// should not lose PATH and break every subsequent command.
+		cmd.Env = append(os.Environ(), o.env...)
+	}
+}
+
+// envArg converts the env object into KEY=VALUE entries. Passing them
+// structurally avoids the quoting hazards of prefixing the command string.
+func envArg(args map[string]any) ([]string, error) {
+	raw, ok := args["env"].(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	out := make([]string, 0, len(raw))
+	for k, v := range raw {
+		if k == "" || strings.ContainsAny(k, "=\x00") {
+			return nil, fmt.Errorf("invalid env name: %q", k)
+		}
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("env value for %q must be a string", k)
+		}
+		if strings.ContainsRune(s, 0) {
+			return nil, fmt.Errorf("env value for %q must not contain NUL", k)
+		}
+		out = append(out, k+"="+s)
+	}
+	sort.Strings(out) // deterministic for traces and tests
+	return out, nil
+}
+
+// setProcessGroup puts the command in its own process group, so the whole job
+// can be signalled later. Killing only the direct child left grandchildren
+// running -- and a `cmd &` or a pipeline is the usual shape of a long job --
+// which also held the output pipes open and stalled cmd.Wait() indefinitely.
+func setProcessGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+
+// killProcessGroup signals the entire job, falling back to the direct child if
+// the group is already gone.
+func killProcessGroup(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	// Negative pid means "the group with this leader". Setpgid made the child
+	// its own leader, so this reaches its descendants too.
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
+// waitExitCode reports how a command ended, using the shell convention a
+// caller already knows: 128+signal for a signalled death. Go's ExitCode()
+// returns -1 there, which says only "not a normal exit" -- and it collided
+// with the -9 that kill used to write itself, so the same process could report
+// two different codes depending on which happened last.
+func waitExitCode(cmd *exec.Cmd) int {
+	err := cmd.Wait()
+	if err == nil {
+		return 0
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		return 1
+	}
+	if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return 128 + int(status.Signal())
+	}
+	return exitErr.ExitCode()
+}
+
+func (s *ShellTool) runSync(command string, timeout, tail int, opts runOpts) Result {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	if workingDir != "" {
-		cmd.Dir = workingDir
-	}
+	setProcessGroup(cmd)
+	opts.apply(cmd)
 
-	stdout := NewBoundedLog(maxOutputBytes)
-	stderr := NewBoundedLog(maxOutputBytes)
+	stdout := NewBoundedLogMode(opts.maxOutputBytes, opts.mode)
+	stderr := NewBoundedLogMode(opts.maxOutputBytes, opts.mode)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -111,19 +243,18 @@ func (s *ShellTool) runSync(command, workingDir string, timeout, tail int, maxOu
 	return Ok(output)
 }
 
-func (s *ShellTool) runBackground(command, workingDir, agentID string, maxOutputBytes int) Result {
+func (s *ShellTool) runBackground(command, agentID string, opts runOpts) Result {
 	pid := uuid.New().String()[:8]
 
 	cmd := exec.Command("sh", "-c", command)
-	if workingDir != "" {
-		cmd.Dir = workingDir
-	}
+	setProcessGroup(cmd)
+	opts.apply(cmd)
 
 	proc := &Process{
 		pid:    pid,
 		cmd:    cmd,
-		stdout: NewBoundedLog(maxOutputBytes),
-		stderr: NewBoundedLog(maxOutputBytes),
+		stdout: NewBoundedLogMode(opts.maxOutputBytes, opts.mode),
+		stderr: NewBoundedLogMode(opts.maxOutputBytes, opts.mode),
 	}
 	cmd.Stdout = proc.stdout
 	cmd.Stderr = proc.stderr
@@ -139,20 +270,14 @@ func (s *ShellTool) runBackground(command, workingDir, agentID string, maxOutput
 	// Wait also joins os/exec's stdout/stderr copy goroutines. Publish exit only
 	// after both logs contain the process's complete captured output.
 	go func() {
-		err := cmd.Wait()
-		code := 0
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				code = exitErr.ExitCode()
-			} else {
-				code = 1
-			}
-		}
+		code := waitExitCode(cmd)
 		proc.mu.Lock()
 		proc.exitCode = &code
 		proc.mu.Unlock()
 
-		data := map[string]any{"pid": pid, "exitCode": code}
+		// snake_case to match every other field the runtime emits, including
+		// process read's own "exit_code".
+		data := map[string]any{"pid": pid, "exit_code": code}
 		events.PushTo(agentID, "process_exited", pid, data)
 	}()
 

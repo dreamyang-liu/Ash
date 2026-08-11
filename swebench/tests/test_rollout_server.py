@@ -66,6 +66,7 @@ class FakeSession:
         self.create_ok = create_ok
         self.passing = passing
         self.commands: list[str] = []
+        self.callers: list[str] = []  # identity each call was attributed to
         self.created_with: Optional[str] = None
         self.destroyed = False
 
@@ -74,8 +75,18 @@ class FakeSession:
         return self.create_ok
 
     def execute(self, tool_name: str, args: dict) -> ToolResult:
+        return self._run(tool_name, args, "harness")
+
+    def executor_for(self, agent_id: str):
+        """Mirrors AshSession: an executor with one agent's identity bound."""
+        def run(tool_name: str, args: dict) -> ToolResult:
+            return self._run(tool_name, args, agent_id)
+        return run
+
+    def _run(self, tool_name: str, args: dict, agent_id: str) -> ToolResult:
         command = args.get("command", "")
         self.commands.append(command)
+        self.callers.append(agent_id)
         passed = any(test_id in command for test_id in self.passing)
         return ToolResult(success=passed, output="")
 

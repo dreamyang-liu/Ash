@@ -25,14 +25,13 @@ BASH_ONLY_SCHEMA = [
     },
 ]
 
-AGENT_TOOL_ROUTES = {
-    "shell": "shell",
-    "text_editor": "text_editor",
-    "grep_files": "grep_files",
-    "process": "process",
-    "web_fetch": "web_fetch",
-    "web_search": "web_search",
-}
+# Derived from the SDK's data-driven route table (single source of truth,
+# ash_sandbox.toolset.BUILTIN_ROUTES). "bash" is excluded here: the
+# executor handles the bash_only alias itself. Consumers unchanged:
+# route_agent_tool below, agent/__init__.py, tests.
+from ash_sandbox.toolset import BUILTIN_ROUTES as _BUILTIN_ROUTES
+
+AGENT_TOOL_ROUTES = {k: v for k, v in _BUILTIN_ROUTES.items() if k != "bash"}
 
 
 def route_agent_tool(name: str, args: dict) -> tuple[str, dict]:
@@ -41,6 +40,17 @@ def route_agent_tool(name: str, args: dict) -> tuple[str, dict]:
     if runtime_tool is None:
         raise KeyError(f"unknown agent tool: {name}")
     return runtime_tool, dict(args)
+
+
+def is_custom_tool(name: str) -> bool:
+    """Whether name is a registered manifest-defined custom tool.
+
+    Custom tools don't go through route_agent_tool; the session executor
+    uses custom_tools.plan_custom_tool to expand them into artifact+shell.
+    """
+    from .custom_tools import CUSTOM_TOOL_SPECS
+
+    return name in CUSTOM_TOOL_SPECS
 
 
 def truncate_output(content: str, max_len: int = 12000) -> str:
@@ -108,10 +118,36 @@ TOOLS_SCHEMA = [
                     "tail": {"type": "integer", "description": "Only return last N lines of output"},
                     "max_output_bytes": {
                         "type": "integer",
-                        "default": 1048576,
-                        "description": "Maximum captured bytes per output stream. Larger output keeps the first 40% and last 60%.",
+                        "description": "Total bytes of output to return. Larger output is truncated per truncate_mode.",
+                    },
+                    "truncate_mode": {
+                        "type": "string",
+                        "default": "H2T3",
+                        "description": (
+                            'How to divide the byte budget when output is too long: "H<n>T<n>" '
+                            "with weights for the head and tail sections. H2T3 keeps the first "
+                            "40% and last 60%; T1 keeps only the tail (useful for build/test "
+                            "errors); H1 keeps only the beginning."
+                        ),
                     },
                     "working_dir": {"type": "string", "description": "Working directory (default: /testbed)"},
+                    "stdin": {
+                        "type": "string",
+                        "description": (
+                            "Data to feed the command on standard input, then close it. "
+                            "Lets you run 'python -', 'patch -p1', or 'sh -s' without "
+                            "first writing a temporary file."
+                        ),
+                    },
+                    "env": {
+                        "type": "object",
+                        "description": (
+                            'Extra environment variables, e.g. {"PYTHONPATH": "/testbed"}. '
+                            "Added to the existing environment rather than replacing it. "
+                            "Prefer this over a 'KEY=value cmd' prefix: values needing "
+                            "quotes or spaces are handled correctly."
+                        ),
+                    },
                 },
                 "required": ["command"],
             },
@@ -244,6 +280,62 @@ TOOLS_SCHEMA = [
                     },
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait_for_events",
+            "description": (
+                "Observe asynchronous sandbox facts. Delivery is opt-in: "
+                "action=subscribe registers interest in event kinds (optionally "
+                "narrowed to specific sources) so they arrive with later tool "
+                "responses; action=wait (the default) blocks until a matching event "
+                "occurs or the timeout elapses -- use it instead of polling in a "
+                "loop when waiting on background work. Events expire automatically "
+                "after their time-to-live."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["wait", "subscribe", "unsubscribe", "subscriptions"],
+                        "default": "wait",
+                        "description": (
+                            "wait: block for a matching event. subscribe: receive these "
+                            "kinds with later tool responses (nothing is delivered "
+                            "without a subscription). unsubscribe: stop receiving them. "
+                            "subscriptions: list active ones."
+                        ),
+                    },
+                    "kinds": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            'Event kinds, e.g. ["process_exited", '
+                            '"tool:text_editor", "tool:web_fetch"]. Any tool '
+                            'call is observable as "tool:<name>". Required for '
+                            "subscribe; omit when waiting to accept any kind."
+                        ),
+                    },
+                    "sources": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Wait only for events from these handles: a pid returned by a "
+                            "background shell call, or a file path. Omit to accept any "
+                            "source. Use this to wait on one specific background process."
+                        ),
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "default": 30,
+                        "description": "Seconds to wait. Values are clamped to the runtime maximum.",
+                    },
+                },
+                "required": [],
             },
         },
     },

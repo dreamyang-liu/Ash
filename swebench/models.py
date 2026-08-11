@@ -27,6 +27,7 @@ class AgentConfig:
     reasoning_effort: Optional[str] = None  # "low" | "medium" | "high" | "none" (adaptive thinking)
     prompt_cache: bool = True  # Enable prompt caching for Anthropic/Bedrock models
     tools: str = "default"  # "default" (structured tools) | "bash_only" (single bash tool)
+    custom_tools_dir: Optional[str] = None  # manifest dir; None = default configs/custom_tools
     workdir: str = "/testbed"
     system_template: Optional[str] = None  # Jinja2 template for system prompt (overrides AGENT.md)
     instance_template: Optional[str] = None  # Jinja2 template for instance/task message

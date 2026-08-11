@@ -248,20 +248,26 @@ def run_single_instance(
             sys.stdout.flush()
 
         trace_dir = output_dir / "traces"
+        agent_id = "agent"
         agent = AshAgent(
             config,
-            executor=session.execute,
+            executor=session.executor_for(agent_id),
             on_step=_on_step,
             trace_dir=trace_dir,
             run_id=new_run_id(),
-            agent_id="agent",
+            agent_id=agent_id,
             sandbox_id=session.sandbox_id,
         )
         _agent_ref.append(agent)
         if quiet:
             agent.stream = False  # no streaming in parallel (avoids stdout conflicts)
         tools_mode = getattr(config, "tools", "default")
-        agent.set_tools_schema(BASH_ONLY_SCHEMA if tools_mode == "bash_only" else TOOLS_SCHEMA)
+        if tools_mode == "bash_only":
+            agent.set_tools_schema(BASH_ONLY_SCHEMA)
+        else:
+            from .agent.custom_tools import custom_agent_schemas, load_custom_tools
+            load_custom_tools(getattr(config, "custom_tools_dir", None))
+            agent.set_tools_schema(TOOLS_SCHEMA + custom_agent_schemas())
 
         # Run agent loop
         task = format_task_prompt(instance)

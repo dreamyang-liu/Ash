@@ -19,7 +19,7 @@ from .prompts import build_system_prompt, build_instance_message  # re-exported
 from .conversation import Conversation
 from .guardrails import Guardrails
 from .llm import LLMClient, ThinkingLoopError
-from .tools import tool_summary, TOOLS_SCHEMA, BASH_ONLY_SCHEMA, route_agent_tool
+from .tools import tool_summary, TOOLS_SCHEMA, BASH_ONLY_SCHEMA, route_agent_tool, is_custom_tool
 from .trace import ToolTraceWriter, new_run_id
 from . import hooks
 
@@ -77,8 +77,24 @@ class AshAgent:
 
         result = None
         error_kind = None
+        custom_plan = None
         if name == "bash":  # bash_only mode alias
             exec_name, exec_args = "shell", dict(args)
+        elif is_custom_tool(name):
+            # Manifest-defined tool: artifact -> shell (url source) or
+            # straight to shell (image-local path source).
+            from .custom_tools import plan_custom_tool
+            try:
+                custom_plan = plan_custom_tool(name, args)
+                if custom_plan.artifact_call is not None:
+                    exec_name, exec_args = custom_plan.artifact_call
+                else:
+                    exec_name, exec_args = custom_plan.shell_call(custom_plan.spec.path)
+                    custom_plan = None  # single-step: no follow-up needed
+            except (ValueError, KeyError) as exc:
+                exec_name, exec_args = name, dict(args)
+                result = ToolResult(success=False, output="", error=str(exc))
+                error_kind = "routing"
         else:
             try:
                 exec_name, exec_args = route_agent_tool(name, args)
@@ -103,6 +119,13 @@ class AshAgent:
                 self._trace(f"[runtime] {exec_name} {tool_summary(exec_name, exec_args)}\n")
             warning = guardrails.check(exec_name, exec_args)
             result = self.executor(exec_name, exec_args)
+            if custom_plan is not None and result.success:
+                # Step 2 of a custom tool: run the verified binary.
+                exec_name, exec_args = custom_plan.shell_call(result.output.strip())
+                self._trace(f"[runtime] {exec_name} {tool_summary(exec_name, exec_args)}\n")
+                step2_warning = guardrails.check(exec_name, exec_args)
+                warning = warning or step2_warning
+                result = self.executor(exec_name, exec_args)
             if not result.success:
                 error_kind = "runtime"
         else:

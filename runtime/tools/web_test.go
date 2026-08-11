@@ -65,26 +65,94 @@ func TestWebFetchValidationAndTruncation(t *testing.T) {
 		t.Fatalf("expected missing url error, got: %#v", missingURL)
 	}
 
+	// Body larger than the requested budget: web_fetch now uses the shared
+	// output bounds (max_output_bytes + truncate_mode), so truncation is
+	// reported by the same self-describing marker as every other tool.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, strings.Repeat("x", 40))
+		fmt.Fprint(w, strings.Repeat("x", 4000))
 	}))
 	defer server.Close()
 
 	truncated := tool.Execute(map[string]any{
-		"url":        server.URL,
-		"format":     "text",
-		"max_length": float64(5),
+		"url":              server.URL,
+		"format":           "text",
+		"max_output_bytes": float64(1024), // minimum accepted budget
 	})
 	if !truncated.Success {
 		t.Fatalf("truncated fetch failed: %s", truncated.Error)
 	}
-	if !strings.Contains(truncated.Output, "xxxxx") || !strings.Contains(truncated.Output, "... (truncated,") {
-		t.Fatalf("expected truncated output, got:\n%s", truncated.Output)
+	if !strings.Contains(truncated.Output, "xxxxx") || !strings.Contains(truncated.Output, "truncated") {
+		t.Fatalf("expected truncated output, got:\n%.200s", truncated.Output)
+	}
+
+	// Tail-only mode is available here too, like on shell.
+	tailOnly := tool.Execute(map[string]any{
+		"url":              server.URL,
+		"format":           "text",
+		"max_output_bytes": float64(1024),
+		"truncate_mode":    "T1",
+	})
+	if !tailOnly.Success {
+		t.Fatalf("tail-mode fetch failed: %s", tailOnly.Error)
 	}
 
 	invalidFormat := tool.Execute(map[string]any{"url": server.URL, "format": "pdf"})
 	if invalidFormat.Success || !strings.Contains(invalidFormat.Error, "invalid format: pdf") {
 		t.Fatalf("expected invalid format error, got: %#v", invalidFormat)
+	}
+}
+
+func TestWebFetchTruncationSurvivesConversion(t *testing.T) {
+	// The bound applies to the *converted* text, so it must not be applied to
+	// the raw body first. Reading only max_output_bytes+1 of markup meant
+	// stripping the tags shrank the result below the budget, boundText saw a
+	// short string, and half a document went missing with no marker at all --
+	// invisible to a test whose body does not shrink when converted.
+	const paragraphs = 400
+	var markup strings.Builder
+	markup.WriteString("<html><body>")
+	for i := 0; i < paragraphs; i++ {
+		fmt.Fprintf(&markup, `<p class="verbose-attribute-padding">line %d</p>`, i)
+	}
+	markup.WriteString("</body></html>")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, markup.String())
+	}))
+	defer server.Close()
+
+	tool := &WebFetchTool{}
+	full := tool.Execute(map[string]any{"url": server.URL, "format": "text"})
+	if !full.Success {
+		t.Fatalf("unbounded fetch failed: %s", full.Error)
+	}
+	// Sanity: the converted document must exceed the budget, or there is
+	// nothing to truncate and the test proves nothing.
+	if len(full.Output) <= 1024 {
+		t.Fatalf("test setup: converted document is only %d bytes", len(full.Output))
+	}
+
+	bounded := tool.Execute(map[string]any{
+		"url":              server.URL,
+		"format":           "text",
+		"max_output_bytes": float64(1024),
+	})
+	if !bounded.Success {
+		t.Fatalf("bounded fetch failed: %s", bounded.Error)
+	}
+	if !strings.Contains(bounded.Output, "truncated") {
+		t.Errorf("loss must be announced; got %d bytes with no marker:\n%.300s",
+			len(bounded.Output), bounded.Output)
+	}
+	// The reported total must describe the document, not the slice that was
+	// read: a consumer uses it to judge how much it is missing.
+	if strings.Contains(bounded.Output, "1025 bytes total") {
+		t.Error("reported total is the read limit, not the document size")
+	}
+	// The last line must survive, since the default mode keeps a tail.
+	if !strings.Contains(bounded.Output, fmt.Sprintf("line %d", paragraphs-1)) {
+		t.Error("tail of the document was dropped despite a head+tail mode")
 	}
 }
 

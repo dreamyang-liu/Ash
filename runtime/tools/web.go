@@ -20,8 +20,12 @@ const defaultUA = "AshRuntime/1.0 (+https://github.com/dreamyang-liu/ash)"
 const (
 	defaultWebTimeoutSeconds = 15
 	maxWebTimeoutSeconds     = 60
-	defaultWebMaxLength      = 10000
-	maxWebMaxLength          = 200000
+	// How much of a document is read before conversion. Independent of the
+	// output budget, which applies to the converted result: stripping HTML to
+	// text routinely shrinks it tenfold, so budgeting the raw bytes threw away
+	// content that would have fit. This ceiling exists only to bound memory,
+	// like every other limit in the runtime.
+	maxFetchBodyBytes = 8 << 20
 )
 
 // ---- WebFetchTool ----
@@ -35,16 +39,20 @@ func (w *WebFetchTool) Description() string {
 }
 
 func (w *WebFetchTool) Schema() map[string]any {
+	props := map[string]any{
+		"url":     map[string]any{"type": "string", "description": "URL to fetch"},
+		"format":  map[string]any{"type": "string", "enum": []string{"html", "text", "markdown"}, "default": "markdown"},
+		"headers": map[string]any{"type": "object", "description": "Additional HTTP headers"},
+		"timeout": map[string]any{"type": "integer", "default": defaultWebTimeoutSeconds, "description": "Request timeout in seconds. Values are clamped to the runtime maximum."},
+	}
+	// Page content is byte output: same bounds as every other such tool.
+	for k, v := range outputBoundSchema() {
+		props[k] = v
+	}
 	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"url":        map[string]any{"type": "string", "description": "URL to fetch"},
-			"format":     map[string]any{"type": "string", "enum": []string{"html", "text", "markdown"}, "default": "markdown"},
-			"headers":    map[string]any{"type": "object", "description": "Additional HTTP headers"},
-			"timeout":    map[string]any{"type": "integer", "default": defaultWebTimeoutSeconds, "description": "Request timeout in seconds. Values are clamped to the runtime maximum."},
-			"max_length": map[string]any{"type": "integer", "default": defaultWebMaxLength, "description": "Maximum returned characters. Values are clamped to the runtime maximum."},
-		},
-		"required": []string{"url"},
+		"type":       "object",
+		"properties": props,
+		"required":   []string{"url"},
 	}
 }
 
@@ -57,10 +65,8 @@ func (w *WebFetchTool) Execute(args map[string]any) Result {
 	if f, ok := args["format"].(string); ok && f != "" {
 		format = f
 	}
-	maxLen := defaultWebMaxLength
-	if m, ok := args["max_length"].(float64); ok && int(m) > 0 {
-		maxLen = clampInt(int(m), 1, maxWebMaxLength)
-	}
+	maxLen := outputBytesArg(args)
+	mode := truncateModeArg(args)
 	timeoutSeconds := defaultWebTimeoutSeconds
 	if t, ok := args["timeout"].(float64); ok && int(t) > 0 {
 		timeoutSeconds = clampInt(int(t), 1, maxWebTimeoutSeconds)
@@ -86,9 +92,18 @@ func (w *WebFetchTool) Execute(args map[string]any) Result {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxLen)+1))
+	// Read up to a generous ceiling rather than the output budget: text and
+	// markdown conversion shrink a document by a large factor, so cutting the
+	// raw body at maxLen discarded content that would have fit, and handed
+	// boundText an already-short string -- which then reported no truncation at
+	// all. Losing half a page silently is worse than losing it loudly.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBodyBytes+1))
 	if err != nil {
 		return Err("read body: " + err.Error())
+	}
+	bodyTruncated := len(body) > maxFetchBodyBytes
+	if bodyTruncated {
+		body = body[:maxFetchBodyBytes]
 	}
 	html := string(body)
 
@@ -108,7 +123,15 @@ func (w *WebFetchTool) Execute(args map[string]any) Result {
 	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
 		prefix += fmt.Sprintf("[content_type] %s\n", contentType)
 	}
-	return Ok(prefix + truncate(output, maxLen))
+	if bodyTruncated {
+		// The document itself exceeded what this tool will read, so even an
+		// unbounded output would be incomplete. Say so separately from the
+		// output budget's own notice.
+		prefix += fmt.Sprintf("[source_truncated] read the first %d bytes of the document\n",
+			maxFetchBodyBytes)
+	}
+	bounded, _ := boundText(output, maxLen, mode)
+	return Ok(prefix + bounded)
 }
 
 func stripHTML(s string) string {
@@ -151,13 +174,6 @@ func toMarkdown(html string) string {
 		return stripHTML(html)
 	}
 	return strings.TrimSpace(md)
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + fmt.Sprintf("\n... (truncated, %d total chars)", len(s))
 }
 
 func clampInt(v, min, max int) int {

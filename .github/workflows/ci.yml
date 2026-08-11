@@ -43,10 +43,12 @@ jobs:
           import sys, json
           data = json.loads(sys.stdin.read())
           tools = data['result']['tools']
-          assert len(tools) == 6, f'Expected 6 tools, got {len(tools)}'
+          assert len(tools) == 8, f'Expected 8 tools, got {len(tools)}'
           names = [t['name'] for t in tools]
           assert 'shell' in names
           assert 'web_search' in names
+          assert 'artifact' in names
+          assert 'wait_for_events' in names
           assert 'read_file' not in names
           print(f'OK: {len(tools)} tools registered')
           "
@@ -125,6 +127,10 @@ jobs:
         run: |
           ./ash-runtime --port 19878 &
           sleep 2
+          # Event delivery is opt-in: nothing is retained for an identity that
+          # asked for nothing, so subscribe before producing the event.
+          curl -sf -X POST http://localhost:19878 -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":"wait_for_events","arguments":{"action":"subscribe","kinds":["process_exited"]}}}' > /dev/null
           # Start background process
           PID=$(curl -sf -X POST http://localhost:19878 -H 'Content-Type: application/json' \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"shell","arguments":{"command":"echo bg_done","background":true}}}' | python3 -c "
@@ -201,7 +207,7 @@ jobs:
                   r = await sb.call('shell', command='echo client_http')
                   assert 'client_http' in r.output, f'HTTP failed: {r.output}'
                   tools = await sb.tool_schemas(format='openai')
-                  assert len(tools) == 6
+                  assert len(tools) == 8
 
               # MCP backend
               async with Sandbox.mcp('http://localhost:19879/mcp') as sb:

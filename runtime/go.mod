@@ -15,6 +15,7 @@ require (
 	github.com/antchfx/htmlquery v1.3.6 // indirect
 	github.com/antchfx/xpath v1.3.6 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
+	golang.org/x/crypto/x509roots/fallback v0.0.0-20260723152544-d701c51f7e4e // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 )

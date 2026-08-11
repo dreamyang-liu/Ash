@@ -32,6 +32,8 @@ func All() []Tool {
 		&GrepTool{},
 		&WebFetchTool{},
 		&WebSearchTool{},
+		&ArtifactTool{},   // primitive for SDK-side custom tools (binary download+verify)
+		&WaitEventsTool{}, // primitive for async sandbox facts (long poll, no push)
 	}
 }
 
