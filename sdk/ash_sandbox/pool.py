@@ -243,11 +243,32 @@ class MicroVMPool(Pool):
 
     def __init__(self, server_url: str, default_template: str = "ubuntu",
                  runtime_port: int = 3000, api_key: str = "",
-                 request_timeout: float = 120):
+                 request_timeout: float = 120, sandbox_ttl: int = 300,
+                 auto_resume: bool = True):
+        """
+        Args:
+            server_url: AgentENV server, e.g. "http://127.0.0.1:8000".
+            default_template: Template or snapshot name whose image already
+                runs ash-runtime on `runtime_port` (e.g. built once with
+                `aenv snapshot create <sandbox> --name ash-base`).
+            runtime_port: Port ash-runtime listens on inside the VM.
+            api_key: AgentENV API key. Sent as `X-API-KEY`; that is the header
+                the server validates (a Bearer Authorization header is not).
+            sandbox_ttl: Default sandbox time-to-live in seconds. AgentENV's
+                own default is 15s, after which the VM auto-pauses -- far too
+                short for an agent turn, so spawn() and resume() always send
+                this instead.
+            auto_resume: Ask AgentENV to transparently resume a sandbox that
+                auto-paused at TTL expiry when the next proxied call arrives.
+                With snapshot resume in the tens of milliseconds, an idle
+                sandbox then costs nothing and the agent never notices.
+        """
         self.server_url = server_url.rstrip("/")
         self.default_template = default_template
         self.runtime_port = runtime_port
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self.sandbox_ttl = sandbox_ttl
+        self.auto_resume = auto_resume
+        headers = {"X-API-KEY": api_key} if api_key else {}
         self._client = httpx.AsyncClient(timeout=request_timeout, headers=headers)
         self._sandboxes: dict[str, Sandbox] = {}
 
@@ -269,14 +290,30 @@ class MicroVMPool(Pool):
         resources: dict | None = None,
         agent_id: str = "",
     ) -> Sandbox:
-        """Start a microVM from a template and attach to its runtime."""
-        payload: dict = {"templateID": image or self.default_template}
+        """Start a microVM from a template and attach to its runtime.
+
+        `entrypoint` is not supported: the runtime must already be baked into
+        the template (VM resources likewise come from the template). Fail loud
+        rather than silently ignoring a setup command the caller relies on.
+        """
         if entrypoint:
-            payload["entrypoint"] = entrypoint
+            raise ValueError(
+                "MicroVMPool cannot run an entrypoint; bake setup into the "
+                "template instead (aenv snapshot create <sandbox> --name ...)"
+            )
+        if resources:
+            raise ValueError(
+                "MicroVMPool cannot set per-sandbox resources; they are fixed "
+                "by the template"
+            )
+        payload: dict = {
+            "templateID": image or self.default_template,
+            "timeout": self.sandbox_ttl,
+            "autoPause": True,
+            "autoResume": {"enabled": self.auto_resume},
+        }
         if env:
             payload["envVars"] = env
-        if resources:
-            payload.update(resources)
 
         resp = await self._client.post(f"{self.server_url}/sandboxes", json=payload)
         resp.raise_for_status()
@@ -303,11 +340,22 @@ class MicroVMPool(Pool):
 
     async def pause(self, sandbox: Sandbox) -> None:
         """Suspend a VM. Its memory and disk state are snapshotted."""
-        await self._post_state(sandbox, "pause")
+        sid = _require_id(sandbox)
+        resp = await self._client.post(
+            f"{self.server_url}/sandboxes/{sid}/pause")
+        resp.raise_for_status()
 
     async def resume(self, sandbox: Sandbox) -> None:
-        """Restore a paused VM from its snapshot."""
-        await self._post_state(sandbox, "resume")
+        """Restore a paused VM from its snapshot.
+
+        The endpoint requires a JSON body (415 without one); `timeout`
+        restarts the sandbox's TTL clock from now.
+        """
+        sid = _require_id(sandbox)
+        resp = await self._client.post(
+            f"{self.server_url}/sandboxes/{sid}/resume",
+            json={"timeout": self.sandbox_ttl})
+        resp.raise_for_status()
 
     async def fork(self, sandbox: Sandbox, count: int = 1,
                    agent_ids: list[str] | None = None) -> list[Sandbox]:
@@ -324,16 +372,23 @@ class MicroVMPool(Pool):
         """
         sid = _require_id(sandbox)
         resp = await self._client.post(
-            f"{self.server_url}/sandboxes/{sid}/fork", json={"count": count})
+            f"{self.server_url}/sandboxes/{sid}/fork",
+            json={"count": count, "timeout": self.sandbox_ttl})
         resp.raise_for_status()
-        body = resp.json()
-        children = body.get("sandboxes") or body.get("children") or []
+        # The response is a list of per-fork results, each carrying either
+        # `sandbox` or `error`. A 201 only means the snapshot succeeded, so
+        # surface partial failures rather than silently returning fewer
+        # children than asked for.
+        results = resp.json()
+        errors = [r["error"] for r in results if r.get("error")]
+        if errors:
+            raise RuntimeError(f"{len(errors)}/{len(results)} forks failed: {errors}")
         return [
             self._attach(
-                _sandbox_id(child),
+                _sandbox_id(result["sandbox"]),
                 agent_ids[i] if agent_ids and i < len(agent_ids) else sandbox.agent_id,
             )
-            for i, child in enumerate(children)
+            for i, result in enumerate(results)
         ]
 
     # --- Internals ---
@@ -349,11 +404,6 @@ class MicroVMPool(Pool):
         sb._container_id = sandbox_id
         self._sandboxes[sandbox_id] = sb
         return sb
-
-    async def _post_state(self, sandbox: Sandbox, action: str) -> None:
-        sid = _require_id(sandbox)
-        resp = await self._client.post(f"{self.server_url}/sandboxes/{sid}/{action}")
-        resp.raise_for_status()
 
 
 def _sandbox_id(body: dict) -> str:

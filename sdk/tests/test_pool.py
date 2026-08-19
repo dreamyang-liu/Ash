@@ -31,7 +31,7 @@ class FakeAenv(BaseHTTPRequestHandler):
         FakeAenv.requests.append((method, self.path, body, dict(self.headers)))
         return body
 
-    def _reply(self, payload: dict):
+    def _reply(self, payload: dict | list):
         raw = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -39,19 +39,27 @@ class FakeAenv(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    #: When set, the fork endpoint reports this error for every child after
+    #: the first, mimicking AgentENV's per-fork failure reporting.
+    fork_error: dict | None = None
+
     def do_POST(self):
-        self._record("POST")
+        body = self._record("POST")
         if self.path == "/sandboxes":
             FakeAenv.next_id += 1
             return self._reply({"sandboxID": f"vm-{FakeAenv.next_id}"})
         if self.path.endswith("/fork"):
-            FakeAenv.next_id += 1
-            first = FakeAenv.next_id
-            FakeAenv.next_id += 1
-            return self._reply({"sandboxes": [
-                {"sandboxID": f"vm-{first}"},
-                {"sandboxID": f"vm-{FakeAenv.next_id}"},
-            ]})
+            # AgentENV replies with one result per requested fork, each
+            # carrying either `sandbox` or `error` (verified against a live
+            # server; see /sandboxes/{id}/fork in its OpenAPI spec).
+            results = []
+            for i in range(body.get("count", 1)):
+                if i > 0 and FakeAenv.fork_error:
+                    results.append({"error": FakeAenv.fork_error})
+                    continue
+                FakeAenv.next_id += 1
+                results.append({"sandbox": {"sandboxID": f"vm-{FakeAenv.next_id}"}})
+            return self._reply(results)
         if self.path.rstrip("/") == "":
             # A tool call proxied into a sandbox.
             return self._reply({"result": {"content": [{"type": "text", "text": "ok"}],
@@ -70,6 +78,7 @@ class FakeAenv(BaseHTTPRequestHandler):
 def aenv():
     FakeAenv.requests = []
     FakeAenv.next_id = 0
+    FakeAenv.fork_error = None
     server = HTTPServer(("127.0.0.1", 0), FakeAenv)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_port}"
@@ -144,7 +153,7 @@ def test_fork_returns_independent_children(aenv):
     assert len(pool.list()) == 3
 
 def test_pause_and_resume_hit_the_state_endpoints(aenv):
-    pool = MicroVMPool(aenv)
+    pool = MicroVMPool(aenv, sandbox_ttl=600)
 
     async def scenario():
         sb = await pool.spawn()
@@ -157,6 +166,70 @@ def test_pause_and_resume_hit_the_state_endpoints(aenv):
         f"/sandboxes/{sb.sandbox_id}/pause",
         f"/sandboxes/{sb.sandbox_id}/resume",
     ]
+    # Resume must carry a JSON body: AgentENV replies 415 to a bare POST, and
+    # the timeout restarts the sandbox's TTL clock.
+    _, _, resume_body, _ = FakeAenv.requests[-1]
+    assert resume_body == {"timeout": 600}
+
+def test_requests_authenticate_with_the_x_api_key_header(aenv):
+    # AgentENV validates X-API-KEY; an Authorization: Bearer header is not
+    # checked (observed against a live server: garbage bearer tokens pass).
+    pool = MicroVMPool(aenv, api_key="secret-key")
+
+    async def scenario():
+        await pool.spawn()
+        await pool.close()
+
+    asyncio.run(scenario())
+    _, _, _, headers = FakeAenv.requests[0]
+    assert headers.get("X-API-KEY") == "secret-key"
+    assert "Authorization" not in headers
+
+def test_spawn_sends_ttl_and_pause_policy(aenv):
+    # AgentENV's default TTL is 15s, after which the VM pauses — far too short
+    # for an agent turn, so spawn must always pick the TTL explicitly.
+    pool = MicroVMPool(aenv, sandbox_ttl=900)
+
+    async def scenario():
+        await pool.spawn()
+        await pool.close()
+
+    asyncio.run(scenario())
+    _, _, body, _ = FakeAenv.requests[0]
+    assert body["timeout"] == 900
+    assert body["autoPause"] is True
+    assert body["autoResume"] == {"enabled": True}
+
+def test_spawn_refuses_what_a_template_cannot_express(aenv):
+    # entrypoint and resources are container-pool concepts; a microVM template
+    # bakes both in. Silently dropping them would strand a caller whose setup
+    # command never ran.
+    pool = MicroVMPool(aenv)
+
+    async def spawn_with_entrypoint():
+        await pool.spawn(entrypoint="pip install -e .")
+
+    async def spawn_with_resources():
+        await pool.spawn(resources={"cpu": "2"})
+
+    with pytest.raises(ValueError, match="entrypoint"):
+        asyncio.run(spawn_with_entrypoint())
+    with pytest.raises(ValueError, match="resources"):
+        asyncio.run(spawn_with_resources())
+
+def test_partial_fork_failure_is_an_error_not_a_short_list(aenv):
+    # A 201 from AgentENV only means the snapshot succeeded; each fork then
+    # reports its own outcome. Returning 1 child when 2 were asked for would
+    # let a rollout silently lose branches.
+    FakeAenv.fork_error = {"code": 507, "message": "insufficient memory"}
+    pool = MicroVMPool(aenv)
+
+    async def scenario():
+        parent = await pool.spawn()
+        await pool.fork(parent, count=2)
+
+    with pytest.raises(RuntimeError, match="1/2 forks failed"):
+        asyncio.run(scenario())
 
 def test_destroy_removes_only_the_named_sandbox(aenv):
     pool = MicroVMPool(aenv)
