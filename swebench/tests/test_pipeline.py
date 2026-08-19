@@ -13,6 +13,9 @@ Covered:
 - WaggleInterceptor reproduces CoordinatedExecutor's OCC behavior
 - WagglePolicy hooks: on_write / on_conflict / on_drift / on_commit,
   hook-exception fallback to default OCC
+- piped_executor: the harness-side mount (identity binding, raw-executor
+  metadata, per-call sandbox-id resolution, two mounted agents sharing
+  Waggle arbitration)
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from swebench.agent.pipeline import (
     ToolInterceptor,
     ToolPipeline,
     load_pipeline,
+    piped_executor,
 )
 from swebench.agent.waggle import (
     Allow,
@@ -553,3 +557,105 @@ def test_policy_wait_times_out_within_the_write_deadline():
     assert not result.success
     assert "[WAGGLE]" in result.output and "on hold" in result.output
     assert time.monotonic() - start < 5.0
+
+
+# --------------------------------------------------------------------------- #
+#  piped_executor — the harness-side mount
+# --------------------------------------------------------------------------- #
+
+def test_piped_executor_is_a_plain_executor():
+    # The whole point of the mount: an AshAgent consumes it without knowing
+    # the pipeline exists, and the onion runs on every call.
+    log = []
+    execute = piped_executor(ToolPipeline([Tap("a", log)]),
+                             _inner_recorder(log), agent_id="A")
+    result = execute("shell", {"command": "ls"})
+    assert result.success and result.output == "ran"
+    assert [e[:2] for e in log] == [("a", "before"), ("inner", "shell"), ("a", "after")]
+
+
+def test_piped_executor_binds_identity_and_supplies_raw_executor():
+    seen = {}
+
+    class Probe(ToolInterceptor):
+        def before(self, ctx):
+            seen["agent"] = ctx.agent_id
+            seen["sandbox"] = ctx.sandbox_id
+            seen["raw"] = ctx.metadata.get("executor")
+            return Continue()
+
+    def inner(tool, args):
+        return _ok()
+
+    execute = piped_executor(ToolPipeline([Probe()]), inner,
+                             agent_id="worker-1", sandbox_id="sb-42")
+    execute("shell", {})
+    assert seen["agent"] == "worker-1"
+    assert seen["sandbox"] == "sb-42"
+    # Waggle's contract: the raw executor rides in metadata so probe traffic
+    # and arbitrated writes never re-enter the pipeline.
+    assert seen["raw"] is inner
+
+
+def test_piped_executor_resolves_callable_sandbox_id_per_call():
+    # A session hands out executors before its sandbox exists; the id must be
+    # read at call time, not frozen at mount time.
+    ids = []
+
+    class Probe(ToolInterceptor):
+        def before(self, ctx):
+            ids.append(ctx.sandbox_id)
+            return Continue()
+
+    current = {"id": "unknown"}
+    execute = piped_executor(ToolPipeline([Probe()]), lambda t, a: _ok(),
+                             agent_id="A", sandbox_id=lambda: current["id"])
+    execute("shell", {})
+    current["id"] = "sb-7"          # sandbox spawned after the mount
+    execute("shell", {})
+    assert ids == ["unknown", "sb-7"]
+
+
+def test_piped_executor_does_not_leak_arg_mutations_between_layers():
+    # The mount copies args into the context, so a Rewrite downstream can
+    # never mutate the dict the agent still holds.
+    class Rewriter(ToolInterceptor):
+        def before(self, ctx):
+            return Rewrite({**ctx.args, "injected": True})
+
+    captured = {}
+
+    def inner(tool, args):
+        captured.update(args)
+        return _ok()
+
+    execute = piped_executor(ToolPipeline([Rewriter()]), inner, agent_id="A")
+    original = {"command": "ls"}
+    execute("shell", original)
+    assert captured == {"command": "ls", "injected": True}
+    assert original == {"command": "ls"}
+
+
+def test_two_mounted_agents_share_waggle_arbitration():
+    # End-to-end through the mount: same kernel, two executors, OCC fires.
+    # This is the manager-worker layout expressed via executor_for(pipeline=).
+    sandbox = FakeSandbox({PATH: "base"})
+    pipeline = ToolPipeline([WaggleInterceptor()])   # ONE shared instance
+    a = piped_executor(pipeline, sandbox.executor(), agent_id="A")
+    b = piped_executor(pipeline, sandbox.executor(), agent_id="B")
+
+    for execute in (a, b):
+        assert execute("text_editor", {"command": "view", "path": PATH}).success
+    assert a("text_editor", {"command": "write", "path": PATH,
+                             "file_text": "A wins"}).success
+    stale = b("text_editor", {"command": "write", "path": PATH,
+                              "file_text": "B stale"})
+    assert not stale.success
+    assert "[WAGGLE]" in stale.output          # rejection carries the diff
+    assert sandbox.read(PATH) == "A wins"      # no lost update
+
+    # The loser re-reads and re-applies — the LLM-as-merge-engine loop.
+    assert b("text_editor", {"command": "view", "path": PATH}).success
+    assert b("text_editor", {"command": "write", "path": PATH,
+                             "file_text": "B rebased"}).success
+    assert sandbox.read(PATH) == "B rebased"
