@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -114,7 +115,11 @@ func main() {
 				return
 			}
 
+			// Headers first: the tool is about to take as long as its command
+			// does, and a proxy watching for a response gives up long before.
+			stop, _ := beginResponse(w)
 			result, notifications := executeTool(target, params.Arguments, params.AgentID)
+			stop()
 
 			text := result.Output
 			isError := !result.Success
@@ -200,7 +205,9 @@ func main() {
 				writeMCP(w, req.ID, nil, &RPCError{Code: -32602, Message: "unknown tool: " + params.Name})
 				return
 			}
+			stop, _ := beginResponse(w)
 			result, notifications := executeTool(target, params.Arguments, params.AgentID)
+			stop()
 			text := result.Output
 			if !result.Success && result.Error != "" {
 				text = result.Error
@@ -221,8 +228,14 @@ func main() {
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      6 * time.Minute, // slightly over shell max (5min) to allow response write
-		IdleTimeout:       120 * time.Second,
+		// No WriteTimeout: it is a deadline on the whole response, and a tool
+		// call's response is only written once its command finishes, so any
+		// value here is really a cap on how long a command may run -- one that
+		// silently disagrees with the caller's own `timeout` argument (up to
+		// maxTimeoutSeconds). Killing the command is the shell tool's job, where
+		// the caller's timeout is known; the write deadline is set per request in
+		// beginResponse instead.
+		IdleTimeout: 120 * time.Second,
 	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -252,6 +265,86 @@ func writeMCP(w http.ResponseWriter, id json.RawMessage, result any, rpcErr *RPC
 	resp := RPCResponse{JSONRPC: "2.0", ID: id, Result: result, Error: rpcErr}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// keepaliveInterval is how often a long-running call writes a byte to prove the
+// connection is alive. Comfortably under the 30 s that reverse proxies commonly
+// allow for response headers, with room for one lost tick.
+var keepaliveInterval = 10 * time.Second
+
+// beginResponse sends the response headers before the tool runs, then keeps the
+// connection warm until stop() is called.
+//
+// A tool call takes as long as its command does -- minutes, for a test suite or
+// a compile. The runtime answers in one shot, so nothing at all reaches the
+// client until the command finishes, and a proxy in between reads that silence
+// as a dead upstream: AgentENV cuts the connection at 30 s
+// (response_header_timeout_ms=30000), and any gateway-style backend may do the
+// same. The command keeps running in the sandbox, so the caller loses the result
+// of work that actually happened.
+//
+// Sending the headers early answers the only question a proxy is asking. The
+// heartbeat is a newline, which JSON ignores as leading whitespace, so a client
+// that knows nothing about any of this parses the response exactly as before --
+// no protocol change, no client change, no version negotiation.
+//
+// Returns a stop function; the caller must invoke it before writing the body.
+// Also reports whether headers were actually sent, since a ResponseWriter that
+// cannot flush (a test recorder, a wrapped writer) must fall back to writing the
+// whole response at the end.
+func beginResponse(w http.ResponseWriter) (stop func(), started bool) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return func() {}, false
+	}
+
+	// Clear the write deadline for this response. A tool call is not done until
+	// its command is, and the caller states how long that may be (`timeout`, up
+	// to maxTimeoutSeconds); a transport-level deadline would cut the connection
+	// while the command still runs, losing the result of work that happened. The
+	// shell tool remains the thing that stops a command.
+	if rc := http.NewResponseController(w); rc != nil {
+		_ = rc.SetWriteDeadline(time.Time{})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	// A tool call answers 200 even when the tool fails: the failure travels in
+	// the JSON-RPC body (or isError), not the HTTP status. That is what makes it
+	// safe to commit to a status code before knowing the outcome.
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		ticker := time.NewTicker(keepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				// Writing after the handler returns panics, so the write must
+				// happen only while the handler is still running -- guaranteed
+				// because stop() runs before the handler writes the body.
+				if _, err := w.Write([]byte("\n")); err != nil {
+					return // client hung up; the body write will fail too
+				}
+				flusher.Flush()
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() {
+		// Wait for the heartbeat to exit, not just signal it: a ResponseWriter
+		// is not safe for concurrent use, and the caller writes the body next.
+		once.Do(func() {
+			close(done)
+			<-exited
+		})
+	}, true
 }
 
 func runStdio(allTools []tools.Tool) {

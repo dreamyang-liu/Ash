@@ -235,6 +235,17 @@ class MicroVMPool(Pool):
     What this buys over containers is the state operations -- pause, resume and
     fork all run in the tens of milliseconds -- which is why they are declared
     as supported capabilities here and refused by the base class elsewhere.
+
+    Reaching the runtime only through a proxy has one consequence worth knowing:
+    AgentENV gives an upstream 30 s to produce response headers
+    (`response_header_timeout_ms`), and a tool call produces none until its
+    command finishes. Runtimes from before mid-2026 therefore lose any call
+    longer than that -- a 504 with the command still running inside the VM, so
+    the work happens and the result is discarded. Current runtimes send headers
+    up front and heartbeat while the command runs, which keeps the connection
+    alive for as long as the call takes; there is nothing to configure. Against
+    an older runtime, run long commands with `shell(background=True)` and poll
+    `process read`, so every individual request stays short.
     """
 
     #: AgentENV's proxy routing headers (it also accepts E2B-compatible aliases).

@@ -1,0 +1,34 @@
+# SWE-bench on Firecracker microVMs — a 2-instance smoke run.
+#
+# The environment comes from SWE-bench's own images, converted to AgentENV
+# templates so nothing about the benchmark environment is hand-rolled:
+#
+#   aenv pull swebench/sweb.eval.x86_64.<id>:latest \
+#     --name "sweb-<instance_id>" --cpu 2 --memory 2048 \
+#     --start-cmd "curl -fsSL <bootstrap.sh> | ASH_PORT=3000 sh" --probe 3000
+#
+# `--start-cmd` is the microVM equivalent of DockerPool's entrypoint: it fetches
+# ash-runtime into the image before the template snapshot is captured, so the
+# runtime is baked in and spawn stays in the ~170 ms range.
+extends: default
+
+model:
+  name: bedrock/us.anthropic.claude-sonnet-4-6
+
+limits:
+  cost_limit: 2.0
+  step_limit: 60
+
+dataset:
+  subset: verified
+
+execution:
+  workers: 2
+  output: results/microvm-smoke
+  backend: microvm
+  # Template per instance, named after it — see the aenv pull line above.
+  image_template: "sweb-{instance_id}"
+  microvm:
+    server_url: http://127.0.0.1:8000
+    api_key_file: /home/ec2-user/projects/LBP/artifacts/aenv-api-key
+    sandbox_ttl: 1800
