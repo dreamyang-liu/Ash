@@ -318,7 +318,8 @@ func commandOutcome(stdout, stderr *BoundedLog, tailLines int) CommandOutcome {
 	}
 }
 
-// Result renders an outcome for the wire.
+// Result renders an outcome for the wire, for a tool whose own success is the
+// command's success -- `shell` running one in the foreground.
 //
 // A plain success -- exit 0, nothing on stderr, nothing clipped -- is returned
 // as bare stdout: there is nothing to say beyond it, and wrapping `echo hello`
@@ -326,24 +327,49 @@ func commandOutcome(stdout, stderr *BoundedLog, tailLines int) CommandOutcome {
 // else carries the schema, because something about the run cannot be read off
 // the text.
 func (o CommandOutcome) Result() Result {
-	if o.plain() {
-		return Ok(o.Stdout)
-	}
-	payload, err := json.Marshal(o)
-	if err != nil {
-		// Unreachable for this struct; degrade to the merged rendering rather
-		// than losing the output entirely.
-		return Result{Success: o.ok(), Output: o.Stdout + o.Stderr}
-	}
-	return Result{Success: o.ok(), Output: string(payload)}
+	return o.result(o.commandSucceeded())
 }
 
-func (o CommandOutcome) ok() bool {
+// Snapshot renders an outcome as a report ABOUT a command rather than as its
+// result. `process read` answers "here is where that pid stands", and it answers
+// that correctly whether the command exited 0, exited 3, or was killed -- so its
+// Success describes the read, not the exit code.
+//
+// Keeping these apart matters: folding them together made `process read` report
+// failure for every non-zero process, so a caller polling a killed pid saw a
+// tool error instead of the exit code it was waiting for.
+//
+// Always structured, never bare stdout: the answer to "is it still running, and
+// with what code" cannot be read off the output, and a caller polling a pid
+// parses every reply.
+func (o CommandOutcome) Snapshot() Result {
+	return Result{Success: true, Output: o.encode()}
+}
+
+func (o CommandOutcome) result(success bool) Result {
+	if success && o.plain() {
+		return Ok(o.Stdout)
+	}
+	return Result{Success: success, Output: o.encode()}
+}
+
+func (o CommandOutcome) encode() string {
+	payload, err := json.Marshal(o)
+	if err != nil {
+		// Unreachable for this struct; degrade to the merged text rather than
+		// losing the output entirely.
+		return o.Stdout + o.Stderr
+	}
+	return string(payload)
+}
+
+// commandSucceeded reports whether the command itself came out clean.
+func (o CommandOutcome) commandSucceeded() bool {
 	return !o.TimedOut && (o.ExitCode == nil || *o.ExitCode == 0)
 }
 
 // plain reports whether the outcome holds nothing a bare stdout would omit.
 func (o CommandOutcome) plain() bool {
-	return o.ok() && !o.Running && o.Stderr == "" &&
+	return !o.Running && o.Stderr == "" &&
 		!o.StdoutTruncated && !o.StderrTruncated
 }

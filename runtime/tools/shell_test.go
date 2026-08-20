@@ -173,3 +173,73 @@ func TestBackgroundProcessExitWaitsForCapturedOutput(t *testing.T) {
 		}
 	}
 }
+
+// TestSnapshotOfANonZeroProcessIsASuccessfulRead pins the distinction between
+// "the command failed" and "reading about the command failed". Folding them
+// together made `process read` report a tool error for every non-zero pid, so a
+// caller polling for an exit code saw a failure instead of the code it wanted --
+// and the kill test above caught it only indirectly.
+func TestSnapshotOfANonZeroProcessIsASuccessfulRead(t *testing.T) {
+	shell := &ShellTool{}
+	process := &ProcessTool{}
+
+	started := shell.Execute(map[string]any{
+		"command": "exit 9", "background": true,
+	})
+	if !started.Success {
+		t.Fatalf("spawn: %s", started.Error)
+	}
+	var start struct{ PID string }
+	if err := json.Unmarshal([]byte(started.Output), &start); err != nil {
+		t.Fatalf("decode start: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		r := process.Execute(map[string]any{"pid": start.PID, "action": "read"})
+		if !r.Success {
+			t.Fatalf("reading a non-zero process must succeed, got error: %s", r.Error)
+		}
+		var snap struct {
+			ExitCode *int `json:"exit_code"`
+			Running  bool `json:"running"`
+		}
+		// Always structured: "is it running, and with what code" cannot be read
+		// off the output, so a poller parses every reply.
+		if err := json.Unmarshal([]byte(r.Output), &snap); err != nil {
+			t.Fatalf("a snapshot must be JSON, got %q: %v", r.Output, err)
+		}
+		if snap.ExitCode != nil {
+			if *snap.ExitCode != 9 {
+				t.Fatalf("exit_code = %d, want 9", *snap.ExitCode)
+			}
+			if snap.Running {
+				t.Fatal("running should be false once an exit code is known")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("exit code never settled")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestForegroundFailureStillFails is the other half: a command that ran and came
+// out non-zero is a failed tool call, because for `shell` the command's success
+// IS the tool's success.
+func TestForegroundFailureStillFails(t *testing.T) {
+	r := (&ShellTool{}).Execute(map[string]any{"command": "exit 7"})
+	if r.Success {
+		t.Fatal("a command exiting 7 must report failure")
+	}
+	var snap struct {
+		ExitCode *int `json:"exit_code"`
+	}
+	if err := json.Unmarshal([]byte(r.Output), &snap); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if snap.ExitCode == nil || *snap.ExitCode != 7 {
+		t.Fatalf("exit_code = %v, want 7", snap.ExitCode)
+	}
+}

@@ -57,11 +57,13 @@ func (p *ProcessTool) read(proc *Process, tail int) Result {
 	proc.mu.Unlock()
 
 	// The same CommandOutcome `shell` reports, so reading a background pid and
-	// running a command in the foreground answer in one shape.
+	// running a command in the foreground answer in one shape. Snapshot, not
+	// Result: reading the state of a process that exited non-zero is a
+	// successful read.
 	outcome := commandOutcome(proc.stdout, proc.stderr, tail)
 	outcome.ExitCode = exitCode
 	outcome.Running = exitCode == nil
-	return outcome.Result()
+	return outcome.Snapshot()
 }
 
 func (p *ProcessTool) kill(proc *Process) Result {
