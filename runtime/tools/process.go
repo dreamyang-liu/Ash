@@ -53,29 +53,17 @@ func (p *ProcessTool) Execute(args map[string]any) Result {
 
 func (p *ProcessTool) read(proc *Process, tail int) Result {
 	proc.mu.Lock()
-	running := proc.exitCode == nil
 	exitCode := proc.exitCode
 	proc.mu.Unlock()
 
-	stdout, stdoutTruncated := proc.stdout.Render()
-	stderr, stderrTruncated := proc.stderr.Render()
-	if tail > 0 {
-		stdout = lastNLines(stdout, tail)
-		stderr = lastNLines(stderr, tail)
-	}
-
-	resp := map[string]any{
-		"stdout":           stdout,
-		"stderr":           stderr,
-		"running":          running,
-		"exit_code":        exitCode,
-		"stdout_bytes":     proc.stdout.TotalBytes(),
-		"stderr_bytes":     proc.stderr.TotalBytes(),
-		"stdout_truncated": stdoutTruncated,
-		"stderr_truncated": stderrTruncated,
-	}
-	out, _ := json.Marshal(resp)
-	return Ok(string(out))
+	// The same CommandOutcome `shell` reports, so reading a background pid and
+	// running a command in the foreground answer in one shape. Snapshot, not
+	// Result: reading the state of a process that exited non-zero is a
+	// successful read.
+	outcome := commandOutcome(proc.stdout, proc.stderr, tail)
+	outcome.ExitCode = exitCode
+	outcome.Running = exitCode == nil
+	return outcome.Snapshot()
 }
 
 func (p *ProcessTool) kill(proc *Process) Result {

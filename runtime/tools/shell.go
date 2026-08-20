@@ -195,13 +195,19 @@ func killProcessGroup(cmd *exec.Cmd) {
 	}
 }
 
-// waitExitCode reports how a command ended, using the shell convention a
-// caller already knows: 128+signal for a signalled death. Go's ExitCode()
-// returns -1 there, which says only "not a normal exit" -- and it collided
-// with the -9 that kill used to write itself, so the same process could report
-// two different codes depending on which happened last.
+// waitExitCode waits for a command and reports how it ended. Only for a command
+// nobody has waited on yet -- the background path, where Wait() is this
+// goroutine's job. After Run() has returned, pass its error to exitCodeFromErr.
 func waitExitCode(cmd *exec.Cmd) int {
-	err := cmd.Wait()
+	return exitCodeFromErr(cmd.Wait())
+}
+
+// exitCodeFromErr turns the error from Run()/Wait() into an exit code, using the
+// shell convention a caller already knows: 128+signal for a signalled death.
+// Go's ExitCode() returns -1 there, which says only "not a normal exit" -- and
+// it collided with the -9 that kill used to write itself, so the same process
+// could report two different codes depending on which happened last.
+func exitCodeFromErr(err error) int {
 	if err == nil {
 		return 0
 	}
@@ -229,18 +235,19 @@ func (s *ShellTool) runSync(command string, timeout, tail int, opts runOpts) Res
 	cmd.Stderr = stderr
 
 	err := cmd.Run()
-	output := renderCommandOutput(stdout, stderr, tail)
 
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			if output != "" {
-				return Err(output + "\ncommand timed out after " + fmt.Sprintf("%d", timeout) + "s")
-			}
-			return Err("command timed out after " + fmt.Sprintf("%d", timeout) + "s")
-		}
-		return Err(output)
-	}
-	return Ok(output)
+	// A command that ran and failed is not a tool error. Success=false says it
+	// failed and the exit code says how; Error stays reserved for the tool
+	// refusing the request (bad arguments, unknown action) -- the meaning it
+	// carries at every other Err() call site.
+	outcome := commandOutcome(stdout, stderr, tail)
+	// exitCodeFromErr, not waitExitCode: Run() has already waited, and a second
+	// Wait() fails with "already called" -- not an ExitError, so every command
+	// would report a generic 1, successes included.
+	code := exitCodeFromErr(err)
+	outcome.ExitCode = &code
+	outcome.TimedOut = ctx.Err() == context.DeadlineExceeded
+	return outcome.Result()
 }
 
 func (s *ShellTool) runBackground(command, agentID string, opts runOpts) Result {

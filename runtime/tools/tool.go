@@ -9,6 +9,11 @@ type Tool interface {
 }
 
 // Result of a tool execution.
+//
+// Success answers "did this work". The two text fields say where to read why:
+// Output is what the tool produced, Error is the tool refusing to produce
+// anything. They are alternatives, never two copies of one message -- the wire
+// format carries a single text slot, so a duplicate would reach the model twice.
 type Result struct {
 	Success bool
 	Output  string
@@ -19,6 +24,9 @@ func Ok(output string) Result {
 	return Result{Success: true, Output: output}
 }
 
+// Err reports that the tool could not run the request at all: a missing or
+// invalid argument, an unknown action, an unreachable URL. There is no output
+// in this case, only a reason.
 func Err(msg string) Result {
 	return Result{Success: false, Error: msg}
 }

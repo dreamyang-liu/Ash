@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from swebench.agent import AshAgent
 from swebench.agent.conversation import Conversation
 from swebench.agent.trace import ToolTraceWriter
-from swebench.models import AgentConfig, ToolResult, Trajectory
+from swebench.models import AgentConfig, CommandOutcome, ToolResult, Trajectory
 
 
 def _tool_call(call_id: str, name: str, args: dict):
@@ -108,18 +108,15 @@ def test_tool_trace_classifies_runtime_failure_and_records_truncation(tmp_path):
 
 
 def test_process_snapshot_propagates_runtime_truncation_flag(tmp_path):
+    """A background snapshot reports truncation as a fact, not as prose the
+    trace has to grep for."""
     path = tmp_path / "trace.events.jsonl"
-    output = json.dumps({
-        "stdout": "bounded",
-        "stderr": "",
-        "running": True,
-        "exit_code": None,
-        "stdout_truncated": True,
-        "stderr_truncated": False,
-    })
+    outcome = CommandOutcome(stdout="bounded", running=True, exit_code=None,
+                             stdout_bytes=419430400, stdout_truncated=True)
     agent = _agent_with_trace(
         path,
-        lambda name, args: ToolResult(success=True, output=output),
+        lambda name, args: ToolResult(success=True, output="bounded",
+                                      outcome=outcome),
     )
     agent._run_tool(
         _tool_call("provider-call", "process", {"pid": "p123", "action": "read"}),
@@ -130,3 +127,5 @@ def test_process_snapshot_propagates_runtime_truncation_flag(tmp_path):
 
     _, finished = _events(path)
     assert finished["result"]["output_truncated"] is True
+    assert finished["result"]["command"]["stdout_bytes"] == 419430400
+    assert finished["result"]["command"]["running"] is True

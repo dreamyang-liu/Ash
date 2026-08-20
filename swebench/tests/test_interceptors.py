@@ -376,9 +376,12 @@ def test_guardrail_warning_survives_truncation_of_a_huge_output():
     assert "without reading it first" in result.output      # not elided
 
 
-def test_default_chain_is_guardrails_then_truncate():
+def test_default_chain_presents_then_bounds_then_annotates():
+    """Order is semantics, read innermost-out: the presenter composes text from
+    a command's outcome, truncation bounds it, guardrails annotate last."""
     names = [i.name for i in default_pipeline().interceptors]
-    assert names == ["GuardrailInterceptor", "TruncateInterceptor"]
+    assert names == ["GuardrailInterceptor", "TruncateInterceptor",
+                     "OutcomePresenter"]
 
 
 # --------------------------------------------------------------------------- #

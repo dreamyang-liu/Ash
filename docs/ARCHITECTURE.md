@@ -247,6 +247,7 @@ localhost HTTP (milliseconds), which bounds the cost.
 | Waggle mounting | ✅ `WaggleInterceptor` inside the MCP proxy (opt-in `--coordinate` / `--plugins`); `CoordinatedExecutor` kept as test fixture / proxy-less lite mode; `piped_executor` / `executor_for(pipeline=)` mounts the same chain on harness-thread agents | unchanged |
 | Interceptor pipeline | ✅ `swebench/agent/pipeline.py`, mounted in `swebench/mcp_server.py` and consumed by the agent loop | ACL/audit interceptors still to come |
 | Guardrails + truncation | ✅ migrated out of the loop into `GuardrailInterceptor` (`guardrails.py`) + `TruncateInterceptor` (`interceptors.py`); the loop mounts `default_pipeline()`, the proxy takes `--guardrails` | unchanged |
+| Command results | ✅ one `CommandOutcome` schema (`runtime/tools/boundedlog.go`) answered by both `shell` and `process read` — exit code, streams unmerged, byte counts, truncation flags; unpacked into SDK fields, rendered for the model by `OutcomePresenter` (`interceptors.py`) | more tools report an outcome as they grow one |
 | Policy hooks | ✅ `WagglePolicy` (`on_write`/`on_conflict`/`on_drift`/`on_commit`), run inside the file's critical section | + two reference policies (ownership ACL, auto-merge-then-reject) |
 | Harnesses (L3) | `litellm`, `claude-code`, `manager-worker`, `best-of-n` | + orchestrator-worker (ledger/replan), debate |
 | Eval (L4) | SWE-bench (`extends:` configs, batch runner) | + more benchmarks; topology × coordination A/B matrix |

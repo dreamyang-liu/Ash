@@ -59,13 +59,7 @@ class HTTPBackend(Backend):
         data = resp.json()
         if data.get("error"):
             return ToolResult(output="", is_error=True, notifications=[])
-        result = data["result"]
-        text = result["content"][0]["text"] if result.get("content") else ""
-        return ToolResult(
-            output=text,
-            is_error=result.get("isError", False),
-            notifications=result.get("notifications", []),
-        )
+        return ToolResult.from_response(data["result"])
 
     async def list_tools(self) -> list[dict]:
         resp = await self._client.post(self.url, json={
@@ -112,13 +106,7 @@ class MCPBackend(Backend):
         data = resp.json()
         if data.get("error"):
             return ToolResult(output="", is_error=True, notifications=[])
-        result = data["result"]
-        text = result["content"][0]["text"] if result.get("content") else ""
-        return ToolResult(
-            output=text,
-            is_error=result.get("isError", False),
-            notifications=result.get("notifications", []),
-        )
+        return ToolResult.from_response(data["result"])
 
     async def list_tools(self) -> list[dict]:
         await self._ensure_init()
@@ -193,13 +181,7 @@ class CLIBackend(Backend):
             "tools/call", call_params(tool_name, args, agent_id))
         if data.get("error"):
             return ToolResult(output=data["error"]["message"], is_error=True, notifications=[])
-        result = data["result"]
-        text = result["content"][0]["text"] if result.get("content") else ""
-        return ToolResult(
-            output=text,
-            is_error=result.get("isError", False),
-            notifications=result.get("notifications", []),
-        )
+        return ToolResult.from_response(data["result"])
 
     async def list_tools(self) -> list[dict]:
         data = await self._request("tools/list", {})
@@ -267,13 +249,7 @@ class GatewayBackend(Backend):
         data = resp.json()
         if data.get("error"):
             return ToolResult(output="", is_error=True, notifications=[])
-        result = data["result"]
-        text = result["content"][0]["text"] if result.get("content") else ""
-        return ToolResult(
-            output=text,
-            is_error=result.get("isError", False),
-            notifications=result.get("notifications", []),
-        )
+        return ToolResult.from_response(data["result"])
 
     async def list_tools(self) -> list[dict]:
         resp = await self._client.post(

@@ -148,9 +148,7 @@ class AshSession:
         call_args = {k: v for k, v in args.items() if k != "agent_id"}
         sdk_result: SdkToolResult = await self._sandbox.call(
             tool_name, agent_id=agent_id, **call_args)
-        if sdk_result.is_error:
-            return ToolResult(success=False, output=sdk_result.output, error=sdk_result.output)
-        return ToolResult(success=True, output=sdk_result.output)
+        return ToolResult.from_sdk(sdk_result)
 
     def get_patch(self) -> str:
         """Get the full diff of all changes vs initial state."""
