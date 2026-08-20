@@ -48,6 +48,19 @@ logger = logging.getLogger("ash.pipeline")  # unconfigured -> WARNING+ to stderr
 
 Executor = Callable[[str, dict], ToolResult]
 
+#: Reserved ``CallContext.metadata`` keys — the conventions hosts and
+#: interceptors use to talk to each other about one call.
+#:
+#: ``EXECUTOR``   the raw sandbox executor, for interceptors needing probe
+#:               traffic or arbitrated writes that must not re-enter the chain.
+#: ``RAW_OUTPUT`` / ``RAW_ERROR``
+#:               what the runtime actually returned, recorded before any
+#:               interceptor rewrote it. Interception is for what the *model*
+#:               sees; a trace must still be able to record ground truth.
+EXECUTOR = "executor"
+RAW_OUTPUT = "raw_output"
+RAW_ERROR = "raw_error"
+
 
 # --------------------------------------------------------------------------- #
 #  Call context and verdicts
@@ -243,14 +256,24 @@ def piped_executor(pipeline: ToolPipeline, inner: Executor, agent_id: str,
       instance (coordination state lives inside its interceptors). Blocking
       interceptors (Waggle reservation waits) block the calling thread, so
       give each agent its own thread -- the manager-worker layout.
+    - The returned executor carries ``ash_pipeline``, so a host that would
+      otherwise mount a chain of its own can see one is already in force and
+      not stack a second (``AshAgent`` checks this). Two seats enforcing one
+      rule state it to the model twice.
     """
     def run(tool_name: str, args: dict) -> ToolResult:
         target = sandbox_id() if callable(sandbox_id) else sandbox_id
         ctx = CallContext(agent_id=agent_id, sandbox_id=target,
                           tool_name=tool_name, args=dict(args),
-                          metadata={"executor": inner})
+                          metadata={EXECUTOR: inner})
         return pipeline.execute(ctx, inner)
+    run.ash_pipeline = pipeline          # type: ignore[attr-defined]
     return run
+
+
+def mounted_pipeline(executor: Executor) -> "ToolPipeline | None":
+    """The chain already folded into ``executor`` by :func:`piped_executor`."""
+    return getattr(executor, "ash_pipeline", None)
 
 
 # --------------------------------------------------------------------------- #

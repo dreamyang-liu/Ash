@@ -100,12 +100,19 @@ Assembly is plain Python — order is semantics, a list is the configuration:
 ```python
 # my_plugins.py        ash-mcp-proxy --plugins my_plugins.py
 PIPELINE = [
-    GuardrailInterceptor(),                                   # safety first
-    ToolACLInterceptor({"investigator": {"text_editor", "grep_files"}}),
+    GuardrailInterceptor(read_before_edit=False),   # nudges; Waggle enforces below
+    ToolACLInterceptor({"investigator": {"text_editor", "grep_files"}}),  # planned
     WaggleInterceptor(policy=TeamPolicy()),                   # coordination
-    AuditInterceptor("audit.jsonl"),                          # observe last
+    TruncateInterceptor(),                                    # bound the result
+    AuditInterceptor("audit.jsonl"),                          # observe last (planned)
 ]
 ```
+
+`GuardrailInterceptor` (`swebench/agent/guardrails.py`), `WaggleInterceptor` and
+`TruncateInterceptor` (`swebench/agent/interceptors.py`) exist today; the ACL and
+audit seats are still to be written. Note `read_before_edit=False` above: that
+rule is Waggle's when coordination is mounted, and two seats stating one rule
+tells the model the same thing twice.
 
 ### Waggle — the coordination interceptor
 
@@ -238,7 +245,8 @@ localhost HTTP (milliseconds), which bounds the cost.
 | Runtime (L1) | ✅ as designed | unchanged, forever |
 | Waggle kernel | ✅ `swebench/agent/waggle.py` (`WorkspaceCoordinator`), 10 unit tests + live-conflict experiment | same kernel, mounted in the proxy |
 | Waggle mounting | ✅ `WaggleInterceptor` inside the MCP proxy (opt-in `--coordinate` / `--plugins`); `CoordinatedExecutor` kept as test fixture / proxy-less lite mode; `piped_executor` / `executor_for(pipeline=)` mounts the same chain on harness-thread agents | unchanged |
-| Interceptor pipeline | ✅ `swebench/agent/pipeline.py`, mounted in `swebench/mcp_server.py` | guardrails/ACL/audit migrate out of the agent loop into it |
+| Interceptor pipeline | ✅ `swebench/agent/pipeline.py`, mounted in `swebench/mcp_server.py` and consumed by the agent loop | ACL/audit interceptors still to come |
+| Guardrails + truncation | ✅ migrated out of the loop into `GuardrailInterceptor` (`guardrails.py`) + `TruncateInterceptor` (`interceptors.py`); the loop mounts `default_pipeline()`, the proxy takes `--guardrails` | unchanged |
 | Policy hooks | ✅ `WagglePolicy` (`on_write`/`on_conflict`/`on_drift`/`on_commit`), run inside the file's critical section | + two reference policies (ownership ACL, auto-merge-then-reject) |
 | Harnesses (L3) | `litellm`, `claude-code`, `manager-worker`, `best-of-n` | + orchestrator-worker (ledger/replan), debate |
 | Eval (L4) | SWE-bench (`extends:` configs, batch runner) | + more benchmarks; topology × coordination A/B matrix |
@@ -248,8 +256,9 @@ localhost HTTP (milliseconds), which bounds the cost.
 1. **A/B evidence** — manager-worker with Waggle on/off over a multi-file
    SWE-bench slice; publish numbers alongside the mechanism.
 2. **Pipeline + proxy mounting** — ✅ interceptor chain built and mounted in
-   `swebench/mcp_server.py`, Waggle behind it; guardrails/output-truncation
-   migration from the agent loop still pending.
+   `swebench/mcp_server.py`, Waggle behind it; guardrails and output truncation
+   migrated out of the agent loop into interceptors, so agents arriving through
+   the proxy get them too.
 3. **`best-of-n` harness** — parallel candidates + objective test-based
    selection (the highest-confidence score lever).
 4. **Policy hook surface** — ✅ `WagglePolicy` shipped; the two reference

@@ -39,8 +39,10 @@ from different streams.
   `output_truncated`.
 - `duration_ms`: elapsed monotonic time from immediately before execution.
 - `error_kind`: present on failures; v1 emits `routing` or `runtime`.
-- `observation`: present only when formatting, warnings, or processors changed
-  the text returned to the model.
+- `observation`: present only when the text returned to the model differs from
+  the runtime's output — error formatting, or an interceptor that appended a
+  guardrail warning or elided oversized output. `result.output` stays
+  untruncated: bounding output protects the model's context, not the trace.
 - `process_id`: present when a background shell call creates a process.
 
 `parent_call_id` is not used to pair start and finish events, group parallel

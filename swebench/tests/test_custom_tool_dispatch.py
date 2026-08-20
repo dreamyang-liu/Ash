@@ -52,11 +52,6 @@ class FakeConversation:
         self.tool_results.append((a, kw))
 
 
-class NoopGuardrails:
-    def check(self, name, args):
-        return None
-
-
 def register_analyzer():
     register(parse_manifest({
         "name": "analyzer",
@@ -83,7 +78,7 @@ def test_custom_tool_dispatches_artifact_then_shell():
 
     agent = make_agent(executor)
     agent._run_tool(make_tool_call("analyzer", {"file": "main.py"}),
-                    FakeConversation(), NoopGuardrails(), "turn1")
+                    FakeConversation(), "turn1")
 
     assert [c[0] for c in calls] == ["artifact", "shell"]
     assert calls[0][1] == {"url": "https://example.com/analyzer", "sha256": SHA}
@@ -101,7 +96,7 @@ def test_custom_tool_artifact_failure_short_circuits():
 
     agent = make_agent(executor)
     agent._run_tool(make_tool_call("analyzer", {"file": "x"}),
-                    FakeConversation(), NoopGuardrails(), "turn1")
+                    FakeConversation(), "turn1")
     assert calls == ["artifact"]  # shell step never runs
 
 
@@ -115,7 +110,7 @@ def test_custom_tool_bad_args_fail_before_any_execution():
 
     agent = make_agent(executor)
     agent._run_tool(make_tool_call("analyzer", {}),  # missing required 'file'
-                    FakeConversation(), NoopGuardrails(), "turn1")
+                    FakeConversation(), "turn1")
     assert calls == []  # validation failed at plan time; nothing executed
 
 
@@ -162,7 +157,7 @@ def test_path_sourced_tool_skips_artifact_step():
 
     agent = make_agent(executor)
     agent._run_tool(make_tool_call("imagetool", {"file": "a.py"}),
-                    FakeConversation(), NoopGuardrails(), "turn1")
+                    FakeConversation(), "turn1")
 
     # Single step: shell only, no artifact download.
     assert [c[0] for c in calls] == ["shell"]

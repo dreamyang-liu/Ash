@@ -33,6 +33,8 @@ from typing import Any
 from ash_sandbox import DockerPool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
 
+from .agent.guardrails import GuardrailInterceptor
+from .agent.interceptors import TruncateInterceptor
 from .agent.pipeline import CallContext, ToolPipeline, load_pipeline
 from .agent.waggle import WaggleInterceptor
 from .models import ToolResult
@@ -444,8 +446,19 @@ class HttpMcpServer:
         self.pipeline = pipeline
         self._sessions: dict[str, Session] = {}
 
+    #: Headers that identify the caller, most explicit first. ``mcp-session-id``
+    #: is the protocol's own mechanism: ``initialize`` returns ``sessionId`` and
+    #: a conforming client echoes it back on subsequent requests.
+    SESSION_HEADERS = ("x-session-owner", "mcp-session-id")
+
     def _get_or_create_session(self, headers: dict) -> Session:
-        owner = headers.get("x-session-owner", str(uuid.uuid4()))
+        owner = next((headers[h] for h in self.SESSION_HEADERS if headers.get(h)), None)
+        if owner is None:
+            # Anonymous request: a fresh identity, so sandboxes stay private.
+            # Interceptors keyed by agent_id (guardrails, Waggle) can hold no
+            # state across such requests — each one looks like a new agent — so
+            # a client that wants governance must identify itself.
+            owner = str(uuid.uuid4())
         if owner not in self._sessions:
             groups_header = headers.get("x-session-groups", "")
             explicit_groups = [g.strip() for g in groups_header.split(",") if g.strip()]
@@ -594,17 +607,34 @@ _TRUTHY = {"1", "true", "yes", "on"}
 def _build_pipeline(args) -> "ToolPipeline | None":
     """Assemble the L2 interceptor pipeline (docs/ARCHITECTURE.md).
 
-    Default OFF: with no --plugins and no coordination flag the proxy
+    Default OFF: with no --plugins, --guardrails or coordination flag the proxy
     dispatches tool calls exactly as before. --plugins replaces the default
     assembly entirely — the PIPELINE list in the file is the configuration.
+
+    Order is semantics: guardrails advise before Waggle arbitrates, and their
+    ``after`` therefore runs last, so a warning is appended to whatever result
+    (including a Waggle rejection) the model ends up seeing. Truncation sits
+    innermost, so it bounds the runtime's result and the seats above it annotate
+    already-bounded text. When both guardrails and coordination are on,
+    read-before-edit is left to Waggle — it enforces the same rule and names
+    the version the agent is stale against.
     """
     if args.plugins:
         return load_pipeline(args.plugins)
     coordinate = args.coordinate or \
         os.environ.get("ASH_MCP_COORDINATE", "").strip().lower() in _TRUTHY
+    interceptors: list = []
+    if args.guardrails:
+        interceptors.append(GuardrailInterceptor(
+            enforcement=args.guardrails, read_before_edit=not coordinate))
     if coordinate:
-        return ToolPipeline([WaggleInterceptor(ttl=args.waggle_ttl)])
-    return None
+        interceptors.append(WaggleInterceptor(ttl=args.waggle_ttl))
+    if interceptors and args.max_output_bytes > 0:
+        # Only with another seat: mounting the chain for truncation alone would
+        # change the default dispatch path, and the runtime already bounds its
+        # own output (ASH_MAX_OUTPUT_BYTES).
+        interceptors.append(TruncateInterceptor(max_len=args.max_output_bytes))
+    return ToolPipeline(interceptors) if interceptors else None
 
 
 def main():
@@ -623,6 +653,14 @@ def main():
                              "Default: off.")
     parser.add_argument("--waggle-ttl", type=float, default=120.0,
                         help="Waggle reservation TTL in seconds (with --coordinate)")
+    parser.add_argument("--guardrails", nargs="?", const="warn", default=None,
+                        choices=["warn", "reject"],
+                        help="Mount read-before-edit / edit-streak guardrails: "
+                             "'warn' annotates the result, 'reject' refuses the "
+                             "call. Default: off.")
+    parser.add_argument("--max-output-bytes", type=int, default=12000,
+                        help="Bound each tool result to this many characters "
+                             "when the pipeline is mounted (0 disables)")
     parser.add_argument("--plugins", default=None,
                         help="Python file exporting PIPELINE: list[ToolInterceptor]; "
                              "replaces the default pipeline assembly")
@@ -637,6 +675,12 @@ def main():
     if pipeline is not None:
         names = ", ".join(i.name for i in pipeline.interceptors) or "(empty)"
         sys.stderr.write(f"[ash-mcp] interceptor pipeline: {names}\n")
+        if args.http:
+            # Per-agent state is keyed by session identity, so an unidentified
+            # client gets a new one per request and the chain can hold nothing.
+            sys.stderr.write(
+                "[ash-mcp] note: interceptor state is per session — clients must send "
+                f"one of {', '.join(HttpMcpServer.SESSION_HEADERS)}\n")
         sys.stderr.flush()
 
     if args.http:

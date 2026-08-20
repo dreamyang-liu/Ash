@@ -32,6 +32,7 @@ from ..dataset import resolve_image, image_registry_for_subset
 from ..sandbox import AshSession
 from ..models import AgentConfig, ToolResult
 from ..agent import AshAgent, TOOLS_SCHEMA
+from ..agent.interceptors import default_pipeline
 from ..agent.trace import new_run_id
 from ..agent.waggle import CoordinatedExecutor, WorkspaceCoordinator
 from .. import style as S
@@ -309,6 +310,11 @@ class ManagerWorkerHarness(BaseHarness):
                     run_id=run_id,
                     agent_id=worker_id,
                     sandbox_id=sandbox_id,
+                    # Read-before-edit is Waggle's when it is mounted: it
+                    # enforces the same rule and names the version this worker
+                    # is stale against, so a second seat would only tell the
+                    # model the same thing twice.
+                    pipeline=default_pipeline(read_before_edit=not waggle_state),
                 )
                 agent.stream = False
                 agent.set_tools_schema(TOOLS_SCHEMA)
