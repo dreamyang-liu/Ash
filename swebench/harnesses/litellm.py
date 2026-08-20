@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .base import BaseHarness
 from ..dataset import resolve_image, format_task_prompt, image_registry_for_subset
+from ..backends import backend_config
 from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent
@@ -41,7 +42,8 @@ class LiteLLMHarness(BaseHarness):
         if self._dashboard:
             self._dashboard.update(instance_id, status="spawning")
 
-        session = AshSession(runtime_bin=c.get("runtime_bin"), quiet=quiet)
+        session = AshSession(runtime_bin=c.get("runtime_bin"), quiet=quiet,
+                             backend=backend_config(c))
 
         try:
             if not session.create(image):

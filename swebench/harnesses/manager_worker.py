@@ -29,6 +29,7 @@ from ash_sandbox import Sandbox
 
 from .base import BaseHarness
 from ..dataset import resolve_image, image_registry_for_subset
+from ..backends import backend_config
 from ..sandbox import AshSession
 from ..models import AgentConfig, ToolResult
 from ..agent import AshAgent, TOOLS_SCHEMA
@@ -200,7 +201,8 @@ class ManagerWorkerHarness(BaseHarness):
         run_id = new_run_id()
         waggle_state = WorkspaceCoordinator(ttl=float(c.get("waggle_ttl", 120.0))) if c.get("waggle") else None
 
-        session = AshSession(runtime_bin=c.get("runtime_bin"), quiet=True)
+        session = AshSession(runtime_bin=c.get("runtime_bin"), quiet=True,
+                             backend=backend_config(c))
         try:
             if not session.create(image):
                 return self._fail(iid, c, "session_failed")

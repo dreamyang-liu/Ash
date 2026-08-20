@@ -6,10 +6,11 @@ Provides synchronous interface for spawning containers and executing tools.
 import asyncio
 from typing import Callable, Optional
 
-from ash_sandbox import DockerPool, Sandbox
+from ash_sandbox import Pool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
 
 from . import style as S
+from .backends import build_pool
 from .models import ToolResult
 
 
@@ -29,11 +30,17 @@ class AshSession:
     forget it and an agent cannot act as another.
     """
 
-    def __init__(self, runtime_bin: str | None = None, timeout: float = 300.0, quiet: bool = False):
+    def __init__(self, runtime_bin: str | None = None, timeout: float = 300.0,
+                 quiet: bool = False, backend: dict | None = None):
         self.runtime_bin = runtime_bin
         self.timeout = timeout
         self.quiet = quiet
-        self._pool: Optional[DockerPool] = None
+        #: Where sandboxes come from (``swebench/backends.py``). The config's
+        #: execution section, passed through; ``None`` means local Docker. A
+        #: session names no concrete pool, so the same harness code runs on
+        #: containers, microVMs, or a k8s fleet.
+        self.backend = backend or {}
+        self._pool: Optional[Pool] = None
         self._sandbox: Optional[Sandbox] = None
         self._base_commit: str = ""
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -55,11 +62,10 @@ class AshSession:
 
     async def _create_async(self, image: str) -> bool:
         try:
-            self._pool = DockerPool(runtime_bin=self.runtime_bin)
+            self._pool = build_pool(self.backend, runtime_bin=self.runtime_bin)
             self._sandbox = await self._pool.spawn(image=image)
-            cid = self._sandbox._container_id or "unknown"
             if not self.quiet:
-                print(S.kv("sandbox ", S.cyan(cid[:12])))
+                print(S.kv("sandbox ", S.cyan(self.sandbox_id[:12])))
             r = await self._sandbox.call("shell", command="git -C /testbed rev-parse HEAD")
             if not r.is_error:
                 self._base_commit = r.output.strip()
@@ -70,23 +76,27 @@ class AshSession:
 
     def destroy(self):
         if self._sandbox:
-            cid = self._sandbox._container_id or ""
+            container_id = self._sandbox._container_id or ""
             try:
                 self._get_loop().run_until_complete(self._destroy_async())
             except Exception:
-                if cid:
+                # Last resort for a local container the pool could not remove:
+                # a leaked container holds its image and ports. Only meaningful
+                # for Docker -- other backends have no local handle to reap,
+                # and their own teardown (or a TTL) is the only recourse.
+                if container_id:
                     import subprocess
-                    subprocess.run(["docker", "rm", "-f", cid],
+                    subprocess.run(["docker", "rm", "-f", container_id],
                                    capture_output=True, timeout=10)
             self._sandbox = None
             self._pool = None
 
     async def _destroy_async(self):
         if self._pool and self._sandbox:
-            cid = self._sandbox._container_id or ""
+            sid = self.sandbox_id
             await self._pool.destroy(self._sandbox)
             if not self.quiet:
-                print(S.kv("cleanup ", S.dim(f"destroyed {cid[:12]}")))
+                print(S.kv("cleanup ", S.dim(f"destroyed {sid[:12]}")))
             self._sandbox = None
             self._pool = None
 

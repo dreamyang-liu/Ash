@@ -94,3 +94,14 @@ dataset:
 
 execution:
   workers: 1
+  # Where sandboxes come from: docker (default) | microvm | k8s.
+  # Per-backend settings live under a section of the same name, so one config can
+  # carry several and switching is a one-word change. See swebench/backends.py.
+  backend: docker
+  # microvm:                          # Firecracker via AgentENV (~135 ms spawn)
+  #   server_url: http://127.0.0.1:8000
+  #   template: ash-base              # snapshot with ash-runtime already baked in
+  #   api_key_file: ~/.config/ash/aenv-key   # keeps the key out of this file
+  # k8s:
+  #   control_plane_url: http://control-plane
+  #   gateway_url: http://gateway
