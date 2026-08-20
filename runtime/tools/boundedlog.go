@@ -286,17 +286,22 @@ func (b *BoundedLog) tailLimit() int {
 //
 // ExitCode is nil while a process is still running -- 0 and "not known yet" are
 // different answers.
+//
+// Every field is always present. `running: false` and `timed_out: false` are
+// answers, not absences, and omitempty would make a consumer unable to tell "it
+// finished" from "this runtime never said" -- so a poller would have to treat a
+// missing key as either, and pick wrong on one of them.
 type CommandOutcome struct {
 	Stdout          string `json:"stdout"`
 	Stderr          string `json:"stderr"`
 	ExitCode        *int   `json:"exit_code"`
-	Running         bool   `json:"running,omitempty"`
-	TimedOut        bool   `json:"timed_out,omitempty"`
+	Running         bool   `json:"running"`
+	TimedOut        bool   `json:"timed_out"`
 	StdoutBytes     int64  `json:"stdout_bytes"`
 	StderrBytes     int64  `json:"stderr_bytes"`
 	StdoutTruncated bool   `json:"stdout_truncated"`
 	StderrTruncated bool   `json:"stderr_truncated"`
-	MaxPerStream    int    `json:"max_per_stream,omitempty"`
+	MaxPerStream    int    `json:"max_per_stream"`
 }
 
 // commandOutcome reads both logs into the shared schema.
