@@ -39,7 +39,8 @@ from .agent.interceptors import TruncateInterceptor
 from .agent.pipeline import CallContext, ToolPipeline, load_pipeline
 from .agent.waggle import WaggleInterceptor
 from .models import ToolResult
-from .patch import WORKDIR, format_patch, patch_commands
+from .patch import (UNTRACKED_LIST, WORKDIR, diff_command, format_patch,
+                    select_added, stage_commands)
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +54,10 @@ class SandboxEntry:
     image: str
     groups: list[str]        # visibility = group intersection
     base_commit: str = ""
+    #: Untracked paths present before any agent ran. A SWE-bench image can ship
+    #: a `build/` tree; without this snapshot it is indistinguishable later from
+    #: a file the agent created (see swebench/patch.py).
+    baseline_untracked: set[str] = field(default_factory=set)
 
     def visible_to(self, session_groups: list[str]) -> bool:
         return bool(set(self.groups) & set(session_groups))
@@ -259,9 +264,13 @@ class SandboxPool:
         sandbox = await self._pool.spawn(image=image)
         r = await sandbox.call("shell", command="git -C /testbed rev-parse HEAD")
         base_commit = r.output.strip() if not r.is_error else ""
+        probe = await sandbox.call("shell", command=f"cd {WORKDIR} && {UNTRACKED_LIST}")
+        baseline = set(line.strip() for line in (probe.output or "").splitlines()
+                       if line.strip()) if not probe.is_error else set()
         sb_id = self._next_id()
         entry = SandboxEntry(id=sb_id, sandbox=sandbox, image=image,
-                             groups=groups, base_commit=base_commit)
+                             groups=groups, base_commit=base_commit,
+                             baseline_untracked=baseline)
         self._sandboxes[sb_id] = entry
         self._log(f"created {sb_id} groups={groups}")
         return entry
@@ -296,11 +305,16 @@ class SandboxPool:
 
     async def _extract_patch(self, entry: SandboxEntry) -> str:
         try:
-            # Same commands as the harness session (swebench/patch.py), so a
+            # Same rules as the harness session (swebench/patch.py), so a
             # prediction does not depend on which path produced it.
-            stage, diff = patch_commands(entry.base_commit)
-            await entry.sandbox.call("shell", command=f"cd {WORKDIR} && {stage}")
-            r = await entry.sandbox.call("shell", command=f"cd {WORKDIR} && {diff}")
+            listed = await entry.sandbox.call(
+                "shell", command=f"cd {WORKDIR} && {UNTRACKED_LIST}")
+            added = select_added((listed.output or "").splitlines(),
+                                 entry.baseline_untracked)
+            for command in stage_commands(added):
+                await entry.sandbox.call("shell", command=f"cd {WORKDIR} && {command}")
+            r = await entry.sandbox.call(
+                "shell", command=f"cd {WORKDIR} && {diff_command(entry.base_commit)}")
             patch = format_patch(r.output)
             if self.patch_dir:
                 self.patch_dir.mkdir(parents=True, exist_ok=True)

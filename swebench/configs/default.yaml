@@ -52,9 +52,16 @@ agent:
     - NEVER modify test files. If you accidentally did, revert them before finishing:
       `shell({"command": "cd /testbed && git checkout -- '**/test*' '**/conftest*'"})`
     - Fix ALL instances of a bug pattern, not just one
-    - Keep patches clean: only source changes, no temp files
-    - When you are done, clean up any temporary files you created:
-      `shell({"command": "cd /testbed && rm -f repro*.py reproduce*.py test_fix*.py"})`
+    - Your patch is taken from the repository when you finish, so it will contain
+      whatever you leave behind. Before you stop, delete the scratch you created —
+      reproduce scripts, one-off tests, notes, anything that is not part of the
+      fix. List what you added and remove it by name:
+      `shell({"command": "cd /testbed && git status --porcelain"})`
+      then `shell({"command": "cd /testbed && rm -f <the files you created>"})`
+    - Do NOT delete files that were already there when you started, and do not
+      revert your own source changes.
+    - A new source file IS part of the fix if the fix needs one — keep it. Only
+      remove what you wrote to investigate.
 
     ## Tool Examples
 

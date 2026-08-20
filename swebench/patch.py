@@ -1,52 +1,118 @@
 """Extracting the agent's work as a patch — one implementation, two callers.
 
-A prediction is a diff of the *repository's* files. An agent also leaves things
-behind that are not part of its answer: a reproduce script it wrote to see the
-bug, `build/` from a `setup.py build`, `.pytest_cache`, `__pycache__`. Those are
-how it worked, not what it changed.
+A prediction should be everything the agent changed, and nothing else. Both
+halves are easy to get wrong in opposite directions.
 
-`git add -A` cannot tell the difference — it stages every untracked file, and
-force-stages ones the repo ignores. Measured on one run: a `psf/requests`
-prediction came out at 872,340 characters across 66 files, of which **one** was a
-source change and 65 were `build/` output. The official grader applies whatever we
-hand it, so nothing downstream would have caught that.
+`git add -A` errs one way: it stages every untracked path, including ones that
+were already there before the agent started. A `psf/requests` prediction came out
+at 872,340 characters across 66 files, of which one was a source change and 65
+were a `build/` tree that ships **inside the SWE-bench image** — `git status` in a
+freshly created sandbox already reports `?? build/`. The official grader applies
+whatever it is handed, so nothing downstream catches this.
 
-So the patch is built from tracked files only (`git add -u`). Deliberately
-excluding a newly added source file is a real trade-off, and the data says it is
-the right one: across SWE-bench Verified, 1 gold patch in 500 adds a file (0.2%),
-while an agent leaves scratch behind constantly. `untracked_paths` reports what
-was left out, so a caller can log it rather than wonder.
+Staging only tracked files (`git add -u`) errs the other way: it silently drops a
+source file the agent created, and only the agent knows whether a new file is
+part of the answer or a scratch script. mini-swe-agent avoids the whole question
+by having the model produce the diff itself (`git diff -- <files it edited>`),
+which is the most honest answer available — the author of a change knows its
+extent.
+
+This takes the same position without depending on the model getting a submission
+ritual right: record which paths are untracked when the sandbox is created, and
+treat only *newly* appeared paths as the agent's. Image baggage is excluded
+because it predates the agent, not because it is untracked; a source file the
+agent adds is included because the agent added it. The prompt still asks for
+scratch to be cleaned up, so the two reinforce rather than substitute.
 """
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Iterable
 
 #: Where SWE-bench images check out the repository under test.
 WORKDIR = "/testbed"
 
 Shell = Callable[[str], object]     # command -> ToolResult-like (.success, .output)
 
-__all__ = ["WORKDIR", "extract_patch", "untracked_paths", "patch_commands",
-           "format_patch", "UNTRACKED_LIST"]
+__all__ = ["WORKDIR", "extract_patch", "baseline_untracked", "added_paths",
+           "select_added", "stage_commands", "diff_command", "format_patch",
+           "UNTRACKED_LIST"]
 
-#: Lists the files a patch leaves out (respecting .gitignore).
+#: Untracked paths, respecting .gitignore. Read-only: never touches the index.
 UNTRACKED_LIST = "git ls-files --others --exclude-standard"
+
+#: Paths never worth submitting whatever their status: caches and compiled
+#: output are not a change to the repository under any reading, and an agent that
+#: forgets to clean one up should not have its answer buried.
+NEVER_SUBMIT = (
+    "__pycache__/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
+    ".tox/", ".eggs/", "*.egg-info/", "*.pyc", "*.pyo", "*.so", "*.o",
+)
 
 
 def _output(result) -> str:
     return (getattr(result, "output", "") or "") if getattr(result, "success", False) else ""
 
 
-#: The commands that produce a patch, in order. Shared so the sync and async
-#: callers cannot drift on the part that matters -- which files get staged.
-def patch_commands(base_commit: str = "") -> tuple[str, str]:
-    """(stage, diff) — the two commands, given a base commit.
+def _lines(result) -> list[str]:
+    return [line.strip() for line in _output(result).splitlines() if line.strip()]
 
-    `git add -u`, not `-A`: stage modifications and deletions of files the repo
-    already tracks, and leave the agent's scratch alone.
+
+def baseline_untracked(shell: Shell) -> set[str]:
+    """Untracked paths that exist before the agent runs.
+
+    Called once, at sandbox creation. A SWE-bench image can arrive with a
+    `build/` tree or a stray artifact already in place; those are the image's,
+    not the agent's, and the difference is invisible later.
     """
-    return "git add -u", f"git diff --cached {base_commit or 'HEAD'}"
+    return set(_lines(shell(UNTRACKED_LIST)))
+
+
+def _is_noise(path: str) -> bool:
+    from fnmatch import fnmatch
+    for pattern in NEVER_SUBMIT:
+        if pattern.endswith("/"):
+            if path.startswith(pattern) or f"/{pattern}" in f"/{path}":
+                return True
+        elif fnmatch(path, pattern) or fnmatch(path.rsplit("/", 1)[-1], pattern):
+            return True
+    return False
+
+
+def select_added(untracked: Iterable[str], baseline: Iterable[str] = ()) -> list[str]:
+    """The agent's new paths, given the current and baseline untracked lists.
+
+    Pure, so the async caller can do its own listing and still apply exactly the
+    same rules -- the part that decides what a prediction contains is shared even
+    though the two callers cannot share an executor.
+    """
+    before = set(baseline)
+    return sorted(p for p in (s.strip() for s in untracked)
+                  if p and p not in before and not _is_noise(p))
+
+
+def added_paths(shell: Shell, baseline: Iterable[str] = ()) -> list[str]:
+    """Untracked paths the agent created, minus caches and compiled output."""
+    return select_added(_lines(shell(UNTRACKED_LIST)), baseline)
+
+
+def stage_commands(added: Iterable[str] = ()) -> list[str]:
+    """Commands that stage the agent's work.
+
+    `-u` covers modifications and deletions of tracked files; each newly added
+    path is then staged by name. Named explicitly rather than with `-A` so a path
+    that was already there cannot ride along.
+    """
+    commands = ["git add -u"]
+    paths = [p for p in added if p]
+    if paths:
+        quoted = " ".join(f"'{p}'" for p in paths)
+        commands.append(f"git add -- {quoted}")
+    return commands
+
+
+def diff_command(base_commit: str = "") -> str:
+    return f"git diff --cached {base_commit or 'HEAD'}"
 
 
 def format_patch(diff_output: str) -> str:
@@ -55,26 +121,15 @@ def format_patch(diff_output: str) -> str:
     return patch + "\n" if patch else ""
 
 
-def extract_patch(shell: Shell, base_commit: str = "") -> str:
-    """The diff of tracked files against ``base_commit``.
+def extract_patch(shell: Shell, base_commit: str = "",
+                  baseline: Iterable[str] = ()) -> tuple[str, list[str]]:
+    """(patch, paths added by the agent) — the diff of everything it changed.
 
     ``shell`` runs one command in the repository and returns something with
-    ``.success`` and ``.output``. The async caller (the MCP proxy) uses
-    ``patch_commands`` and ``format_patch`` directly instead of this wrapper.
+    ``.success`` and ``.output``. The async caller (the MCP proxy) drives
+    ``stage_commands``/``diff_command`` directly.
     """
-    stage, diff = patch_commands(base_commit)
-    shell(stage)
-    return format_patch(_output(shell(diff)))
-
-
-def untracked_paths(shell: Shell, limit: int = 20) -> list[str]:
-    """Paths the agent created that the patch leaves out.
-
-    Worth logging: a reproduce script is expected, but a `build/` tree usually
-    means a command was run that the task did not need, and an untracked file
-    under a source directory may be a real answer this excludes (rare — see the
-    module docstring).
-    """
-    listed = _output(shell(UNTRACKED_LIST))
-    paths = [line.strip() for line in listed.splitlines() if line.strip()]
-    return paths[:limit]
+    added = added_paths(shell, baseline)
+    for command in stage_commands(added):
+        shell(command)
+    return format_patch(_output(shell(diff_command(base_commit)))), added
