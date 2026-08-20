@@ -655,10 +655,19 @@ class WaggleInterceptor(ToolInterceptor):
 
     def __init__(self, state: Optional[WorkspaceCoordinator] = None,
                  policy: Optional[WagglePolicy] = None,
-                 ttl: float = DEFAULT_TTL, require_read: bool = True) -> None:
+                 ttl: float = DEFAULT_TTL, require_read: bool = True,
+                 opaque_writers: "set[str] | None" = None) -> None:
         self.state = state or WorkspaceCoordinator(ttl=ttl)
         self.policy = policy
         self.require_read = require_read
+        # Tools that touch the workspace without Waggle being able to see how.
+        # `shell` always does; name any other here -- a manifest-defined tool
+        # that edits files, say, whose dispatch happens below this seat and so
+        # reaches it as one opaque call. Each name costs a fingerprint scan per
+        # call (~10 ms, ADR-1) and buys drift detection for it; leaving one out
+        # means an agent can edit a file version it never read, unwarned.
+        self.opaque_writers = {"shell"} | set(opaque_writers or ())
+        self.tools = {"text_editor"} | self.opaque_writers
 
     def before(self, ctx: CallContext) -> Verdict:
         if ctx.tool_name == "text_editor" and \
@@ -667,7 +676,7 @@ class WaggleInterceptor(ToolInterceptor):
         return Continue()
 
     def after(self, ctx: CallContext, result: ToolResult) -> ToolResult:
-        if ctx.tool_name == "shell":
+        if ctx.tool_name in self.opaque_writers:
             self._adapter(ctx)._scan_effects()
         elif result.success and self._is_read(ctx):
             path = ctx.args.get("path")

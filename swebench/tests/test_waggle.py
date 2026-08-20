@@ -308,3 +308,63 @@ def test_dump_is_json_friendly_audit():
     assert key == f"default:{PATH}"
     assert [r["version"] for r in records] == [1, 2]
     assert {"version", "author", "op", "timestamp", "bytes"} <= records[0].keys()
+
+
+# --------------------------------------------------------------------------- #
+#  Opaque writers: tools whose file effects Waggle cannot see directly
+# --------------------------------------------------------------------------- #
+
+def test_shell_is_an_opaque_writer_by_default():
+    """Default behaviour is unchanged: shell is scanned, nothing else is."""
+    from swebench.agent.waggle import WaggleInterceptor
+
+    icpt = WaggleInterceptor()
+    assert icpt.opaque_writers == {"shell"}
+    assert icpt.tools == {"text_editor", "shell"}
+    assert not icpt.applies_to("mytool")
+
+
+def test_declaring_a_tool_an_opaque_writer_restores_drift_detection():
+    """A tool whose dispatch happens below this seat arrives as one opaque call,
+    so Waggle has no `shell` to key on. Undeclared, an agent can then write over
+    a file version it never read: `str_replace` may coexist by luck, but a whole
+    file `write` silently discards the other agent's work.
+
+    Naming the tool is all it takes -- Waggle is a pluggable suite, so which
+    calls it watches is its own configuration.
+    """
+    from swebench.agent.pipeline import CallContext, ToolPipeline
+    from swebench.agent.waggle import WaggleInterceptor, WorkspaceCoordinator
+
+    path = "/testbed/app.py"
+    original = "def f():\n    return 1\n"
+    after_tool = original + "\ndef g():\n    return 'other agent'\n"
+
+    def run(declared: bool):
+        sandbox = FakeSandbox({path: original})
+        icpt = WaggleInterceptor(state=WorkspaceCoordinator(ttl=5.0),
+                                 opaque_writers={"mycodegen"} if declared else None)
+        pipe = ToolPipeline([icpt])
+
+        def call(agent, tool, args):
+            executor = sandbox.executor()
+            return pipe.execute(
+                CallContext(agent_id=agent, sandbox_id="default", tool_name=tool,
+                            args=dict(args), metadata={"executor": executor}),
+                executor)
+
+        call("A", "text_editor", {"command": "view", "path": path})
+        sandbox.mutate(path, after_tool)                 # the tool's effect
+        call("B", "mycodegen", {"target": path})          # one opaque call
+        result = call("A", "text_editor", {
+            "command": "write", "path": path, "file_text": "def f():\n    return 2\n"})
+        return result, sandbox.read(path)
+
+    undeclared, content = run(declared=False)
+    assert undeclared.success                            # nothing stopped it
+    assert "other agent" not in content                  # ... and the work is gone
+
+    declared, content = run(declared=True)
+    assert not declared.success
+    assert "[WAGGLE]" in declared.output                 # rejected with a diff
+    assert "other agent" in content                      # the work survived
