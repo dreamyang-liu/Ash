@@ -631,3 +631,44 @@ def test_http_sessions_are_stable_for_an_identified_client():
     assert len(set(owner)) == 1
     anon = [server._get_or_create_session({}).id for _ in range(3)]
     assert len(set(anon)) == 3, "an unidentified client stays isolated"
+
+
+# --------------------------------------------------------------------------- #
+#  Composing with PR #21's harness-side mount (executor_for(pipeline=))
+# --------------------------------------------------------------------------- #
+
+def test_an_already_governed_executor_is_not_governed_twice():
+    """`executor_for(pipeline=…)` folds a chain into the executor. If the agent
+    then mounted its default on top, every rule the two share would be stated
+    to the model twice."""
+    from swebench.agent.pipeline import piped_executor
+
+    ex = piped_executor(ToolPipeline([GuardrailInterceptor()]),
+                        lambda t, a: _ok(), "w1", "sb")
+    agent = _agent(ex)
+    conv = _Conv()
+    agent._run_tool(_tool_call("text_editor", {"command": "str_replace",
+                                              "path": PATH, "old_str": "a",
+                                              "new_str": "b"}), conv, "turn-1")
+    assert conv.results[0].count("without reading it first") == 1
+
+
+def test_an_explicit_pipeline_still_wins_over_a_mounted_one():
+    """Deferring to the executor's chain must not override an explicit choice."""
+    from swebench.agent.pipeline import piped_executor
+
+    ex = piped_executor(ToolPipeline([]), lambda t, a: _ok(), "w1", "sb")
+    agent = _agent(ex, pipeline=ToolPipeline([GuardrailInterceptor()]))
+    conv = _Conv()
+    agent._run_tool(_tool_call("text_editor", {"command": "str_replace",
+                                              "path": PATH, "old_str": "a",
+                                              "new_str": "b"}), conv, "turn-1")
+    assert "without reading it first" in conv.results[0]
+
+
+def test_a_plain_executor_still_gets_the_default_chain():
+    """The deference must key off an actually-mounted chain, not fire always."""
+    agent = _agent(lambda t, a: _ok("z" * 40000))
+    conv = _Conv()
+    agent._run_tool(_tool_call("shell", {"command": "cat big"}), conv, "turn-1")
+    assert "characters truncated" in conv.results[0]

@@ -20,7 +20,7 @@ from ..models import AgentConfig, CostTracker, ToolResult, Trajectory
 from .prompts import build_system_prompt, build_instance_message  # re-exported
 from .conversation import Conversation
 from .llm import LLMClient, ThinkingLoopError
-from .pipeline import CallContext, ToolPipeline
+from .pipeline import EXECUTOR, CallContext, ToolPipeline, mounted_pipeline
 from .tools import tool_summary, TOOLS_SCHEMA, BASH_ONLY_SCHEMA, route_agent_tool, is_custom_tool
 from .trace import ToolTraceWriter, new_run_id
 from . import hooks, interceptors
@@ -75,6 +75,21 @@ class AshAgent:
             self._trace_file.write(text)
             self._trace_file.flush()
 
+    def _resolve_pipeline(self) -> ToolPipeline:
+        """The chain to run around this agent's calls.
+
+        An explicit ``pipeline=`` always wins (including ``ToolPipeline([])`` to
+        opt out). Otherwise the default is mounted — unless the executor already
+        carries one (``piped_executor``, i.e. ``executor_for(pipeline=…)``), in
+        which case the caller has stated their governance and stacking the
+        default on top would double every rule it shares.
+        """
+        if self.pipeline is not None:
+            return self.pipeline
+        if mounted_pipeline(self.executor) is not None:
+            return ToolPipeline([])
+        return interceptors.default_pipeline()
+
     def _governed(self, metadata: dict) -> Callable[[str, dict], ToolResult]:
         """This call's executor, wrapped in the L2 pipeline if one is mounted.
 
@@ -83,10 +98,11 @@ class AshAgent:
         loop needs afterwards (the pre-truncation output).
         """
         if self._pipeline is None:
-            self._pipeline = self.pipeline if self.pipeline is not None \
-                else interceptors.default_pipeline()
+            self._pipeline = self._resolve_pipeline()
         pipeline = self._pipeline
-        metadata.setdefault("executor", self.executor)
+        if not pipeline.interceptors:
+            return self.executor
+        metadata.setdefault(EXECUTOR, self.executor)
 
         def run(tool_name: str, args: dict) -> ToolResult:
             ctx = CallContext(agent_id=self.agent_id, sandbox_id=self.sandbox_id,
