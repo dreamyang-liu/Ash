@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from . import style as S
+from .backends import BackendError, backend_config, build_pool
 from .dataset import load_instances
 from .batch import run_batch
 from .harnesses import get_harness
@@ -104,6 +105,12 @@ def _flatten_config(config: dict) -> dict:
         ("execution", "workers"): "workers",
         ("execution", "output"): "output",
         ("execution", "runtime_bin"): "runtime_bin",
+        ("execution", "backend"): "backend",
+        # Per-backend settings sections, kept whole so backends.py validates
+        # their keys rather than every one becoming a flat entry here.
+        ("execution", "docker"): "docker",
+        ("execution", "microvm"): "microvm",
+        ("execution", "k8s"): "k8s",
         ("execution", "image_template"): "image_template",
         ("execution", "harness"): "harness",
     }
@@ -116,11 +123,18 @@ def _flatten_config(config: dict) -> dict:
             if key in config[section]:
                 flat[flat_key] = config[section][key]
 
-    # Top-level keys override
+    # Top-level keys override. Mapped keys whose value is itself a settings
+    # mapping (the per-backend sections) are included: skipping every dict here
+    # would silently drop a top-level `microvm:` block, which reads as "my
+    # settings were ignored" with nothing to point at.
     top_level = {v for v in mapping.values()}
+    nested_ok = {"docker", "microvm", "k8s", "env"}
     for key in top_level:
-        if key in config and not isinstance(config[key], dict):
-            flat[key] = config[key]
+        if key not in config:
+            continue
+        if isinstance(config[key], dict) and key not in nested_ok:
+            continue
+        flat[key] = config[key]
 
     # env section (passed through as-is)
     if "env" in config:
@@ -157,6 +171,12 @@ def main():
     parser.add_argument("--output", "-o", default=None)
     parser.add_argument("--workers", "-w", type=int, default=None)
     parser.add_argument("--runtime-bin", default=None)
+    parser.add_argument("--backend", default=None,
+                        choices=["docker", "microvm", "k8s"],
+                        help="Where sandboxes come from (default: docker). "
+                             "Per-backend settings go under execution.<backend> "
+                             "in the config; 'microvm' also reads "
+                             "AENV_SERVER_URL / AENV_API_KEY.")
     parser.add_argument("--custom-tools-dir", default=None,
                         help="Directory of custom tool manifests (*.yaml/*.json). "
                              "Defaults to configs/custom_tools if present.")
@@ -206,12 +226,24 @@ def main():
     for key in ["model", "provider", "api_base", "api_key", "max_tokens",
                 "step_limit", "cost_limit", "temperature", "reasoning_effort",
                 "prompt_cache", "max_budget", "timeout", "runtime_bin",
-                "image_template", "subset", "workers", "custom_tools_dir"]:
+                "image_template", "subset", "workers", "custom_tools_dir",
+                "backend"]:
         cli_val = getattr(args, key.replace("-", "_"), None)
         if cli_val is not None:
             harness_config[key] = cli_val
     harness_config.setdefault("subset", subset)
     harness_config.setdefault("workers", workers)
+
+    # Validate the sandbox backend before anything expensive. A bad setting
+    # would otherwise surface once per instance, as N identical failures with
+    # the real cause buried in each.
+    try:
+        build_pool(backend_config(harness_config))
+    except BackendError as exc:
+        print(f"  {S.bright_red('!')} {exc}")
+        return 2
+    except Exception:
+        pass          # reachability is the run's problem, not the config's
 
     # Banner
     print(S.banner())
@@ -256,4 +288,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

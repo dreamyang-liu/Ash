@@ -38,6 +38,7 @@ from typing import Callable, Optional, Sequence
 
 from .base import BaseHarness
 from ..dataset import resolve_image, format_task_prompt, image_registry_for_subset
+from ..backends import backend_config
 from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent, TOOLS_SCHEMA, BASH_ONLY_SCHEMA
@@ -270,7 +271,8 @@ class BestOfNHarness(BaseHarness):
         iid = instance["instance_id"]
         temp = candidate_temperature(c.get("temperature"),
                                      c.get("temperature_jitter"), index)
-        session = AshSession(runtime_bin=c.get("runtime_bin"), quiet=True)
+        session = AshSession(runtime_bin=c.get("runtime_bin"), quiet=True,
+                             backend=backend_config(c))
         try:
             if not session.create(image):
                 return Candidate(index=index, patch="", exit_status="session_failed")

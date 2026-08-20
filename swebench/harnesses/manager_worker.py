@@ -29,6 +29,7 @@ from ash_sandbox import Sandbox
 
 from .base import BaseHarness
 from ..dataset import resolve_image, image_registry_for_subset
+from ..backends import backend_config
 from ..sandbox import AshSession
 from ..models import AgentConfig, ToolResult
 from ..agent import AshAgent, TOOLS_SCHEMA
@@ -200,7 +201,8 @@ class ManagerWorkerHarness(BaseHarness):
         run_id = new_run_id()
         waggle_state = WorkspaceCoordinator(ttl=float(c.get("waggle_ttl", 120.0))) if c.get("waggle") else None
 
-        session = AshSession(runtime_bin=c.get("runtime_bin"), quiet=True)
+        session = AshSession(runtime_bin=c.get("runtime_bin"), quiet=True,
+                             backend=backend_config(c))
         try:
             if not session.create(image):
                 return self._fail(iid, c, "session_failed")
@@ -231,7 +233,9 @@ class ManagerWorkerHarness(BaseHarness):
             wrk_cfg = self._agent_config(c, worker_system, wrk_steps)
             results = self._run_workers(url, wrk_cfg, problem, subtasks, iid, traj_dir,
                                         waggle_state, trace_dir=trace_dir,
-                                        run_id=run_id, sandbox_id=sandbox_id)
+                                        run_id=run_id, sandbox_id=sandbox_id,
+                                        opaque_writers=set(
+                                            c.get("waggle_opaque_writers") or ()))
 
             # --- 4. Combined patch = one tree, one diff -------------------------
             patch = session.get_patch()
@@ -288,7 +292,7 @@ class ManagerWorkerHarness(BaseHarness):
 
     def _run_workers(self, url, cfg, problem, subtasks, iid, traj_dir,
                      waggle_state=None, *, trace_dir, run_id,
-                     sandbox_id) -> list[tuple]:
+                     sandbox_id, opaque_writers=frozenset()) -> list[tuple]:
         def _run_one(st: dict) -> tuple:
             worker_id = f"worker-{st['id']}"
             # Identity is bound to the executor, so every runtime call this
@@ -299,6 +303,10 @@ class ManagerWorkerHarness(BaseHarness):
                 ex = CoordinatedExecutor(
                     ex, waggle_state, agent_id=worker_id,
                     sandbox_id=sandbox_id,
+                    # Manifest tools expand inside the executor, so they arrive
+                    # as one opaque call; naming them keeps the drift scan
+                    # running for the files they touch.
+                    opaque_writers=opaque_writers,
                 )
             try:
                 agent = AshAgent(

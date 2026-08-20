@@ -308,3 +308,116 @@ def test_dump_is_json_friendly_audit():
     assert key == f"default:{PATH}"
     assert [r["version"] for r in records] == [1, 2]
     assert {"version", "author", "op", "timestamp", "bytes"} <= records[0].keys()
+
+
+# --------------------------------------------------------------------------- #
+#  Opaque writers: tools whose file effects Waggle cannot see directly
+# --------------------------------------------------------------------------- #
+
+def test_shell_is_an_opaque_writer_by_default():
+    """Default behaviour is unchanged: shell is scanned, nothing else is."""
+    from swebench.agent.waggle import WaggleInterceptor
+
+    icpt = WaggleInterceptor()
+    assert icpt.opaque_writers == {"shell"}
+    assert icpt.tools == {"text_editor", "shell"}
+    assert not icpt.applies_to("mytool")
+
+
+def test_declaring_a_tool_an_opaque_writer_restores_drift_detection():
+    """A tool whose dispatch happens below this seat arrives as one opaque call,
+    so Waggle has no `shell` to key on. Undeclared, an agent can then write over
+    a file version it never read: `str_replace` may coexist by luck, but a whole
+    file `write` silently discards the other agent's work.
+
+    Naming the tool is all it takes -- Waggle is a pluggable suite, so which
+    calls it watches is its own configuration.
+    """
+    from swebench.agent.pipeline import CallContext, ToolPipeline
+    from swebench.agent.waggle import WaggleInterceptor, WorkspaceCoordinator
+
+    path = "/testbed/app.py"
+    original = "def f():\n    return 1\n"
+    after_tool = original + "\ndef g():\n    return 'other agent'\n"
+
+    def run(declared: bool):
+        sandbox = FakeSandbox({path: original})
+        icpt = WaggleInterceptor(state=WorkspaceCoordinator(ttl=5.0),
+                                 opaque_writers={"mycodegen"} if declared else None)
+        pipe = ToolPipeline([icpt])
+
+        def call(agent, tool, args):
+            executor = sandbox.executor()
+            return pipe.execute(
+                CallContext(agent_id=agent, sandbox_id="default", tool_name=tool,
+                            args=dict(args), metadata={"executor": executor}),
+                executor)
+
+        call("A", "text_editor", {"command": "view", "path": path})
+        sandbox.mutate(path, after_tool)                 # the tool's effect
+        call("B", "mycodegen", {"target": path})          # one opaque call
+        result = call("A", "text_editor", {
+            "command": "write", "path": path, "file_text": "def f():\n    return 2\n"})
+        return result, sandbox.read(path)
+
+    undeclared, content = run(declared=False)
+    assert undeclared.success                            # nothing stopped it
+    assert "other agent" not in content                  # ... and the work is gone
+
+    declared, content = run(declared=True)
+    assert not declared.success
+    assert "[WAGGLE]" in declared.output                 # rejected with a diff
+    assert "other agent" in content                      # the work survived
+
+
+def test_the_lite_mounting_shares_the_opaque_writer_setting():
+    """Both mountings must watch the same calls, or switching between them
+    quietly changes what coordination covers."""
+    from swebench.agent.waggle import CoordinatedExecutor, WorkspaceCoordinator
+
+    sandbox = FakeSandbox({"/testbed/a.py": "v1"})
+    ex = CoordinatedExecutor(sandbox.executor(), WorkspaceCoordinator(ttl=5.0),
+                             agent_id="A", opaque_writers={"mytool"})
+    assert ex._opaque_writers == {"shell", "mytool"}
+
+
+def test_an_opaque_writer_reaches_the_runtime_under_its_own_name():
+    """The executor below this seat expands a manifest tool by name, so renaming
+    it to `shell` on the way through would break dispatch entirely."""
+    from swebench.agent.waggle import CoordinatedExecutor, WorkspaceCoordinator
+
+    seen = []
+    sandbox = FakeSandbox({"/testbed/a.py": "v1"})
+    inner = sandbox.executor()
+
+    def spy(tool, args):
+        seen.append(tool)
+        return inner(tool, args)
+
+    ex = CoordinatedExecutor(spy, WorkspaceCoordinator(ttl=5.0), agent_id="A",
+                             opaque_writers={"mytool"})
+    ex("mytool", {"target": "/testbed/a.py"})
+    assert seen == ["mytool"]
+
+
+def test_the_lite_mounting_scans_after_a_declared_opaque_writer():
+    """Not just that the setting is stored -- that it drives the scan. Without
+    this, an agent could write over a version it never read."""
+    from swebench.agent.waggle import CoordinatedExecutor, WorkspaceCoordinator
+
+    path = "/testbed/a.py"
+    sandbox = FakeSandbox({path: "v1"})
+    state = WorkspaceCoordinator(ttl=5.0)
+    a = CoordinatedExecutor(sandbox.executor(), state, agent_id="A",
+                            opaque_writers={"mytool"})
+    b = CoordinatedExecutor(sandbox.executor(), state, agent_id="B",
+                            opaque_writers={"mytool"})
+
+    a("text_editor", {"command": "view", "path": path})     # A holds v1
+    sandbox.mutate(path, "v1\nchanged by the tool\n")       # the tool's effect
+    b("mytool", {"target": path})                           # opaque call -> scan
+
+    result = a("text_editor", {"command": "write", "path": path,
+                               "file_text": "rewritten by A\n"})
+    assert not result.success                                # drift was noticed
+    assert "changed by the tool" in sandbox.read(path)       # nothing was lost

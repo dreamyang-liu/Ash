@@ -1,8 +1,11 @@
-"""Executor-level integration tests (pytest, alongside test_custom_tools.py).
+"""How the agent loop treats a custom tool, and manifest loading.
 
-Exercises AshAgent._run_tool's custom-tool branch (agent/__init__.py) with a
-stub executor — no sandbox or network — plus load_custom_tools directory
-semantics (explicit dir must exist; default dir optional).
+Dispatch itself (artifact -> shell, path memoisation, failure short-circuit)
+belongs to the SDK and is tested there (sdk/tests/test_toolset.py). What matters
+here is the loop's side of the seam: a manifest-defined tool is passed to the
+executor under its own name, so interceptors see one call and the SDK expands it.
+Plus load_custom_tools directory semantics (explicit dir must exist; default dir
+optional).
 User instruction: "manifest是用户提供的…作为参数传进去，然后有一个默认的位置".
 """
 
@@ -64,54 +67,47 @@ def register_analyzer():
     }))
 
 
-def test_custom_tool_dispatches_artifact_then_shell():
+def test_a_custom_tool_reaches_the_executor_under_its_own_name():
+    """The loop no longer expands manifest tools: the executor does, and it
+    memoises where the binary landed so a repeat call skips the download. One
+    call also means one seat decision -- tell Waggle about such a tool through
+    `opaque_writers` so its drift scan still runs."""
     register_analyzer()
     calls = []
 
     def executor(name, args):
         calls.append((name, dict(args)))
-        if name == "artifact":
-            return ToolResult(success=True, output="/tmp/ash-artifacts/bbbb/artifact", error="")
-        if name == "shell":
-            return ToolResult(success=True, output="analyzed ok", error="")
-        raise AssertionError(f"unexpected tool {name}")
+        return ToolResult(success=True, output="analyzed ok", error="")
 
     agent = make_agent(executor)
     agent._run_tool(make_tool_call("analyzer", {"file": "main.py"}),
                     FakeConversation(), "turn1")
 
-    assert [c[0] for c in calls] == ["artifact", "shell"]
-    assert calls[0][1] == {"url": "https://example.com/analyzer", "sha256": SHA}
-    assert calls[1][1]["command"] == "/tmp/ash-artifacts/bbbb/artifact main.py"
-    assert calls[1][1]["timeout"] == 15
+    assert calls == [("analyzer", {"file": "main.py"})]
 
 
-def test_custom_tool_artifact_failure_short_circuits():
-    register_analyzer()
+def test_builtin_names_are_still_translated_for_the_interceptors():
+    """Unlike custom tools, builtins are routed here on purpose: a seat keyed on
+    `shell` must not go blind because a run is in bash_only mode."""
     calls = []
 
     def executor(name, args):
         calls.append(name)
-        return ToolResult(success=False, output="", error="download failed: HTTP 403")
+        return ToolResult(success=True, output="ok", error="")
 
     agent = make_agent(executor)
-    agent._run_tool(make_tool_call("analyzer", {"file": "x"}),
+    agent._run_tool(make_tool_call("bash", {"command": "ls"}),
                     FakeConversation(), "turn1")
-    assert calls == ["artifact"]  # shell step never runs
+    assert calls == ["shell"]
 
 
-def test_custom_tool_bad_args_fail_before_any_execution():
-    register_analyzer()
+def test_an_unknown_tool_fails_before_reaching_the_executor():
     calls = []
-
-    def executor(name, args):
-        calls.append(name)
-        return ToolResult(success=True, output="", error="")
-
-    agent = make_agent(executor)
-    agent._run_tool(make_tool_call("analyzer", {}),  # missing required 'file'
-                    FakeConversation(), "turn1")
-    assert calls == []  # validation failed at plan time; nothing executed
+    agent = make_agent(lambda n, a: calls.append(n) or ToolResult(True, "", ""))
+    conv = FakeConversation()
+    agent._run_tool(make_tool_call("no_such_tool", {}), conv, "turn1")
+    assert calls == []
+    assert "unknown agent tool" in conv.tool_results[0][0][1]
 
 
 def test_load_custom_tools_explicit_dir(tmp_path):
@@ -139,7 +135,10 @@ def test_load_custom_tools_default_absent_is_noop(monkeypatch, tmp_path):
     assert ct.load_custom_tools(None) == []
 
 
-def test_path_sourced_tool_skips_artifact_step():
+def test_a_path_sourced_tool_also_stays_opaque_to_the_loop():
+    """Whether a manifest tool needs a download is the SDK's concern; the loop
+    treats every one of them the same. (Single vs two-step dispatch is covered
+    by sdk/tests/test_toolset.py.)"""
     register(parse_manifest({
         "name": "imagetool",
         "description": "binary baked into the image",
@@ -151,15 +150,42 @@ def test_path_sourced_tool_skips_artifact_step():
     }))
     calls = []
 
-    def executor(name, args):
-        calls.append((name, dict(args)))
-        return ToolResult(success=True, output="ok", error="")
-
-    agent = make_agent(executor)
+    agent = make_agent(lambda n, a: calls.append((n, dict(a))) or
+                       ToolResult(success=True, output="ok", error=""))
     agent._run_tool(make_tool_call("imagetool", {"file": "a.py"}),
                     FakeConversation(), "turn1")
 
-    # Single step: shell only, no artifact download.
-    assert [c[0] for c in calls] == ["shell"]
-    assert calls[0][1]["command"] == "/opt/tools/analyzer a.py"
-    assert calls[0][1]["timeout"] == 20
+    assert calls == [("imagetool", {"file": "a.py"})]
+
+
+def test_the_session_dispatches_through_the_sdk_not_a_raw_call():
+    """The point of the sink: AshSession hands the SDK the agent-facing name so
+    it expands manifest tools and memoises the binary path. Using `call` instead
+    would send `mytool` to the runtime, which has no such tool."""
+    from swebench.sandbox import AshSession
+    from ash_sandbox.result import ToolResult as SdkToolResult
+
+    seen = {}
+
+    class FakeSandbox:
+        async def call_agent_tool(self, name, args, registry=None, agent_id=""):
+            seen["via"] = "call_agent_tool"
+            seen["name"] = name
+            seen["registry_has_customs"] = registry is not None and \
+                bool(registry.custom_specs)
+            return SdkToolResult(output="ok", is_error=False)
+
+        async def call(self, tool_name, agent_id="", **kwargs):
+            seen["via"] = "call"
+            return SdkToolResult(output="ok", is_error=False)
+
+    register_analyzer()                      # puts a spec in the default registry
+    session = AshSession(quiet=True)
+    session._sandbox = FakeSandbox()
+    result = session.execute("analyzer", {"file": "m.py"})
+
+    assert result.success
+    assert seen["via"] == "call_agent_tool"
+    assert seen["name"] == "analyzer"
+    assert seen["registry_has_customs"], \
+        "a Sandbox starts with an empty registry; the loaded manifests must be passed"

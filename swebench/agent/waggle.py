@@ -272,13 +272,17 @@ class CoordinatedExecutor:
 
     def __init__(self, inner: Executor, state: WorkspaceCoordinator, agent_id: str,
                  sandbox_id: str = "default", require_read: bool = True,
-                 policy: Optional[WagglePolicy] = None) -> None:
+                 policy: Optional[WagglePolicy] = None,
+                 opaque_writers: "set[str] | None" = None) -> None:
         self._inner = inner
         self._state = state
         self._agent = agent_id
         self._sbx = sandbox_id
         self._require_read = require_read
         self._policy = policy            # None = pure OCC (no hook overhead)
+        # See WaggleInterceptor.opaque_writers -- both mountings share the
+        # setting, so the lite one does not quietly watch less.
+        self._opaque_writers = {"shell"} | set(opaque_writers or ())
 
     # -- dispatch ----------------------------------------------------------- #
 
@@ -288,8 +292,8 @@ class CoordinatedExecutor:
             return self._read(tool_name, args)
         if tool_name == "text_editor" and command in self.WRITE_COMMANDS:
             return self._write(args)
-        if tool_name == "shell":
-            return self._shell(args)
+        if tool_name in self._opaque_writers:
+            return self._shell(args, tool_name)
         return self._inner(tool_name, args)
 
     def close(self) -> None:
@@ -492,8 +496,14 @@ class CoordinatedExecutor:
 
     # -- shell path (effect detection) ----------------------------------------- #
 
-    def _shell(self, args: dict) -> ToolResult:
-        result = self._inner("shell", args)
+    def _shell(self, args: dict, tool_name: str = "shell") -> ToolResult:
+        """Run a call that may change files behind Waggle's back, then look.
+
+        `tool_name` is passed through rather than assumed: a manifest-defined
+        tool declared in ``opaque_writers`` gets the same treatment, and it must
+        reach the runtime under its own name for the executor to expand it.
+        """
+        result = self._inner(tool_name, args)
         self._scan_effects()
         return result
 
@@ -655,10 +665,19 @@ class WaggleInterceptor(ToolInterceptor):
 
     def __init__(self, state: Optional[WorkspaceCoordinator] = None,
                  policy: Optional[WagglePolicy] = None,
-                 ttl: float = DEFAULT_TTL, require_read: bool = True) -> None:
+                 ttl: float = DEFAULT_TTL, require_read: bool = True,
+                 opaque_writers: "set[str] | None" = None) -> None:
         self.state = state or WorkspaceCoordinator(ttl=ttl)
         self.policy = policy
         self.require_read = require_read
+        # Tools that touch the workspace without Waggle being able to see how.
+        # `shell` always does; name any other here -- a manifest-defined tool
+        # that edits files, say, whose dispatch happens below this seat and so
+        # reaches it as one opaque call. Each name costs a fingerprint scan per
+        # call (~10 ms, ADR-1) and buys drift detection for it; leaving one out
+        # means an agent can edit a file version it never read, unwarned.
+        self.opaque_writers = {"shell"} | set(opaque_writers or ())
+        self.tools = {"text_editor"} | self.opaque_writers
 
     def before(self, ctx: CallContext) -> Verdict:
         if ctx.tool_name == "text_editor" and \
@@ -667,7 +686,7 @@ class WaggleInterceptor(ToolInterceptor):
         return Continue()
 
     def after(self, ctx: CallContext, result: ToolResult) -> ToolResult:
-        if ctx.tool_name == "shell":
+        if ctx.tool_name in self.opaque_writers:
             self._adapter(ctx)._scan_effects()
         elif result.success and self._is_read(ctx):
             path = ctx.args.get("path")

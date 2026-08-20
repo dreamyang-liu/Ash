@@ -33,7 +33,7 @@ There are four independently-versioned pieces:
 │   └── ash_sandbox/
 │       ├── sandbox.py       # Sandbox: call(), tool_schemas(), execute_tool_call()
 │       ├── backends.py      # HTTP / MCP / CLI / Gateway transports
-│       ├── pool.py          # DockerPool (local) + SandboxPool (k8s gateway)
+│       ├── pool.py          # DockerPool (local) + MicroVMPool (Firecracker) + SandboxPool (k8s)
 │       ├── result.py        # ToolResult
 │       └── cli.py           # `ash-sandbox` console script
 ├── swebench/                # SWE-bench evaluation harness
@@ -119,8 +119,15 @@ python -m swebench -c swebench/configs/bedrock-sonnet46-bash.yaml
 
 # Claude Code harness instead of the litellm loop
 python -m swebench -c swebench/configs/claude-opus.yaml --harness claude-code
+
+# Run the same harness on Firecracker microVMs instead of containers
+python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
 ```
 
+- **Sandbox backend** is config, not code (`swebench/backends.py`): `docker` (default),
+  `microvm` (AgentENV/Firecracker), `k8s`. Settings go under `execution.<backend>`;
+  `microvm` also reads `AENV_SERVER_URL` / `AENV_API_KEY`. No call site names a pool —
+  `AshSession` and the MCP proxy both build theirs from config.
 - Configs are YAML and compose via `extends: <name>` (resolved against `configs/`); CLI flags
   override file values which override defaults. See `swebench/__main__.py` for the flag/section
   mapping.

@@ -26,9 +26,9 @@ BASH_ONLY_SCHEMA = [
 ]
 
 # Derived from the SDK's data-driven route table (single source of truth,
-# ash_sandbox.toolset.BUILTIN_ROUTES). "bash" is excluded here: the
-# executor handles the bash_only alias itself. Consumers unchanged:
-# route_agent_tool below, agent/__init__.py, tests.
+# ash_sandbox.toolset.BUILTIN_ROUTES). "bash" is excluded: this dict mirrors the
+# default tool schema the model sees, and `bash` belongs to BASH_ONLY_SCHEMA
+# instead. route_agent_tool handles it separately.
 from ash_sandbox.toolset import BUILTIN_ROUTES as _BUILTIN_ROUTES
 
 AGENT_TOOL_ROUTES = {k: v for k, v in _BUILTIN_ROUTES.items() if k != "bash"}
@@ -48,8 +48,14 @@ CONTENT_EDIT_COMMANDS = frozenset({"str_replace", "insert"})
 
 
 def route_agent_tool(name: str, args: dict) -> tuple[str, dict]:
-    """Translate an agent-facing tool call to a runtime tool call."""
-    runtime_tool = AGENT_TOOL_ROUTES.get(name)
+    """Translate an agent-facing tool call to a runtime tool call.
+
+    Covers the bash_only alias as well as the default surface. The agent loop
+    routes before handing a call to its executor so that interceptors see the
+    runtime tool: a seat keyed on `shell` must not go blind because a run is in
+    bash_only mode.
+    """
+    runtime_tool = _BUILTIN_ROUTES.get(name)
     if runtime_tool is None:
         raise KeyError(f"unknown agent tool: {name}")
     return runtime_tool, dict(args)

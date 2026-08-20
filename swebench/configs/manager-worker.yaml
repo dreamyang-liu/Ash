@@ -15,6 +15,11 @@ manager_worker:
   worker_step_limit: 120     # step budget per worker
   waggle: false               # version-arbitration layer (OCC) — allows file overlap
   waggle_ttl: 120             # reservation TTL in seconds (conflict-loser protection)
+  # Custom (manifest-defined) tools that edit files. Their dispatch happens
+  # inside the executor, so Waggle sees one opaque call and has no `shell` to
+  # key on; naming them here keeps its drift scan running (one fingerprint
+  # scan per call). Builtin `shell` is always watched.
+  waggle_opaque_writers: []
 
 limits:
   cost_limit: 5.0            # per-agent budget (manager and each worker independently)

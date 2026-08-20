@@ -30,9 +30,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ash_sandbox import DockerPool, Sandbox
+from ash_sandbox import Pool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
 
+from .backends import BACKENDS, BackendError, build_pool
 from .agent.guardrails import GuardrailInterceptor
 from .agent.interceptors import TruncateInterceptor
 from .agent.pipeline import CallContext, ToolPipeline, load_pipeline
@@ -235,10 +236,15 @@ ALL_TOOLS = LIFECYCLE_TOOLS + EXEC_TOOLS_MULTI
 class SandboxPool:
     """Manages all sandboxes. Session-agnostic — visibility is enforced at the server layer."""
 
-    def __init__(self, runtime_bin: str | None = None, patch_dir: str | None = None):
+    def __init__(self, runtime_bin: str | None = None, patch_dir: str | None = None,
+                 backend: dict | None = None):
         self.runtime_bin = runtime_bin
         self.patch_dir = Path(patch_dir) if patch_dir else None
-        self._pool: DockerPool | None = None
+        #: Where sandboxes come from (``swebench/backends.py``); empty means
+        #: local Docker. The proxy names no concrete pool, so every sandbox a
+        #: client creates through it lands on the configured backend.
+        self.backend = backend or {}
+        self._pool: Pool | None = None
         self._sandboxes: dict[str, SandboxEntry] = {}
         self._counter = 0
 
@@ -248,7 +254,7 @@ class SandboxPool:
 
     async def create(self, image: str, groups: list[str]) -> SandboxEntry:
         if not self._pool:
-            self._pool = DockerPool(runtime_bin=self.runtime_bin)
+            self._pool = build_pool(self.backend, runtime_bin=self.runtime_bin)
         sandbox = await self._pool.spawn(image=image)
         r = await sandbox.call("shell", command="git -C /testbed rev-parse HEAD")
         base_commit = r.output.strip() if not r.is_error else ""
@@ -649,6 +655,11 @@ def main():
     parser.add_argument("--port", type=int, default=8400)
     parser.add_argument("--image", default=None, help="Auto-create a sandbox on start (stdio mode)")
     parser.add_argument("--runtime-bin", default=None)
+    parser.add_argument("--backend", default=None, choices=sorted(BACKENDS),
+                        help="Where sandboxes come from (default: docker). "
+                             "'microvm' needs AENV_SERVER_URL (+ AENV_API_KEY); "
+                             "'k8s' needs ASH_CONTROL_PLANE_URL and "
+                             "ASH_GATEWAY_URL.")
     parser.add_argument("--patch-dir", default=None, help="Directory for per-sandbox patch files")
     parser.add_argument("--patch-file", default=None, help="(deprecated) alias for --patch-dir parent")
     parser.add_argument("--coordinate", action="store_true",
@@ -674,7 +685,18 @@ def main():
     if not patch_dir and args.patch_file:
         patch_dir = str(Path(args.patch_file).parent)
 
-    pool = SandboxPool(runtime_bin=args.runtime_bin, patch_dir=patch_dir)
+    # Fail at startup, not on the first sandbox_create: a proxy that accepted a
+    # backend it cannot build would report the misconfiguration as a tool error
+    # to whatever client happened to ask first.
+    backend = {"backend": args.backend} if args.backend else {}
+    try:
+        build_pool(backend, runtime_bin=args.runtime_bin)
+    except BackendError as exc:
+        sys.stderr.write(f"[ash-mcp] {exc}\n")
+        raise SystemExit(2)
+
+    pool = SandboxPool(runtime_bin=args.runtime_bin, patch_dir=patch_dir,
+                       backend=backend)
     pipeline = _build_pipeline(args)
     if pipeline is not None:
         names = ", ".join(i.name for i in pipeline.interceptors) or "(empty)"
