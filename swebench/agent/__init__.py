@@ -163,11 +163,12 @@ class AshAgent:
             if not result.success:
                 error_kind = "runtime"
         duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
-        # Interceptors may have bounded the output; the trace records what the
-        # runtime returned, the conversation gets what the interceptors produced.
+        # Interceptors may have annotated or bounded the result; the trace
+        # records what the runtime returned, the conversation gets what the
+        # interceptors produced.
         runtime_output = metadata.get(interceptors.RAW_OUTPUT, result.output)
-        content = result.output if result.success else \
-            f"Error: {result.error or 'Unknown error'}\n{result.output}"
+        runtime_error = metadata.get(interceptors.RAW_ERROR, result.error)
+        content = _observation(result.success, result.output, result.error)
         for proc in self.result_processors:
             content = proc(content, name, args, result)
 
@@ -175,7 +176,7 @@ class AshAgent:
             output_truncated = _runtime_output_truncated(exec_name, runtime_output)
             result_event = {
                 "output": runtime_output,
-                "error": result.error,
+                "error": runtime_error,
                 "output_bytes": len(runtime_output.encode("utf-8")),
                 "output_truncated": output_truncated,
             }
@@ -188,6 +189,9 @@ class AshAgent:
             }
             if error_kind:
                 payload["error_kind"] = error_kind
+            # Recorded whenever the model saw something other than the
+            # runtime's raw output: error formatting (a failure's text is never
+            # `output` alone), a guardrail warning, or an elision.
             if content != runtime_output:
                 payload["observation"] = content
             process_id = _background_process_id(exec_name, exec_args, result)
@@ -282,6 +286,11 @@ class AshAgent:
             if self._event_trace:
                 self._event_trace.close()
                 self._event_trace = None
+
+
+def _observation(success: bool, output: str, error: Optional[str]) -> str:
+    """Render a result the way the model sees it."""
+    return output if success else f"Error: {error or 'Unknown error'}\n{output}"
 
 
 def _background_process_id(name: str, args: dict, result: ToolResult) -> Optional[str]:

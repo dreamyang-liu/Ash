@@ -33,7 +33,12 @@ from swebench.agent.guardrails import (
     GuardrailInterceptor,
     GuardrailState,
 )
-from swebench.agent.interceptors import RAW_OUTPUT, TruncateInterceptor, default_pipeline
+from swebench.agent.interceptors import (
+    RAW_ERROR,
+    RAW_OUTPUT,
+    TruncateInterceptor,
+    default_pipeline,
+)
 from swebench.agent.pipeline import CallContext, ToolPipeline
 from swebench.agent.trace import ToolTraceWriter
 from swebench.models import AgentConfig, ToolResult
@@ -121,22 +126,60 @@ def test_read_state_is_keyed_by_sandbox():
 @pytest.mark.parametrize("command,args", [
     ("str_replace", {"old_str": "a", "new_str": "b"}),
     ("insert", {"insert_line": 1, "new_str": "x"}),
-    ("write", {"file_text": "whole new file"}),
 ])
-def test_every_edit_command_is_guarded(command, args):
-    """`write` replaces a whole file — the most destructive blind edit, and the
-    one the loop's inline guardrails missed (it checked str_replace/insert only,
-    while Waggle already arbitrated all three)."""
+def test_content_edits_require_a_read(command, args):
     pipe = ToolPipeline([GuardrailInterceptor()])
     result = _run(pipe, "text_editor", {"command": command, "path": PATH, **args})
     assert "without reading it first" in result.output
 
 
-def test_guardrails_and_waggle_share_one_edit_command_set():
-    """Two hardcoded copies of "this is an edit" is how `write` fell through."""
-    from swebench.agent.tools import EDIT_COMMANDS
+def test_write_does_not_require_a_read_because_it_also_creates():
+    """`view` on a nonexistent path fails, so a creating `write` could never
+    satisfy read-before-edit: in warn mode that is noise on the documented
+    "write a reproduce script" workflow, and in reject mode creating any new
+    file becomes impossible. Waggle pays for an existence probe and refuses only
+    blind *overwrites*; a rule that cannot afford the probe must not claim
+    `write`."""
+    pipe = ToolPipeline([GuardrailInterceptor()])
+    result = _run(pipe, "text_editor", {"command": "write", "path": PATH,
+                                        "file_text": "new file"})
+    assert "without reading it first" not in result.output
+
+    strict = ToolPipeline([GuardrailInterceptor(enforcement="reject")])
+    created = _run(strict, "text_editor", {"command": "write", "path": PATH,
+                                           "file_text": "new file"})
+    assert created.success, "reject mode must not make file creation impossible"
+
+
+def test_write_still_counts_toward_the_edit_streak():
+    """Not requiring a read is not being unguarded: `write` is still an edit."""
+    pipe = ToolPipeline([GuardrailInterceptor()])
+    outputs = [_run(pipe, "text_editor", {"command": "write", "path": PATH,
+                                          "file_text": f"v{i}"}).output
+               for i in range(EDIT_STREAK_LIMIT)]
+    assert "without running tests" in outputs[-1]
+
+
+def test_waggle_arbitrates_every_edit_command():
+    """Waggle keys off the same shared set, and it covers `write` — one place
+    to state "this call is an edit"."""
+    from swebench.agent.tools import CONTENT_EDIT_COMMANDS, EDIT_COMMANDS
     from swebench.agent.waggle import CoordinatedExecutor
     assert CoordinatedExecutor.WRITE_COMMANDS == EDIT_COMMANDS
+    assert "write" in EDIT_COMMANDS
+    assert CONTENT_EDIT_COMMANDS < EDIT_COMMANDS
+
+
+@pytest.mark.parametrize("junk", [["str_replace"], {"a": 1}, 5, None])
+def test_malformed_command_argument_is_not_a_policy_rejection(junk):
+    """A model can put anything in args. Membership against a frozenset raises
+    TypeError on unhashable values, and reject mode is fail-closed — so junk
+    would surface as "rejected by GuardrailInterceptor" instead of letting the
+    runtime report what was actually wrong."""
+    pipe = ToolPipeline([GuardrailInterceptor(enforcement="reject")])
+    result = _run(pipe, "text_editor", {"command": junk, "path": PATH})
+    assert result.success
+    assert result.error != "rejected by GuardrailInterceptor"
 
 
 def test_warning_survives_a_rejection_from_a_deeper_seat():
@@ -223,6 +266,26 @@ def test_state_dump_reports_reads_and_streaks():
     assert dumped["edit_streak"] == {PATH: 1}
 
 
+def test_state_dump_includes_agents_that_only_edited_blindly():
+    """Keying the dump off reads alone hides the agent that never read anything
+    — exactly the behavior this audit exists to surface."""
+    state = GuardrailState()
+    pipe = ToolPipeline([GuardrailInterceptor(state=state)])
+    _run(pipe, *_view(), agent="careful")
+    _run(pipe, *_edit(), agent="blind")
+    assert set(state.dump()) == {"careful:sb-1", "blind:sb-1"}
+    assert state.dump()["blind:sb-1"] == {"files_read": [], "edit_streak": {PATH: 1}}
+
+
+def test_warning_is_separated_from_an_empty_result_body():
+    """A failure with empty output: the loop renders "Error: …\\n" + this text,
+    so a bare join would glue the warning onto the error line."""
+    pipe = ToolPipeline([GuardrailInterceptor()])
+    result = _run(pipe, *_edit(), result=ToolResult(success=False, output="",
+                                                   error="No match found"))
+    assert result.output.startswith("\n\n[Warning]")
+
+
 # --------------------------------------------------------------------------- #
 #  TruncateInterceptor
 # --------------------------------------------------------------------------- #
@@ -243,12 +306,62 @@ def test_long_output_is_elided_and_the_original_preserved_in_metadata():
     assert ctx.metadata[RAW_OUTPUT] == huge                # evidence kept
 
 
-def test_truncation_preserves_success_and_error_fields():
+def test_truncation_preserves_success_and_short_error():
     failed = ToolResult(success=False, output="y" * 500, error="exit 1")
     pipe = ToolPipeline([TruncateInterceptor(max_len=100)])
     result = _run(pipe, "shell", {"command": "boom"}, result=failed)
     assert not result.success
-    assert result.error == "exit 1"                        # error text never elided
+    assert result.error == "exit 1"                        # short error kept whole
+
+
+def test_a_failing_command_is_bounded_including_its_error():
+    """The one that matters most. Every executor here reports a failure as
+    ToolResult(success=False, output=X, error=X) (sandbox.py), and the loop shows
+    the model f"Error: {error}\\n{output}". Bounding only `output` leaves the
+    payload unbounded, because `error` carries the same bytes — a failing pytest
+    without `tail` would blow the context window."""
+    huge = "F" * 3_000_000                                 # a failing pytest
+    pipe = default_pipeline(max_output_len=12000)
+    ctx = _ctx("shell", {"command": "pytest"})
+    result = pipe.execute(ctx, lambda t, a: ToolResult(success=False, output=huge,
+                                                      error=huge))
+    model_sees = f"Error: {result.error or 'Unknown error'}\n{result.output}"
+    assert len(model_sees) < 30_000, f"model received {len(model_sees):,} chars"
+    assert ctx.metadata[RAW_OUTPUT] == huge                # evidence kept
+    assert ctx.metadata[RAW_ERROR] == huge
+
+
+def test_a_huge_error_is_bounded_even_when_output_is_short():
+    """The case a per-field `output` check cannot see: a command that failed
+    with everything on stderr. `output` is under the bound, so a guard that only
+    measures `output` returns early and the error reaches the model whole."""
+    huge = "E" * 3_000_000
+    pipe = ToolPipeline([TruncateInterceptor(max_len=12000)])
+    ctx = _ctx("shell", {"command": "pytest"})
+    result = pipe.execute(ctx, lambda t, a: ToolResult(success=False, output="",
+                                                      error=huge))
+    assert len(result.error) < 30_000, f"error was {len(result.error):,} chars"
+    assert ctx.metadata[RAW_ERROR] == huge
+
+
+def test_combined_budget_bounds_output_and_error_together():
+    """Bounding each field to max_len independently would pass 2x the budget."""
+    pipe = ToolPipeline([TruncateInterceptor(max_len=1000)])
+    result = _run(pipe, "shell", {"command": "boom"},
+                  result=ToolResult(success=False, output="o" * 50_000,
+                                    error="e" * 50_000))
+    assert len(result.output) + len(result.error) <= 1000 * 2
+
+
+def test_truncation_leaves_a_failing_call_with_a_usable_error():
+    """Splitting the budget must not leave the error empty — it is the headline
+    of a failure, and an agent cannot act on `Error: `."""
+    pipe = ToolPipeline([TruncateInterceptor(max_len=1000)])
+    result = _run(pipe, "shell", {"command": "boom"},
+                  result=ToolResult(success=False, output="o" * 50_000,
+                                    error="AssertionError: expected 3, got 4\n" + "e" * 50_000))
+    assert "AssertionError: expected 3, got 4" in result.error
+    assert result.output                                   # output not starved either
 
 
 # --------------------------------------------------------------------------- #
@@ -412,6 +525,43 @@ def test_guardrail_state_does_not_leak_between_runs(monkeypatch):
     assert "without running tests" not in conv2.results[0]
 
 
+def test_trace_is_not_polluted_by_a_guardrail_warning(tmp_path):
+    """The warning is for the model. Counting its bytes as the tool's output
+    inflates output_bytes and — because the polluted text then equals what the
+    model saw — suppresses the `observation` that documents the nudge."""
+    agent = _agent(lambda n, a: _ok("File edited successfully"))
+    path = tmp_path / "trace.events.jsonl"
+    agent._event_trace = ToolTraceWriter(path, run_id="r1", agent_id="A",
+                                        sandbox_id="sb")
+    conv = _Conv()
+    agent._run_tool(_tool_call("text_editor", {"command": "str_replace",
+                                              "path": PATH, "old_str": "a",
+                                              "new_str": "b"}), conv, "turn-1")
+    agent._event_trace.close()
+
+    _, finished = [json.loads(line) for line in path.read_text().splitlines()]
+    assert finished["result"]["output"] == "File edited successfully"
+    assert finished["result"]["output_bytes"] == len(b"File edited successfully")
+    assert "without reading it first" in finished["observation"]
+    assert "without reading it first" in conv.results[0]     # model saw it
+
+
+def test_trace_reports_the_runtime_error_not_the_truncated_one(tmp_path):
+    huge = "F" * 40000
+    agent = _agent(lambda n, a: ToolResult(success=False, output=huge, error=huge))
+    path = tmp_path / "trace.events.jsonl"
+    agent._event_trace = ToolTraceWriter(path, run_id="r1", agent_id="A",
+                                        sandbox_id="sb")
+    conv = _Conv()
+    agent._run_tool(_tool_call("shell", {"command": "pytest"}), conv, "turn-1")
+    agent._event_trace.close()
+
+    _, finished = [json.loads(line) for line in path.read_text().splitlines()]
+    assert finished["result"]["error"] == huge               # ground truth
+    assert finished["result"]["output_bytes"] == len(huge.encode())
+    assert len(conv.results[0]) < 30_000                    # model got a bound
+
+
 def test_trace_records_runtime_bytes_while_the_model_sees_bounded_output(tmp_path):
     """Truncation protects the model's context; the trace keeps ground truth."""
     huge = "w" * 40000
@@ -428,3 +578,56 @@ def test_trace_records_runtime_bytes_while_the_model_sees_bounded_output(tmp_pat
     assert finished["result"]["output"] == huge             # untruncated
     assert "characters truncated" in finished["observation"]  # what the model saw
     assert "characters truncated" in conv.results[0]
+
+
+# --------------------------------------------------------------------------- #
+#  MCP proxy assembly + session identity
+# --------------------------------------------------------------------------- #
+
+def _args(**kw):
+    import types
+    base = dict(plugins=None, coordinate=False, guardrails=None,
+                waggle_ttl=120.0, max_output_bytes=12000)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def test_proxy_pipeline_is_off_by_default():
+    from swebench.mcp_server import _build_pipeline
+    assert _build_pipeline(_args()) is None
+
+
+def test_proxy_bounds_output_whenever_it_mounts_the_chain():
+    """Truncation only reaches proxy clients if the assembly actually includes
+    it — the flag combinations, not the docstring, are the contract."""
+    from swebench.mcp_server import _build_pipeline
+    for args in (_args(guardrails="warn"), _args(coordinate=True),
+                 _args(guardrails="warn", coordinate=True)):
+        names = [i.name for i in _build_pipeline(args).interceptors]
+        assert names[-1] == "TruncateInterceptor", names   # innermost seat
+
+
+def test_proxy_defers_read_before_edit_to_waggle_when_coordinating():
+    from swebench.mcp_server import _build_pipeline
+    seats = {i.name: i for i in
+             _build_pipeline(_args(guardrails="warn", coordinate=True)).interceptors}
+    assert seats["GuardrailInterceptor"].read_before_edit is False
+    assert _build_pipeline(_args(guardrails="warn")) \
+        .interceptors[0].read_before_edit is True
+
+
+def test_http_sessions_are_stable_for_an_identified_client():
+    """Interceptor state is keyed by session identity, so a client that cannot
+    be identified gets a new one per request and no seat can hold state. MCP's
+    own `initialize` hands out a sessionId; honoring it back is what makes
+    read-before-edit satisfiable over HTTP."""
+    from swebench.mcp_server import HttpMcpServer, SandboxPool
+    server = HttpMcpServer(SandboxPool())
+    echoed = [server._get_or_create_session({"mcp-session-id": "s-1"}).id
+              for _ in range(3)]
+    assert len(set(echoed)) == 1
+    owner = [server._get_or_create_session({"x-session-owner": "claude"}).id
+             for _ in range(3)]
+    assert len(set(owner)) == 1
+    anon = [server._get_or_create_session({}).id for _ in range(3)]
+    assert len(set(anon)) == 3, "an unidentified client stays isolated"

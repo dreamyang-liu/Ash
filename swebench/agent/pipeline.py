@@ -48,6 +48,19 @@ logger = logging.getLogger("ash.pipeline")  # unconfigured -> WARNING+ to stderr
 
 Executor = Callable[[str, dict], ToolResult]
 
+#: Reserved ``CallContext.metadata`` keys — the conventions hosts and
+#: interceptors use to talk to each other about one call.
+#:
+#: ``EXECUTOR``   the raw sandbox executor, for interceptors needing probe
+#:               traffic or arbitrated writes that must not re-enter the chain.
+#: ``RAW_OUTPUT`` / ``RAW_ERROR``
+#:               what the runtime actually returned, recorded before any
+#:               interceptor rewrote it. Interception is for what the *model*
+#:               sees; a trace must still be able to record ground truth.
+EXECUTOR = "executor"
+RAW_OUTPUT = "raw_output"
+RAW_ERROR = "raw_error"
+
 
 # --------------------------------------------------------------------------- #
 #  Call context and verdicts

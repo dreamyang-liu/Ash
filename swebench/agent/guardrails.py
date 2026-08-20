@@ -27,14 +27,24 @@ import threading
 from typing import Literal, Optional
 
 from ..models import ToolResult
-from .pipeline import CallContext, Continue, Reject, ToolInterceptor, Verdict
-from .tools import EDIT_COMMANDS
+from .pipeline import (
+    RAW_OUTPUT,
+    CallContext,
+    Continue,
+    Reject,
+    ToolInterceptor,
+    Verdict,
+)
+from .tools import CONTENT_EDIT_COMMANDS, EDIT_COMMANDS
 
 __all__ = ["GuardrailState", "GuardrailInterceptor",
            "TEST_MARKERS", "EDIT_STREAK_LIMIT"]
 
 TEST_MARKERS = ("pytest", "test_", "assert")
 EDIT_STREAK_LIMIT = 3
+
+#: ``ctx.metadata`` key carrying warnings from ``before`` to ``after``.
+_WARNINGS = "guardrail_warnings"
 
 
 def _read_before_edit_warning(path: str) -> str:
@@ -83,23 +93,48 @@ class GuardrailState:
             self._edit_streak.pop((agent_id, sandbox_id), None)
 
     def dump(self) -> dict:
-        """JSON-friendly snapshot, for audit symmetry with ``Waggle.dump()``."""
+        """JSON-friendly snapshot, for audit symmetry with ``Waggle.dump()``.
+
+        Keyed over reads *and* streaks: an agent that only ever edited blindly
+        has no read entry, and it is exactly the behavior this audit exists to
+        surface.
+        """
         with self._lock:
+            keys = set(self._files_read) | set(self._edit_streak)
             return {
                 f"{agent}:{sbx}": {
-                    "files_read": sorted(paths),
+                    "files_read": sorted(self._files_read.get((agent, sbx), ())),
                     "edit_streak": dict(self._edit_streak.get((agent, sbx), {})),
                 }
-                for (agent, sbx), paths in self._files_read.items()
+                for agent, sbx in sorted(keys)
             }
 
 
+def _command(tool_name: str, args: dict) -> str:
+    """This call's text_editor command, or ``''``.
+
+    A model can put anything in ``args`` — a list, a dict, a number. Membership
+    tests against a frozenset raise ``TypeError`` on unhashable values, and in
+    reject mode a fail-closed crash would turn malformed model output into a
+    policy refusal. Normalize once, here, so junk simply does not match.
+    """
+    if tool_name != "text_editor":
+        return ""
+    command = args.get("command")
+    return command if isinstance(command, str) else ""
+
+
 def _is_read(tool_name: str, args: dict) -> bool:
-    return tool_name == "text_editor" and args.get("command") == "view"
+    return _command(tool_name, args) == "view"
 
 
 def _is_edit(tool_name: str, args: dict) -> bool:
-    return tool_name == "text_editor" and args.get("command") in EDIT_COMMANDS
+    return _command(tool_name, args) in EDIT_COMMANDS
+
+
+def _is_content_edit(tool_name: str, args: dict) -> bool:
+    """An edit to existing content — see ``tools.CONTENT_EDIT_COMMANDS``."""
+    return _command(tool_name, args) in CONTENT_EDIT_COMMANDS
 
 
 def _is_test_run(tool_name: str, args: dict) -> bool:
@@ -153,8 +188,11 @@ class GuardrailInterceptor(ToolInterceptor):
 
         path = ctx.args.get("path", "")
         warnings: list[str] = []
-        if self.read_before_edit and path and \
-                not self.state.has_read(ctx.agent_id, ctx.sandbox_id, path):
+        # `write` is an edit for streak purposes but not for read-before-edit:
+        # it also creates files, and creation has nothing to have read.
+        if self.read_before_edit and path \
+                and _is_content_edit(ctx.tool_name, ctx.args) \
+                and not self.state.has_read(ctx.agent_id, ctx.sandbox_id, path):
             if self.enforcement == "reject":
                 return Reject(_read_before_edit_warning(path))
             warnings.append(_read_before_edit_warning(path))
@@ -173,9 +211,13 @@ class GuardrailInterceptor(ToolInterceptor):
             path = ctx.args.get("path")
             if path:
                 self.state.record_read(ctx.agent_id, ctx.sandbox_id, path)
-        warnings = ctx.metadata.pop("guardrail_warnings", None)
+        warnings = ctx.metadata.pop(_WARNINGS, None)
         if not warnings:
             return result
+        # Record what the runtime returned before annotating it. A nudge is for
+        # the model; the trace must still be able to report the real output
+        # (and not count the warning's bytes as the tool's).
+        ctx.metadata.setdefault(RAW_OUTPUT, result.output)
         return ToolResult(success=result.success,
                           output=_append_warnings(result.output, warnings),
                           error=result.error)
@@ -185,5 +227,10 @@ class GuardrailInterceptor(ToolInterceptor):
 
 
 def _append_warnings(output: str, warnings: list[str]) -> str:
-    text = "\n".join(warnings)
-    return f"{output}\n\n{text}" if output else text
+    """Append warnings, always behind a blank line.
+
+    The separator is unconditional even when ``output`` is empty: the loop
+    prefixes failures with ``Error: …\\n``, so a bare join would glue the
+    warning to the error text.
+    """
+    return f"{output}\n\n" + "\n".join(warnings)

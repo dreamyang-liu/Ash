@@ -10,11 +10,13 @@ Two extension points, each a list the agent iterates:
 Override agent.before_query_hooks / agent.result_processors to customize.
 
 Scope: these hooks sit on the *model* path. Tool-path concerns moved to L2
-interceptors (`interceptors.py`) — output truncation used to be a default
-result_processor here and is now `TruncateInterceptor`, so it also covers agents
-reaching the sandbox through the MCP proxy. `result_processors` remains as an
-extension point (it still sees the loop's `Error:`-prefixed content, which
-interceptors do not), but ships empty.
+interceptors (`interceptors.py`): output truncation used to be the one default
+`result_processor` here and is now `TruncateInterceptor`, which also covers
+agents reaching the sandbox through the MCP proxy. `result_processors` survives
+as an extension point — it is the only place that sees the loop's
+`Error:`-prefixed content — but ships empty, and the `truncate` processor is
+gone rather than deprecated: running it alongside the interceptor would elide
+the interceptor's own marker text.
 """
 
 

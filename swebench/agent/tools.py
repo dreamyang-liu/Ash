@@ -36,9 +36,15 @@ AGENT_TOOL_ROUTES = {k: v for k, v in _BUILTIN_ROUTES.items() if k != "bash"}
 #: text_editor commands that modify a file. The single source of truth for
 #: "this call is an edit", shared by everything that has to reason about it:
 #: Waggle's write arbitration (waggle.py) and the guardrails (guardrails.py).
-#: `write` belongs here — replacing a whole file is the most destructive of the
-#: three, so any rule about editing must cover it.
 EDIT_COMMANDS = frozenset({"str_replace", "insert", "write"})
+
+#: Edits that rewrite *existing* content, so "you did not read this file first"
+#: is unambiguous. `write` is excluded on purpose: it also creates files, and
+#: telling creation from overwrite needs a filesystem probe. Waggle pays for
+#: that probe and refuses only blind overwrites (`_write_unregistered`); a rule
+#: that cannot afford the probe must not claim to cover `write`, or creating a
+#: new file becomes an unsatisfiable warning — or, when enforced, impossible.
+CONTENT_EDIT_COMMANDS = frozenset({"str_replace", "insert"})
 
 
 def route_agent_tool(name: str, args: dict) -> tuple[str, dict]:
