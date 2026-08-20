@@ -36,7 +36,10 @@ from different streams.
 
 - `status`: `ok` or `error` in v1.
 - `result`: raw runtime `output`, `error`, `output_bytes`, and
-  `output_truncated`.
+  `output_truncated`. `output` and `error` are alternatives, not two views of
+  one message: a command that ran and exited non-zero reports its output in
+  `output` with no `error`, while a call the tool refused reports an `error`
+  with no output. `error_kind` distinguishes the two.
 - `duration_ms`: elapsed monotonic time from immediately before execution.
 - `error_kind`: present on failures; v1 emits `routing` or `runtime`.
 - `observation`: present only when the text returned to the model differs from

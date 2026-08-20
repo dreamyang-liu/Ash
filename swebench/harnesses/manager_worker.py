@@ -106,9 +106,7 @@ class _WorkerExecutor:
             r = self._loop.run_until_complete(self._sb.call(tool_name, **args))
         except Exception as e:  # noqa: BLE001 - surface as tool error to the agent
             return ToolResult(success=False, output="", error=str(e))
-        if r.is_error:
-            return ToolResult(success=False, output=r.output, error=r.output)
-        return ToolResult(success=True, output=r.output)
+        return ToolResult.from_sdk(r)
 
     def close(self):
         try:

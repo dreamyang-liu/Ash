@@ -232,13 +232,18 @@ func (s *ShellTool) runSync(command string, timeout, tail int, opts runOpts) Res
 	output := renderCommandOutput(stdout, stderr, tail)
 
 	if err != nil {
+		// A command that ran and failed is not a tool error: Success=false says
+		// it failed, and what it printed is Output like any other run. Reserve
+		// Error for the tool itself refusing (bad arguments, unknown action) --
+		// the meaning it carries in every other Err() call site. Putting output
+		// under Error costs consumers dearly: the wire format has one text slot,
+		// so a client that keeps separate output/error fields cannot tell which
+		// it received and ends up storing the same bytes twice.
 		if ctx.Err() == context.DeadlineExceeded {
-			if output != "" {
-				return Err(output + "\ncommand timed out after " + fmt.Sprintf("%d", timeout) + "s")
-			}
-			return Err("command timed out after " + fmt.Sprintf("%d", timeout) + "s")
+			return Failed(joinNonEmpty(output,
+				"command timed out after "+fmt.Sprintf("%d", timeout)+"s"))
 		}
-		return Err(output)
+		return Failed(output)
 	}
 	return Ok(output)
 }

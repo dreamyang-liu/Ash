@@ -8,10 +8,32 @@ from typing import Any, Optional
 
 @dataclass
 class ToolResult:
-    """Result from calling an ash tool via CLI."""
+    """Result of one tool call.
+
+    ``output`` and ``error`` are alternatives, not two views of one message:
+    ``output`` is what the tool produced, ``error`` is the tool refusing to
+    produce anything (bad arguments, no sandbox, a transport failure). A command
+    that ran and exited non-zero has real output and no error -- ``success``
+    already says it failed.
+
+    Storing one message in both fields costs twice, because the agent loop
+    renders a failure as ``f"Error: {error}\\n{output}"``: the model reads the
+    same bytes twice and pays for both.
+    """
     success: bool
     output: str
     error: Optional[str] = None
+
+    @classmethod
+    def from_sdk(cls, result) -> "ToolResult":
+        """Convert an ``ash_sandbox.ToolResult``.
+
+        The wire format has one text slot plus an ``is_error`` flag, so a failed
+        call gives us one string and no way to know whether it is output or a
+        refusal. Treat it as output: it is what the runtime chose to show, and
+        ``success=False`` carries the failure without duplicating the text.
+        """
+        return cls(success=not result.is_error, output=result.output)
 
 
 @dataclass

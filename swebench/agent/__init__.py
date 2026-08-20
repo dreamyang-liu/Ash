@@ -305,8 +305,20 @@ class AshAgent:
 
 
 def _observation(success: bool, output: str, error: Optional[str]) -> str:
-    """Render a result the way the model sees it."""
-    return output if success else f"Error: {error or 'Unknown error'}\n{output}"
+    """Render a result the way the model sees it.
+
+    A failure is announced, then explained by whichever field holds the reason.
+    A command that ran and exited non-zero has output and no error; a call the
+    tool refused has an error and no output. Only the fields that carry
+    something are shown, so neither case gets a filler line -- and a result
+    holding one message in both fields would not print it twice.
+    """
+    if success:
+        return output
+    reason = error or ""
+    if reason and output and reason != output:
+        return f"Error: {reason}\n{output}"
+    return f"Error: {reason or output or 'Unknown error'}"
 
 
 def _background_process_id(name: str, args: dict, result: ToolResult) -> Optional[str]:
