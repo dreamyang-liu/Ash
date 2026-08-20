@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -274,34 +275,75 @@ func (b *BoundedLog) tailLimit() int {
 	return b.max - b.headLimit()
 }
 
-func renderCommandOutput(stdout, stderr *BoundedLog, tailLines int) string {
+// CommandOutcome is what running a command produced. One schema for both ways
+// of running one: `shell` in the foreground and `process read` on a background
+// pid report the same fields, so a consumer written for either works with both.
+//
+// Streams stay separate. Merging them into one blob was lossy in three ways: the
+// "[stderr]" divider it inserted is forgeable by any command that prints one,
+// the exit code had nowhere to go (`exit 5` prints nothing and arrived as an
+// empty string), and truncation was described in prose a consumer had to grep.
+//
+// ExitCode is nil while a process is still running -- 0 and "not known yet" are
+// different answers.
+type CommandOutcome struct {
+	Stdout          string `json:"stdout"`
+	Stderr          string `json:"stderr"`
+	ExitCode        *int   `json:"exit_code"`
+	Running         bool   `json:"running,omitempty"`
+	TimedOut        bool   `json:"timed_out,omitempty"`
+	StdoutBytes     int64  `json:"stdout_bytes"`
+	StderrBytes     int64  `json:"stderr_bytes"`
+	StdoutTruncated bool   `json:"stdout_truncated"`
+	StderrTruncated bool   `json:"stderr_truncated"`
+	MaxPerStream    int    `json:"max_per_stream,omitempty"`
+}
+
+// commandOutcome reads both logs into the shared schema.
+func commandOutcome(stdout, stderr *BoundedLog, tailLines int) CommandOutcome {
 	stdoutText, stdoutTruncated := stdout.Render()
 	stderrText, stderrTruncated := stderr.Render()
-
 	if tailLines > 0 {
 		stdoutText = lastNLines(stdoutText, tailLines)
 		stderrText = lastNLines(stderrText, tailLines)
 	}
+	return CommandOutcome{
+		Stdout:          stdoutText,
+		Stderr:          stderrText,
+		StdoutBytes:     stdout.TotalBytes(),
+		StderrBytes:     stderr.TotalBytes(),
+		StdoutTruncated: stdoutTruncated,
+		StderrTruncated: stderrTruncated,
+		MaxPerStream:    stdout.max,
+	}
+}
 
-	var b strings.Builder
-	if stdoutText != "" {
-		b.WriteString(stdoutText)
+// Result renders an outcome for the wire.
+//
+// A plain success -- exit 0, nothing on stderr, nothing clipped -- is returned
+// as bare stdout: there is nothing to say beyond it, and wrapping `echo hello`
+// in JSON would make every consumer parse a payload to find one word. Anything
+// else carries the schema, because something about the run cannot be read off
+// the text.
+func (o CommandOutcome) Result() Result {
+	if o.plain() {
+		return Ok(o.Stdout)
 	}
-	if stderrText != "" {
-		if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
-			b.WriteString("\n")
-		}
-		b.WriteString("[stderr]\n")
-		b.WriteString(stderrText)
+	payload, err := json.Marshal(o)
+	if err != nil {
+		// Unreachable for this struct; degrade to the merged rendering rather
+		// than losing the output entirely.
+		return Result{Success: o.ok(), Output: o.Stdout + o.Stderr}
 	}
-	if stdoutTruncated || stderrTruncated {
-		if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
-			b.WriteString("\n")
-		}
-		b.WriteString(fmt.Sprintf(
-			"[output_limit] stdout=%d bytes stderr=%d bytes max_per_stream=%d bytes\n",
-			stdout.TotalBytes(), stderr.TotalBytes(), stdout.max,
-		))
-	}
-	return b.String()
+	return Result{Success: o.ok(), Output: string(payload)}
+}
+
+func (o CommandOutcome) ok() bool {
+	return !o.TimedOut && (o.ExitCode == nil || *o.ExitCode == 0)
+}
+
+// plain reports whether the outcome holds nothing a bare stdout would omit.
+func (o CommandOutcome) plain() bool {
+	return o.ok() && !o.Running && o.Stderr == "" &&
+		!o.StdoutTruncated && !o.StderrTruncated
 }

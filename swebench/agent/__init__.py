@@ -189,13 +189,14 @@ class AshAgent:
             content = proc(content, name, args, result)
 
         if self._event_trace:
-            output_truncated = _runtime_output_truncated(exec_name, runtime_output)
             result_event = {
                 "output": runtime_output,
                 "error": runtime_error,
                 "output_bytes": len(runtime_output.encode("utf-8")),
-                "output_truncated": output_truncated,
+                "output_truncated": _output_truncated(runtime_output, result.outcome),
             }
+            if result.outcome is not None:
+                result_event["command"] = _command_facts(result.outcome)
             payload = {
                 "turn_id": turn_id,
                 "call_id": call_id,
@@ -332,15 +333,23 @@ def _background_process_id(name: str, args: dict, result: ToolResult) -> Optiona
     return pid if isinstance(pid, str) and pid else None
 
 
-def _runtime_output_truncated(name: str, output: str) -> bool:
-    if "[output truncated:" in output:
+#: Command facts worth a trace slot. The streams themselves are excluded: the
+#: recorded output already holds them, and copying megabytes into every event
+#: would bloat the trace for nothing.
+_COMMAND_FACT_KEYS = ("exit_code", "running", "timed_out", "stdout_bytes",
+                      "stderr_bytes", "stdout_truncated", "stderr_truncated")
+
+
+def _command_facts(outcome) -> dict:
+    return {k: getattr(outcome, k) for k in _COMMAND_FACT_KEYS}
+
+
+def _output_truncated(output: str, outcome=None) -> bool:
+    """Whether the runtime dropped part of this result.
+
+    Prefers the reported fact; falls back to the marker `text_editor`/`grep`
+    embed in their own output, which report no outcome.
+    """
+    if outcome is not None and outcome.truncated:
         return True
-    if name != "process":
-        return False
-    try:
-        payload = json.loads(output)
-    except (json.JSONDecodeError, TypeError):
-        return False
-    return isinstance(payload, dict) and bool(
-        payload.get("stdout_truncated") or payload.get("stderr_truncated")
-    )
+    return "[output truncated:" in output

@@ -1,7 +1,5 @@
 package tools
 
-import "strings"
-
 // Tool is the interface all sandbox tools implement.
 type Tool interface {
 	Name() string
@@ -31,24 +29,6 @@ func Ok(output string) Result {
 // in this case, only a reason.
 func Err(msg string) Result {
 	return Result{Success: false, Error: msg}
-}
-
-// Failed reports that the tool ran the request and it came out unsuccessful --
-// a command exiting non-zero, say. The output is real output, so it belongs in
-// Output; Success=false already carries the failure.
-func Failed(output string) Result {
-	return Result{Success: false, Output: output}
-}
-
-// joinNonEmpty joins parts with a newline, skipping empty ones.
-func joinNonEmpty(parts ...string) string {
-	kept := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p != "" {
-			kept = append(kept, p)
-		}
-	}
-	return strings.Join(kept, "\n")
 }
 
 // All returns the complete RL tool set.

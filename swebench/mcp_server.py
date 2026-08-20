@@ -411,8 +411,12 @@ class SessionHandler:
             future = asyncio.run_coroutine_threadsafe(
                 entry.sandbox.call(tool, **tool_args), loop)
             sdk = future.result()
-            return ToolResult(success=not sdk.is_error, output=sdk.output,
-                              error="tool error" if sdk.is_error else None)
+            # from_sdk, so a command's outcome reaches seats on this path too
+            # (a presenter rendering it, audit reading its byte counts).
+            result = ToolResult.from_sdk(sdk)
+            if sdk.is_error and not result.error:
+                result.error = "tool error"
+            return result
 
         ctx = CallContext(agent_id=self.session.id, sandbox_id=entry.id,
                           tool_name=name, args=dict(args),
