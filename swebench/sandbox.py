@@ -90,7 +90,8 @@ class AshSession:
             self._sandbox = None
             self._pool = None
 
-    def executor_for(self, agent_id: str) -> Callable[[str, dict], ToolResult]:
+    def executor_for(self, agent_id: str,
+                     pipeline=None) -> Callable[[str, dict], ToolResult]:
         """An executor for one agent, with that agent's identity bound in.
 
         Hand this to an agent instead of :meth:`execute`: its calls are then
@@ -98,12 +99,24 @@ class AshSession:
         has no way to act under another agent's name. The signature stays
         ``(tool_name, args) -> ToolResult``, so it drops into anything taking
         an executor -- including the interceptor pipeline.
+
+        ``pipeline`` (a :class:`~swebench.agent.pipeline.ToolPipeline`) mounts
+        L2 governance around this agent's calls -- the harness-side equivalent
+        of the MCP proxy's ``--coordinate``/``--plugins``. Identity and the
+        raw executor are wired in here so a harness cannot forget either;
+        agents that must be arbitrated together share one pipeline instance.
+        The sandbox id is resolved per call, because this session may not
+        have spawned its sandbox yet when the executor is handed out.
         """
         def run(tool_name: str, args: dict, timeout: float | None = None) -> ToolResult:
             return self._run(tool_name, args,
                              timeout if timeout is not None else self.timeout,
                              agent_id)
-        return run
+        if pipeline is None:
+            return run
+        from .agent.pipeline import piped_executor
+        return piped_executor(pipeline, run, agent_id,
+                              sandbox_id=lambda: self.sandbox_id)
 
     def execute(self, tool_name: str, args: dict, timeout: float = 300.0) -> ToolResult:
         """Run a tool as the harness itself (resets, patch extraction, tests).

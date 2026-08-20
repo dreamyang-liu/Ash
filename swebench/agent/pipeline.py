@@ -216,6 +216,44 @@ def _rejection(interceptor: ToolInterceptor, message: str) -> ToolResult:
 
 
 # --------------------------------------------------------------------------- #
+#  Mounting (fold a pipeline into an executor)
+# --------------------------------------------------------------------------- #
+
+def piped_executor(pipeline: ToolPipeline, inner: Executor, agent_id: str,
+                   sandbox_id: "str | Callable[[], str]" = "default") -> Executor:
+    """Fold ``pipeline`` around ``inner`` into a plain executor.
+
+    This is the harness-side mount: the same onion the MCP proxy runs
+    (``mcp_server._exec_via_pipeline``) exposed through the one seam every
+    agent already consumes -- ``(tool_name, args) -> ToolResult`` -- so an
+    ``AshAgent`` (or anything else holding an executor) gets L2 governance
+    without knowing the pipeline exists.
+
+    - Identity is bound at mount time, like ``AshSession.executor_for``:
+      every call through the returned executor is attributed to ``agent_id``,
+      so mount one executor per agent.
+    - ``sandbox_id`` may be a zero-arg callable, resolved per call, for
+      sessions whose sandbox appears (or is recreated) after the executor is
+      handed out -- a stale id would silently key coordination state to the
+      wrong workspace.
+    - ``ctx.metadata["executor"]`` carries ``inner`` so interceptors needing
+      probe traffic or arbitrated writes (Waggle) reach the sandbox without
+      re-entering the pipeline.
+    - Agents whose calls must be arbitrated together must share ONE pipeline
+      instance (coordination state lives inside its interceptors). Blocking
+      interceptors (Waggle reservation waits) block the calling thread, so
+      give each agent its own thread -- the manager-worker layout.
+    """
+    def run(tool_name: str, args: dict) -> ToolResult:
+        target = sandbox_id() if callable(sandbox_id) else sandbox_id
+        ctx = CallContext(agent_id=agent_id, sandbox_id=target,
+                          tool_name=tool_name, args=dict(args),
+                          metadata={"executor": inner})
+        return pipeline.execute(ctx, inner)
+    return run
+
+
+# --------------------------------------------------------------------------- #
 #  Plugin loading (assembly is plain Python: a list is the configuration)
 # --------------------------------------------------------------------------- #
 

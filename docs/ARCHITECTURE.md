@@ -237,7 +237,7 @@ localhost HTTP (milliseconds), which bounds the cost.
 |---|---|---|
 | Runtime (L1) | ✅ as designed | unchanged, forever |
 | Waggle kernel | ✅ `swebench/agent/waggle.py` (`WorkspaceCoordinator`), 10 unit tests + live-conflict experiment | same kernel, mounted in the proxy |
-| Waggle mounting | ✅ `WaggleInterceptor` inside the MCP proxy (opt-in `--coordinate` / `--plugins`); `CoordinatedExecutor` kept as test fixture / proxy-less lite mode | unchanged |
+| Waggle mounting | ✅ `WaggleInterceptor` inside the MCP proxy (opt-in `--coordinate` / `--plugins`); `CoordinatedExecutor` kept as test fixture / proxy-less lite mode; `piped_executor` / `executor_for(pipeline=)` mounts the same chain on harness-thread agents | unchanged |
 | Interceptor pipeline | ✅ `swebench/agent/pipeline.py`, mounted in `swebench/mcp_server.py` | guardrails/ACL/audit migrate out of the agent loop into it |
 | Policy hooks | ✅ `WagglePolicy` (`on_write`/`on_conflict`/`on_drift`/`on_commit`), run inside the file's critical section | + two reference policies (ownership ACL, auto-merge-then-reject) |
 | Harnesses (L3) | `litellm`, `claude-code`, `manager-worker`, `best-of-n` | + orchestrator-worker (ledger/replan), debate |
