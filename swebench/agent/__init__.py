@@ -2,7 +2,9 @@
 
 Everything around the loop lives elsewhere: model calls + caching + streaming +
 retries in `llm.py`, prompts in `prompts.py`, conversation/trajectory state in
-`conversation.py`, and the sandbox SDK behind the `executor` callable. Tool-path
+`conversation.py`, and the sandbox SDK behind the `executor` callable -- which
+also owns tool dispatch, so a manifest-defined tool is handed over by name and
+expanded there rather than here. Tool-path
 concerns (guardrails, output truncation) are L2 interceptors on a `ToolPipeline`
 (`interceptors.py`, `guardrails.py`) rather than loop code, so the MCP proxy and
 harness-side mounts get them too; model-path concerns (budget warnings) remain
@@ -125,25 +127,19 @@ class AshAgent:
 
         result = None
         error_kind = None
-        custom_plan = None
-        if name == "bash":  # bash_only mode alias
-            exec_name, exec_args = "shell", dict(args)
-        elif is_custom_tool(name):
-            # Manifest-defined tool: artifact -> shell (url source) or
-            # straight to shell (image-local path source).
-            from .custom_tools import plan_custom_tool
-            try:
-                custom_plan = plan_custom_tool(name, args)
-                if custom_plan.artifact_call is not None:
-                    exec_name, exec_args = custom_plan.artifact_call
-                else:
-                    exec_name, exec_args = custom_plan.shell_call(custom_plan.spec.path)
-                    custom_plan = None  # single-step: no follow-up needed
-            except (ValueError, KeyError) as exc:
-                exec_name, exec_args = name, dict(args)
-                result = ToolResult(success=False, output="", error=str(exc))
-                error_kind = "routing"
+        if is_custom_tool(name):
+            # Passed through under its own name. The executor expands it into
+            # artifact->shell (ash_sandbox.Sandbox.call_agent_tool), which also
+            # remembers where the binary landed, so a repeat call skips the
+            # download round-trip. Interceptors therefore see one opaque call --
+            # tell Waggle about any such tool via `opaque_writers` so its drift
+            # scan still runs (see waggle.py).
+            exec_name, exec_args = name, dict(args)
         else:
+            # Builtin names ARE translated here, even though the executor would
+            # do it too: `bash` must reach the interceptors as `shell`, or a
+            # bash_only run would hide every command from the seats that key on
+            # the runtime tool -- Waggle's drift scan above all.
             try:
                 exec_name, exec_args = route_agent_tool(name, args)
             except KeyError as exc:
@@ -168,14 +164,6 @@ class AshAgent:
             if exec_name != name:
                 self._trace(f"[runtime] {exec_name} {tool_summary(exec_name, exec_args)}\n")
             result = execute(exec_name, exec_args)
-            if custom_plan is not None and result.success:
-                # Step 2 of a custom tool: run the verified binary. Step 1's
-                # artifact path is the runtime's, never the model's — read it
-                # from the raw result, which truncation may have elided.
-                artifact_path = metadata.pop(interceptors.RAW_OUTPUT, result.output)
-                exec_name, exec_args = custom_plan.shell_call(artifact_path.strip())
-                self._trace(f"[runtime] {exec_name} {tool_summary(exec_name, exec_args)}\n")
-                result = execute(exec_name, exec_args)
             if not result.success:
                 error_kind = "runtime"
         duration_ms = round((time.perf_counter() - started_at) * 1000, 3)

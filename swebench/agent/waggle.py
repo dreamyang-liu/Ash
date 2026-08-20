@@ -272,13 +272,17 @@ class CoordinatedExecutor:
 
     def __init__(self, inner: Executor, state: WorkspaceCoordinator, agent_id: str,
                  sandbox_id: str = "default", require_read: bool = True,
-                 policy: Optional[WagglePolicy] = None) -> None:
+                 policy: Optional[WagglePolicy] = None,
+                 opaque_writers: "set[str] | None" = None) -> None:
         self._inner = inner
         self._state = state
         self._agent = agent_id
         self._sbx = sandbox_id
         self._require_read = require_read
         self._policy = policy            # None = pure OCC (no hook overhead)
+        # See WaggleInterceptor.opaque_writers -- both mountings share the
+        # setting, so the lite one does not quietly watch less.
+        self._opaque_writers = {"shell"} | set(opaque_writers or ())
 
     # -- dispatch ----------------------------------------------------------- #
 
@@ -288,8 +292,8 @@ class CoordinatedExecutor:
             return self._read(tool_name, args)
         if tool_name == "text_editor" and command in self.WRITE_COMMANDS:
             return self._write(args)
-        if tool_name == "shell":
-            return self._shell(args)
+        if tool_name in self._opaque_writers:
+            return self._shell(args, tool_name)
         return self._inner(tool_name, args)
 
     def close(self) -> None:
@@ -492,8 +496,14 @@ class CoordinatedExecutor:
 
     # -- shell path (effect detection) ----------------------------------------- #
 
-    def _shell(self, args: dict) -> ToolResult:
-        result = self._inner("shell", args)
+    def _shell(self, args: dict, tool_name: str = "shell") -> ToolResult:
+        """Run a call that may change files behind Waggle's back, then look.
+
+        `tool_name` is passed through rather than assumed: a manifest-defined
+        tool declared in ``opaque_writers`` gets the same treatment, and it must
+        reach the runtime under its own name for the executor to expand it.
+        """
+        result = self._inner(tool_name, args)
         self._scan_effects()
         return result
 

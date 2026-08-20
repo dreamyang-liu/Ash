@@ -10,6 +10,7 @@ from ash_sandbox import Pool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
 
 from . import style as S
+from .agent.custom_tools import DEFAULT_REGISTRY
 from .backends import build_pool
 from .models import ToolResult
 
@@ -156,8 +157,13 @@ class AshSession:
         # baffling tool failure). The channel's identity is the only one that
         # counts, so drop any that arrived in the arguments.
         call_args = {k: v for k, v in args.items() if k != "agent_id"}
-        sdk_result: SdkToolResult = await self._sandbox.call(
-            tool_name, agent_id=agent_id, **call_args)
+        # call_agent_tool, not call: it owns the agent-facing tool surface --
+        # builtin routing plus manifest-defined tools, whose artifact->shell
+        # expansion it also memoises, so a repeat call skips the download
+        # round-trip. The registry is passed explicitly because manifests load
+        # into the process-default one while a Sandbox starts with its own.
+        sdk_result: SdkToolResult = await self._sandbox.call_agent_tool(
+            tool_name, call_args, registry=DEFAULT_REGISTRY, agent_id=agent_id)
         return ToolResult.from_sdk(sdk_result)
 
     def get_patch(self) -> str:

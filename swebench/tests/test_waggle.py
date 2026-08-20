@@ -368,3 +368,56 @@ def test_declaring_a_tool_an_opaque_writer_restores_drift_detection():
     assert not declared.success
     assert "[WAGGLE]" in declared.output                 # rejected with a diff
     assert "other agent" in content                      # the work survived
+
+
+def test_the_lite_mounting_shares_the_opaque_writer_setting():
+    """Both mountings must watch the same calls, or switching between them
+    quietly changes what coordination covers."""
+    from swebench.agent.waggle import CoordinatedExecutor, WorkspaceCoordinator
+
+    sandbox = FakeSandbox({"/testbed/a.py": "v1"})
+    ex = CoordinatedExecutor(sandbox.executor(), WorkspaceCoordinator(ttl=5.0),
+                             agent_id="A", opaque_writers={"mytool"})
+    assert ex._opaque_writers == {"shell", "mytool"}
+
+
+def test_an_opaque_writer_reaches_the_runtime_under_its_own_name():
+    """The executor below this seat expands a manifest tool by name, so renaming
+    it to `shell` on the way through would break dispatch entirely."""
+    from swebench.agent.waggle import CoordinatedExecutor, WorkspaceCoordinator
+
+    seen = []
+    sandbox = FakeSandbox({"/testbed/a.py": "v1"})
+    inner = sandbox.executor()
+
+    def spy(tool, args):
+        seen.append(tool)
+        return inner(tool, args)
+
+    ex = CoordinatedExecutor(spy, WorkspaceCoordinator(ttl=5.0), agent_id="A",
+                             opaque_writers={"mytool"})
+    ex("mytool", {"target": "/testbed/a.py"})
+    assert seen == ["mytool"]
+
+
+def test_the_lite_mounting_scans_after_a_declared_opaque_writer():
+    """Not just that the setting is stored -- that it drives the scan. Without
+    this, an agent could write over a version it never read."""
+    from swebench.agent.waggle import CoordinatedExecutor, WorkspaceCoordinator
+
+    path = "/testbed/a.py"
+    sandbox = FakeSandbox({path: "v1"})
+    state = WorkspaceCoordinator(ttl=5.0)
+    a = CoordinatedExecutor(sandbox.executor(), state, agent_id="A",
+                            opaque_writers={"mytool"})
+    b = CoordinatedExecutor(sandbox.executor(), state, agent_id="B",
+                            opaque_writers={"mytool"})
+
+    a("text_editor", {"command": "view", "path": path})     # A holds v1
+    sandbox.mutate(path, "v1\nchanged by the tool\n")       # the tool's effect
+    b("mytool", {"target": path})                           # opaque call -> scan
+
+    result = a("text_editor", {"command": "write", "path": path,
+                               "file_text": "rewritten by A\n"})
+    assert not result.success                                # drift was noticed
+    assert "changed by the tool" in sandbox.read(path)       # nothing was lost
