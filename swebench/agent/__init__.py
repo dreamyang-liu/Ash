@@ -1,11 +1,13 @@
 """Agent loop for SWE-bench.
 
 Everything around the loop lives elsewhere: model calls + caching + streaming +
-retries in `llm.py`, prompts in `prompts.py`, guardrails in `guardrails.py`,
-cross-cutting concerns (budget warnings, output truncation) as pluggable
-`hooks.py`, conversation/trajectory state in `conversation.py`, and the sandbox
-SDK behind the `executor` callable. What remains here is the loop: query the
-model, run tool calls, repeat.
+retries in `llm.py`, prompts in `prompts.py`, conversation/trajectory state in
+`conversation.py`, and the sandbox SDK behind the `executor` callable. Tool-path
+concerns (guardrails, output truncation) are L2 interceptors on a `ToolPipeline`
+(`interceptors.py`, `guardrails.py`) rather than loop code, so the MCP proxy and
+harness-side mounts get them too; model-path concerns (budget warnings) remain
+`hooks.py`. What remains here is the loop: query the model, run tool calls,
+repeat.
 """
 
 import json
@@ -17,11 +19,11 @@ from uuid import uuid4
 from ..models import AgentConfig, CostTracker, ToolResult, Trajectory
 from .prompts import build_system_prompt, build_instance_message  # re-exported
 from .conversation import Conversation
-from .guardrails import Guardrails
 from .llm import LLMClient, ThinkingLoopError
+from .pipeline import CallContext, ToolPipeline
 from .tools import tool_summary, TOOLS_SCHEMA, BASH_ONLY_SCHEMA, route_agent_tool, is_custom_tool
 from .trace import ToolTraceWriter, new_run_id
-from . import hooks
+from . import hooks, interceptors
 
 __all__ = ["AshAgent", "build_system_prompt", "build_instance_message",
            "TOOLS_SCHEMA", "BASH_ONLY_SCHEMA"]
@@ -36,9 +38,20 @@ class AshAgent:
                  trace_dir: Optional[Path] = None,
                  run_id: Optional[str] = None,
                  agent_id: str = "agent",
-                 sandbox_id: str = "default"):
+                 sandbox_id: str = "default",
+                 pipeline: "ToolPipeline | None" = None):
         self.config = config
         self.executor = executor          # executor(tool_name, args) -> ToolResult
+        # Caller-supplied L2 chain, or None to let run() mount the loop's
+        # default (guardrails + truncation). Pass ToolPipeline([]) for no
+        # interception, or one shared instance to govern several agents
+        # together — coordination state lives inside the interceptors.
+        self.pipeline = pipeline
+        # The chain actually in force, resolved on first use. run() clears it so
+        # a defaulted chain is rebuilt per run and guardrail state (files read,
+        # edit streaks) never leaks between runs; a caller-supplied chain is
+        # reused as-is, because its state is the caller's to own.
+        self._pipeline: "ToolPipeline | None" = None
         self.on_step = on_step            # on_step(step_num, kind, text)
         self.trace_dir = trace_dir
         self.run_id = run_id
@@ -62,8 +75,27 @@ class AshAgent:
             self._trace_file.write(text)
             self._trace_file.flush()
 
-    def _run_tool(self, tc, conv: Conversation, guardrails: Guardrails,
-                  turn_id: str) -> None:
+    def _governed(self, metadata: dict) -> Callable[[str, dict], ToolResult]:
+        """This call's executor, wrapped in the L2 pipeline if one is mounted.
+
+        ``metadata`` is the call's shared scratch space: interceptors read the
+        raw executor from it (Waggle's probe traffic) and write back facts the
+        loop needs afterwards (the pre-truncation output).
+        """
+        if self._pipeline is None:
+            self._pipeline = self.pipeline if self.pipeline is not None \
+                else interceptors.default_pipeline()
+        pipeline = self._pipeline
+        metadata.setdefault("executor", self.executor)
+
+        def run(tool_name: str, args: dict) -> ToolResult:
+            ctx = CallContext(agent_id=self.agent_id, sandbox_id=self.sandbox_id,
+                              tool_name=tool_name, args=dict(args),
+                              metadata=metadata)
+            return pipeline.execute(ctx, self.executor)
+        return run
+
+    def _run_tool(self, tc, conv: Conversation, turn_id: str) -> None:
         """Execute one tool call, trace it, and record its result on the conversation."""
         name = tc.function.name
         try:
@@ -113,38 +145,38 @@ class AshAgent:
                 runtime={"name": exec_name, "args": exec_args},
             )
 
+        metadata: dict = {}
         started_at = time.perf_counter()
         if result is None:
+            execute = self._governed(metadata)
             if exec_name != name:
                 self._trace(f"[runtime] {exec_name} {tool_summary(exec_name, exec_args)}\n")
-            warning = guardrails.check(exec_name, exec_args)
-            result = self.executor(exec_name, exec_args)
+            result = execute(exec_name, exec_args)
             if custom_plan is not None and result.success:
-                # Step 2 of a custom tool: run the verified binary.
-                exec_name, exec_args = custom_plan.shell_call(result.output.strip())
+                # Step 2 of a custom tool: run the verified binary. Step 1's
+                # artifact path is the runtime's, never the model's — read it
+                # from the raw result, which truncation may have elided.
+                artifact_path = metadata.pop(interceptors.RAW_OUTPUT, result.output)
+                exec_name, exec_args = custom_plan.shell_call(artifact_path.strip())
                 self._trace(f"[runtime] {exec_name} {tool_summary(exec_name, exec_args)}\n")
-                step2_warning = guardrails.check(exec_name, exec_args)
-                warning = warning or step2_warning
-                result = self.executor(exec_name, exec_args)
+                result = execute(exec_name, exec_args)
             if not result.success:
                 error_kind = "runtime"
-        else:
-            warning = None
         duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
-        raw_content = result.output if result.success else \
+        # Interceptors may have bounded the output; the trace records what the
+        # runtime returned, the conversation gets what the interceptors produced.
+        runtime_output = metadata.get(interceptors.RAW_OUTPUT, result.output)
+        content = result.output if result.success else \
             f"Error: {result.error or 'Unknown error'}\n{result.output}"
-        content = raw_content
-        if warning:
-            content += f"\n\n{warning}"
         for proc in self.result_processors:
             content = proc(content, name, args, result)
 
         if self._event_trace:
-            output_truncated = _runtime_output_truncated(exec_name, result.output)
+            output_truncated = _runtime_output_truncated(exec_name, runtime_output)
             result_event = {
-                "output": result.output,
+                "output": runtime_output,
                 "error": result.error,
-                "output_bytes": len(result.output.encode("utf-8")),
+                "output_bytes": len(runtime_output.encode("utf-8")),
                 "output_truncated": output_truncated,
             }
             payload = {
@@ -156,7 +188,7 @@ class AshAgent:
             }
             if error_kind:
                 payload["error_kind"] = error_kind
-            if content != result.output:
+            if content != runtime_output:
                 payload["observation"] = content
             process_id = _background_process_id(exec_name, exec_args, result)
             if process_id:
@@ -217,7 +249,7 @@ class AshAgent:
 
         llm = LLMClient(self.config, self.cost, self._tools_schema, trace=self._trace, on_step=self.on_step)
         llm.stream = self.stream
-        guardrails = Guardrails()
+        self._pipeline = None             # re-resolved per run (see __init__)
 
         conv = Conversation(self.trajectory)
         conv.add_system(build_system_prompt(task, self.config))
@@ -240,7 +272,7 @@ class AshAgent:
                 if message.tool_calls:
                     turn_id = f"turn-{self.cost.api_calls}"
                     for tc in message.tool_calls:
-                        self._run_tool(tc, conv, guardrails, turn_id)
+                        self._run_tool(tc, conv, turn_id)
                 elif self._nudge(conv, message) == "completed":
                     return "completed"
         finally:

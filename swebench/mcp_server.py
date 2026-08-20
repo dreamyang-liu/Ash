@@ -33,6 +33,7 @@ from typing import Any
 from ash_sandbox import DockerPool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
 
+from .agent.guardrails import GuardrailInterceptor
 from .agent.pipeline import CallContext, ToolPipeline, load_pipeline
 from .agent.waggle import WaggleInterceptor
 from .models import ToolResult
@@ -594,17 +595,27 @@ _TRUTHY = {"1", "true", "yes", "on"}
 def _build_pipeline(args) -> "ToolPipeline | None":
     """Assemble the L2 interceptor pipeline (docs/ARCHITECTURE.md).
 
-    Default OFF: with no --plugins and no coordination flag the proxy
+    Default OFF: with no --plugins, --guardrails or coordination flag the proxy
     dispatches tool calls exactly as before. --plugins replaces the default
     assembly entirely — the PIPELINE list in the file is the configuration.
+
+    Order is semantics: guardrails advise before Waggle arbitrates, and their
+    ``after`` therefore runs last, so a warning is appended to whatever result
+    (including a Waggle rejection) the model ends up seeing. When both are on,
+    read-before-edit is left to Waggle — it enforces the same rule and names
+    the version the agent is stale against.
     """
     if args.plugins:
         return load_pipeline(args.plugins)
     coordinate = args.coordinate or \
         os.environ.get("ASH_MCP_COORDINATE", "").strip().lower() in _TRUTHY
+    interceptors: list = []
+    if args.guardrails:
+        interceptors.append(GuardrailInterceptor(
+            enforcement=args.guardrails, read_before_edit=not coordinate))
     if coordinate:
-        return ToolPipeline([WaggleInterceptor(ttl=args.waggle_ttl)])
-    return None
+        interceptors.append(WaggleInterceptor(ttl=args.waggle_ttl))
+    return ToolPipeline(interceptors) if interceptors else None
 
 
 def main():
@@ -623,6 +634,11 @@ def main():
                              "Default: off.")
     parser.add_argument("--waggle-ttl", type=float, default=120.0,
                         help="Waggle reservation TTL in seconds (with --coordinate)")
+    parser.add_argument("--guardrails", nargs="?", const="warn", default=None,
+                        choices=["warn", "reject"],
+                        help="Mount read-before-edit / edit-streak guardrails: "
+                             "'warn' annotates the result, 'reject' refuses the "
+                             "call. Default: off.")
     parser.add_argument("--plugins", default=None,
                         help="Python file exporting PIPELINE: list[ToolInterceptor]; "
                              "replaces the default pipeline assembly")

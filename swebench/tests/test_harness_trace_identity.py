@@ -20,13 +20,20 @@ class _FakeTrajectory:
         self.saved_to = path
 
 
+_IDENTITY_KEYS = ("trace_dir", "run_id", "agent_id", "sandbox_id")
+
+
 class _FakeAgent:
     created = []
 
-    def __init__(self, config, executor, **identity):
+    def __init__(self, config, executor, **kwargs):
         self.config = config
         self.executor = executor
-        self.identity = identity
+        # Identity only — these tests are about who a call is attributed to.
+        # Other kwargs (e.g. pipeline=) are recorded separately so adding one
+        # does not break every identity assertion.
+        self.identity = {k: v for k, v in kwargs.items() if k in _IDENTITY_KEYS}
+        self.kwargs = kwargs
         self.cost = CostTracker()
         self.trajectory = _FakeTrajectory()
         self.stream = True
@@ -146,6 +153,23 @@ def test_each_worker_gets_an_executor_bound_to_its_own_identity(monkeypatch, tmp
     bound = [ex.agent_id for ex in _FakeWorkerExecutor.created]
     assert bound == ["worker-t1"], "the worker's executor must carry its identity"
     assert len(set(bound)) == len(bound), "identities must be unique per worker"
+
+
+def test_coordinated_workers_leave_read_before_edit_to_waggle(monkeypatch, tmp_path):
+    # With Waggle mounted on the worker's executor, a guardrail seat enforcing
+    # the same rule would state it to the model twice -- and Waggle's message is
+    # the better one (it names the version the worker is stale against).
+    _run_manager_and_workers(monkeypatch, tmp_path)   # waggle_state passed in
+
+    manager, worker = _FakeAgent.created
+    seats = {i.name: i for i in worker.kwargs["pipeline"].interceptors}
+    assert seats["GuardrailInterceptor"].read_before_edit is False
+    # The other guardrail still applies: turning one rule off is not turning
+    # the seat off.
+    assert seats["GuardrailInterceptor"].edit_streak_limit > 0
+    assert "TruncateInterceptor" in seats
+    # The manager is uncoordinated (read-only exploration), so it keeps the rule.
+    assert manager.kwargs.get("pipeline") is None
 
 
 def test_manager_bookkeeping_is_not_attributed_to_the_manager(monkeypatch, tmp_path):

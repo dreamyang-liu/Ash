@@ -1,0 +1,430 @@
+"""Unit tests for the interceptors migrated out of the agent loop.
+
+Covers GuardrailInterceptor (swebench/agent/guardrails.py), TruncateInterceptor
+and the loop's default chain (swebench/agent/interceptors.py), plus the agent
+loop consuming a pipeline (swebench/agent/__init__.py).
+
+No Docker, no model calls.
+
+Covered:
+- read-before-edit: warn mode annotates, reject mode refuses
+- reads recorded only on SUCCESS, and only in `after` (a failed view must not
+  unlock editing — the loop's inline version had this backwards)
+- state keyed by (agent_id, sandbox_id): A's read never excuses B's blind edit
+- edit-streak counting and its reset by a test-running shell command
+- truncation bounds ToolResult.output, preserves the original in metadata,
+  and never elides error text
+- ordering: a guardrail warning survives truncation of a huge output
+- agent loop: default chain mounted, custom chain respected, ToolPipeline([])
+  disables interception, guardrail state does not leak across runs
+- trace fidelity: events report the runtime's byte count, not the bounded one
+"""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from swebench.agent import AshAgent
+from swebench.agent.guardrails import (
+    EDIT_STREAK_LIMIT,
+    GuardrailInterceptor,
+    GuardrailState,
+)
+from swebench.agent.interceptors import RAW_OUTPUT, TruncateInterceptor, default_pipeline
+from swebench.agent.pipeline import CallContext, ToolPipeline
+from swebench.agent.trace import ToolTraceWriter
+from swebench.models import AgentConfig, ToolResult
+
+PATH = "/testbed/target.py"
+
+
+def _ok(output: str = "ok") -> ToolResult:
+    return ToolResult(success=True, output=output)
+
+
+def _ctx(tool: str, args: dict, agent: str = "A", sandbox: str = "sb-1") -> CallContext:
+    return CallContext(agent_id=agent, sandbox_id=sandbox, tool_name=tool,
+                       args=dict(args), metadata={})
+
+
+def _view(path: str = PATH) -> tuple[str, dict]:
+    return "text_editor", {"command": "view", "path": path}
+
+
+def _edit(path: str = PATH) -> tuple[str, dict]:
+    return "text_editor", {"command": "str_replace", "path": path,
+                           "old_str": "a", "new_str": "b"}
+
+
+def _run(pipe: ToolPipeline, tool: str, args: dict, agent: str = "A",
+         sandbox: str = "sb-1", result: ToolResult | None = None) -> ToolResult:
+    inner = lambda t, a: (result if result is not None else _ok())  # noqa: E731
+    return pipe.execute(_ctx(tool, args, agent, sandbox), inner)
+
+
+# --------------------------------------------------------------------------- #
+#  GuardrailInterceptor: read-before-edit
+# --------------------------------------------------------------------------- #
+
+def test_warn_mode_appends_warning_but_lets_the_edit_through():
+    pipe = ToolPipeline([GuardrailInterceptor()])
+    result = _run(pipe, *_edit())
+    assert result.success                                  # advisory, not a block
+    assert "without reading it first" in result.output
+    assert result.output.startswith("ok")                  # tool output preserved
+
+
+def test_reject_mode_refuses_the_edit():
+    pipe = ToolPipeline([GuardrailInterceptor(enforcement="reject")])
+    result = _run(pipe, *_edit())
+    assert not result.success
+    assert result.error == "rejected by GuardrailInterceptor"
+    assert "without reading it first" in result.output
+
+
+def test_reading_first_silences_the_warning():
+    pipe = ToolPipeline([GuardrailInterceptor()])
+    assert _run(pipe, *_view()).success
+    result = _run(pipe, *_edit())
+    assert result.success
+    assert "Warning" not in result.output
+
+
+def test_failed_view_does_not_unlock_editing():
+    """A view that errored is not a read. The loop's inline version recorded
+    reads before execution, so viewing a nonexistent file counted."""
+    pipe = ToolPipeline([GuardrailInterceptor()])
+    failed = ToolResult(success=False, output="", error="No such file")
+    _run(pipe, *_view(), result=failed)
+    assert "without reading it first" in _run(pipe, *_edit()).output
+
+
+def test_read_state_is_keyed_by_agent():
+    """Shared interceptor instance: A's read must not excuse B's blind edit."""
+    pipe = ToolPipeline([GuardrailInterceptor()])
+    _run(pipe, *_view(), agent="A")
+    assert "Warning" not in _run(pipe, *_edit(), agent="A").output
+    assert "without reading it first" in _run(pipe, *_edit(), agent="B").output
+
+
+def test_read_state_is_keyed_by_sandbox():
+    """Same agent, two workspaces: reading a path in one is not reading it in
+    the other — the file behind that path is a different file."""
+    pipe = ToolPipeline([GuardrailInterceptor()])
+    _run(pipe, *_view(), sandbox="sb-1")
+    assert "without reading it first" in _run(pipe, *_edit(), sandbox="sb-2").output
+
+
+@pytest.mark.parametrize("command,args", [
+    ("str_replace", {"old_str": "a", "new_str": "b"}),
+    ("insert", {"insert_line": 1, "new_str": "x"}),
+    ("write", {"file_text": "whole new file"}),
+])
+def test_every_edit_command_is_guarded(command, args):
+    """`write` replaces a whole file — the most destructive blind edit, and the
+    one the loop's inline guardrails missed (it checked str_replace/insert only,
+    while Waggle already arbitrated all three)."""
+    pipe = ToolPipeline([GuardrailInterceptor()])
+    result = _run(pipe, "text_editor", {"command": command, "path": PATH, **args})
+    assert "without reading it first" in result.output
+
+
+def test_guardrails_and_waggle_share_one_edit_command_set():
+    """Two hardcoded copies of "this is an edit" is how `write` fell through."""
+    from swebench.agent.tools import EDIT_COMMANDS
+    from swebench.agent.waggle import CoordinatedExecutor
+    assert CoordinatedExecutor.WRITE_COMMANDS == EDIT_COMMANDS
+
+
+def test_warning_survives_a_rejection_from_a_deeper_seat():
+    """The warning is stashed in `before` and emitted in `after`. A deeper seat
+    rejecting must not swallow it — the guardrail was entered, so per the onion
+    rules its `after` still runs."""
+    from swebench.agent.pipeline import Reject, ToolInterceptor
+
+    class DeepRejecter(ToolInterceptor):
+        def before(self, ctx):
+            return Reject("deeper seat said no")
+
+    ctx = _ctx("text_editor", {"command": "str_replace", "path": PATH,
+                               "old_str": "a", "new_str": "b"})
+    result = ToolPipeline([GuardrailInterceptor(), DeepRejecter()]) \
+        .execute(ctx, lambda t, a: _ok())
+    assert not result.success
+    assert "deeper seat said no" in result.output       # rejection preserved
+    assert "without reading it first" in result.output  # warning still delivered
+    assert "guardrail_warnings" not in ctx.metadata     # stash drained
+
+
+def test_rejecting_guardrail_leaves_no_orphaned_stash():
+    """In reject mode the guardrail's own `after` never runs (it produced the
+    result), so the message must travel in the Reject, not the stash."""
+    ctx = _ctx("text_editor", {"command": "str_replace", "path": PATH,
+                               "old_str": "a", "new_str": "b"})
+    result = ToolPipeline([GuardrailInterceptor(enforcement="reject")]) \
+        .execute(ctx, lambda t, a: _ok())
+    assert "without reading it first" in result.output
+    assert "guardrail_warnings" not in ctx.metadata
+
+
+def test_reject_mode_is_fail_closed_and_warn_mode_fail_open():
+    assert GuardrailInterceptor(enforcement="reject").fail_mode == "closed"
+    assert GuardrailInterceptor().fail_mode == "open"
+
+
+def test_invalid_enforcement_is_rejected_at_construction():
+    with pytest.raises(ValueError, match="enforcement"):
+        GuardrailInterceptor(enforcement="block")
+
+
+# --------------------------------------------------------------------------- #
+#  GuardrailInterceptor: edit streaks
+# --------------------------------------------------------------------------- #
+
+def test_edit_streak_warns_at_the_limit_and_a_test_run_resets_it():
+    pipe = ToolPipeline([GuardrailInterceptor()])
+    _run(pipe, *_view())
+    for _ in range(EDIT_STREAK_LIMIT - 1):
+        assert "without running tests" not in _run(pipe, *_edit()).output
+    assert "without running tests" in _run(pipe, *_edit()).output
+
+    _run(pipe, "shell", {"command": "pytest tests/"})       # streak reset
+    assert "without running tests" not in _run(pipe, *_edit()).output
+
+
+def test_non_test_shell_command_does_not_reset_the_streak():
+    pipe = ToolPipeline([GuardrailInterceptor()])
+    _run(pipe, *_view())
+    for _ in range(EDIT_STREAK_LIMIT):
+        _run(pipe, *_edit())
+    _run(pipe, "shell", {"command": "ls -la"})
+    assert "without running tests" in _run(pipe, *_edit()).output
+
+
+def test_edit_streaks_are_per_agent():
+    pipe = ToolPipeline([GuardrailInterceptor()])
+    for agent in ("A", "B"):
+        _run(pipe, *_view(), agent=agent)
+    for _ in range(EDIT_STREAK_LIMIT):
+        _run(pipe, *_edit(), agent="A")
+    assert "without running tests" not in _run(pipe, *_edit(), agent="B").output
+
+
+def test_state_dump_reports_reads_and_streaks():
+    state = GuardrailState()
+    pipe = ToolPipeline([GuardrailInterceptor(state=state)])
+    _run(pipe, *_view())
+    _run(pipe, *_edit())
+    dumped = state.dump()["A:sb-1"]
+    assert dumped["files_read"] == [PATH]
+    assert dumped["edit_streak"] == {PATH: 1}
+
+
+# --------------------------------------------------------------------------- #
+#  TruncateInterceptor
+# --------------------------------------------------------------------------- #
+
+def test_short_output_passes_through_untouched():
+    pipe = ToolPipeline([TruncateInterceptor(max_len=100)])
+    result = _run(pipe, "shell", {"command": "ls"}, result=_ok("small"))
+    assert result.output == "small"
+
+
+def test_long_output_is_elided_and_the_original_preserved_in_metadata():
+    huge = "x" * 500
+    interceptor = TruncateInterceptor(max_len=100)
+    ctx = _ctx("shell", {"command": "cat big"})
+    result = ToolPipeline([interceptor]).execute(ctx, lambda t, a: _ok(huge))
+    assert len(result.output) < len(huge)
+    assert "characters truncated" in result.output
+    assert ctx.metadata[RAW_OUTPUT] == huge                # evidence kept
+
+
+def test_truncation_preserves_success_and_error_fields():
+    failed = ToolResult(success=False, output="y" * 500, error="exit 1")
+    pipe = ToolPipeline([TruncateInterceptor(max_len=100)])
+    result = _run(pipe, "shell", {"command": "boom"}, result=failed)
+    assert not result.success
+    assert result.error == "exit 1"                        # error text never elided
+
+
+# --------------------------------------------------------------------------- #
+#  Default chain: order is semantics
+# --------------------------------------------------------------------------- #
+
+def test_guardrail_warning_survives_truncation_of_a_huge_output():
+    """Guardrails sit outermost, so the warning is appended after truncation."""
+    pipe = default_pipeline(max_output_len=200)
+    result = _run(pipe, *_edit(), result=_ok("z" * 5000))
+    assert "characters truncated" in result.output
+    assert "without reading it first" in result.output      # not elided
+
+
+def test_default_chain_is_guardrails_then_truncate():
+    names = [i.name for i in default_pipeline().interceptors]
+    assert names == ["GuardrailInterceptor", "TruncateInterceptor"]
+
+
+# --------------------------------------------------------------------------- #
+#  Composing with Waggle: one rule, one voice
+# --------------------------------------------------------------------------- #
+
+def _waggle_chain(read_before_edit: bool):
+    from swebench.agent.waggle import WaggleInterceptor, WorkspaceCoordinator
+    from swebench.tests.test_waggle import FakeSandbox
+
+    sandbox = FakeSandbox({PATH: "base"})
+    pipe = ToolPipeline([
+        GuardrailInterceptor(enforcement="warn", read_before_edit=read_before_edit),
+        WaggleInterceptor(state=WorkspaceCoordinator(ttl=5.0)),
+    ])
+
+    def call(tool: str, args: dict) -> ToolResult:
+        executor = sandbox.executor()
+        ctx = CallContext(agent_id="A", sandbox_id="default", tool_name=tool,
+                          args=dict(args), metadata={"executor": executor})
+        return pipe.execute(ctx, executor)
+
+    return call
+
+
+def test_read_before_edit_off_leaves_the_rule_to_waggle():
+    """Both seats enforcing one rule states it to the model twice; Waggle's
+    message is the better one (it names the version you are stale against)."""
+    blind = {"command": "str_replace", "path": PATH, "old_str": "base",
+             "new_str": "x"}
+    both = _waggle_chain(read_before_edit=True)("text_editor", blind)
+    assert both.output.count("without reading it first") == 1
+    assert "[WAGGLE]" in both.output                        # said twice
+
+    deferred = _waggle_chain(read_before_edit=False)("text_editor", blind)
+    assert not deferred.success                             # still enforced
+    assert "[WAGGLE]" in deferred.output
+    assert "without reading it first" not in deferred.output  # said once
+
+
+def test_edit_streak_nudges_survive_with_read_before_edit_off():
+    """Turning off one rule must not disable the other."""
+    call = _waggle_chain(read_before_edit=False)
+    call("text_editor", {"command": "view", "path": PATH})
+    outputs = [call("text_editor", {"command": "write", "path": PATH,
+                                    "file_text": f"v{i}"}).output
+               for i in range(EDIT_STREAK_LIMIT)]
+    assert "without running tests" in outputs[-1]
+
+
+# --------------------------------------------------------------------------- #
+#  Agent loop consuming the pipeline
+# --------------------------------------------------------------------------- #
+
+def _tool_call(name: str, args: dict):
+    return SimpleNamespace(id="tc1",
+                           function=SimpleNamespace(name=name,
+                                                    arguments=json.dumps(args)))
+
+
+class _Conv:
+    def __init__(self):
+        self.results = []
+
+    def add_tool_result(self, _id, content, **kw):
+        self.results.append(content)
+
+
+def _agent(executor, **kw) -> AshAgent:
+    return AshAgent(AgentConfig(), executor=executor, **kw)
+
+
+def test_loop_mounts_the_default_chain_and_truncates():
+    agent = _agent(lambda n, a: _ok("q" * 40000))
+    conv = _Conv()
+    agent._run_tool(_tool_call("shell", {"command": "cat big"}), conv, "turn-1")
+    assert "characters truncated" in conv.results[0]
+
+
+def test_loop_default_chain_warns_on_blind_edit():
+    agent = _agent(lambda n, a: _ok())
+    conv = _Conv()
+    agent._run_tool(_tool_call("text_editor", {"command": "str_replace",
+                                              "path": PATH, "old_str": "a",
+                                              "new_str": "b"}), conv, "turn-1")
+    assert "without reading it first" in conv.results[0]
+
+
+def test_empty_pipeline_disables_interception():
+    agent = _agent(lambda n, a: _ok("q" * 40000), pipeline=ToolPipeline([]))
+    conv = _Conv()
+    agent._run_tool(_tool_call("shell", {"command": "cat big"}), conv, "turn-1")
+    assert "characters truncated" not in conv.results[0]
+    assert len(conv.results[0]) == 40000
+
+
+def test_caller_supplied_pipeline_is_used_and_sees_agent_identity():
+    seen = []
+
+    class Spy(TruncateInterceptor):
+        def after(self, ctx, result):
+            seen.append((ctx.agent_id, ctx.sandbox_id, ctx.tool_name))
+            return result
+
+    agent = _agent(lambda n, a: _ok(), pipeline=ToolPipeline([Spy()]),
+                   agent_id="worker-3", sandbox_id="shared")
+    agent._run_tool(_tool_call("shell", {"command": "ls"}), _Conv(), "turn-1")
+    assert seen == [("worker-3", "shared", "shell")]
+
+
+def test_interceptors_receive_the_routed_runtime_tool_not_the_agent_alias():
+    """bash_only mode: the model calls `bash`, the runtime tool is `shell`.
+    Interceptors must see what actually executes."""
+    seen = []
+
+    class Spy(TruncateInterceptor):
+        def before(self, ctx):
+            seen.append(ctx.tool_name)
+            return super().before(ctx)
+
+    agent = _agent(lambda n, a: _ok(), pipeline=ToolPipeline([Spy()]))
+    agent._run_tool(_tool_call("bash", {"command": "ls"}), _Conv(), "turn-1")
+    assert seen == ["shell"]
+
+
+def test_guardrail_state_does_not_leak_between_runs(monkeypatch):
+    """Each run() gets a fresh default chain: an edit streak from a previous
+    instance must not warn on the first edit of the next one."""
+    agent = _agent(lambda n, a: _ok())
+    conv = _Conv()
+    for _ in range(EDIT_STREAK_LIMIT):
+        agent._run_tool(_tool_call("text_editor", {"command": "str_replace",
+                                                  "path": PATH, "old_str": "a",
+                                                  "new_str": "b"}), conv, "turn-1")
+    assert "without running tests" in conv.results[-1]
+
+    # run() re-resolves the default chain; stub the model call out immediately.
+    monkeypatch.setattr(agent, "_query", lambda *a, **kw: None)
+    agent.run("task")
+    conv2 = _Conv()
+    agent._run_tool(_tool_call("text_editor", {"command": "str_replace",
+                                               "path": PATH, "old_str": "a",
+                                               "new_str": "b"}), conv2, "turn-1")
+    assert "without running tests" not in conv2.results[0]
+
+
+def test_trace_records_runtime_bytes_while_the_model_sees_bounded_output(tmp_path):
+    """Truncation protects the model's context; the trace keeps ground truth."""
+    huge = "w" * 40000
+    agent = _agent(lambda n, a: _ok(huge))
+    path = tmp_path / "trace.events.jsonl"
+    agent._event_trace = ToolTraceWriter(path, run_id="r1", agent_id="A",
+                                        sandbox_id="sb")
+    conv = _Conv()
+    agent._run_tool(_tool_call("shell", {"command": "cat big"}), conv, "turn-1")
+    agent._event_trace.close()
+
+    _, finished = [json.loads(line) for line in path.read_text().splitlines()]
+    assert finished["result"]["output_bytes"] == len(huge.encode())
+    assert finished["result"]["output"] == huge             # untruncated
+    assert "characters truncated" in finished["observation"]  # what the model saw
+    assert "characters truncated" in conv.results[0]

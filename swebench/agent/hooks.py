@@ -8,9 +8,14 @@ Two extension points, each a list the agent iterates:
         Runs on each tool result's content; returns the (possibly rewritten) text.
 
 Override agent.before_query_hooks / agent.result_processors to customize.
-"""
 
-from .tools import truncate_output
+Scope: these hooks sit on the *model* path. Tool-path concerns moved to L2
+interceptors (`interceptors.py`) — output truncation used to be a default
+result_processor here and is now `TruncateInterceptor`, so it also covers agents
+reaching the sandbox through the MCP proxy. `result_processors` remains as an
+extension point (it still sees the loop's `Error:`-prefixed content, which
+interceptors do not), but ships empty.
+"""
 
 
 def budget_warning(agent, conv):
@@ -25,9 +30,5 @@ def budget_warning(agent, conv):
     agent._trace(f"\n{w}\n")
 
 
-def truncate(content, name, args, result):
-    return truncate_output(content)
-
-
 DEFAULT_BEFORE_QUERY = [budget_warning]
-DEFAULT_RESULT_PROCESSORS = [truncate]
+DEFAULT_RESULT_PROCESSORS = []

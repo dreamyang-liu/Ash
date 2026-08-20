@@ -50,6 +50,7 @@ from typing import Callable, Optional, Union
 
 from ..models import ToolResult
 from .pipeline import CallContext, Continue, ShortCircuit, ToolInterceptor, Verdict
+from .tools import EDIT_COMMANDS
 
 logger = logging.getLogger("ash.waggle")  # unconfigured -> WARNING+ to stderr
 
@@ -265,7 +266,9 @@ class CoordinatedExecutor:
     inner executor, so the middleware needs no transport of its own.
     """
 
-    WRITE_COMMANDS = frozenset({"str_replace", "insert", "write"})
+    #: Alias of the shared contract (tools.EDIT_COMMANDS); kept as a class
+    #: attribute because callers reach it as CoordinatedExecutor.WRITE_COMMANDS.
+    WRITE_COMMANDS = EDIT_COMMANDS
 
     def __init__(self, inner: Executor, state: WorkspaceCoordinator, agent_id: str,
                  sandbox_id: str = "default", require_read: bool = True,

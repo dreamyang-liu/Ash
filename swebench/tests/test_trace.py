@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 from swebench.agent import AshAgent
 from swebench.agent.conversation import Conversation
-from swebench.agent.guardrails import Guardrails
 from swebench.agent.trace import ToolTraceWriter
 from swebench.models import AgentConfig, ToolResult, Trajectory
 
@@ -42,7 +41,6 @@ def test_tool_trace_records_turn_sequence_routing_and_background_process(tmp_pat
     agent._run_tool(
         _tool_call("provider-call", "shell", {"command": "pytest", "background": True}),
         conv,
-        Guardrails(),
         turn_id="turn-7",
     )
     agent._event_trace.close()
@@ -76,7 +74,6 @@ def test_tool_trace_classifies_routing_failure(tmp_path):
     agent._run_tool(
         _tool_call("provider-call", "unknown_tool", {"value": 1}),
         conv,
-        Guardrails(),
         turn_id="turn-2",
     )
     agent._event_trace.close()
@@ -99,7 +96,6 @@ def test_tool_trace_classifies_runtime_failure_and_records_truncation(tmp_path):
     agent._run_tool(
         _tool_call("provider-call", "shell", {"command": "fail"}),
         conv,
-        Guardrails(),
         turn_id="turn-3",
     )
     agent._event_trace.close()
@@ -128,7 +124,6 @@ def test_process_snapshot_propagates_runtime_truncation_flag(tmp_path):
     agent._run_tool(
         _tool_call("provider-call", "process", {"pid": "p123", "action": "read"}),
         Conversation(Trajectory()),
-        Guardrails(),
         turn_id="turn-4",
     )
     agent._event_trace.close()
