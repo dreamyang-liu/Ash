@@ -1,0 +1,31 @@
+# SWE-bench verified on Firecracker microVMs — a 10-instance, 10-repo slice.
+#
+# One instance per repo, each with a single FAIL_TO_PASS test, so a score is
+# unambiguous. Environments are SWE-bench's own images converted to AgentENV
+# templates (artifacts/build_sweb_templates.sh) — nothing about the benchmark
+# environment is hand-rolled, which matters: rebuilding a repo by hand gets the
+# dependency pins wrong, and those pins are why the images exist.
+extends: default
+
+model:
+  name: bedrock/us.anthropic.claude-sonnet-4-6
+
+limits:
+  cost_limit: 3.0
+  step_limit: 100
+
+dataset:
+  subset: verified
+
+execution:
+  workers: 5
+  output: results/microvm-slice10
+  backend: microvm
+  # Templates are named after the instance, so this needs no table.
+  image_template: "sweb-{instance_id}"
+  microvm:
+    server_url: http://127.0.0.1:8000
+    api_key_file: /home/ec2-user/projects/LBP/artifacts/aenv-api-key
+    # Long enough for a full agent run; AgentENV's own default (15 s) would
+    # auto-pause the VM mid-turn.
+    sandbox_ttl: 2400

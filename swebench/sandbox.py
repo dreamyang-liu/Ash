@@ -13,6 +13,7 @@ from . import style as S
 from .agent.custom_tools import DEFAULT_REGISTRY
 from .backends import build_pool
 from .models import ToolResult
+from .patch import WORKDIR, extract_patch, untracked_paths
 
 
 #: Identity for the harness's own traffic (patch extraction, resets, test
@@ -167,15 +168,21 @@ class AshSession:
         return ToolResult.from_sdk(sdk_result)
 
     def get_patch(self) -> str:
-        """Get the full diff of all changes vs initial state."""
-        self.execute("shell", {"command": "git add -A", "working_dir": "/testbed"})
-        base = self._base_commit or "HEAD"
-        result = self.execute("shell", {
-            "command": f"git diff {base}",
-            "working_dir": "/testbed",
-        })
-        patch = result.output if result.success else ""
-        patch = patch.rstrip("\r\n")
-        if patch:
-            patch += "\n"
+        """The agent's changes to the repository's own files, as a diff.
+
+        Files the agent created are left out; see ``swebench/patch.py``. Unless
+        quiet, they are named on the way past — a reproduce script is expected, a
+        `build/` tree means a command ran that the task did not need.
+        """
+        def shell(command: str) -> ToolResult:
+            return self.execute("shell", {"command": command,
+                                          "working_dir": WORKDIR})
+
+        patch = extract_patch(shell, self._base_commit)
+        if not self.quiet:
+            left_out = untracked_paths(shell)
+            if left_out:
+                shown = ", ".join(left_out[:4])
+                more = f" (+{len(left_out) - 4})" if len(left_out) > 4 else ""
+                print(S.kv("untracked", S.dim(f"not in patch: {shown}{more}")))
         return patch

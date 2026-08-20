@@ -39,6 +39,7 @@ from .agent.interceptors import TruncateInterceptor
 from .agent.pipeline import CallContext, ToolPipeline, load_pipeline
 from .agent.waggle import WaggleInterceptor
 from .models import ToolResult
+from .patch import WORKDIR, format_patch, patch_commands
 
 
 # ---------------------------------------------------------------------------
@@ -295,12 +296,12 @@ class SandboxPool:
 
     async def _extract_patch(self, entry: SandboxEntry) -> str:
         try:
-            await entry.sandbox.call("shell", command="cd /testbed && git add -A")
-            base = entry.base_commit or "HEAD"
-            r = await entry.sandbox.call("shell", command=f"cd /testbed && git diff {base}")
-            patch = r.output.rstrip("\r\n")
-            if patch:
-                patch += "\n"
+            # Same commands as the harness session (swebench/patch.py), so a
+            # prediction does not depend on which path produced it.
+            stage, diff = patch_commands(entry.base_commit)
+            await entry.sandbox.call("shell", command=f"cd {WORKDIR} && {stage}")
+            r = await entry.sandbox.call("shell", command=f"cd {WORKDIR} && {diff}")
+            patch = format_patch(r.output)
             if self.patch_dir:
                 self.patch_dir.mkdir(parents=True, exist_ok=True)
                 (self.patch_dir / f"{entry.id}.diff").write_text(patch)
