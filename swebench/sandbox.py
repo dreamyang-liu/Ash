@@ -13,6 +13,7 @@ from . import style as S
 from .agent.custom_tools import DEFAULT_REGISTRY
 from .backends import build_pool
 from .models import ToolResult
+from .patch import UNTRACKED_LIST, WORKDIR, extract_patch
 
 
 #: Identity for the harness's own traffic (patch extraction, resets, test
@@ -44,6 +45,8 @@ class AshSession:
         self._pool: Optional[Pool] = None
         self._sandbox: Optional[Sandbox] = None
         self._base_commit: str = ""
+        #: Untracked paths present before the agent ran (see get_patch).
+        self._baseline_untracked: set[str] = set()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     def _get_loop(self) -> asyncio.AbstractEventLoop:
@@ -67,9 +70,18 @@ class AshSession:
             self._sandbox = await self._pool.spawn(image=image)
             if not self.quiet:
                 print(S.kv("sandbox ", S.cyan(self.sandbox_id[:12])))
-            r = await self._sandbox.call("shell", command="git -C /testbed rev-parse HEAD")
+            r = await self._sandbox.call("shell", command=f"git -C {WORKDIR} rev-parse HEAD")
             if not r.is_error:
                 self._base_commit = r.output.strip()
+            # What is already untracked before the agent starts. A SWE-bench
+            # image can ship a `build/` tree or a stray artifact; those are the
+            # image's, and after the run there is no way to tell them from the
+            # agent's own new files.
+            probe = await self._sandbox.call(
+                "shell", command=f"cd {WORKDIR} && {UNTRACKED_LIST}")
+            self._baseline_untracked = set(
+                line.strip() for line in (probe.output or "").splitlines()
+                if line.strip()) if not probe.is_error else set()
             return True
         except Exception as e:
             print(f"  {S.bright_red('!')} Failed to create sandbox: {e}")
@@ -167,15 +179,20 @@ class AshSession:
         return ToolResult.from_sdk(sdk_result)
 
     def get_patch(self) -> str:
-        """Get the full diff of all changes vs initial state."""
-        self.execute("shell", {"command": "git add -A", "working_dir": "/testbed"})
-        base = self._base_commit or "HEAD"
-        result = self.execute("shell", {
-            "command": f"git diff {base}",
-            "working_dir": "/testbed",
-        })
-        patch = result.output if result.success else ""
-        patch = patch.rstrip("\r\n")
-        if patch:
-            patch += "\n"
+        """Everything the agent changed, as a diff.
+
+        Includes files it created -- only the agent knows whether a new file is
+        part of the answer -- while excluding what the image already had and
+        caches nobody means to submit. See ``swebench/patch.py``.
+        """
+        def shell(command: str) -> ToolResult:
+            return self.execute("shell", {"command": command,
+                                          "working_dir": WORKDIR})
+
+        patch, added = extract_patch(shell, self._base_commit,
+                                     self._baseline_untracked)
+        if added and not self.quiet:
+            shown = ", ".join(added[:4])
+            more = f" (+{len(added) - 4})" if len(added) > 4 else ""
+            print(S.kv("added   ", S.dim(f"new files in patch: {shown}{more}")))
         return patch
