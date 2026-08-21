@@ -42,12 +42,52 @@ type RPCError struct {
 	Message string `json:"message"`
 }
 
+// runtimeVersion is reported by --dump-schema, the HTTP banner and the MCP
+// handshake. It was written out three times as "0.1.0" and had gone stale: the
+// repo shipped v0.1.3 while every client was told 0.1.0.
+const runtimeVersion = "0.1.3"
+
+// toolDescriptors is the runtime's declaration of what it serves: every tool's
+// name, description and input schema. One function because there are four
+// consumers -- tools/list over HTTP, over stdio, over MCP, and --dump-schema --
+// and a fourth hand-rolled copy of the same loop is how they would drift apart.
+func toolDescriptors(allTools []tools.Tool) []map[string]any {
+	list := make([]map[string]any, 0, len(allTools))
+	for _, t := range allTools {
+		list = append(list, map[string]any{
+			"name":        t.Name(),
+			"description": t.Description(),
+			"inputSchema": t.Schema(),
+		})
+	}
+	return list
+}
+
 func main() {
 	port := flag.Int("port", 3000, "port to listen on")
 	mode := flag.String("mode", "http", "run mode: http or stdio")
+	dumpSchema := flag.Bool("dump-schema", false,
+		"print the tool declarations as JSON and exit (no sandbox needed)")
 	flag.Parse()
 
 	allTools := tools.All()
+
+	// The agent-facing tool panel is compiled against this declaration
+	// (docs/TOOL_PANEL.md), and compiling has to work with no sandbox running --
+	// in tests, and when validating a config before a run. So the runtime can
+	// state what it serves without serving anything.
+	if *dumpSchema {
+		out, err := json.MarshalIndent(map[string]any{
+			"version": runtimeVersion,
+			"tools":   toolDescriptors(allTools),
+		}, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dump-schema: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(out))
+		return
+	}
 
 	if *mode == "stdio" {
 		runStdio(allTools)
@@ -55,7 +95,7 @@ func main() {
 	}
 
 	addr := fmt.Sprintf("0.0.0.0:%d", *port)
-	fmt.Printf("ash-runtime v0.1.0\n  tools: %d loaded\n  listening on %s\n", len(allTools), addr)
+	fmt.Printf("ash-runtime v%s\n  tools: %d loaded\n  listening on %s\n", runtimeVersion, len(allTools), addr)
 
 	mux := http.NewServeMux()
 
@@ -82,14 +122,7 @@ func main() {
 
 		switch req.Method {
 		case "tools/list":
-			list := make([]map[string]any, 0, len(allTools))
-			for _, t := range allTools {
-				list = append(list, map[string]any{
-					"name":        t.Name(),
-					"description": t.Description(),
-					"inputSchema": t.Schema(),
-				})
-			}
+			list := toolDescriptors(allTools)
 			writeRPC(w, req.ID, list, nil)
 
 		case "tools/call":
@@ -167,21 +200,14 @@ func main() {
 			writeMCP(w, req.ID, map[string]any{
 				"protocolVersion": "2025-03-26",
 				"capabilities":    map[string]any{"tools": map[string]any{}},
-				"serverInfo":      map[string]any{"name": "ash-runtime", "version": "0.1.0"},
+				"serverInfo":      map[string]any{"name": "ash-runtime", "version": runtimeVersion},
 			}, nil)
 
 		case "notifications/initialized":
 			w.WriteHeader(http.StatusAccepted)
 
 		case "tools/list":
-			list := make([]map[string]any, 0, len(allTools))
-			for _, t := range allTools {
-				list = append(list, map[string]any{
-					"name":        t.Name(),
-					"description": t.Description(),
-					"inputSchema": t.Schema(),
-				})
-			}
+			list := toolDescriptors(allTools)
 			writeMCP(w, req.ID, map[string]any{"tools": list}, nil)
 
 		case "tools/call":
@@ -368,21 +394,14 @@ func runStdio(allTools []tools.Tool) {
 			writeStdio(req.ID, map[string]any{
 				"protocolVersion": "2025-03-26",
 				"capabilities":    map[string]any{"tools": map[string]any{}},
-				"serverInfo":      map[string]any{"name": "ash-runtime", "version": "0.1.0"},
+				"serverInfo":      map[string]any{"name": "ash-runtime", "version": runtimeVersion},
 			}, nil)
 
 		case "notifications/initialized":
 			// no response needed
 
 		case "tools/list":
-			list := make([]map[string]any, 0, len(allTools))
-			for _, t := range allTools {
-				list = append(list, map[string]any{
-					"name":        t.Name(),
-					"description": t.Description(),
-					"inputSchema": t.Schema(),
-				})
-			}
+			list := toolDescriptors(allTools)
 			writeStdio(req.ID, map[string]any{"tools": list}, nil)
 
 		case "tools/call":
