@@ -13,7 +13,7 @@ from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent
 from ..agent.trace import new_run_id
-from ..agent.tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA
+from ..agent.tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA, use_panel
 from ..agent.custom_tools import custom_agent_schemas, load_custom_tools
 from ..agent.interceptors import default_pipeline
 from ..agent.pipeline import load_pipeline
@@ -108,6 +108,10 @@ class LiteLLMHarness(BaseHarness):
                 agent.pipeline = default_pipeline(
                     extra=load_pipeline(plugins).interceptors)
             tools_mode = c.get("tools", "default")
+            # Routing resolves against the active panel, so selecting it is part of
+            # selecting the mode: a bash_only run must route through bash_only's
+            # views, which expose one parameter.
+            use_panel(tools_mode)
             if tools_mode == "bash_only":
                 agent.set_tools_schema(BASH_ONLY_SCHEMA)
             else:

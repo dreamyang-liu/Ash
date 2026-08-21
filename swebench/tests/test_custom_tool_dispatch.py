@@ -87,19 +87,26 @@ def test_a_custom_tool_reaches_the_executor_under_its_own_name():
     assert calls == [("analyzer", {"file": "main.py"})]
 
 
-def test_builtin_names_are_still_translated_for_the_interceptors():
-    """Unlike custom tools, builtins are routed here on purpose: an interceptor keyed on
-    `shell` must not go blind because a run is in bash_only mode."""
+def test_builtin_names_are_routed_through_their_compiled_view():
+    """Unlike custom tools, builtins are routed: the view names the runtime tool, so
+    an interceptor keyed on it cannot go blind, and arguments the view does not
+    expose never reach the runtime."""
     calls = []
 
     def executor(name, args):
-        calls.append(name)
+        calls.append((name, dict(args)))
         return ToolResult(success=True, output="ok", error="")
 
     agent = make_agent(executor)
-    agent._run_tool(make_tool_call("bash", {"command": "ls"}),
+    # include_own is hidden on wait_for_events, so it must not reach the runtime;
+    # truncate_mode is exposed on shell and must.
+    agent._run_tool(make_tool_call("shell", {"command": "ls", "truncate_mode": "T1"}),
                     FakeConversation(), "turn1")
-    assert calls == ["shell"]
+    agent._run_tool(make_tool_call("wait_for_events",
+                                   {"action": "wait", "include_own": True}),
+                    FakeConversation(), "turn2")
+    assert calls == [("shell", {"command": "ls", "truncate_mode": "T1"}),
+                     ("wait_for_events", {"action": "wait"})], calls
 
 
 def test_an_unknown_tool_fails_before_reaching_the_executor():

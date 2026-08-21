@@ -1,0 +1,127 @@
+{
+  "_comment": [
+    "The tool panel the model sees, compiled against the runtime's own declaration",
+    "(ash-runtime --dump-schema). See docs/TOOL_PANEL.md.",
+    "",
+    "`hide` is not decoration: a panel narrower than the runtime is a decision, and",
+    "the compiler refuses a parameter that is neither exposed nor hidden so that a",
+    "decision cannot be mistaken for an oversight.",
+    "",
+    "max_output_bytes and truncate_mode stay exposed. Withholding them looked right --",
+    "a model raising its own output budget would go around TruncateInterceptor -- but",
+    "the numbers say otherwise: the runtime's default is 15 MB and the interceptor cuts",
+    "to 12 000 characters, so the interceptor binds either way and the model can only",
+    "ask for *less*. A real run did exactly that (max_output_bytes: 20000 on a pytest",
+    "invocation, truncate_mode: H1 to keep the head), which is the model managing its",
+    "own context, not escaping a limit.",
+    "",
+    "include_own is hidden on wait_for_events: it replays the caller's own events,",
+    "which is a debugging affordance rather than something an agent needs."
+  ],
+  "agent_tools": [
+    {
+      "name": "shell",
+      "expose": [
+        "background",
+        "command",
+        "env",
+        "max_output_bytes",
+        "stdin",
+        "tail",
+        "timeout",
+        "truncate_mode",
+        "working_dir"
+      ],
+      "description": "Execute a shell command synchronously or in the background.\nUse for: running tests (pytest), installing packages (pip), git operations, and any other shell commands.\nWorking directory defaults to /testbed.",
+      "required": [
+        "command"
+      ]
+    },
+    {
+      "name": "text_editor",
+      "expose": [
+        "command",
+        "file_text",
+        "insert_line",
+        "insert_text",
+        "max_output_bytes",
+        "new_str",
+        "old_str",
+        "path",
+        "truncate_mode",
+        "view_range"
+      ],
+      "description": "View or edit files.\nCommands:\n  view: Read file contents (optionally a line range)\n  str_replace: Replace exact text in a file\n  insert: Insert text after a specific line\n  write: Write full content to a file (creates or overwrites)",
+      "required": [
+        "command",
+        "path"
+      ]
+    },
+    {
+      "name": "grep_files",
+      "expose": [
+        "include",
+        "limit",
+        "max_output_bytes",
+        "path",
+        "pattern",
+        "truncate_mode"
+      ],
+      "description": "Search files using ripgrep with a regex pattern.\nUse for finding code patterns, function definitions, imports, etc.",
+      "required": [
+        "pattern"
+      ]
+    },
+    {
+      "name": "process",
+      "expose": [
+        "action",
+        "pid",
+        "tail"
+      ],
+      "description": "Manage a background process started with shell(background=true).\nActions:\n  read: Get the current bounded output snapshot\n  kill: Terminate the process",
+      "required": [
+        "pid",
+        "action"
+      ]
+    },
+    {
+      "name": "web_fetch",
+      "expose": [
+        "format",
+        "headers",
+        "max_output_bytes",
+        "timeout",
+        "truncate_mode",
+        "url"
+      ],
+      "required": [
+        "url"
+      ]
+    },
+    {
+      "name": "web_search",
+      "expose": [
+        "backend",
+        "max_results",
+        "query"
+      ],
+      "required": [
+        "query"
+      ]
+    },
+    {
+      "name": "wait_for_events",
+      "expose": [
+        "action",
+        "kinds",
+        "sources",
+        "timeout"
+      ],
+      "hide": [
+        "include_own"
+      ],
+      "description": "Observe asynchronous sandbox facts. Delivery is opt-in: action=subscribe registers interest in event kinds (optionally narrowed to specific sources) so they arrive with later tool responses; action=wait (the default) blocks until a matching event occurs or the timeout elapses -- use it instead of polling in a loop when waiting on background work. Events expire automatically after their time-to-live."
+    }
+  ]
+}

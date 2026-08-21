@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from swebench.agent.tools import AGENT_TOOL_ROUTES, TOOLS_SCHEMA, route_agent_tool
+from swebench.agent.tools import AGENT_TOOLS, TOOLS_SCHEMA, route_agent_tool
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "sdk"))
 
@@ -115,17 +115,22 @@ def test_agent_tool_schema_exposes_current_surface():
     assert "read_file" not in names
 
 
-def test_agent_tool_routes_are_explicit_and_runtime_routeable():
+def test_every_offered_tool_routes_to_a_real_runtime_tool():
+    """The panel and the routing come from one compiled set of views, so they cannot
+    disagree -- this checks the set itself lands on tools the runtime serves."""
     functions = _function_by_name()
+    views = AGENT_TOOLS["default"]
 
-    assert set(AGENT_TOOL_ROUTES) == set(functions)
-    assert set(AGENT_TOOL_ROUTES.values()) <= RUNTIME_TOOL_NAMES
+    assert set(views) == set(functions)
+    assert {v.runtime_tool for v in views.values()} <= RUNTIME_TOOL_NAMES
 
-    for agent_tool, runtime_tool in AGENT_TOOL_ROUTES.items():
-        agent_required = set(functions[agent_tool]["parameters"].get("required", []))
-        runtime_required = set(RUNTIME_REQUIRED[runtime_tool])
-        if agent_tool == runtime_tool:
-            assert agent_required >= runtime_required
+    for name, view in views.items():
+        agent_required = set(functions[name]["parameters"].get("required", []))
+        runtime_required = set(RUNTIME_REQUIRED[view.runtime_tool])
+        exposed_required = {r for r in runtime_required
+                            if r in {view.runtime_name_of(e) for e in view.expose}}
+        assert agent_required >= exposed_required, \
+            f"{name} offers {sorted(exposed_required - agent_required)} as optional"
 
 
 def test_route_agent_tool_identity_routes_return_runtime_call_copy():

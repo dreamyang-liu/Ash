@@ -8,12 +8,12 @@ agent:
   instance_template: |
     Please solve this issue: {{task}}
 
-    You have a single tool: `bash`. Use it for everything — searching, reading,
+    You have a single tool: `shell`. Use it for everything — searching, reading,
     editing files, and running tests. There are no dedicated file/search tools.
 
-    ## The bash tool
+    ## The shell tool
 
-    - `bash`: Execute any bash command. Always pipe long output through `tail`/`head`
+    - `shell`: Execute any shell command. Always pipe long output through `tail`/`head`
       to save context. Background long-running commands with `&` and check the log later.
 
     ## Recommended Workflow

@@ -1,0 +1,343 @@
+{
+  "tools": [
+    {
+      "description": "Execute a shell command synchronously or in the background",
+      "inputSchema": {
+        "properties": {
+          "background": {
+            "default": false,
+            "description": "Run in background, returns pid",
+            "type": "boolean"
+          },
+          "command": {
+            "description": "Shell command to execute",
+            "type": "string"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Extra environment variables, e.g. {\"PYTHONPATH\": \"/testbed\"}. Added to the existing environment rather than replacing it. Prefer this over a 'KEY=value cmd' prefix: values needing quotes or spaces are handled correctly.",
+            "type": "object"
+          },
+          "max_output_bytes": {
+            "default": 15728640,
+            "description": "Total captured bytes per output stream. Larger output is truncated per truncate_mode.",
+            "type": "integer"
+          },
+          "stdin": {
+            "description": "Data to feed the command on standard input, then close it. Lets you run 'python -', 'patch -p1', or 'sh -s' without first writing a temporary file.",
+            "type": "string"
+          },
+          "tail": {
+            "description": "Return only the last N lines of each stream. Applied after the byte budget, so if the command produced more than max_output_bytes these are the last N lines of what was captured. Setting this makes the capture keep the tail of the output (truncate_mode T1) unless you name a mode yourself.",
+            "type": "integer"
+          },
+          "timeout": {
+            "default": 300,
+            "description": "Timeout in seconds",
+            "type": "integer"
+          },
+          "truncate_mode": {
+            "default": "H2T3",
+            "description": "How to divide the byte budget when output is too long: \"H\u003cn\u003eT\u003cn\u003e\" with weights for the head and tail sections. H2T3 keeps the first 40% and last 60%; T1 keeps only the tail (useful for build/test errors); H1 keeps only the beginning.",
+            "type": "string"
+          },
+          "working_dir": {
+            "description": "Working directory",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "name": "shell"
+    },
+    {
+      "description": "Manage background processes: read bounded output snapshots or kill",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "description": "read: get current bounded output snapshot. kill: terminate.",
+            "enum": [
+              "read",
+              "kill"
+            ],
+            "type": "string"
+          },
+          "pid": {
+            "description": "Process ID from shell(background=true)",
+            "type": "string"
+          },
+          "tail": {
+            "description": "Return only the last N lines from each stream (read only). Applied to what the process captured, which was bounded by the max_output_bytes and truncate_mode given when it was started.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pid",
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "process"
+    },
+    {
+      "description": "View or edit files. command=view reads a file or range; command=str_replace requires old_str and new_str; command=insert requires insert_line and insert_text; command=write requires file_text and creates or overwrites the full file.",
+      "inputSchema": {
+        "properties": {
+          "command": {
+            "description": "Command to execute: view, str_replace, insert, or write",
+            "enum": [
+              "view",
+              "str_replace",
+              "insert",
+              "write"
+            ],
+            "type": "string"
+          },
+          "file_text": {
+            "description": "Required for write. Full file content; creates or overwrites the file.",
+            "type": "string"
+          },
+          "insert_line": {
+            "description": "Required for insert. Line number to insert after; use 0 to insert at the start.",
+            "type": "integer"
+          },
+          "insert_text": {
+            "description": "Required for insert. Text to insert.",
+            "type": "string"
+          },
+          "max_output_bytes": {
+            "default": 15728640,
+            "description": "Total bytes of output to return. Larger output is truncated per truncate_mode.",
+            "type": "integer"
+          },
+          "new_str": {
+            "description": "Required for str_replace. Replacement text.",
+            "type": "string"
+          },
+          "old_str": {
+            "description": "Required for str_replace. Text to find; must match exactly once.",
+            "type": "string"
+          },
+          "path": {
+            "description": "File path",
+            "type": "string"
+          },
+          "truncate_mode": {
+            "default": "H2T3",
+            "description": "How to divide the byte budget when output is too long: \"H\u003cn\u003eT\u003cn\u003e\" with weights for the head and tail sections. H2T3 keeps the first 40% and last 60%; T1 keeps only the tail (useful for errors at the end); H1 keeps only the beginning.",
+            "type": "string"
+          },
+          "view_range": {
+            "description": "For view only: [start, end] inclusive line range.",
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "command",
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "text_editor"
+    },
+    {
+      "description": "Search files using ripgrep with a regex pattern",
+      "inputSchema": {
+        "properties": {
+          "include": {
+            "description": "File glob (e.g. *.py)",
+            "type": "string"
+          },
+          "limit": {
+            "default": 100,
+            "description": "Maximum number of matching lines to return globally",
+            "type": "integer"
+          },
+          "max_output_bytes": {
+            "default": 15728640,
+            "description": "Total bytes of output to return. Larger output is truncated per truncate_mode.",
+            "type": "integer"
+          },
+          "path": {
+            "default": ".",
+            "description": "Search path",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "Regex pattern",
+            "type": "string"
+          },
+          "truncate_mode": {
+            "default": "H2T3",
+            "description": "How to divide the byte budget when output is too long: \"H\u003cn\u003eT\u003cn\u003e\" with weights for the head and tail sections. H2T3 keeps the first 40% and last 60%; T1 keeps only the tail (useful for errors at the end); H1 keeps only the beginning.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "name": "grep_files"
+    },
+    {
+      "description": "Fetch a URL and return its content in the specified format",
+      "inputSchema": {
+        "properties": {
+          "format": {
+            "default": "markdown",
+            "enum": [
+              "html",
+              "text",
+              "markdown"
+            ],
+            "type": "string"
+          },
+          "headers": {
+            "description": "Additional HTTP headers",
+            "type": "object"
+          },
+          "max_output_bytes": {
+            "default": 15728640,
+            "description": "Total bytes of output to return. Larger output is truncated per truncate_mode.",
+            "type": "integer"
+          },
+          "timeout": {
+            "default": 15,
+            "description": "Request timeout in seconds. Values are clamped to the runtime maximum.",
+            "type": "integer"
+          },
+          "truncate_mode": {
+            "default": "H2T3",
+            "description": "How to divide the byte budget when output is too long: \"H\u003cn\u003eT\u003cn\u003e\" with weights for the head and tail sections. H2T3 keeps the first 40% and last 60%; T1 keeps only the tail (useful for errors at the end); H1 keeps only the beginning.",
+            "type": "string"
+          },
+          "url": {
+            "description": "URL to fetch",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "name": "web_fetch"
+    },
+    {
+      "description": "Search the web and return results from multiple engines",
+      "inputSchema": {
+        "properties": {
+          "backend": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "brave",
+              "duckduckgo",
+              "google",
+              "grokipedia",
+              "mojeek",
+              "startpage",
+              "wikipedia",
+              "yahoo",
+              "yandex"
+            ],
+            "type": "string"
+          },
+          "max_results": {
+            "default": 5,
+            "description": "Maximum results. Values are clamped to the runtime maximum.",
+            "type": "integer"
+          },
+          "query": {
+            "description": "Search query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "web_search"
+    },
+    {
+      "description": "Ensure a file with the given sha256 exists locally, downloading from a URL if not cached. Returns the local path.",
+      "inputSchema": {
+        "properties": {
+          "executable": {
+            "default": true,
+            "description": "chmod +x the cached file",
+            "type": "boolean"
+          },
+          "sha256": {
+            "description": "Optional expected sha256 hex digest; when set, download fails if the content does not match",
+            "type": "string"
+          },
+          "url": {
+            "description": "HTTP(S) URL to download the artifact from if not cached",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "name": "artifact"
+    },
+    {
+      "description": "Observe asynchronous sandbox facts. Delivery is opt-in: action=subscribe registers interest in event kinds (optionally narrowed to specific sources) so they arrive with later tool responses; action=wait (the default) blocks until a matching event occurs or the timeout elapses. Events expire automatically after their time-to-live.",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "default": "wait",
+            "description": "wait: block for a matching event. subscribe: receive these kinds with later tool responses (nothing is delivered without a subscription). unsubscribe: stop receiving them. subscriptions: list active ones.",
+            "enum": [
+              "wait",
+              "subscribe",
+              "unsubscribe",
+              "subscriptions"
+            ],
+            "type": "string"
+          },
+          "include_own": {
+            "default": false,
+            "description": "Also receive events caused by your own tool calls. Off by default: your call's result already reported them.",
+            "type": "boolean"
+          },
+          "kinds": {
+            "description": "Event kinds, e.g. [\"process_exited\", \"tool:text_editor\", \"tool:web_fetch\"]. Any tool call is observable as \"tool:\u003cname\u003e\". Required for subscribe; omit when waiting to accept any kind.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "sources": {
+            "description": "Wait only for events from these handles: a pid returned by a background shell call, or a file path. Omit to accept any source. Use this to wait on one specific background process.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "timeout": {
+            "default": 30,
+            "description": "Seconds to wait before giving up. Clamped to the runtime maximum.",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "wait_for_events"
+    }
+  ],
+  "version": "0.1.3"
+}
