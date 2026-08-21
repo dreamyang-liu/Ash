@@ -28,18 +28,15 @@ from types import SimpleNamespace
 import pytest
 
 from swebench.agent import AshAgent
-from swebench.agent.guardrails import (
+from swebench.agent.pipeline import (RAW_ERROR, RAW_OUTPUT, CallContext,
+                                     ToolPipeline)
+from swebench.agent.seats import (
     EDIT_STREAK_LIMIT,
     GuardrailInterceptor,
     GuardrailState,
-)
-from swebench.agent.interceptors import (
-    RAW_ERROR,
-    RAW_OUTPUT,
     TruncateInterceptor,
     default_pipeline,
 )
-from swebench.agent.pipeline import CallContext, ToolPipeline
 from swebench.agent.trace import ToolTraceWriter
 from swebench.models import AgentConfig, ToolResult
 

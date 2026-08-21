@@ -53,8 +53,11 @@ swebench/
 ├── submission.py     # Asking the agent to hand in its patch (eval layer)
 ├── patch.py          # Diffing a worktree, for shared-tree topologies
 ├── agent/            # The agent loop and the L2 interceptor pipeline:
-│                     #   conversation, llm, tools, prompts, hooks,
-│                     #   pipeline/interceptors/guardrails
+│   ├── pipeline.py   #   the onion: verdicts, CallContext, ToolPipeline
+│   ├── seats/        #   one package per interceptor — guardrail, truncate,
+│   │                 #   present — plus the default assembly
+│   └── ...           #   the loop itself: conversation, llm, tools, prompts,
+│                     #   hooks, trace
 ├── harnesses/        # Pluggable topologies; base.py defines the API
 ├── configs/          # Per-model YAML, composed with `extends:`
 ├── mcp_server.py     # MCP proxy: the same pipeline for external agents

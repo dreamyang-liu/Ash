@@ -32,8 +32,7 @@ from ash_sandbox import Pool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
 
 from .backends import BACKENDS, BackendError, build_pool
-from .agent.guardrails import GuardrailInterceptor
-from .agent.interceptors import TruncateInterceptor
+from .agent.seats import GuardrailInterceptor, TruncateInterceptor
 from .agent.pipeline import CallContext, ToolPipeline, load_pipeline
 from .models import ToolResult
 from .patch import (UNTRACKED_LIST, WORKDIR, diff_command, format_patch,

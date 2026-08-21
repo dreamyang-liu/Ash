@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from swebench.agent import _observation
-from swebench.agent.interceptors import default_pipeline
+from swebench.agent.seats import default_pipeline
 from swebench.agent.pipeline import CallContext
 from swebench.models import ToolResult
 

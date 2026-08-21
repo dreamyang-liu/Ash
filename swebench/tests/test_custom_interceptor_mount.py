@@ -19,7 +19,7 @@ import textwrap
 import pytest
 
 from swebench.agent import AshAgent
-from swebench.agent.interceptors import default_pipeline
+from swebench.agent.seats import default_pipeline
 from swebench.agent.pipeline import (CallContext, Continue, Reject,
                                      ToolInterceptor, ToolPipeline,
                                      load_pipeline)

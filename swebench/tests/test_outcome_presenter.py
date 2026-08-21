@@ -18,15 +18,14 @@ from __future__ import annotations
 
 import pytest
 
-from swebench.agent.guardrails import GuardrailInterceptor
-from swebench.agent.interceptors import (
-    RAW_OUTPUT,
+from swebench.agent.pipeline import RAW_OUTPUT, CallContext, ToolPipeline
+from swebench.agent.seats import (
+    GuardrailInterceptor,
     OutcomePresenter,
     TruncateInterceptor,
     default_pipeline,
     render_outcome,
 )
-from swebench.agent.pipeline import CallContext, ToolPipeline
 from swebench.models import CommandOutcome, ToolResult
 
 

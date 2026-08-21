@@ -6,7 +6,7 @@ retries in `llm.py`, prompts in `prompts.py`, conversation/trajectory state in
 also owns tool dispatch, so a manifest-defined tool is handed over by name and
 expanded there rather than here. Tool-path
 concerns (guardrails, output truncation) are L2 interceptors on a `ToolPipeline`
-(`interceptors.py`, `guardrails.py`) rather than loop code, so the MCP proxy and
+(`seats/`) rather than loop code, so the MCP proxy and
 harness-side mounts get them too; model-path concerns (budget warnings) remain
 `hooks.py`. What remains here is the loop: query the model, run tool calls,
 repeat.
@@ -22,10 +22,12 @@ from ..models import AgentConfig, CostTracker, ToolResult, Trajectory
 from .prompts import build_system_prompt, build_instance_message  # re-exported
 from .conversation import Conversation
 from .llm import LLMClient, ThinkingLoopError
-from .pipeline import EXECUTOR, CallContext, ToolPipeline, mounted_pipeline
+from .pipeline import (EXECUTOR, RAW_ERROR, RAW_OUTPUT, CallContext,
+                       ToolPipeline, mounted_pipeline)
 from .tools import tool_summary, TOOLS_SCHEMA, BASH_ONLY_SCHEMA, route_agent_tool, is_custom_tool
 from .trace import ToolTraceWriter, new_run_id
-from . import hooks, interceptors
+from . import hooks
+from . import seats
 
 __all__ = ["AshAgent", "build_system_prompt", "build_instance_message",
            "TOOLS_SCHEMA", "BASH_ONLY_SCHEMA"]
@@ -95,7 +97,7 @@ class AshAgent:
             return self.pipeline
         if mounted_pipeline(self.executor) is not None:
             return ToolPipeline([])
-        return interceptors.default_pipeline()
+        return seats.default_pipeline()
 
     def _governed(self, metadata: dict) -> Callable[[str, dict], ToolResult]:
         """This call's executor, wrapped in the L2 pipeline if one is mounted.
@@ -176,8 +178,8 @@ class AshAgent:
         # Interceptors may have annotated or bounded the result; the trace
         # records what the runtime returned, the conversation gets what the
         # interceptors produced.
-        runtime_output = metadata.get(interceptors.RAW_OUTPUT, result.output)
-        runtime_error = metadata.get(interceptors.RAW_ERROR, result.error)
+        runtime_output = metadata.get(RAW_OUTPUT, result.output)
+        runtime_error = metadata.get(RAW_ERROR, result.error)
         content = _observation(result.success, result.output, result.error)
         for proc in self.result_processors:
             content = proc(content, name, args, result)

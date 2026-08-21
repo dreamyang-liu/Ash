@@ -24,27 +24,17 @@ the same thing twice.
 
 from __future__ import annotations
 
-import threading
 from typing import Literal, Optional
 
-from ..models import ToolResult
-from .pipeline import (
-    RAW_OUTPUT,
-    CallContext,
-    Continue,
-    Reject,
-    ToolInterceptor,
-    Verdict,
-)
-from .tools import CONTENT_EDIT_COMMANDS, EDIT_COMMANDS
+from ....models import ToolResult
+from ...pipeline import (RAW_OUTPUT, CallContext, Continue, Reject,
+                         ToolInterceptor, Verdict)
+from .classify import is_content_edit, is_edit, is_read, is_test_run
+from .state import GuardrailState
 
-__all__ = ["GuardrailState", "GuardrailInterceptor",
-           "TEST_MARKERS", "EDIT_STREAK_LIMIT"]
+__all__ = ["GuardrailInterceptor", "EDIT_STREAK_LIMIT"]
 
-TEST_MARKERS = ("pytest", "test_", "assert")
 EDIT_STREAK_LIMIT = 3
-
-#: ``ctx.metadata`` key carrying warnings from ``before`` to ``after``.
 _WARNINGS = "guardrail_warnings"
 
 
@@ -56,93 +46,6 @@ def _read_before_edit_warning(path: str) -> str:
 def _edit_streak_warning(path: str, count: int) -> str:
     return (f"[Warning] This is edit #{count} to {path} "
             f"without running tests. Consider testing before making more changes.")
-
-
-class GuardrailState:
-    """Read/edit bookkeeping, keyed by ``(agent_id, sandbox_id)``.
-
-    One instance per interceptor, shared across agents — hence the keying:
-    files A read must never excuse B's blind edit. Thread-safe.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._files_read: dict[tuple[str, str], set[str]] = {}
-        self._edit_streak: dict[tuple[str, str], dict[str, int]] = {}
-
-    # -- reads --------------------------------------------------------------- #
-
-    def record_read(self, agent_id: str, sandbox_id: str, path: str) -> None:
-        with self._lock:
-            self._files_read.setdefault((agent_id, sandbox_id), set()).add(path)
-
-    def has_read(self, agent_id: str, sandbox_id: str, path: str) -> bool:
-        with self._lock:
-            return path in self._files_read.get((agent_id, sandbox_id), ())
-
-    # -- edit streaks -------------------------------------------------------- #
-
-    def record_edit(self, agent_id: str, sandbox_id: str, path: str) -> int:
-        """Count this edit and return the streak length since the last test run."""
-        with self._lock:
-            streaks = self._edit_streak.setdefault((agent_id, sandbox_id), {})
-            streaks[path] = streaks.get(path, 0) + 1
-            return streaks[path]
-
-    def reset_edits(self, agent_id: str, sandbox_id: str) -> None:
-        with self._lock:
-            self._edit_streak.pop((agent_id, sandbox_id), None)
-
-    def dump(self) -> dict:
-        """JSON-friendly snapshot, so an audit can read this seat's state.
-
-        Keyed over reads *and* streaks: an agent that only ever edited blindly
-        has no read entry, and it is exactly the behavior this audit exists to
-        surface.
-        """
-        with self._lock:
-            keys = set(self._files_read) | set(self._edit_streak)
-            return {
-                f"{agent}:{sbx}": {
-                    "files_read": sorted(self._files_read.get((agent, sbx), ())),
-                    "edit_streak": dict(self._edit_streak.get((agent, sbx), {})),
-                }
-                for agent, sbx in sorted(keys)
-            }
-
-
-def _command(tool_name: str, args: dict) -> str:
-    """This call's text_editor command, or ``''``.
-
-    A model can put anything in ``args`` — a list, a dict, a number. Membership
-    tests against a frozenset raise ``TypeError`` on unhashable values, and in
-    reject mode a fail-closed crash would turn malformed model output into a
-    policy refusal. Normalize once, here, so junk simply does not match.
-    """
-    if tool_name != "text_editor":
-        return ""
-    command = args.get("command")
-    return command if isinstance(command, str) else ""
-
-
-def _is_read(tool_name: str, args: dict) -> bool:
-    return _command(tool_name, args) == "view"
-
-
-def _is_edit(tool_name: str, args: dict) -> bool:
-    return _command(tool_name, args) in EDIT_COMMANDS
-
-
-def _is_content_edit(tool_name: str, args: dict) -> bool:
-    """An edit to existing content — see ``tools.CONTENT_EDIT_COMMANDS``."""
-    return _command(tool_name, args) in CONTENT_EDIT_COMMANDS
-
-
-def _is_test_run(tool_name: str, args: dict) -> bool:
-    if tool_name != "shell":
-        return False
-    command = args.get("command", "")
-    return any(marker in command for marker in TEST_MARKERS)
 
 
 class GuardrailInterceptor(ToolInterceptor):
@@ -181,10 +84,10 @@ class GuardrailInterceptor(ToolInterceptor):
         self.fail_mode = "closed" if enforcement == "reject" else "open"
 
     def before(self, ctx: CallContext) -> Verdict:
-        if _is_test_run(ctx.tool_name, ctx.args):
+        if is_test_run(ctx.tool_name, ctx.args):
             self.state.reset_edits(ctx.agent_id, ctx.sandbox_id)
             return Continue()
-        if not _is_edit(ctx.tool_name, ctx.args):
+        if not is_edit(ctx.tool_name, ctx.args):
             return Continue()
 
         path = ctx.args.get("path", "")
@@ -192,7 +95,7 @@ class GuardrailInterceptor(ToolInterceptor):
         # `write` is an edit for streak purposes but not for read-before-edit:
         # it also creates files, and creation has nothing to have read.
         if self.read_before_edit and path \
-                and _is_content_edit(ctx.tool_name, ctx.args) \
+                and is_content_edit(ctx.tool_name, ctx.args) \
                 and not self.state.has_read(ctx.agent_id, ctx.sandbox_id, path):
             if self.enforcement == "reject":
                 return Reject(_read_before_edit_warning(path))
@@ -208,7 +111,7 @@ class GuardrailInterceptor(ToolInterceptor):
         return Continue()
 
     def after(self, ctx: CallContext, result: ToolResult) -> ToolResult:
-        if result.success and _is_read(ctx.tool_name, ctx.args):
+        if result.success and is_read(ctx.tool_name, ctx.args):
             path = ctx.args.get("path")
             if path:
                 self.state.record_read(ctx.agent_id, ctx.sandbox_id, path)

@@ -28,7 +28,7 @@ class ToolResult:
     #: ``exit_code``, ``stdout``, ``stderr``, ``timed_out``, byte counts,
     #: truncation flags). ``None`` for a plain success, a refusal, or a tool that
     #: runs no command. Interceptors read it to compose what the model sees; see
-    #: ``agent/interceptors.py``.
+    #: ``agent/seats/``.
     outcome: Optional["CommandOutcome"] = None
 
     @classmethod

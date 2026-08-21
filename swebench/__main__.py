@@ -101,7 +101,7 @@ def _flatten_config(config: dict) -> dict:
         ("execution", "k8s"): "k8s",
         ("execution", "image_template"): "image_template",
         ("execution", "harness"): "harness",
-        # A Python file of your own interceptors; see agent/interceptors.py.
+        # A Python file of your own interceptors; see agent/seats/.
         ("execution", "interceptors"): "interceptors",
     }
 

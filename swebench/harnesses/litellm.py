@@ -14,7 +14,7 @@ from ..models import AgentConfig
 from ..agent import AshAgent
 from ..agent.trace import new_run_id
 from ..agent.tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA
-from ..agent.interceptors import default_pipeline
+from ..agent.seats import default_pipeline
 from ..agent.pipeline import load_pipeline
 from .. import style as S
 
