@@ -81,26 +81,69 @@ class CallContext:
     metadata: dict = field(default_factory=dict)
 
 
+#  The four verdicts are the four things a seat can do about a call: let it
+#  through, change it, refuse it, or answer it. They are exhaustive rather than
+#  convenient — dropping one does not remove the need, it pushes callers onto a
+#  workaround that loses something. Each docstring below says which.
+#
+#  ``Continue`` and ``Reject`` are used by the guardrails. ``Rewrite`` and
+#  ``ShortCircuit`` currently have no production caller (Waggle was the last one),
+#  and are kept because the alternatives are worse in ways that are easy to
+#  measure and hard to notice — see below.
+
+
 @dataclass(frozen=True)
 class Continue:
-    """Let the call proceed unchanged."""
+    """Let the call proceed unchanged.
+
+    An observer needs a way to say "I looked and I am not interfering", distinct
+    from having no opinion. Audit and metering seats return only this.
+    """
 
 
 @dataclass(frozen=True)
 class Reject:
-    """Refuse the call; ``message`` becomes the failed result's output."""
+    """Refuse the call; ``message`` becomes the failed result's output.
+
+    Forces ``success=False``, which is the point: the model must see that its
+    call did not happen. Use it for a rule ("do not run `git stash`, it can lose
+    your edits"), never to deliver content -- see ``ShortCircuit``.
+    """
     message: str
 
 
 @dataclass(frozen=True)
 class Rewrite:
-    """Let the call proceed with ``new_args`` instead of ``ctx.args``."""
+    """Let the call proceed with ``new_args`` instead of ``ctx.args``.
+
+    A seat could instead mutate ``ctx.args`` in place -- ``CallContext`` is frozen,
+    but that only binds the fields, so the dict inside is writable. The difference
+    shows up in the ``after`` hooks: ``Rewrite`` derives a fresh context, so every
+    seat's ``after`` sees the args *its own* ``before`` saw, while an in-place edit
+    is visible to the seats outside it.
+
+    That distinction is what makes an audit seat trustworthy. It records "the agent
+    asked for X" on the way in and "the result was Y" on the way out; if an inner
+    seat rewrote the args in place, the pair no longer describes one request. With
+    ``Rewrite``, adding ``timeout 300`` to a pytest command is invisible to the
+    seats above -- they still see what the agent asked for.
+    """
     new_args: dict
 
 
 @dataclass(frozen=True)
 class ShortCircuit:
-    """Answer the call with ``result`` without reaching the inner executor."""
+    """Answer the call with ``result`` without reaching the inner executor.
+
+    The difference from ``Reject`` is that this result can be a *success*. A cache
+    seat that recognises a repeated `pytest` invocation has a real answer to give,
+    and giving it through ``Reject`` would hand the model ``success=False`` on a
+    passing test suite -- an agent reading that goes off to fix a test that was
+    never broken.
+
+    So: ``Reject`` is for calls that must not happen, ``ShortCircuit`` for calls
+    somebody else already answered (a cache, a mock, a redirect to another tool).
+    """
     result: ToolResult
 
 
