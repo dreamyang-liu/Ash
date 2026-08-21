@@ -190,3 +190,33 @@ def test_the_session_dispatches_through_the_sdk_not_a_raw_call():
     assert seen["name"] == "analyzer"
     assert seen["registry_has_customs"], \
         "a Sandbox starts with an empty registry; the loaded manifests must be passed"
+
+
+# --------------------------------------------------------------------------- #
+#  Reaching the harness
+# --------------------------------------------------------------------------- #
+
+def test_the_harness_loads_manifests_and_grows_the_schema():
+    """Dispatch was live and loading was not: runner.py called load_custom_tools,
+    nothing inherited that when it was deleted, and `custom_tools_dir` reached
+    AgentConfig from nowhere. A manifest-defined tool was therefore never in the
+    schema the model sees -- the feature was unreachable, not broken."""
+    import inspect
+    from swebench.harnesses import litellm
+
+    source = inspect.getsource(litellm)
+    assert "load_custom_tools(" in source, "manifests are never loaded"
+    assert "custom_agent_schemas()" in source, "the schema never grows"
+    assert 'custom_tools_dir=c.get("custom_tools_dir")' in source, \
+        "the config key does not reach AgentConfig"
+
+
+def test_custom_tools_are_absent_in_bash_only_mode():
+    """One tool means one tool: growing the schema would contradict the mode."""
+    import inspect
+    from swebench.harnesses import litellm
+
+    source = inspect.getsource(litellm)
+    bash_branch = source[source.index('if tools_mode == "bash_only"'):]
+    bash_branch = bash_branch[:bash_branch.index("else:")]
+    assert "custom_agent_schemas" not in bash_branch

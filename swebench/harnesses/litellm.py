@@ -14,6 +14,7 @@ from ..models import AgentConfig
 from ..agent import AshAgent
 from ..agent.trace import new_run_id
 from ..agent.tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA
+from ..agent.custom_tools import custom_agent_schemas, load_custom_tools
 from ..agent.interceptors import default_pipeline
 from ..agent.pipeline import load_pipeline
 from .. import style as S
@@ -57,6 +58,7 @@ class LiteLLMHarness(BaseHarness):
                 return self._fail(instance_id, "session_failed")
 
             agent_config = AgentConfig(
+                custom_tools_dir=c.get("custom_tools_dir"),
                 model=c.get("model", "openai/Qwen/Qwen3-Coder-30B-A3B-Instruct"),
                 api_base=c.get("api_base"),
                 api_key=c.get("api_key"),
@@ -106,7 +108,15 @@ class LiteLLMHarness(BaseHarness):
                 agent.pipeline = default_pipeline(
                     extra=load_pipeline(plugins).interceptors)
             tools_mode = c.get("tools", "default")
-            agent.set_tools_schema(BASH_ONLY_SCHEMA if tools_mode == "bash_only" else TOOLS_SCHEMA)
+            if tools_mode == "bash_only":
+                agent.set_tools_schema(BASH_ONLY_SCHEMA)
+            else:
+                # Manifest-defined tools, if any. Loading them was the deleted
+                # runner.py's job and nothing inherited it, so `custom_tools_dir`
+                # reached AgentConfig from nowhere and the schema never grew:
+                # the dispatch half of the feature was live and unreachable.
+                load_custom_tools(agent_config.custom_tools_dir)
+                agent.set_tools_schema(TOOLS_SCHEMA + custom_agent_schemas())
             # The agent hands in its own diff: it knows which files it fixed,
             # which is the one thing a harness reading git state cannot know.
             # The reserve buys the turns to do it before the budget is gone.
