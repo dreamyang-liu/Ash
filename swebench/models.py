@@ -164,7 +164,15 @@ class CostTracker:
 
 @dataclass
 class Trajectory:
-    """Agent trajectory for saving and evaluation."""
+    """One agent run, recorded: the messages, what it cost, how it ended.
+
+    ``instance_id`` names the run rather than binding it to a benchmark -- a
+    harness sets whatever it uses to tell runs apart (``django__django-10880``,
+    ``iid-worker-2``). A benchmark prediction is a different thing and belongs to
+    whoever defines the benchmark: each harness returns one from
+    ``run_instance`` (see ``harnesses/base.py``), which is why the dead
+    ``to_prediction`` that used to sit here had no callers.
+    """
     instance_id: str = ""
     messages: list[dict] = field(default_factory=list)
     info: dict = field(default_factory=dict)
@@ -189,10 +197,3 @@ class Trajectory:
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2))
-
-    def to_prediction(self) -> dict:
-        return {
-            "instance_id": self.instance_id,
-            "model_patch": self.info.get("submission", ""),
-            "model_name_or_path": self.info.get("model", "ash-agent"),
-        }
