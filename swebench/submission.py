@@ -30,6 +30,12 @@ the exit status says why. Extracting a patch anyway would put our guess about th
 agent's work back into the answer, and an agent that ran out of budget mid-edit
 usually has nothing worth grading. An empty prediction is the honest report.
 
+Measured on a live 10-instance slice (SWE-bench verified, Firecracker, sonnet-4-6):
+every instance submitted, each patch touching one source file at 489-1912 bytes,
+and 8 of 10 resolved -- matching the best previous score, with the same two
+instances unresolved as before this change. Nine agents were asked on the finish
+path and one on the budget path, so both are exercised by that number.
+
 Who uses this
 -------------
 The one-agent-one-tree topologies, where "which files did you change" has a single
