@@ -30,6 +30,7 @@ from ash_sandbox import Sandbox
 from .base import BaseHarness
 from ..dataset import resolve_image, image_registry_for_subset
 from ..backends import backend_config
+from ..prediction import failure, prediction
 from ..sandbox import AshSession
 from ..models import AgentConfig, ToolResult
 from ..agent import AshAgent, TOOLS_SCHEMA
@@ -246,12 +247,7 @@ class ManagerWorkerHarness(BaseHarness):
             status = "completed" if patch.strip() else "no_patch"
             self._log(iid, subtasks, results, patch, status)
 
-            return {
-                "instance_id": iid,
-                "model_patch": patch,
-                "model_name_or_path": wrk_cfg.model,
-                "exit_status": status,
-            }
+            return prediction(iid, wrk_cfg.model, patch, status)
         except Exception as e:  # noqa: BLE001
             return self._fail(iid, c, f"error: {e}")
         finally:
@@ -354,9 +350,4 @@ class ManagerWorkerHarness(BaseHarness):
         print(S.kv("exit    ", S.green(status) if status == "completed" else S.yellow(status)))
 
     def _fail(self, iid: str, c: dict, status: str) -> dict:
-        return {
-            "instance_id": iid,
-            "model_patch": "",
-            "model_name_or_path": c.get("model", "unknown"),
-            "exit_status": status,
-        }
+        return failure(iid, c.get("model"), status)

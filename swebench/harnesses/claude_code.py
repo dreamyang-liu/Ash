@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .base import BaseHarness
 from ..dataset import resolve_image, format_task_prompt
+from ..prediction import failure, prediction
 from .. import style as S
 
 
@@ -268,12 +269,8 @@ class ClaudeCodeHarness(BaseHarness):
                 "usage": result_msg.usage if result_msg else None,
             }, indent=2, default=str))
 
-            return {
-                "instance_id": instance_id,
-                "model_patch": patch,
-                "model_name_or_path": f"claude-code/{model}",
-                "exit_status": exit_status,
-            }
+            return prediction(instance_id, f"claude-code/{model}", patch,
+                              exit_status)
 
         except asyncio.TimeoutError:
             print(S.kv("error   ", S.bright_red(f"timeout ({timeout}s)")))
@@ -289,9 +286,4 @@ class ClaudeCodeHarness(BaseHarness):
             shutil.rmtree(patch_dir, ignore_errors=True)
 
     def _fail(self, instance_id: str, model: str, status: str) -> dict:
-        return {
-            "instance_id": instance_id,
-            "model_patch": "",
-            "model_name_or_path": f"claude-code/{model}",
-            "exit_status": status,
-        }
+        return failure(instance_id, f"claude-code/{model}", status)

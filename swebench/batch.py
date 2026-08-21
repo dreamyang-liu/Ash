@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import style as S
+from .prediction import failure
 
 
 class _Dashboard:
@@ -176,12 +177,8 @@ def run_batch(
                 break
             except Exception as e:
                 print(S.kv("error   ", S.bright_red(str(e))))
-                predictions.append({
-                    "instance_id": inst["instance_id"],
-                    "model_patch": "",
-                    "model_name_or_path": "error",
-                    "exit_status": f"error: {e}",
-                })
+                predictions.append(failure(inst["instance_id"], "error",
+                                           f"error: {e}"))
                 save()
     else:
         # Parallel mode with live dashboard
@@ -218,12 +215,7 @@ def run_batch(
                         else:
                             dashboard.update(iid, status="failed", detail=result.get("exit_status", "no patch"))
                     except Exception as e:
-                        result = {
-                            "instance_id": iid,
-                            "model_patch": "",
-                            "model_name_or_path": "error",
-                            "exit_status": f"error: {e}",
-                        }
+                        result = failure(iid, "error", f"error: {e}")
                         dashboard.update(iid, status="failed", detail=str(e)[:40])
                     predictions.append(result)
                     save()

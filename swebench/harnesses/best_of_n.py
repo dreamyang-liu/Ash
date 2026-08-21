@@ -39,6 +39,7 @@ from typing import Callable, Optional, Sequence
 from .base import BaseHarness
 from ..dataset import resolve_image, format_task_prompt, image_registry_for_subset
 from ..backends import backend_config
+from ..prediction import failure, prediction
 from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent, TOOLS_SCHEMA, BASH_ONLY_SCHEMA
@@ -253,12 +254,7 @@ class BestOfNHarness(BaseHarness):
             patch = "" if winner is None else \
                 next(x.patch for x in candidates if x.index == winner)
             self._log(iid, candidates, winner, patch, status)
-            return {
-                "instance_id": iid,
-                "model_patch": patch,
-                "model_name_or_path": c.get("model", "unknown"),
-                "exit_status": status,
-            }
+            return prediction(iid, c.get("model"), patch, status)
         except Exception as e:  # noqa: BLE001
             return self._fail(iid, f"error: {e}")
 
@@ -339,9 +335,4 @@ class BestOfNHarness(BaseHarness):
         print(S.kv("exit    ", S.green(status) if status == "completed" else S.yellow(status)))
 
     def _fail(self, iid: str, status: str) -> dict:
-        return {
-            "instance_id": iid,
-            "model_patch": "",
-            "model_name_or_path": self.config.get("model", "unknown"),
-            "exit_status": status,
-        }
+        return failure(iid, self.config.get("model"), status)

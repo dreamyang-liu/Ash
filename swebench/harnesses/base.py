@@ -7,8 +7,10 @@ from pathlib import Path
 class BaseHarness(ABC):
     """Abstract base for SWE-bench agent harnesses.
 
-    A harness takes an instance + config and returns a prediction dict:
-      {"instance_id": ..., "model_patch": ..., "model_name_or_path": ..., "exit_status": ...}
+    A harness takes an instance + config and returns a prediction, built with
+    ``swebench.prediction.prediction`` (or ``failure`` when there is nothing to
+    submit). That module owns the format; restating it here is how nine
+    hand-written copies came to disagree about their fallbacks.
     """
 
     def __init__(self, config: dict):

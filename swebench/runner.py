@@ -29,6 +29,7 @@ except ImportError:
 
 from .agent import AshAgent
 from .agent.trace import new_run_id
+from .prediction import failure, prediction
 from .sandbox import AshSession
 from . import style as S
 from .agent.tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA
@@ -208,12 +209,7 @@ def run_single_instance(
 
     try:
         if not session.create(image):
-            return {
-                "instance_id": instance_id,
-                "model_patch": "",
-                "model_name_or_path": config.model,
-                "exit_status": "session_failed",
-            }
+            return failure(instance_id, config.model, "session_failed")
 
         # Register container with janitor
         if janitor and session._sandbox and session._sandbox._container_id:
@@ -292,22 +288,12 @@ def run_single_instance(
             print(S.kv("cost    ", S.cost(agent.cost.total_cost, agent.cost.api_calls)))
             print(S.kv("patch   ", S.patch_info(patch)))
 
-        return {
-            "instance_id": instance_id,
-            "model_patch": patch,
-            "model_name_or_path": config.model,
-            "exit_status": exit_status,
-        }
+        return prediction(instance_id, config.model, patch, exit_status)
 
     except Exception as e:
         if not quiet:
             print(S.kv("error   ", S.bright_red(str(e))))
-        return {
-            "instance_id": instance_id,
-            "model_patch": "",
-            "model_name_or_path": config.model,
-            "exit_status": f"error: {e}",
-        }
+        return failure(instance_id, config.model, f"error: {e}")
 
     finally:
         if janitor and session._sandbox and session._sandbox._container_id:
@@ -478,12 +464,8 @@ def run_batch(
                 return
             except Exception as e:
                 print(S.kv("error", S.bright_red(str(e))))
-                predictions.append({
-                    "instance_id": inst["instance_id"],
-                    "model_patch": "",
-                    "model_name_or_path": config.model,
-                    "exit_status": f"error: {e}",
-                })
+                predictions.append(failure(inst["instance_id"], config.model,
+                                           f"error: {e}"))
                 save()
     else:
         # Parallel mode with live dashboard
@@ -533,12 +515,7 @@ def run_batch(
                 return result
             except Exception as e:
                 dashboard.update(iid, status="failed", detail=str(e)[:40])
-                return {
-                    "instance_id": iid,
-                    "model_patch": "",
-                    "model_name_or_path": config.model,
-                    "exit_status": f"error: {e}",
-                }
+                return failure(iid, config.model, f"error: {e}")
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(_run_with_dashboard, inst): inst for inst in instances}

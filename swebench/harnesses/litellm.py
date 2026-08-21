@@ -6,6 +6,7 @@ from pathlib import Path
 from .base import BaseHarness
 from ..dataset import resolve_image, format_task_prompt, image_registry_for_subset
 from ..backends import backend_config
+from ..prediction import failure, prediction
 from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent
@@ -115,12 +116,7 @@ class LiteLLMHarness(BaseHarness):
                 print(S.kv("cost    ", S.cost(agent.cost.total_cost, agent.cost.api_calls)))
                 print(S.kv("patch   ", S.patch_info(patch)))
 
-            return {
-                "instance_id": instance_id,
-                "model_patch": patch,
-                "model_name_or_path": agent_config.model,
-                "exit_status": exit_status,
-            }
+            return prediction(instance_id, agent_config.model, patch, exit_status)
 
         except Exception as e:
             if not quiet and not self._dashboard:
@@ -131,9 +127,4 @@ class LiteLLMHarness(BaseHarness):
             session.destroy()
 
     def _fail(self, instance_id: str, status: str) -> dict:
-        return {
-            "instance_id": instance_id,
-            "model_patch": "",
-            "model_name_or_path": self.config.get("model", "unknown"),
-            "exit_status": status,
-        }
+        return failure(instance_id, self.config.get("model"), status)
