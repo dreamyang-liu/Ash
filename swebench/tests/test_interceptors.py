@@ -681,3 +681,50 @@ def test_a_plain_executor_still_gets_the_default_chain():
     conv = _Conv()
     agent._run_tool(_tool_call("shell", {"command": "cat big"}), conv, "turn-1")
     assert "characters truncated" in conv.results[0]
+
+
+# --------------------------------------------------------------------------- #
+#  A seat that rewrites a result must not destroy the rest of it
+# --------------------------------------------------------------------------- #
+
+def test_no_seat_drops_the_structured_outcome():
+    """Every seat here rebuilds ToolResult to change one field, and `outcome` has
+    to survive the rebuild: it is the runtime's structured report (exit code, the
+    two streams, byte counts), and a seat further out may want to read it.
+
+    The guardrail seat used to drop it. That was invisible while it was outermost
+    -- nothing downstream looked -- and became reachable as soon as `extra=` let a
+    caller mount a seat outside it. Swept across the chain rather than tested on
+    one seat, so a new seat inherits the check."""
+    from swebench.models import CommandOutcome
+
+    outcome = CommandOutcome(exit_code=1, stdout="out", stderr="err",
+                             stdout_bytes=3, stderr_bytes=3)
+    edit = {"command": "str_replace", "path": PATH, "old_str": "a", "new_str": "b"}
+
+    for seat in default_pipeline().interceptors:
+        # Long enough to trigger truncation, and an edit so the guardrail warns:
+        # each seat must be on its rewriting path, not its pass-through path.
+        incoming = ToolResult(success=False, output="x" * 40_000,
+                              error="y" * 40_000, outcome=outcome)
+        ctx = CallContext(agent_id="A", sandbox_id="sb", tool_name="text_editor",
+                          args=dict(edit), metadata={})
+        pipe = ToolPipeline([seat])
+        result = pipe.execute(ctx, lambda t, a: incoming)
+        assert result.outcome is outcome, \
+            f"{seat.name} dropped the outcome while rewriting the result"
+
+
+def test_the_whole_default_chain_preserves_the_outcome():
+    """End to end, not seat by seat: what the agent loop receives still carries
+    the structured report."""
+    from swebench.models import CommandOutcome
+
+    outcome = CommandOutcome(exit_code=1, stdout="out", stderr="err")
+    incoming = ToolResult(success=False, output="x" * 40_000, error=None,
+                          outcome=outcome)
+    ctx = CallContext(agent_id="A", sandbox_id="sb", tool_name="text_editor",
+                      args={"command": "str_replace", "path": PATH,
+                            "old_str": "a", "new_str": "b"}, metadata={})
+    result = default_pipeline().execute(ctx, lambda t, a: incoming)
+    assert result.outcome is outcome

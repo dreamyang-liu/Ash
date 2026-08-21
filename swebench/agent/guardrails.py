@@ -219,9 +219,15 @@ class GuardrailInterceptor(ToolInterceptor):
         # the model; the trace must still be able to report the real output
         # (and not count the warning's bytes as the tool's).
         ctx.metadata.setdefault(RAW_OUTPUT, result.output)
+        # `outcome` is carried through: a seat that annotates text must not
+        # destroy the structured report a seat further out still wants to read.
+        # Dropping it was invisible while this was the outermost seat -- nothing
+        # downstream looked -- and became reachable the moment `extra=` let a
+        # caller mount their own seat outside it.
         return ToolResult(success=result.success,
                           output=_append_warnings(result.output, warnings),
-                          error=result.error)
+                          error=result.error,
+                          outcome=result.outcome)
 
     def dump(self) -> dict:
         return self.state.dump()
