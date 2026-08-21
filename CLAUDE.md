@@ -42,7 +42,7 @@ There are four independently-versioned pieces:
 │   │                        #   pipeline/interceptors/guardrails/waggle, hooks
 │   ├── harnesses/           # Pluggable backends: litellm, claude-code (base.py defines API)
 │   ├── configs/             # Per-model YAML configs (inherit via `extends:`)
-│   ├── batch.py / runner.py # Parallel execution + dashboard
+│   ├── batch.py             # Parallel execution + dashboard
 │   └── dataset.py           # Loads SWE-bench instances
 ├── k8s-scaffold/            # K8s infrastructure (Go)
 │   ├── control-plane/       # REST API for sandbox lifecycle (spawn/destroy), Redis store
