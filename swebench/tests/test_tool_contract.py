@@ -237,3 +237,85 @@ def test_sdk_sandbox_exposes_managed_sandbox_identity():
 
     sandbox._container_id = "sandbox-123"
     assert sandbox.sandbox_id == "sandbox-123"
+
+
+# --------------------------------------------------------------------------- #
+#  The hand-written schema vs what the runtime actually serves
+# --------------------------------------------------------------------------- #
+
+#: Runtime tools deliberately absent from the model's panel, and why. `artifact`
+#: fetches and verifies a binary; a manifest-defined tool is expanded into
+#: artifact+shell by the SDK (toolset.CustomToolPlan), so the model calls the tool
+#: by its own name and never this. Listing it would offer a download primitive as a
+#: first-class action.
+NOT_OFFERED_TO_THE_MODEL = {"artifact"}
+
+
+def _runtime_tool_names() -> "set[str] | None":
+    """Ask a built ash-runtime what it serves. None if no binary is available."""
+    import json
+    import shutil
+    import subprocess
+
+    binary = shutil.which("ash-runtime")
+    for candidate in ("/tmp/ash-rt", "/tmp/serve/ash-runtime",
+                      str(Path(__file__).resolve().parents[2] / "runtime" / "ash-runtime")):
+        if binary:
+            break
+        if Path(candidate).is_file():
+            binary = candidate
+    if not binary:
+        return None
+
+    request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    try:
+        proc = subprocess.run([binary, "--mode", "stdio"], input=request + "\n",
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in proc.stdout.splitlines():
+        try:
+            tools = json.loads(line).get("result", {}).get("tools")
+        except json.JSONDecodeError:
+            continue
+        if tools:
+            return {t["name"] for t in tools}
+    return None
+
+
+def test_the_agent_panel_matches_what_the_runtime_serves():
+    """CLAUDE.md requires the runtime, the SDK and this schema to move together, and
+    until now nothing checked it: the contract test restated its own hardcoded list,
+    so a tool added to the runtime and forgotten here would go unnoticed.
+
+    Skipped rather than failed when no binary is around -- this needs `go build` --
+    but it runs in CI, where one is.
+    """
+    import pytest
+
+    served = _runtime_tool_names()
+    if served is None:
+        pytest.skip("no ash-runtime binary; run `cd runtime && go build -o ash-runtime .`")
+
+    offered = {t["function"]["name"] for t in TOOLS_SCHEMA}
+    missing = served - offered - NOT_OFFERED_TO_THE_MODEL
+    invented = offered - served
+
+    assert not missing, (
+        f"the runtime serves {sorted(missing)} and the agent panel does not offer "
+        f"them; add them to TOOLS_SCHEMA or to NOT_OFFERED_TO_THE_MODEL with a reason")
+    assert not invented, (
+        f"the agent panel offers {sorted(invented)}, which the runtime does not "
+        f"serve; the model would call a tool that fails to route")
+
+
+def test_every_deliberate_omission_is_still_a_real_runtime_tool():
+    """Guards the escape hatch: an omission left behind after the runtime drops a
+    tool would hide a genuine mismatch for the next person."""
+    import pytest
+
+    served = _runtime_tool_names()
+    if served is None:
+        pytest.skip("no ash-runtime binary")
+    stale = NOT_OFFERED_TO_THE_MODEL - served
+    assert not stale, f"{sorted(stale)} is excluded but the runtime no longer serves it"
