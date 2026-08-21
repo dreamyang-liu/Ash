@@ -14,6 +14,8 @@ from ..models import AgentConfig
 from ..agent import AshAgent
 from ..agent.trace import new_run_id
 from ..agent.tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA
+from ..agent.interceptors import default_pipeline
+from ..agent.pipeline import load_pipeline
 from .. import style as S
 
 
@@ -93,6 +95,16 @@ class LiteLLMHarness(BaseHarness):
             )
             if quiet:
                 agent.stream = False
+            # Your own L2 seats, mounted outside the defaults. `interceptors` is
+            # a path to a Python file holding `PIPELINE = [MyInterceptor()]` --
+            # a file rather than a config schema because policy is code (ADR-3):
+            # a YAML dialect for "reject writes under src/ unless ..." becomes a
+            # crippled programming language. Absent, the agent mounts the
+            # defaults exactly as before.
+            plugins = c.get("interceptors")
+            if plugins:
+                agent.pipeline = default_pipeline(
+                    extra=load_pipeline(plugins).interceptors)
             tools_mode = c.get("tools", "default")
             agent.set_tools_schema(BASH_ONLY_SCHEMA if tools_mode == "bash_only" else TOOLS_SCHEMA)
             # The agent hands in its own diff: it knows which files it fixed,

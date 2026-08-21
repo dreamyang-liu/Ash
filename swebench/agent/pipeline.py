@@ -286,12 +286,24 @@ def load_pipeline(path: str) -> ToolPipeline:
     The module is executed from ``path`` (ADR-3: policy and assembly are
     Python code, not a DSL). Raises ``ValueError`` if the file cannot be
     imported or does not define a module-level ``PIPELINE`` list.
+
+    Every failure is a ``ValueError`` naming the path, including the ones the
+    import machinery raises itself -- a missing file gave ``FileNotFoundError``
+    and a typo in the plugin gave ``SyntaxError``, neither mentioning that a
+    plugins file was what failed. The distinction matters because the caller
+    above is a benchmark run: a governance chain that fails to load must stop the
+    run loudly, not read as "no interceptors configured".
     """
     spec = importlib.util.spec_from_file_location("ash_mcp_plugins", path)
     if spec is None or spec.loader is None:
         raise ValueError(f"cannot import plugins module from {path!r}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:      # missing file, syntax error, import error, ...
+        raise ValueError(
+            f"cannot import plugins module from {path!r}: "
+            f"{type(exc).__name__}: {exc}") from exc
     interceptors = getattr(module, "PIPELINE", None)
     if not isinstance(interceptors, (list, tuple)):
         raise ValueError(f"{path!r} must define a module-level PIPELINE list")
