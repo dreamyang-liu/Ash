@@ -70,7 +70,8 @@ def register_analyzer():
 def test_a_custom_tool_reaches_the_executor_under_its_own_name():
     """The loop no longer expands manifest tools: the executor does, and it
     memoises where the binary landed so a repeat call skips the download. One
-    call also means one seat decision -- tell Waggle about such a tool through
+    call also means one seat decision -- tell a coordination seat about such a
+    tool through
     `opaque_writers` so its drift scan still runs."""
     register_analyzer()
     calls = []

@@ -54,7 +54,7 @@ swebench/
 ├── patch.py          # Diffing a worktree, for shared-tree topologies
 ├── agent/            # The agent loop and the L2 interceptor pipeline:
 │                     #   conversation, llm, tools, prompts, hooks,
-│                     #   pipeline/interceptors/guardrails/waggle
+│                     #   pipeline/interceptors/guardrails
 ├── harnesses/        # Pluggable topologies; base.py defines the API
 ├── configs/          # Per-model YAML, composed with `extends:`
 ├── mcp_server.py     # MCP proxy: the same pipeline for external agents
@@ -92,8 +92,9 @@ Registered in `harnesses/__init__.py`:
 Add one by subclassing `BaseHarness` and registering it in `HARNESSES`.
 
 `manager-worker` and `best-of-n` were removed while the single-agent path is being
-settled; see `harnesses/__init__.py`. The L2 machinery they used (Waggle, one
-shared chain across several agents) is still here and tested.
+settled, and Waggle (the write-arbitration seat they used) with them. Mounting one
+shared chain across several agents still works and is still tested — a coordination
+seat comes back as a plugin, or by reverting.
 
 ## Evaluating results
 

@@ -101,7 +101,8 @@ class AshAgent:
         """This call's executor, wrapped in the L2 pipeline if one is mounted.
 
         ``metadata`` is the call's shared scratch space: interceptors read the
-        raw executor from it (Waggle's probe traffic) and write back facts the
+        raw executor from it (probe traffic that must not re-enter the chain) and
+        write back facts the
         loop needs afterwards (the pre-truncation output).
         """
         if self._pipeline is None:
@@ -137,14 +138,14 @@ class AshAgent:
             # artifact->shell (ash_sandbox.Sandbox.call_agent_tool), which also
             # remembers where the binary landed, so a repeat call skips the
             # download round-trip. Interceptors therefore see one opaque call --
-            # tell Waggle about any such tool via `opaque_writers` so its drift
-            # scan still runs (see waggle.py).
+            # a coordination seat cannot see how such a tool touches files, so it
+            # must be told the tool's name to watch it at all.
             exec_name, exec_args = name, dict(args)
         else:
             # Builtin names ARE translated here, even though the executor would
             # do it too: `bash` must reach the interceptors as `shell`, or a
             # bash_only run would hide every command from the seats that key on
-            # the runtime tool -- Waggle's drift scan above all.
+            # the runtime tool -- a drift scan above all.
             try:
                 exec_name, exec_args = route_agent_tool(name, args)
             except KeyError as exc:

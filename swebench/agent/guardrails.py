@@ -1,6 +1,6 @@
 """Tool-level guardrails: nudge the agent away from common failure patterns.
 
-One kernel, one mounting — the same split as Waggle (docs/ARCHITECTURE.md,
+One kernel, one mounting (docs/ARCHITECTURE.md,
 ADR-2):
 
 ``GuardrailState``
@@ -16,9 +16,10 @@ ADR-2):
 
 Enforcement is a parameter, not a fork. ``enforcement="warn"`` appends advisory
 text (the agent loop's historical behavior, fail-open); ``enforcement="reject"``
-refuses the call outright. Waggle's ``require_read`` is the same rule with
-teeth — when both are mounted, give this one ``"warn"`` and let Waggle reject,
-or set ``require_read=False`` on Waggle and reject here.
+refuses the call outright. A coordination seat mounted below may enforce the same
+rule with a better message (it can name the version the agent is stale against);
+when one is, give this seat ``read_before_edit=False`` so the model is not told
+the same thing twice.
 """
 
 from __future__ import annotations
@@ -93,7 +94,7 @@ class GuardrailState:
             self._edit_streak.pop((agent_id, sandbox_id), None)
 
     def dump(self) -> dict:
-        """JSON-friendly snapshot, for audit symmetry with ``Waggle.dump()``.
+        """JSON-friendly snapshot, so an audit can read this seat's state.
 
         Keyed over reads *and* streaks: an agent that only ever edited blindly
         has no read entry, and it is exactly the behavior this audit exists to
@@ -159,7 +160,7 @@ class GuardrailInterceptor(ToolInterceptor):
     view counted; this mounting fixes that.)
 
     ``read_before_edit=False`` drops that rule and keeps only edit-streak
-    nudges. Use it when ``WaggleInterceptor`` is also mounted: its
+    nudges. Use it when a coordination seat is also mounted: its
     ``require_read`` enforces the same rule with a better message (it names the
     version the agent is stale against), and two seats stating one rule tells
     the model the same thing twice.

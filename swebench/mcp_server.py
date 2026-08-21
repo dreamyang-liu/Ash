@@ -6,15 +6,15 @@ Supports multiple sandboxes with ownership + group-based visibility:
   overlap with the session's groups
 - Runs as HTTP/SSE for multi-session, or stdio for single-session (backwards-compat)
 - Optionally routes exec tool calls through the L2 interceptor pipeline
-  (docs/ARCHITECTURE.md): OFF by default; --coordinate mounts Waggle write
-  arbitration, --plugins <file.py> replaces the pipeline assembly entirely.
+  (docs/ARCHITECTURE.md): OFF by default; --guardrails mounts read-before-edit
+  and edit-streak nudges, --plugins <file.py> supplies your own seats.
 
 Usage:
     # HTTP mode (multi-session):
     python -m swebench.mcp_server --http --port 8400
 
-    # HTTP mode with Waggle coordination for shared sandboxes:
-    python -m swebench.mcp_server --http --port 8400 --coordinate
+    # HTTP mode with governance mounted on the tool path:
+    python -m swebench.mcp_server --http --port 8400 --guardrails reject
 
     # Stdio mode (single-session, backwards-compat):
     python -m swebench.mcp_server --image <docker-image> --patch-dir /tmp/patches/
@@ -23,12 +23,10 @@ Usage:
 import asyncio
 import copy
 import json
-import os
 import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from ash_sandbox import Pool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
@@ -37,7 +35,6 @@ from .backends import BACKENDS, BackendError, build_pool
 from .agent.guardrails import GuardrailInterceptor
 from .agent.interceptors import TruncateInterceptor
 from .agent.pipeline import CallContext, ToolPipeline, load_pipeline
-from .agent.waggle import WaggleInterceptor
 from .models import ToolResult
 from .patch import (UNTRACKED_LIST, WORKDIR, diff_command, format_patch,
                     select_added, stage_commands)
@@ -421,8 +418,9 @@ class SessionHandler:
                                  args: dict) -> dict:
         """Run one exec tool through the interceptor pipeline (L2 governance).
 
-        The pipeline contract (and Waggle's blocking reservation waits) is
-        synchronous, so it runs on a worker thread; the raw executor bridges
+        The pipeline contract is synchronous, and an interceptor is allowed to
+        block (waiting on a lock, say), so it runs on a worker thread; the raw
+        executor bridges
         each inner/probe call back onto this event loop. agent_id is the MCP
         session identity; sandbox_id is the resolved sandbox.
         """
@@ -480,7 +478,7 @@ class HttpMcpServer:
         owner = next((headers[h] for h in self.SESSION_HEADERS if headers.get(h)), None)
         if owner is None:
             # Anonymous request: a fresh identity, so sandboxes stay private.
-            # Interceptors keyed by agent_id (guardrails, Waggle) can hold no
+            # Interceptors keyed by agent_id (the guardrails) can hold no
             # state across such requests — each one looks like a new agent — so
             # a client that wants governance must identify itself.
             owner = str(uuid.uuid4())
@@ -626,34 +624,26 @@ class StdioMcpServer:
 # CLI
 # ---------------------------------------------------------------------------
 
-_TRUTHY = {"1", "true", "yes", "on"}
 
 
 def _build_pipeline(args) -> "ToolPipeline | None":
     """Assemble the L2 interceptor pipeline (docs/ARCHITECTURE.md).
 
-    Default OFF: with no --plugins, --guardrails or coordination flag the proxy
-    dispatches tool calls exactly as before. --plugins replaces the default
-    assembly entirely — the PIPELINE list in the file is the configuration.
+    Default OFF: with no --plugins or --guardrails the proxy dispatches tool calls
+    exactly as before. --plugins replaces the default assembly entirely — the
+    PIPELINE list in the file is the configuration, which is also how a
+    coordination seat comes back (Waggle was removed; see git history).
 
-    Order is semantics: guardrails advise before Waggle arbitrates, and their
-    ``after`` therefore runs last, so a warning is appended to whatever result
-    (including a Waggle rejection) the model ends up seeing. Truncation sits
-    innermost, so it bounds the runtime's result and the seats above it annotate
-    already-bounded text. When both guardrails and coordination are on,
-    read-before-edit is left to Waggle — it enforces the same rule and names
-    the version the agent is stale against.
+    Order is semantics: guardrails annotate on the way out, so their ``after``
+    runs last and a warning is appended to whatever result the model ends up
+    seeing. Truncation sits innermost, so it bounds the runtime's result and the
+    seats above it annotate already-bounded text.
     """
     if args.plugins:
         return load_pipeline(args.plugins)
-    coordinate = args.coordinate or \
-        os.environ.get("ASH_MCP_COORDINATE", "").strip().lower() in _TRUTHY
     interceptors: list = []
     if args.guardrails:
-        interceptors.append(GuardrailInterceptor(
-            enforcement=args.guardrails, read_before_edit=not coordinate))
-    if coordinate:
-        interceptors.append(WaggleInterceptor(ttl=args.waggle_ttl))
+        interceptors.append(GuardrailInterceptor(enforcement=args.guardrails))
     if interceptors and args.max_output_bytes > 0:
         # Only with another seat: mounting the chain for truncation alone would
         # change the default dispatch path, and the runtime already bounds its
@@ -677,12 +667,6 @@ def main():
                              "ASH_GATEWAY_URL.")
     parser.add_argument("--patch-dir", default=None, help="Directory for per-sandbox patch files")
     parser.add_argument("--patch-file", default=None, help="(deprecated) alias for --patch-dir parent")
-    parser.add_argument("--coordinate", action="store_true",
-                        help="Route tool calls through the interceptor pipeline with "
-                             "Waggle write arbitration (env: ASH_MCP_COORDINATE=1). "
-                             "Default: off.")
-    parser.add_argument("--waggle-ttl", type=float, default=120.0,
-                        help="Waggle reservation TTL in seconds (with --coordinate)")
     parser.add_argument("--guardrails", nargs="?", const="warn", default=None,
                         choices=["warn", "reject"],
                         help="Mount read-before-edit / edit-streak guardrails: "

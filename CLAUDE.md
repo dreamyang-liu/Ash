@@ -39,7 +39,7 @@ There are four independently-versioned pieces:
 ├── swebench/                # SWE-bench evaluation harness
 │   ├── __main__.py          # CLI entry (`python -m swebench`), YAML config loader w/ `extends`
 │   ├── agent/               # Agent loop + L2 pipeline: conversation, llm, tools, prompts,
-│   │                        #   pipeline/interceptors/guardrails/waggle, hooks
+│   │                        #   pipeline/interceptors/guardrails, hooks
 │   ├── harnesses/           # Pluggable backends: litellm, claude-code (base.py defines API)
 │   ├── configs/             # Per-model YAML configs (inherit via `extends:`)
 │   ├── batch.py             # Parallel execution + dashboard

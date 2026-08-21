@@ -137,7 +137,7 @@ def test_write_does_not_require_a_read_because_it_also_creates():
     """`view` on a nonexistent path fails, so a creating `write` could never
     satisfy read-before-edit: in warn mode that is noise on the documented
     "write a reproduce script" workflow, and in reject mode creating any new
-    file becomes impossible. Waggle pays for an existence probe and refuses only
+    file becomes impossible. A seat that can afford an existence probe may refuse
     blind *overwrites*; a rule that cannot afford the probe must not claim
     `write`."""
     pipe = ToolPipeline([GuardrailInterceptor()])
@@ -160,13 +160,15 @@ def test_write_still_counts_toward_the_edit_streak():
     assert "without running tests" in outputs[-1]
 
 
-def test_waggle_arbitrates_every_edit_command():
-    """Waggle keys off the same shared set, and it covers `write` — one place
-    to state "this call is an edit"."""
+def test_one_place_states_what_counts_as_an_edit():
+    """Two sets, one narrower than the other, and the difference is `write`:
+    everything that mutates a file (EDIT_COMMANDS, for streak counting) versus
+    everything that mutates *existing* content (CONTENT_EDIT_COMMANDS, for
+    read-before-edit). A coordination seat keys off the wider one; that seat was
+    removed with Waggle, and the distinction is the part worth keeping."""
     from swebench.agent.tools import CONTENT_EDIT_COMMANDS, EDIT_COMMANDS
-    from swebench.agent.waggle import CoordinatedExecutor
-    assert CoordinatedExecutor.WRITE_COMMANDS == EDIT_COMMANDS
     assert "write" in EDIT_COMMANDS
+    assert "write" not in CONTENT_EDIT_COMMANDS
     assert CONTENT_EDIT_COMMANDS < EDIT_COMMANDS
 
 
@@ -385,17 +387,15 @@ def test_default_chain_presents_then_bounds_then_annotates():
 
 
 # --------------------------------------------------------------------------- #
-#  Composing with Waggle: one rule, one voice
+#  read_before_edit as a standalone switch
 # --------------------------------------------------------------------------- #
 
-def _waggle_chain(read_before_edit: bool):
-    from swebench.agent.waggle import WaggleInterceptor, WorkspaceCoordinator
-    from swebench.tests.test_waggle import FakeSandbox
+def _chain(read_before_edit: bool):
+    from swebench.tests.fake_sandbox import FakeSandbox
 
     sandbox = FakeSandbox({PATH: "base"})
     pipe = ToolPipeline([
         GuardrailInterceptor(enforcement="warn", read_before_edit=read_before_edit),
-        WaggleInterceptor(state=WorkspaceCoordinator(ttl=5.0)),
     ])
 
     def call(tool: str, args: dict) -> ToolResult:
@@ -407,24 +407,19 @@ def _waggle_chain(read_before_edit: bool):
     return call
 
 
-def test_read_before_edit_off_leaves_the_rule_to_waggle():
-    """Both seats enforcing one rule states it to the model twice; Waggle's
-    message is the better one (it names the version you are stale against)."""
+def test_read_before_edit_can_be_turned_off():
+    """The switch exists so a chain with a coordination seat below does not state
+    one rule twice -- that seat left with Waggle, but the switch is independent of
+    it and a chain composed by hand still needs it."""
     blind = {"command": "str_replace", "path": PATH, "old_str": "base",
              "new_str": "x"}
-    both = _waggle_chain(read_before_edit=True)("text_editor", blind)
-    assert both.output.count("without reading it first") == 1
-    assert "[WAGGLE]" in both.output                        # said twice
-
-    deferred = _waggle_chain(read_before_edit=False)("text_editor", blind)
-    assert not deferred.success                             # still enforced
-    assert "[WAGGLE]" in deferred.output
-    assert "without reading it first" not in deferred.output  # said once
+    assert "without reading it first" in _chain(True)("text_editor", blind).output
+    assert "without reading it first" not in _chain(False)("text_editor", blind).output
 
 
 def test_edit_streak_nudges_survive_with_read_before_edit_off():
     """Turning off one rule must not disable the other."""
-    call = _waggle_chain(read_before_edit=False)
+    call = _chain(read_before_edit=False)
     call("text_editor", {"command": "view", "path": PATH})
     outputs = [call("text_editor", {"command": "write", "path": PATH,
                                     "file_text": f"v{i}"}).output
@@ -589,8 +584,7 @@ def test_trace_records_runtime_bytes_while_the_model_sees_bounded_output(tmp_pat
 
 def _args(**kw):
     import types
-    base = dict(plugins=None, coordinate=False, guardrails=None,
-                waggle_ttl=120.0, max_output_bytes=12000)
+    base = dict(plugins=None, guardrails=None, max_output_bytes=12000)
     base.update(kw)
     return types.SimpleNamespace(**base)
 
@@ -604,19 +598,31 @@ def test_proxy_bounds_output_whenever_it_mounts_the_chain():
     """Truncation only reaches proxy clients if the assembly actually includes
     it — the flag combinations, not the docstring, are the contract."""
     from swebench.mcp_server import _build_pipeline
-    for args in (_args(guardrails="warn"), _args(coordinate=True),
-                 _args(guardrails="warn", coordinate=True)):
+    for args in (_args(guardrails="warn"), _args(guardrails="reject")):
         names = [i.name for i in _build_pipeline(args).interceptors]
         assert names[-1] == "TruncateInterceptor", names   # innermost seat
 
 
-def test_proxy_defers_read_before_edit_to_waggle_when_coordinating():
+def test_proxy_guardrails_enforce_read_before_edit():
+    """It used to be deferred to a coordination seat below, which is gone; with
+    guardrails as the only seat, the rule has to be on."""
     from swebench.mcp_server import _build_pipeline
     seats = {i.name: i for i in
-             _build_pipeline(_args(guardrails="warn", coordinate=True)).interceptors}
-    assert seats["GuardrailInterceptor"].read_before_edit is False
-    assert _build_pipeline(_args(guardrails="warn")) \
-        .interceptors[0].read_before_edit is True
+             _build_pipeline(_args(guardrails="warn")).interceptors}
+    assert seats["GuardrailInterceptor"].read_before_edit is True
+
+
+def test_a_plugins_file_replaces_the_assembly(tmp_path):
+    """How a coordination seat comes back after Waggle's removal: as a plugin."""
+    from swebench.mcp_server import _build_pipeline
+    path = tmp_path / "seats.py"
+    path.write_text(
+        "from swebench.agent.pipeline import ToolInterceptor\n"
+        "class MySeat(ToolInterceptor):\n    pass\n"
+        "PIPELINE = [MySeat()]\n")
+    names = [i.name for i in
+             _build_pipeline(_args(plugins=str(path))).interceptors]
+    assert names == ["MySeat"]
 
 
 def test_http_sessions_are_stable_for_an_identified_client():

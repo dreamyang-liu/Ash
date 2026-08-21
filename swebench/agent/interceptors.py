@@ -154,10 +154,9 @@ def default_pipeline(guardrail_state: Optional[GuardrailState] = None,
     annotate last — a warning is appended after truncation and therefore survives
     it (it would otherwise be elided along with the output's middle).
 
-    Guardrails are advisory here; rejection is Waggle's job when coordination is
-    mounted. Pass ``read_before_edit=False`` when composing this chain with
-    ``WaggleInterceptor``, which enforces that rule itself. Pass ``renderer`` to
-    show commands to the model differently.
+    Guardrails are advisory here. Pass ``read_before_edit=False`` when composing
+    this chain with a coordination interceptor that enforces the same rule, so the
+    model is not told it twice. Pass ``renderer`` to show commands differently.
     """
     return ToolPipeline([
         GuardrailInterceptor(state=guardrail_state, enforcement="warn",

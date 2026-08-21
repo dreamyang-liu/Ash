@@ -250,11 +250,11 @@ def piped_executor(pipeline: ToolPipeline, inner: Executor, agent_id: str,
       handed out -- a stale id would silently key coordination state to the
       wrong workspace.
     - ``ctx.metadata["executor"]`` carries ``inner`` so interceptors needing
-      probe traffic or arbitrated writes (Waggle) reach the sandbox without
+      probe traffic or arbitrated writes reach the sandbox without
       re-entering the pipeline.
     - Agents whose calls must be arbitrated together must share ONE pipeline
       instance (coordination state lives inside its interceptors). Blocking
-      interceptors (Waggle reservation waits) block the calling thread, so
+      interceptors (one waiting on a lock, say) block the calling thread, so
       give each agent its own thread -- the manager-worker layout.
     - The returned executor carries ``ash_pipeline``, so a host that would
       otherwise mount a chain of its own can see one is already in force and
