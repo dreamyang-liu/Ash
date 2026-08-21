@@ -48,7 +48,7 @@ class GuardrailState:
             self._edit_streak.pop((agent_id, sandbox_id), None)
 
     def dump(self) -> dict:
-        """JSON-friendly snapshot, so an audit can read this seat's state.
+        """JSON-friendly snapshot, so an audit can read this interceptor's state.
 
         Keyed over reads *and* streaks: an agent that only ever edited blindly
         has no read entry, and it is exactly the behavior this audit exists to

@@ -1,4 +1,4 @@
-"""The seat that hands a rendered outcome to the model."""
+"""The interceptor that hands a rendered outcome to the model."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ class OutcomePresenter(ToolInterceptor):
 
     The runtime executes and reports (ADR-1): a command's exit code, its two
     streams unmerged, byte counts, truncation flags. Rendering those for a reader
-    is policy, and policy is code (ADR-3) — so this seat takes the renderer as a
+    is policy, and policy is code (ADR-3) — so this interceptor takes the renderer as a
     plain function::
 
         renderer(outcome: CommandOutcome) -> str | None
@@ -25,8 +25,8 @@ class OutcomePresenter(ToolInterceptor):
     no outcome (a refusal, a tool that runs no command, a plain success whose
     text is just its stdout) pass through untouched.
 
-    Mount it innermost: it composes the text, the truncation seat bounds whatever
-    it composed, and the guardrail seat annotates last — so a renderer cannot
+    Mount it innermost: it composes the text, the truncation interceptor bounds whatever
+    it composed, and the guardrail interceptor annotates last — so a renderer cannot
     hand the model more than the byte budget allows.
     """
 

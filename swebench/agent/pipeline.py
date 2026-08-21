@@ -81,7 +81,7 @@ class CallContext:
     metadata: dict = field(default_factory=dict)
 
 
-#  The four verdicts are the four things a seat can do about a call: let it
+#  The four verdicts are the four things an interceptor can do about a call: let it
 #  through, change it, refuse it, or answer it. They are exhaustive rather than
 #  convenient — dropping one does not remove the need, it pushes callers onto a
 #  workaround that loses something. Each docstring below says which.
@@ -97,7 +97,7 @@ class Continue:
     """Let the call proceed unchanged.
 
     An observer needs a way to say "I looked and I am not interfering", distinct
-    from having no opinion. Audit and metering seats return only this.
+    from having no opinion. Audit and metering interceptors return only this.
     """
 
 
@@ -116,17 +116,17 @@ class Reject:
 class Rewrite:
     """Let the call proceed with ``new_args`` instead of ``ctx.args``.
 
-    A seat could instead mutate ``ctx.args`` in place -- ``CallContext`` is frozen,
+    An interceptor could instead mutate ``ctx.args`` in place -- ``CallContext`` is frozen,
     but that only binds the fields, so the dict inside is writable. The difference
     shows up in the ``after`` hooks: ``Rewrite`` derives a fresh context, so every
-    seat's ``after`` sees the args *its own* ``before`` saw, while an in-place edit
-    is visible to the seats outside it.
+    interceptor's ``after`` sees the args *its own* ``before`` saw, while an in-place edit
+    is visible to the interceptors outside it.
 
-    That distinction is what makes an audit seat trustworthy. It records "the agent
+    That distinction is what makes an audit interceptor trustworthy. It records "the agent
     asked for X" on the way in and "the result was Y" on the way out; if an inner
-    seat rewrote the args in place, the pair no longer describes one request. With
+    interceptor rewrote the args in place, the pair no longer describes one request. With
     ``Rewrite``, adding ``timeout 300`` to a pytest command is invisible to the
-    seats above -- they still see what the agent asked for.
+    interceptors above -- they still see what the agent asked for.
     """
     new_args: dict
 
@@ -136,7 +136,7 @@ class ShortCircuit:
     """Answer the call with ``result`` without reaching the inner executor.
 
     The difference from ``Reject`` is that this result can be a *success*. A cache
-    seat that recognises a repeated `pytest` invocation has a real answer to give,
+    interceptor that recognises a repeated `pytest` invocation has a real answer to give,
     and giving it through ``Reject`` would hand the model ``success=False`` on a
     passing test suite -- an agent reading that goes off to fix a test that was
     never broken.
@@ -156,7 +156,7 @@ _VERDICT_TYPES = (Continue, Reject, Rewrite, ShortCircuit)
 # --------------------------------------------------------------------------- #
 
 class ToolInterceptor:
-    """One seat on the tool-call path. Subclass and override the hooks."""
+    """One interceptor on the tool-call path. Subclass and override the hooks."""
 
     tools: "set[str] | Literal['*']" = "*"  # which tools this interceptor sees
     fail_mode: Literal["open", "closed"] = "open"
@@ -301,7 +301,7 @@ def piped_executor(pipeline: ToolPipeline, inner: Executor, agent_id: str,
       give each agent its own thread -- the manager-worker layout.
     - The returned executor carries ``ash_pipeline``, so a host that would
       otherwise mount a chain of its own can see one is already in force and
-      not stack a second (``AshAgent`` checks this). Two seats enforcing one
+      not stack a second (``AshAgent`` checks this). Two interceptors enforcing one
       rule state it to the model twice.
     """
     def run(tool_name: str, args: dict) -> ToolResult:

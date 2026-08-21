@@ -6,8 +6,8 @@ read the file first" becomes a crippled programming language -- so a plugins fil
 holds the instances and config holds only the path to it.
 
 Covered:
-- `extra=` puts your seats outside the defaults, and outside is what makes them
-  able to reject a call before the inner seats spend anything on it
+- `extra=` puts your interceptors outside the defaults, and outside is what makes them
+  able to reject a call before the inner interceptors spend anything on it
 - the config key reaches the agent's chain
 - with no config key, nothing changes
 """
@@ -19,7 +19,7 @@ import textwrap
 import pytest
 
 from swebench.agent import AshAgent
-from swebench.agent.seats import default_pipeline
+from swebench.agent.interceptors import default_pipeline
 from swebench.agent.pipeline import (CallContext, Continue, Reject,
                                      ToolInterceptor, ToolPipeline,
                                      load_pipeline)
@@ -43,7 +43,7 @@ PLUGIN_SOURCE = textwrap.dedent('''
 
 
 class Counter(ToolInterceptor):
-    """An observer, to check what a seat placed outside actually sees."""
+    """An observer, to check what an interceptor placed outside actually sees."""
 
     tools = "*"
 
@@ -64,7 +64,7 @@ class Blocker(ToolInterceptor):
 
 @pytest.fixture
 def plugin_file(tmp_path):
-    path = tmp_path / "my_seats.py"
+    path = tmp_path / "my_interceptors.py"
     path.write_text(PLUGIN_SOURCE)
     return str(path)
 
@@ -77,7 +77,7 @@ def _ok(tool, args):
 #  extra=
 # --------------------------------------------------------------------------- #
 
-def test_extra_seats_are_mounted_with_the_defaults():
+def test_extra_interceptors_are_mounted_with_the_defaults():
     chain = default_pipeline(extra=[Blocker()])
     names = [i.name for i in chain.interceptors]
     assert names == ["Blocker", "GuardrailInterceptor",
@@ -90,7 +90,7 @@ def test_no_extra_leaves_the_default_chain_alone():
         "GuardrailInterceptor", "TruncateInterceptor", "OutcomePresenter"]
 
 
-def test_an_extra_seat_can_stop_a_call_reaching_the_runtime():
+def test_an_extra_interceptor_can_stop_a_call_reaching_the_runtime():
     reached = []
 
     def runtime(tool, args):
@@ -105,11 +105,11 @@ def test_an_extra_seat_can_stop_a_call_reaching_the_runtime():
     assert reached == [], "the call reached the runtime despite a rejection"
 
 
-def test_extra_seats_sit_outside_so_they_see_rejected_calls():
+def test_extra_interceptors_sit_outside_so_they_see_rejected_calls():
     """Why `extra` mounts outside rather than inside: a short circuit unwinds the
-    onion through every seat already entered, so an outer observer sees calls the
-    inner seats refuse. An inner one would not -- which is the whole reason to
-    care where the seat goes."""
+    onion through every interceptor already entered, so an outer observer sees calls the
+    inner interceptors refuse. An inner one would not -- which is the whole reason to
+    care where the interceptor goes."""
     counter = Counter()
     chain = default_pipeline(extra=[counter, Blocker()])
     chain.execute(CallContext("a", "sb", "shell", {"command": "rm -rf /"}), _ok)
@@ -120,12 +120,12 @@ def test_extra_seats_sit_outside_so_they_see_rejected_calls():
 #  Through a plugins file, the way config does it
 # --------------------------------------------------------------------------- #
 
-def test_a_plugins_file_supplies_the_seats(plugin_file):
+def test_a_plugins_file_supplies_the_interceptors(plugin_file):
     chain = default_pipeline(extra=load_pipeline(plugin_file).interceptors)
     assert [i.name for i in chain.interceptors][0] == "NoDestructiveShell"
 
 
-def test_the_seats_from_a_file_actually_run(plugin_file):
+def test_the_interceptors_from_a_file_actually_run(plugin_file):
     chain = default_pipeline(extra=load_pipeline(plugin_file).interceptors)
     refused = chain.execute(
         CallContext("a", "sb", "shell", {"command": "rm -rf /testbed"}), _ok)

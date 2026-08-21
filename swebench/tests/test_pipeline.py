@@ -11,7 +11,7 @@ Covered:
 - tools filtering, inner-exception conversion, plugin loading
 - piped_executor: the harness-side mount (identity binding, raw-executor
   metadata, per-call sandbox-id resolution, and two agents sharing one
-  stateful seat -- what a multi-agent topology needs from the mount)
+  stateful interceptor -- what a multi-agent topology needs from the mount)
 """
 
 from __future__ import annotations
@@ -340,7 +340,7 @@ def test_piped_executor_binds_identity_and_supplies_raw_executor():
     assert seen["agent"] == "worker-1"
     assert seen["sandbox"] == "sb-42"
     # The contract for probe traffic: the raw executor rides in metadata so a
-    # seat's own calls never re-enter the pipeline.
+    # interceptor's own calls never re-enter the pipeline.
     assert seen["raw"] is inner
 
 
@@ -384,7 +384,7 @@ def test_piped_executor_does_not_leak_arg_mutations_between_layers():
 
 
 def test_two_mounted_agents_share_one_chain_and_its_state():
-    """One interceptor instance, two executors: state is shared, so a seat can
+    """One interceptor instance, two executors: state is shared, so an interceptor can
     arbitrate between agents. This is what a multi-agent topology needs from the
     mount, and it was previously asserted through Waggle -- the property belongs to
     piped_executor, so it is checked here without a coordinator.
@@ -403,15 +403,16 @@ def test_two_mounted_agents_share_one_chain_and_its_state():
                 return Reject(f"{path} is held by {held}")
             return Continue()
 
-    seat = FirstWriterWins()                  # ONE shared instance
-    pipeline = ToolPipeline([seat])
+    interceptor = FirstWriterWins()                  # ONE shared instance
+    pipeline = ToolPipeline([interceptor])
     a = piped_executor(pipeline, lambda t, args: _ok(), agent_id="A")
     b = piped_executor(pipeline, lambda t, args: _ok(), agent_id="B")
 
     assert a("text_editor", {"command": "write", "path": PATH}).success
     loser = b("text_editor", {"command": "write", "path": PATH})
     assert not loser.success and "held by A" in loser.output
-    assert seat.owner[PATH] == "A", "the two mounts did not share the seat's state"
+    assert interceptor.owner[PATH] == "A", \
+        "the two mounts did not share the interceptor's state"
 
 
 # --------------------------------------------------------------------------- #
@@ -421,9 +422,9 @@ def test_two_mounted_agents_share_one_chain_and_its_state():
 #  so these pin what would be lost by deleting them. Both failures are quiet:
 #  the workaround runs fine and reports the wrong thing.
 
-def test_rewrite_keeps_each_seats_after_consistent_with_its_own_before():
-    """An audit seat records "the agent asked for X" on the way in and "the result
-    was Y" on the way out. Rewrite derives a fresh context, so an inner seat adding
+def test_rewrite_keeps_each_interceptors_after_consistent_with_its_own_before():
+    """An audit interceptor records "the agent asked for X" on the way in and "the result
+    was Y" on the way out. Rewrite derives a fresh context, so an inner interceptor adding
     `timeout 300` cannot make that pair describe two different requests."""
     class Auditor(ToolInterceptor):
         def __init__(self):
@@ -458,7 +459,7 @@ def test_rewrite_keeps_each_seats_after_consistent_with_its_own_before():
 def test_mutating_args_in_place_is_what_rewrite_avoids():
     """The workaround, shown failing: CallContext is frozen, but that binds the
     fields, not the dict inside -- so an in-place edit leaks outward and the outer
-    seat's after no longer matches its own before."""
+    interceptor's after no longer matches its own before."""
     class Auditor(ToolInterceptor):
         def __init__(self):
             self.at_before = self.at_after = None
@@ -485,7 +486,7 @@ def test_mutating_args_in_place_is_what_rewrite_avoids():
 
 
 def test_short_circuit_can_answer_successfully_and_reject_cannot():
-    """A cache seat holding a passing test result has to report success. Through
+    """A cache interceptor holding a passing test result has to report success. Through
     Reject it would report failure on a green suite, and an agent reading that goes
     off to fix a test that was never broken."""
     answer = ToolResult(success=True, output="5 passed")

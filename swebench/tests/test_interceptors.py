@@ -30,7 +30,7 @@ import pytest
 from swebench.agent import AshAgent
 from swebench.agent.pipeline import (RAW_ERROR, RAW_OUTPUT, CallContext,
                                      ToolPipeline)
-from swebench.agent.seats import (
+from swebench.agent.interceptors import (
     EDIT_STREAK_LIMIT,
     GuardrailInterceptor,
     GuardrailState,
@@ -134,7 +134,7 @@ def test_write_does_not_require_a_read_because_it_also_creates():
     """`view` on a nonexistent path fails, so a creating `write` could never
     satisfy read-before-edit: in warn mode that is noise on the documented
     "write a reproduce script" workflow, and in reject mode creating any new
-    file becomes impossible. A seat that can afford an existence probe may refuse
+    file becomes impossible. An interceptor that can afford an existence probe may refuse
     blind *overwrites*; a rule that cannot afford the probe must not claim
     `write`."""
     pipe = ToolPipeline([GuardrailInterceptor()])
@@ -161,8 +161,8 @@ def test_one_place_states_what_counts_as_an_edit():
     """Two sets, one narrower than the other, and the difference is `write`:
     everything that mutates a file (EDIT_COMMANDS, for streak counting) versus
     everything that mutates *existing* content (CONTENT_EDIT_COMMANDS, for
-    read-before-edit). A coordination seat keys off the wider one; that seat was
-    removed with Waggle, and the distinction is the part worth keeping."""
+    read-before-edit). A coordination interceptor keys off the wider one; that
+    one left with Waggle, and the distinction is the part worth keeping."""
     from swebench.agent.tools import CONTENT_EDIT_COMMANDS, EDIT_COMMANDS
     assert "write" in EDIT_COMMANDS
     assert "write" not in CONTENT_EDIT_COMMANDS
@@ -181,22 +181,22 @@ def test_malformed_command_argument_is_not_a_policy_rejection(junk):
     assert result.error != "rejected by GuardrailInterceptor"
 
 
-def test_warning_survives_a_rejection_from_a_deeper_seat():
-    """The warning is stashed in `before` and emitted in `after`. A deeper seat
+def test_warning_survives_a_rejection_from_a_deeper_interceptor():
+    """The warning is stashed in `before` and emitted in `after`. A deeper interceptor
     rejecting must not swallow it — the guardrail was entered, so per the onion
     rules its `after` still runs."""
     from swebench.agent.pipeline import Reject, ToolInterceptor
 
     class DeepRejecter(ToolInterceptor):
         def before(self, ctx):
-            return Reject("deeper seat said no")
+            return Reject("deeper interceptor said no")
 
     ctx = _ctx("text_editor", {"command": "str_replace", "path": PATH,
                                "old_str": "a", "new_str": "b"})
     result = ToolPipeline([GuardrailInterceptor(), DeepRejecter()]) \
         .execute(ctx, lambda t, a: _ok())
     assert not result.success
-    assert "deeper seat said no" in result.output       # rejection preserved
+    assert "deeper interceptor said no" in result.output       # rejection preserved
     assert "without reading it first" in result.output  # warning still delivered
     assert "guardrail_warnings" not in ctx.metadata     # stash drained
 
@@ -405,8 +405,8 @@ def _chain(read_before_edit: bool):
 
 
 def test_read_before_edit_can_be_turned_off():
-    """The switch exists so a chain with a coordination seat below does not state
-    one rule twice -- that seat left with Waggle, but the switch is independent of
+    """The switch exists so a chain with a coordination interceptor below does not state
+    one rule twice -- that interceptor left with Waggle, but the switch is independent of
     it and a chain composed by hand still needs it."""
     blind = {"command": "str_replace", "path": PATH, "old_str": "base",
              "new_str": "x"}
@@ -597,22 +597,22 @@ def test_proxy_bounds_output_whenever_it_mounts_the_chain():
     from swebench.mcp_server import _build_pipeline
     for args in (_args(guardrails="warn"), _args(guardrails="reject")):
         names = [i.name for i in _build_pipeline(args).interceptors]
-        assert names[-1] == "TruncateInterceptor", names   # innermost seat
+        assert names[-1] == "TruncateInterceptor", names   # innermost interceptor
 
 
 def test_proxy_guardrails_enforce_read_before_edit():
-    """It used to be deferred to a coordination seat below, which is gone; with
-    guardrails as the only seat, the rule has to be on."""
+    """It used to be deferred to a coordination interceptor below, which is gone; with
+    guardrails as the only interceptor, the rule has to be on."""
     from swebench.mcp_server import _build_pipeline
-    seats = {i.name: i for i in
+    interceptors = {i.name: i for i in
              _build_pipeline(_args(guardrails="warn")).interceptors}
-    assert seats["GuardrailInterceptor"].read_before_edit is True
+    assert interceptors["GuardrailInterceptor"].read_before_edit is True
 
 
 def test_a_plugins_file_replaces_the_assembly(tmp_path):
-    """How a coordination seat comes back after Waggle's removal: as a plugin."""
+    """How a coordination interceptor comes back after Waggle's removal: as a plugin."""
     from swebench.mcp_server import _build_pipeline
-    path = tmp_path / "seats.py"
+    path = tmp_path / "interceptors.py"
     path.write_text(
         "from swebench.agent.pipeline import ToolInterceptor\n"
         "class MySeat(ToolInterceptor):\n    pass\n"
@@ -624,7 +624,7 @@ def test_a_plugins_file_replaces_the_assembly(tmp_path):
 
 def test_http_sessions_are_stable_for_an_identified_client():
     """Interceptor state is keyed by session identity, so a client that cannot
-    be identified gets a new one per request and no seat can hold state. MCP's
+    be identified gets a new one per request and no interceptor can hold state. MCP's
     own `initialize` hands out a sessionId; honoring it back is what makes
     read-before-edit satisfiable over HTTP."""
     from swebench.mcp_server import HttpMcpServer, SandboxPool
@@ -681,40 +681,40 @@ def test_a_plain_executor_still_gets_the_default_chain():
 
 
 # --------------------------------------------------------------------------- #
-#  A seat that rewrites a result must not destroy the rest of it
+#  An interceptor that rewrites a result must not destroy the rest of it
 # --------------------------------------------------------------------------- #
 
-def test_no_seat_drops_the_structured_outcome():
-    """Every seat here rebuilds ToolResult to change one field, and `outcome` has
+def test_no_interceptor_drops_the_structured_outcome():
+    """Every interceptor here rebuilds ToolResult to change one field, and `outcome` has
     to survive the rebuild: it is the runtime's structured report (exit code, the
-    two streams, byte counts), and a seat further out may want to read it.
+    two streams, byte counts), and an interceptor further out may want to read it.
 
-    The guardrail seat used to drop it. That was invisible while it was outermost
+    The guardrail interceptor used to drop it. That was invisible while it was outermost
     -- nothing downstream looked -- and became reachable as soon as `extra=` let a
-    caller mount a seat outside it. Swept across the chain rather than tested on
-    one seat, so a new seat inherits the check."""
+    caller mount an interceptor outside it. Swept across the chain rather than tested on
+    one interceptor, so a new interceptor inherits the check."""
     from swebench.models import CommandOutcome
 
     outcome = CommandOutcome(exit_code=1, stdout="out", stderr="err",
                              stdout_bytes=3, stderr_bytes=3)
     edit = {"command": "str_replace", "path": PATH, "old_str": "a", "new_str": "b"}
 
-    for seat in default_pipeline().interceptors:
+    for interceptor in default_pipeline().interceptors:
         # Long enough to trigger truncation, and an edit so the guardrail warns:
-        # each seat must be on its rewriting path, not its pass-through path.
+        # each interceptor must be on its rewriting path, not its pass-through path.
         incoming = ToolResult(success=False, output="x" * 40_000,
                               error="y" * 40_000, outcome=outcome)
         ctx = CallContext(agent_id="A", sandbox_id="sb", tool_name="text_editor",
                           args=dict(edit), metadata={})
-        pipe = ToolPipeline([seat])
+        pipe = ToolPipeline([interceptor])
         result = pipe.execute(ctx, lambda t, a: incoming)
         assert result.outcome is outcome, \
-            f"{seat.name} dropped the outcome while rewriting the result"
+            f"{interceptor.name} dropped the outcome while rewriting the result"
 
 
 def test_the_whole_default_chain_preserves_the_outcome():
-    """End to end, not seat by seat: what the agent loop receives still carries
-    the structured report."""
+    """End to end rather than one at a time: what the agent loop receives still
+    carries the structured report."""
     from swebench.models import CommandOutcome
 
     outcome = CommandOutcome(exit_code=1, stdout="out", stderr="err")

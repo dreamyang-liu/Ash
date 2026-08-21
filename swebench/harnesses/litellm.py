@@ -14,7 +14,7 @@ from ..models import AgentConfig
 from ..agent import AshAgent
 from ..agent.trace import new_run_id
 from ..agent.tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA
-from ..agent.seats import default_pipeline
+from ..agent.interceptors import default_pipeline
 from ..agent.pipeline import load_pipeline
 from .. import style as S
 
@@ -95,7 +95,7 @@ class LiteLLMHarness(BaseHarness):
             )
             if quiet:
                 agent.stream = False
-            # Your own L2 seats, mounted outside the defaults. `interceptors` is
+            # Your own L2 interceptors, mounted outside the defaults. `interceptors` is
             # a path to a Python file holding `PIPELINE = [MyInterceptor()]` --
             # a file rather than a config schema because policy is code (ADR-3):
             # a YAML dialect for "reject writes under src/ unless ..." becomes a

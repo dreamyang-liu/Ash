@@ -6,7 +6,7 @@ retries in `llm.py`, prompts in `prompts.py`, conversation/trajectory state in
 also owns tool dispatch, so a manifest-defined tool is handed over by name and
 expanded there rather than here. Tool-path
 concerns (guardrails, output truncation) are L2 interceptors on a `ToolPipeline`
-(`seats/`) rather than loop code, so the MCP proxy and
+(`interceptors/`) rather than loop code, so the MCP proxy and
 harness-side mounts get them too; model-path concerns (budget warnings) remain
 `hooks.py`. What remains here is the loop: query the model, run tool calls,
 repeat.
@@ -27,7 +27,7 @@ from .pipeline import (EXECUTOR, RAW_ERROR, RAW_OUTPUT, CallContext,
 from .tools import tool_summary, TOOLS_SCHEMA, BASH_ONLY_SCHEMA, route_agent_tool, is_custom_tool
 from .trace import ToolTraceWriter, new_run_id
 from . import hooks
-from . import seats
+from . import interceptors
 
 __all__ = ["AshAgent", "build_system_prompt", "build_instance_message",
            "TOOLS_SCHEMA", "BASH_ONLY_SCHEMA"]
@@ -97,7 +97,7 @@ class AshAgent:
             return self.pipeline
         if mounted_pipeline(self.executor) is not None:
             return ToolPipeline([])
-        return seats.default_pipeline()
+        return interceptors.default_pipeline()
 
     def _governed(self, metadata: dict) -> Callable[[str, dict], ToolResult]:
         """This call's executor, wrapped in the L2 pipeline if one is mounted.
@@ -140,13 +140,13 @@ class AshAgent:
             # artifact->shell (ash_sandbox.Sandbox.call_agent_tool), which also
             # remembers where the binary landed, so a repeat call skips the
             # download round-trip. Interceptors therefore see one opaque call --
-            # a coordination seat cannot see how such a tool touches files, so it
+            # a coordination interceptor cannot see how such a tool touches files, so it
             # must be told the tool's name to watch it at all.
             exec_name, exec_args = name, dict(args)
         else:
             # Builtin names ARE translated here, even though the executor would
             # do it too: `bash` must reach the interceptors as `shell`, or a
-            # bash_only run would hide every command from the seats that key on
+            # bash_only run would hide every command from the interceptors that key on
             # the runtime tool -- a drift scan above all.
             try:
                 exec_name, exec_args = route_agent_tool(name, args)

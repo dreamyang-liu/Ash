@@ -1,4 +1,4 @@
-"""The default truncation seat: elide the middle, keep both ends."""
+"""The default truncation interceptor: elide the middle, keep both ends."""
 
 from __future__ import annotations
 
@@ -46,9 +46,9 @@ class TruncateInterceptor(ToolInterceptor):
         new_output = truncate_output(result.output,
                                     max(self.max_len - error_budget, 1))
 
-        # setdefault: RAW_* hold what the RUNTIME returned. An inner seat (the
+        # setdefault: RAW_* hold what the RUNTIME returned. An inner interceptor (the
         # presenter) may already have recorded that before rewriting; the text
-        # this seat received would then be a rewrite, not ground truth.
+        # this interceptor received would then be a rewrite, not ground truth.
         if new_output != result.output:
             ctx.metadata.setdefault(RAW_OUTPUT, result.output)
         if new_error != result.error:

@@ -9,16 +9,16 @@ ADR-2):
     Thread-safe: one instance is shared by every agent on a pipeline.
 
 ``GuardrailInterceptor``
-    An L2 seat on the tool-call path. ``before`` decides (warn or reject),
+    An L2 interceptor on the tool-call path. ``before`` decides (warn or reject),
     ``after`` records successful reads and appends warnings to the result.
     Mounted in the MCP proxy, on a harness executor via
     ``AshSession.executor_for(pipeline=)``, or via ``--plugins``.
 
 Enforcement is a parameter, not a fork. ``enforcement="warn"`` appends advisory
 text (the agent loop's historical behavior, fail-open); ``enforcement="reject"``
-refuses the call outright. A coordination seat mounted below may enforce the same
+refuses the call outright. A coordination interceptor mounted below may enforce the same
 rule with a better message (it can name the version the agent is stale against);
-when one is, give this seat ``read_before_edit=False`` so the model is not told
+when one is, give this interceptor ``read_before_edit=False`` so the model is not told
 the same thing twice.
 """
 
@@ -63,9 +63,9 @@ class GuardrailInterceptor(ToolInterceptor):
     view counted; this mounting fixes that.)
 
     ``read_before_edit=False`` drops that rule and keeps only edit-streak
-    nudges. Use it when a coordination seat is also mounted: its
+    nudges. Use it when a coordination interceptor is also mounted: its
     ``require_read`` enforces the same rule with a better message (it names the
-    version the agent is stale against), and two seats stating one rule tells
+    version the agent is stale against), and two interceptors stating one rule tells
     the model the same thing twice.
     """
 
@@ -122,11 +122,11 @@ class GuardrailInterceptor(ToolInterceptor):
         # the model; the trace must still be able to report the real output
         # (and not count the warning's bytes as the tool's).
         ctx.metadata.setdefault(RAW_OUTPUT, result.output)
-        # `outcome` is carried through: a seat that annotates text must not
-        # destroy the structured report a seat further out still wants to read.
-        # Dropping it was invisible while this was the outermost seat -- nothing
+        # `outcome` is carried through: an interceptor that annotates text must not
+        # destroy the structured report an interceptor further out still wants to read.
+        # Dropping it was invisible while this was the outermost interceptor -- nothing
         # downstream looked -- and became reachable the moment `extra=` let a
-        # caller mount their own seat outside it.
+        # caller mount their own interceptor outside it.
         return ToolResult(success=result.success,
                           output=_append_warnings(result.output, warnings),
                           error=result.error,

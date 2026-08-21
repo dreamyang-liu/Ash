@@ -54,7 +54,7 @@ swebench/
 ├── patch.py          # Diffing a worktree, for shared-tree topologies
 ├── agent/            # The agent loop and the L2 interceptor pipeline:
 │   ├── pipeline.py   #   the onion: verdicts, CallContext, ToolPipeline
-│   ├── seats/        #   one package per interceptor — guardrail, truncate,
+│   ├── interceptors/ #   one package each — guardrail, truncate,
 │   │                 #   present — plus the default assembly
 │   └── ...           #   the loop itself: conversation, llm, tools, prompts,
 │                     #   hooks, trace
@@ -95,9 +95,10 @@ Registered in `harnesses/__init__.py`:
 Add one by subclassing `BaseHarness` and registering it in `HARNESSES`.
 
 `manager-worker` and `best-of-n` were removed while the single-agent path is being
-settled, and Waggle (the write-arbitration seat they used) with them. Mounting one
-shared chain across several agents still works and is still tested — a coordination
-seat comes back as a plugin, or by reverting.
+settled, and Waggle (the write-arbitration interceptor they used) with them.
+Mounting one
+shared chain across several agents still works and is still tested — a
+coordination interceptor comes back as a plugin, or by reverting.
 
 ## Evaluating results
 

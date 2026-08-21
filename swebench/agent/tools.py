@@ -35,12 +35,12 @@ AGENT_TOOL_ROUTES = {k: v for k, v in _BUILTIN_ROUTES.items() if k != "bash"}
 
 #: text_editor commands that modify a file. The single source of truth for
 #: "this call is an edit", shared by everything that has to reason about it:
-#: The guardrails (guardrails.py), and any coordination seat mounted as a plugin.
+#: The guardrails (guardrails.py), and any coordination interceptor mounted as a plugin.
 EDIT_COMMANDS = frozenset({"str_replace", "insert", "write"})
 
 #: Edits that rewrite *existing* content, so "you did not read this file first"
 #: is unambiguous. `write` is excluded on purpose: it also creates files, and
-#: telling creation from overwrite needs a filesystem probe. A seat that can
+#: telling creation from overwrite needs a filesystem probe. An interceptor that can
 #: afford that probe may refuse blind overwrites; one that cannot pays for
 #: that probe and refuses only blind overwrites (`_write_unregistered`); a rule
 #: that cannot afford the probe must not claim to cover `write`, or creating a
@@ -53,7 +53,7 @@ def route_agent_tool(name: str, args: dict) -> tuple[str, dict]:
 
     Covers the bash_only alias as well as the default surface. The agent loop
     routes before handing a call to its executor so that interceptors see the
-    runtime tool: a seat keyed on `shell` must not go blind because a run is in
+    runtime tool: an interceptor keyed on `shell` must not go blind because a run is in
     bash_only mode.
     """
     runtime_tool = _BUILTIN_ROUTES.get(name)

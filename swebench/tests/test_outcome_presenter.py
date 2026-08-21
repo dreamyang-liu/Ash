@@ -2,14 +2,14 @@
 
 The runtime reports what a command did — exit code, streams unmerged, byte
 counts — in one schema shared by `shell` and `process read`. Rendering that for a
-model is policy, so it lives in a pipeline seat whose renderer is a plain
+model is policy, so it lives in a pipeline interceptor whose renderer is a plain
 function. These tests pin that seam and the default rendering.
 
 Covered:
 - the default renderer: sections from separate streams, exit status from the
   number, silent failure, timeout, still-running, clipping advice
 - a forged divider in stdout cannot fake a stderr section
-- the seat: custom renderer, None keeps the runtime's text, no-outcome results
+- the interceptor: custom renderer, None keeps the runtime's text, no-outcome results
   pass through, a crashing renderer fails open
 - composition: presented text is bounded by Truncate and annotated by Guardrails
 """
@@ -19,7 +19,7 @@ from __future__ import annotations
 import pytest
 
 from swebench.agent.pipeline import RAW_OUTPUT, CallContext, ToolPipeline
-from swebench.agent.seats import (
+from swebench.agent.interceptors import (
     GuardrailInterceptor,
     OutcomePresenter,
     TruncateInterceptor,
@@ -103,7 +103,7 @@ def test_clipping_reports_real_sizes_and_suggests_a_remedy():
 
 
 # --------------------------------------------------------------------------- #
-#  The seat
+#  The interceptor
 # --------------------------------------------------------------------------- #
 
 def test_a_custom_renderer_drives_what_the_model_reads():
@@ -153,7 +153,7 @@ def test_default_chain_presents_then_bounds_then_annotates():
                      "OutcomePresenter"]
 
 
-def test_presented_text_is_bounded_by_the_truncation_seat():
+def test_presented_text_is_bounded_by_the_truncation_interceptor():
     """The presenter is innermost, so what it composes is what gets bounded — a
     renderer cannot hand the model more than the byte budget allows."""
     pipe = ToolPipeline([
@@ -170,7 +170,7 @@ def test_presented_text_is_bounded_by_the_truncation_seat():
     assert "[exit 1]" in result.output                      # presenter's tail kept
     assert len(result.output) < 40000
     assert ctx.metadata[RAW_OUTPUT] == "runtime text"       # innermost rewrite wins
-    assert result.outcome is not None                       # facts survive every seat
+    assert result.outcome is not None            # the facts survive the chain
 
 
 def test_the_loop_renders_outcomes_by_default():

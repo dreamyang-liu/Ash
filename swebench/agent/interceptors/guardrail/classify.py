@@ -1,6 +1,6 @@
 """Which calls count as reading, editing, or running the tests.
 
-Separate from the seat because the answers come from the tool contract, not from
+Separate from the interceptor because the answers come from the tool contract, not from
 any one rule: ``EDIT_COMMANDS`` and ``CONTENT_EDIT_COMMANDS`` live in
 ``agent/tools.py`` so that "this call is an edit" is stated once.
 """

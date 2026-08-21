@@ -7,7 +7,7 @@ Supports multiple sandboxes with ownership + group-based visibility:
 - Runs as HTTP/SSE for multi-session, or stdio for single-session (backwards-compat)
 - Optionally routes exec tool calls through the L2 interceptor pipeline
   (docs/ARCHITECTURE.md): OFF by default; --guardrails mounts read-before-edit
-  and edit-streak nudges, --plugins <file.py> supplies your own seats.
+  and edit-streak nudges, --plugins <file.py> supplies your own interceptors.
 
 Usage:
     # HTTP mode (multi-session):
@@ -32,7 +32,7 @@ from ash_sandbox import Pool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
 
 from .backends import BACKENDS, BackendError, build_pool
-from .agent.seats import GuardrailInterceptor, TruncateInterceptor
+from .agent.interceptors import GuardrailInterceptor, TruncateInterceptor
 from .agent.pipeline import CallContext, ToolPipeline, load_pipeline
 from .models import ToolResult
 from .patch import (UNTRACKED_LIST, WORKDIR, diff_command, format_patch,
@@ -429,7 +429,7 @@ class SessionHandler:
             future = asyncio.run_coroutine_threadsafe(
                 entry.sandbox.call(tool, **tool_args), loop)
             sdk = future.result()
-            # from_sdk, so a command's outcome reaches seats on this path too
+            # from_sdk, so a command's outcome reaches interceptors on this path too
             # (a presenter rendering it, audit reading its byte counts).
             result = ToolResult.from_sdk(sdk)
             if sdk.is_error and not result.error:
@@ -631,12 +631,12 @@ def _build_pipeline(args) -> "ToolPipeline | None":
     Default OFF: with no --plugins or --guardrails the proxy dispatches tool calls
     exactly as before. --plugins replaces the default assembly entirely — the
     PIPELINE list in the file is the configuration, which is also how a
-    coordination seat comes back (Waggle was removed; see git history).
+    coordination interceptor comes back (Waggle was removed; see git history).
 
     Order is semantics: guardrails annotate on the way out, so their ``after``
     runs last and a warning is appended to whatever result the model ends up
     seeing. Truncation sits innermost, so it bounds the runtime's result and the
-    seats above it annotate already-bounded text.
+    interceptors above it annotate already-bounded text.
     """
     if args.plugins:
         return load_pipeline(args.plugins)
@@ -644,7 +644,7 @@ def _build_pipeline(args) -> "ToolPipeline | None":
     if args.guardrails:
         interceptors.append(GuardrailInterceptor(enforcement=args.guardrails))
     if interceptors and args.max_output_bytes > 0:
-        # Only with another seat: mounting the chain for truncation alone would
+        # Only with another interceptor: mounting the chain for truncation alone would
         # change the default dispatch path, and the runtime already bounds its
         # own output (ASH_MAX_OUTPUT_BYTES).
         interceptors.append(TruncateInterceptor(max_len=args.max_output_bytes))

@@ -70,7 +70,7 @@ def register_analyzer():
 def test_a_custom_tool_reaches_the_executor_under_its_own_name():
     """The loop no longer expands manifest tools: the executor does, and it
     memoises where the binary landed so a repeat call skips the download. One
-    call also means one seat decision -- tell a coordination seat about such a
+    call also means one interceptor decision -- tell a coordination interceptor about such a
     tool through
     `opaque_writers` so its drift scan still runs."""
     register_analyzer()
@@ -88,7 +88,7 @@ def test_a_custom_tool_reaches_the_executor_under_its_own_name():
 
 
 def test_builtin_names_are_still_translated_for_the_interceptors():
-    """Unlike custom tools, builtins are routed here on purpose: a seat keyed on
+    """Unlike custom tools, builtins are routed here on purpose: an interceptor keyed on
     `shell` must not go blind because a run is in bash_only mode."""
     calls = []
 
