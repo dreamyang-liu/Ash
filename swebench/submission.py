@@ -38,16 +38,19 @@ path and one on the budget path, so both are exercised by that number.
 
 Who uses this
 -------------
-The one-agent-one-tree topologies, where "which files did you change" has a single
-answer to ask for: ``harnesses/litellm.py`` and ``runner.py``.
+``harnesses/litellm.py`` — one agent, one worktree, so "which files did you
+change" has a single answer to ask for.
 
-Not ``manager_worker`` or ``best_of_n``. Several agents share one worktree there,
-so no single agent can report the change set -- the combined diff *is* the answer,
-and ``session.get_patch()`` reads it from the tree that holds it. Not
-``rollout_server`` either: it grades the live tree by running tests in it, so its
+Not ``rollout_server``: it grades the live tree by running tests in it, so its
 ``get_patch()`` call is a gate ("is there anything to grade?") rather than the
-answer being graded. Three call sites, three different questions, which is why
-this module is imported by two of them rather than replacing the other two.
+answer being graded. Asking there would buy nothing and cost turns.
+
+The precondition is one agent owning the tree, not "every harness". The
+manager-worker and best-of-n harnesses put several agents in one worktree, where no
+single agent can report the change set and the combined diff *is* the answer; they
+used ``session.get_patch()`` for that reason, and were removed while the
+single-agent path settles. A topology like that returning here needs the tree's
+diff, not this module.
 """
 
 from __future__ import annotations

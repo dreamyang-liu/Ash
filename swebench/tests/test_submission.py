@@ -350,18 +350,23 @@ def test_a_reused_agent_is_asked_again_on_its_second_run(monkeypatch):
         "second run was never asked to submit"
 
 
-def test_only_the_single_agent_topologies_ask_for_a_submission():
-    """A shared worktree has no single agent to ask: manager_worker and best_of_n
-    run several agents in one tree, so the combined diff is the answer and
-    get_patch() is right there. Documented in submission.py; asserted here so the
-    boundary is not crossed by accident."""
+def test_the_reserve_is_only_for_agents_that_can_answer_for_the_whole_tree():
+    """Asking works because one agent owns the worktree, so "which files did you
+    change" has one answer. It does not generalise: the manager-worker and
+    best-of-n harnesses put several agents in one tree and used get_patch(), and
+    they were deleted while the single-agent path settles.
+
+    So this asserts the precondition instead of naming the exceptions -- anything
+    installing the reserve must be a topology where one agent can answer for the
+    tree, and the rollout server shows the other reason to skip it: it grades the
+    live tree by running tests in it, so its get_patch() is a gate rather than the
+    answer."""
     import inspect
-    from swebench.harnesses import best_of_n, manager_worker
-    for module in (best_of_n, manager_worker):
-        source = inspect.getsource(module)
-        assert "reserve_submission" not in source, \
-            f"{module.__name__} shares one worktree; it cannot ask one agent"
-        assert "get_patch()" in source
+    from swebench import rollout_server
+    source = inspect.getsource(rollout_server)
+    assert "reserve_submission" not in source, \
+        "the rollout server grades the tree; a submitted diff is not what it needs"
+    assert "get_patch()" in source
 
 
 def test_an_appended_ask_is_recorded_in_the_trajectory():

@@ -250,7 +250,7 @@ localhost HTTP (milliseconds), which bounds the cost.
 | Command results | ✅ one `CommandOutcome` schema (`runtime/tools/boundedlog.go`) answered by both `shell` and `process read` — exit code, streams unmerged, byte counts, truncation flags; unpacked into SDK fields, rendered for the model by `OutcomePresenter` (`interceptors.py`) | more tools report an outcome as they grow one |
 | Policy hooks | ✅ `WagglePolicy` (`on_write`/`on_conflict`/`on_drift`/`on_commit`), run inside the file's critical section | + two reference policies (ownership ACL, auto-merge-then-reject) |
 | Sandbox source | ✅ `backend:` config picks the SDK pool (`swebench/backends.py`): `docker`, `microvm` (Firecracker/AgentENV, ~135 ms spawn), `k8s`. No call site names a pool | speculative `fork()` for `best-of-n` (share one exploration prefix) |
-| Harnesses (L3) | `litellm`, `claude-code`, `manager-worker`, `best-of-n` | + orchestrator-worker (ledger/replan), debate |
+| Harnesses (L3) | `litellm`, `claude-code` | restore `manager-worker` / `best-of-n` (removed while the single-agent path settles; the L2 machinery they used is still here), + orchestrator-worker (ledger/replan), debate |
 | Eval (L4) | SWE-bench (`extends:` configs, batch runner) | + more benchmarks; topology × coordination A/B matrix |
 
 ## Roadmap (ordered)

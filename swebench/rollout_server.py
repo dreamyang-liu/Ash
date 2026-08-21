@@ -52,12 +52,13 @@ from typing import Any, Callable, Optional
 
 from .agent import AshAgent, TOOLS_SCHEMA
 from .dataset import (
+    build_test_command,
     format_task_prompt,
     image_registry_for_subset,
     load_instances,
+    parse_test_list,
     resolve_image,
 )
-from .harnesses.best_of_n import build_test_command, parse_test_list
 from .models import AgentConfig
 from .sandbox import AshSession
 

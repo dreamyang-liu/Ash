@@ -46,18 +46,23 @@ def test_from_sdk_maps_success():
     assert result.success and result.output == "all good" and result.error is None
 
 
-def test_both_conversion_sites_share_one_implementation():
-    """Two hand-rolled copies of this conversion is how the duplication got in
-    (and stayed in two files). Grep is the cheapest guard against a third."""
+def test_no_module_hand_rolls_the_sdk_conversion():
+    """Two hand-rolled copies is how the duplication got in, and stayed in two
+    files. Now swept across the package rather than checking two names: the second
+    copy lived in the manager-worker harness, and a test naming files goes quiet
+    the moment one is added or removed."""
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    for name in ("sandbox.py", "harnesses/manager_worker.py"):
-        source = (root / name).read_text()
-        assert "from_sdk" in source, f"{name} should convert via ToolResult.from_sdk"
+    for path in sorted(root.rglob("*.py")):
+        if "tests" in path.parts:
+            continue
+        source = path.read_text()
         assert "error=r.output" not in source and \
                "error=sdk_result.output" not in source, \
-               f"{name} still duplicates the output into error"
+               f"{path.name} duplicates the output into error; use ToolResult.from_sdk"
+    assert "from_sdk" in (root / "sandbox.py").read_text(), \
+        "sandbox.py should convert via ToolResult.from_sdk"
 
 
 # --------------------------------------------------------------------------- #

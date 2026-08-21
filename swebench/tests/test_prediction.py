@@ -95,6 +95,9 @@ def test_no_module_assembles_a_prediction_by_hand():
 def test_every_harness_reports_through_the_builder():
     """A harness that returned a bare dict would bypass the fallbacks above."""
     root = Path(__file__).resolve().parents[1] / "harnesses"
-    for name in ("litellm.py", "best_of_n.py", "manager_worker.py", "claude_code.py"):
-        src = (root / name).read_text()
-        assert "from ..prediction import" in src, f"{name} does not use the builder"
+    for path in sorted(root.glob("*.py")):
+        if path.name in ("__init__.py", "base.py"):
+            continue                      # the registry and the ABC report nothing
+        src = path.read_text()
+        assert "from ..prediction import" in src, \
+            f"{path.name} does not use the builder"

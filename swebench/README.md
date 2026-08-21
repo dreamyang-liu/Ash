@@ -84,14 +84,16 @@ traces. Treat it as generated data.
 
 Registered in `harnesses/__init__.py`:
 
-| Harness          | Topology                                            |
-|------------------|-----------------------------------------------------|
-| `litellm`        | one agent, one sandbox — any litellm model          |
-| `claude-code`    | the Claude Code CLI, driven over MCP                |
-| `best-of-n`      | N independent attempts, one scored winner           |
-| `manager-worker` | a manager splitting work across workers in one tree |
+| Harness       | Topology                                     |
+|---------------|----------------------------------------------|
+| `litellm`     | one agent, one sandbox — any litellm model    |
+| `claude-code` | the Claude Code CLI, driven over MCP         |
 
 Add one by subclassing `BaseHarness` and registering it in `HARNESSES`.
+
+`manager-worker` and `best-of-n` were removed while the single-agent path is being
+settled; see `harnesses/__init__.py`. The L2 machinery they used (Waggle, one
+shared chain across several agents) is still here and tested.
 
 ## Evaluating results
 
