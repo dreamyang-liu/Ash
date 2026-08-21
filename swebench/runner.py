@@ -29,6 +29,8 @@ except ImportError:
 
 from .agent import AshAgent
 from .agent.trace import new_run_id
+from .submission import (DEFAULT_RESERVE_STEPS, SUBMISSION_KEY,
+                         extract_submission, reserve_submission)
 from .prediction import failure, prediction
 from .sandbox import AshSession
 from . import style as S
@@ -265,17 +267,26 @@ def run_single_instance(
             load_custom_tools(getattr(config, "custom_tools_dir", None))
             agent.set_tools_schema(TOOLS_SCHEMA + custom_agent_schemas())
 
+        # The agent hands in its own diff; the reserve buys it the turns to do
+        # so before the budget is gone. See swebench/submission.py.
+        reserve = DEFAULT_RESERVE_STEPS
+        before_query, before_finish = reserve_submission(
+            reserve, getattr(config, "workdir", "/testbed"))
+        agent.before_query_hooks.append(before_query)
+        agent.before_finish_hooks.append(before_finish)
+
         # Run agent loop
         task = format_task_prompt(instance)
         exit_status = agent.run(task, instance_id=instance_id)
 
-        # Extract patch
-        patch = session.get_patch()
+        # No fallback to git: an agent that handed nothing in reports an empty
+        # patch, and exit_status says why.
+        patch = extract_submission(agent.trajectory)
 
         # Save trajectory
         agent.trajectory.info = {
             "exit_status": exit_status,
-            "submission": patch,
+            SUBMISSION_KEY: patch,
             "model": config.model,
         }
         agent.trajectory.cost = agent.cost

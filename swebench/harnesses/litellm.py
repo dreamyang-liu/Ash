@@ -7,6 +7,8 @@ from .base import BaseHarness
 from ..dataset import resolve_image, format_task_prompt, image_registry_for_subset
 from ..backends import backend_config
 from ..prediction import failure, prediction
+from ..submission import (DEFAULT_RESERVE_STEPS, SUBMISSION_KEY,
+                          extract_submission, reserve_submission)
 from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent
@@ -93,18 +95,32 @@ class LiteLLMHarness(BaseHarness):
                 agent.stream = False
             tools_mode = c.get("tools", "default")
             agent.set_tools_schema(BASH_ONLY_SCHEMA if tools_mode == "bash_only" else TOOLS_SCHEMA)
+            # The agent hands in its own diff: it knows which files it fixed,
+            # which is the one thing a harness reading git state cannot know.
+            # The reserve buys the turns to do it before the budget is gone.
+            reserve = int(c.get("submission_reserve_steps",
+                                DEFAULT_RESERVE_STEPS))
+            if reserve > 0:
+                before_query, before_finish = reserve_submission(
+                    reserve, agent_config.workdir)
+                agent.before_query_hooks.append(before_query)
+                agent.before_finish_hooks.append(before_finish)
 
             if agent_config.instance_template:
                 task = instance.get("problem_statement", "")
             else:
                 task = format_task_prompt(instance)
             exit_status = agent.run(task, instance_id=instance_id)
-            patch = session.get_patch()
+            # No fallback to git: if the agent did not hand anything in, the
+            # prediction is empty and exit_status says why. Extracting a patch
+            # anyway would substitute our guess for the agent's judgement.
+            patch = extract_submission(agent.trajectory) if reserve > 0 \
+                else session.get_patch()
 
             # Save trajectory
             agent.trajectory.info = {
                 "exit_status": exit_status,
-                "submission": patch,
+                SUBMISSION_KEY: patch,
                 "model": agent_config.model,
             }
             agent.trajectory.cost = agent.cost

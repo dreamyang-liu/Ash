@@ -1,13 +1,24 @@
 """Pluggable hooks for the agent loop — keep cross-cutting concerns out of run().
 
-Two extension points, each a list the agent iterates:
+Three extension points, each a list the agent iterates:
 
     before_query(agent, conv) -> None
         Runs before every model call; may mutate the Conversation in place.
+    before_finish(agent, conv) -> bool
+        Runs when the agent has stopped calling tools and the loop is about to
+        report ``completed``. Returning True keeps it going for another turn.
     result_processor(content, name, args, result) -> str
         Runs on each tool result's content; returns the (possibly rewritten) text.
 
-Override agent.before_query_hooks / agent.result_processors to customize.
+Override agent.before_query_hooks / agent.before_finish_hooks /
+agent.result_processors to customize.
+
+`before_finish` exists because the two ways a run ends need different
+interventions and only one of them is predictable. A budget ceiling can be seen
+coming, so `before_query` handles it; an agent deciding it is done cannot, and it
+is the common case -- 24 of 25 recorded runs ended that way. Anything that must
+happen before the last turn therefore needs both, which is why the hook can veto
+the ending rather than merely observe it.
 
 Scope: these hooks sit on the *model* path. Tool-path concerns moved to L2
 interceptors (`interceptors.py`): output truncation used to be the one default
@@ -33,4 +44,7 @@ def budget_warning(agent, conv):
 
 
 DEFAULT_BEFORE_QUERY = [budget_warning]
+#: Nothing by default: an agent that says it is finished is finished, unless a
+#: caller has something to ask for first (see ``swebench/submission.py``).
+DEFAULT_BEFORE_FINISH = []
 DEFAULT_RESULT_PROCESSORS = []

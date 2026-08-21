@@ -66,7 +66,12 @@ class AshAgent:
         self._event_trace: Optional[ToolTraceWriter] = None
         self._warned = False
         self.stream = True                # set False to disable streaming (parallel mode)
+        #: Scratch space for hooks, cleared at the start of every run. A hook
+        #: that fires "once" needs somewhere to remember that, and an agent
+        #: reused for a second run must not inherit the first run's memory.
+        self.hook_state: dict = {}
         self.before_query_hooks = list(hooks.DEFAULT_BEFORE_QUERY)
+        self.before_finish_hooks = list(hooks.DEFAULT_BEFORE_FINISH)
         self.result_processors = list(hooks.DEFAULT_RESULT_PROCESSORS)
 
     def set_tools_schema(self, schema: list[dict]):
@@ -244,6 +249,7 @@ class AshAgent:
         self.trajectory.instance_id = instance_id
         self.cost = CostTracker()
         self._warned = False
+        self.hook_state = {}
         active_run_id = self.run_id or new_run_id()
         if self.trace_dir:
             self.trace_dir.mkdir(parents=True, exist_ok=True)
@@ -283,7 +289,9 @@ class AshAgent:
                     for tc in message.tool_calls:
                         self._run_tool(tc, conv, turn_id)
                 elif self._nudge(conv, message) == "completed":
-                    return "completed"
+                    # A hook may want one more turn before we call it a day.
+                    if not any(h(self, conv) for h in self.before_finish_hooks):
+                        return "completed"
         finally:
             if self._trace_file:
                 self._trace_file.close()

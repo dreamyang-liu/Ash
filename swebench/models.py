@@ -134,19 +134,38 @@ class CostTracker:
         except Exception:
             pass
 
+    def steps_left(self, step_limit: int, cost_limit: float) -> int:
+        """How many more model calls the budget allows, by whichever runs out first.
+
+        Steps and money are separate ceilings and the tighter one decides. Worth
+        being explicit, because they are easy to conflate: one real run stopped at
+        59 of 100 steps having spent $3.07 of $3.00, so counting steps alone would
+        have called it comfortable with 41 to go.
+        """
+        remaining_steps = step_limit - self.api_calls
+        if self.api_calls < 1 or self.total_cost <= 0:
+            return max(remaining_steps, 0)
+        avg = self.total_cost / self.api_calls
+        affordable = int((cost_limit - self.total_cost) / avg) if avg > 0 else remaining_steps
+        return max(min(remaining_steps, affordable), 0)
+
     def budget_warning(self, step_limit: int, cost_limit: float) -> Optional[str]:
-        """Return a one-time warning string when only a few steps remain, else None."""
+        """Return a one-time warning when the budget is nearly gone, else None.
+
+        Says how much is left and nothing about what to do with it -- what counts
+        as finishing is the caller's business, and a cost tracker that told an
+        agent to "submit its best attempt" was answering a question only the eval
+        layer can ask.
+        """
         if self.api_calls < 3:
             return None
-        avg = self.total_cost / self.api_calls
-        remaining_steps = step_limit - self.api_calls
-        est = min(remaining_steps, int((cost_limit - self.total_cost) / avg)) if avg > 0 else remaining_steps
-        if est > 4 and remaining_steps > 4:
+        est = self.steps_left(step_limit, cost_limit)
+        if est > 4 and (step_limit - self.api_calls) > 4:
             return None
         return (
-            f"\n\n[Budget Warning] ~{est} steps remaining "
-            f"({self.api_calls}/{step_limit} steps, ${self.total_cost:.2f}/${cost_limit:.2f} budget). "
-            f"Finalize your fix now: run tests and stop. If tests fail, revert and submit your best attempt."
+            f"\n\n[Budget] ~{est} step(s) left "
+            f"({self.api_calls}/{step_limit} steps, "
+            f"${self.total_cost:.2f}/${cost_limit:.2f})."
         )
 
     def to_dict(self) -> dict:
