@@ -94,3 +94,68 @@ def test_every_shipped_panel_is_mentioned_where_panels_are_documented():
     doc = (REPO / "docs" / "TOOL_PANEL.md").read_text()
     for panel in sorted(p.stem for p in PANEL_DIR.glob("*.y*ml")):
         assert panel in doc, f"{panel} is shipped but not mentioned in docs/TOOL_PANEL.md"
+
+
+# --------------------------------------------------------------------------- #
+#  CLAUDE.md
+# --------------------------------------------------------------------------- #
+#  It is the first thing an agent reads about this repo, so a wrong claim there
+#  propagates. It had three: "exactly 6 tools" in one place, "7 tools" in another,
+#  and a rule asking three hand-written tool lists to be edited together, which the
+#  panel compiler had already replaced.
+
+CLAUDE_MD = REPO / "CLAUDE.md"
+
+
+def test_claude_md_names_the_right_number_of_tools():
+    """The count was wrong in two places and disagreed with itself."""
+    import json
+
+    served = len(json.loads((REPO / "runtime" / "schema" / "tools.json").read_text())["tools"])
+    text = CLAUDE_MD.read_text()
+    assert f"serves **{served} tools**" in text, f"the runtime serves {served}"
+    assert f"{served} tool implementations" in text
+
+
+def test_claude_md_lists_every_tool_the_runtime_serves():
+    """A tool missing from the table is one nobody knows exists: `artifact` and
+    `wait_for_events` were both absent.
+
+    Scoped to the table, not the whole file. Checking "mentioned anywhere" passed while
+    the row was deleted, because these names also appear in the layout and the prose --
+    a mutation caught that."""
+    import json
+
+    served = {t["name"] for t in
+              json.loads((REPO / "runtime" / "schema" / "tools.json").read_text())["tools"]}
+    table = re.search(r"\n\| Tool\s+\| Purpose.*?\n\n", CLAUDE_MD.read_text(), re.S)
+    assert table, "the tool table is gone from CLAUDE.md"
+    rows = set(re.findall(r"^\| `(\w+)`", table.group(0), re.M))
+    assert rows == served, (
+        f"the table and the runtime disagree: only in the table {sorted(rows - served)}, "
+        f"only in the runtime {sorted(served - rows)}")
+
+
+def test_claude_md_paths_exist():
+    """A named path that has moved sends a reader hunting."""
+    named = set(re.findall(r'`((?:swebench|runtime|sdk|docs)/[\w/.]+)`', CLAUDE_MD.read_text()))
+    missing = [p for p in sorted(named) if not (REPO / p).exists()]
+    assert not missing, f"CLAUDE.md names {missing}, which do not exist"
+
+
+def test_claude_md_config_keys_exist():
+    """Every `section.key` it documents has to be in the flag/section table, or a
+    reader sets something that is silently ignored -- which is how `custom_tools_dir`
+    spent months reaching AgentConfig from nowhere."""
+    mapping = (REPO / "swebench" / "__main__.py").read_text()
+    claimed = set(re.findall(r'`(agent|execution|dataset|limits|model)\.(\w+)`',
+                             CLAUDE_MD.read_text()))
+    missing = [f"{s}.{k}" for s, k in sorted(claimed)
+               if f'("{s}", "{k}")' not in mapping]
+    assert not missing, f"CLAUDE.md documents {missing}, which the CLI does not map"
+
+
+def test_claude_md_does_not_ask_for_hand_synced_tool_lists():
+    """That rule described three hand-written copies. The panel is compiled now, and
+    asking a reader to edit copies that no longer exist sends them looking for them."""
+    assert "three tool views" not in CLAUDE_MD.read_text()
