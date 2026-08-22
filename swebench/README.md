@@ -52,12 +52,14 @@ swebench/
 ├── prediction.py     # The SWE-bench prediction format (eval layer)
 ├── submission.py     # Asking the agent to hand in its patch (eval layer)
 ├── patch.py          # Diffing a worktree, for shared-tree topologies
+├── style.py          # Terminal formatting for the CLI and dashboard
 ├── agent/            # The agent loop and the L2 interceptor pipeline:
 │   ├── pipeline.py   #   the onion: verdicts, CallContext, ToolPipeline
 │   ├── interceptors/ #   one package each — guardrail, truncate,
 │   │                 #   present — plus the default assembly
-│   └── ...           #   the loop itself: conversation, llm, tools, prompts,
-│                     #   hooks, trace
+│   ├── tools.py      #   panel compilation + routing (ToolPanel)
+│   └── ...           #   the loop itself: conversation, llm, prompts,
+│                     #   hooks, trace, custom_tools
 ├── harnesses/        # Pluggable topologies; base.py defines the API
 ├── configs/          # Per-model YAML, composed with `extends:`
 ├── mcp_server.py     # MCP proxy: the same pipeline for external agents
@@ -68,16 +70,19 @@ swebench/
 
 1. **Sandbox** — `AshSession.create(image)` starts one from the configured
    backend and connects to the `ash-runtime` serving tools inside it.
-2. **Agent loop** — the model gets a system prompt and the issue, and drives the
-   runtime's tools (`shell`, `text_editor`, `process`, `grep_files`, `web_*`; or a
-   single `bash` tool with `tools: bash_only`). Every call crosses one seam —
-   `executor(tool_name, args) -> ToolResult` — which is where output truncation,
-   guardrails, and multi-agent coordination mount as interceptors.
-3. **Submission** — the agent is asked for its own diff, with steps reserved so it
+2. **Tool panel** — compiled, not written: the runtime declares what it serves
+   (`runtime/schema/tools.json`) and a manifest says what to offer and how
+   (`tools:` in config, `configs/tool_panels/*.yaml`). See docs/TOOL_PANEL.md.
+   `bash_only` is one such panel — a single `shell` view with only `command`.
+3. **Agent loop** — the model gets a system prompt and the issue, and calls the
+   panel's tools. Every call crosses one seam —
+   `executor(tool_name, args) -> ToolResult` — which is where output truncation
+   and guardrails mount as interceptors (`agent/interceptors/`), and where your own
+   go via `execution.interceptors`.
+4. **Submission** — the agent is asked for its own diff, with steps reserved so it
    still has turns to answer in (`submission.py`); it knows which files it changed,
-   which a harness reading git state can only guess. Shared-worktree topologies
-   diff the tree instead, since there no single agent knows the change set.
-4. **Cleanup** — `session.destroy()` runs in a `finally`, so the sandbox goes away
+   which a harness reading git state can only guess.
+5. **Cleanup** — `session.destroy()` runs in a `finally`, so the sandbox goes away
    even when the run raises.
 
 Output lands in `results/<run>/`: `preds.json`, plus per-instance trajectories and
