@@ -183,6 +183,22 @@ class Sandbox:
         if registry.is_custom_tool(name):
             return await self._call_custom_tool(name, args, registry, agent_id)
         runtime_tool, runtime_args = registry.route(name, args)
+        # Checked against the runtime's own declaration rather than a hardcoded
+        # table. The table this replaces listed the runtime's tools by hand and was
+        # already wrong -- `artifact` was missing, so calling the runtime's own
+        # artifact tool through this method was rejected as unknown.
+        #
+        # Only rejects when the declaration is actually known. An empty list means a
+        # backend that does not report its tools, not a runtime with none, and
+        # refusing every call on that basis would be worse than the mistake this
+        # replaces: the runtime rejects an unknown tool on its own, so the check
+        # here buys a clearer error, not safety.
+        served = {t.get("name") for t in await self._get_tools()}
+        if served and runtime_tool not in served:
+            raise KeyError(
+                f"unknown agent tool: {name}"
+                + (f" (aliased to {runtime_tool!r})" if runtime_tool != name else "")
+                + f"; this runtime serves {', '.join(sorted(served))}")
         return await self.backend.call(runtime_tool, runtime_args, agent_id)
 
     async def _call_custom_tool(self, name: str, args: dict,

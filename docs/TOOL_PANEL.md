@@ -7,13 +7,18 @@ one had.
 
 ## Why
 
-Three places described tools and two were written by hand:
+Two places described tools and one of them was written by hand:
 
-| | source | how |
+| | source | answers |
 |---|---|---|
 | runtime (Go) | `runtime/tools/*.go` `Schema()` | authoritative — it executes the calls |
-| SDK | `Sandbox.tool_schemas()` | reads the live runtime; already correct |
 | agent panel | `agent/tools.py` `TOOLS_SCHEMA` | **hand-written Python literal** |
+
+`Sandbox.tool_schemas()` is not a third copy and is not replaced by this. It answers
+"what can this sandbox do" -- every runtime tool plus the registry's custom ones,
+with no policy applied, `artifact` included. The compiled panel answers "what should
+this model be offered", which is a narrower thing on purpose. Both exist and neither
+is a stale copy of the other.
 
 Measured drift on 7 tools, 4 of them wrong:
 
@@ -92,6 +97,14 @@ discrete argv slots and are never interpreted by a shell.
   real mapping (`bash` → `shell`), which existed so an interceptor keyed on `shell`
   would not go blind in `bash_only` mode. With `bash_only` expressed as an agent
   tool over `shell`, the mapping is data and the table is not needed.
+
+  What the table was really doing was rejecting names the runtime does not serve, and
+  the runtime already knows which those are: `Sandbox.execute_tool_call` now checks
+  against its declaration. That also fixed a case the table got wrong — `artifact`
+  was missing from it, so calling the runtime's own `artifact` tool through dispatch
+  was rejected as unknown. `ToolRegistry(aliases=…)` survives for genuine renames and
+  is empty by default; an empty declaration is treated as unverifiable rather than as
+  a runtime with no tools, since refusing every call would be worse than the table.
 
 Compile-time validation against the runtime is the whole point, so it needs a
 runtime to validate against — either a running one or its declared schema. Where

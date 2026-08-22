@@ -219,3 +219,32 @@ def test_the_prompt_for_bash_only_names_the_tool_it_offers():
     config = (Path(__file__).resolve().parents[1] / "configs" / "default-bash.yaml").read_text()
     assert "`shell`" in config
     assert "`bash`" not in config
+
+
+def test_reserved_names_cover_every_tool_the_runtime_serves():
+    """`ToolRegistry.RESERVED_NAMES` is hardcoded, which is what BUILTIN_ROUTES was --
+    so it needs the check that table never had.
+
+    It cannot be derived: registration happens while manifests load, before any
+    sandbox exists, so there is no declaration to consult. A custom tool named `shell`
+    would shadow the real one (dispatch checks is_custom_tool first) and every shell
+    call would silently become a binary invocation, so the list has to be right.
+    """
+    from ash_sandbox import ToolRegistry
+
+    served = {t["name"] for t in json.loads(RUNTIME_SCHEMA.read_text())["tools"]}
+    missing = served - ToolRegistry.RESERVED_NAMES
+    assert not missing, (
+        f"the runtime serves {sorted(missing)} and a custom tool could take those "
+        f"names, shadowing them; add them to ToolRegistry.RESERVED_NAMES")
+
+
+def test_reserved_names_are_real_tools_or_documented_aliases():
+    """A stale entry would forbid a name for no reason. `bash` is kept on purpose:
+    it was the one real alias in the old route table and is still a name a caller
+    might map, so a custom tool should not take it."""
+    from ash_sandbox import ToolRegistry
+
+    served = {t["name"] for t in json.loads(RUNTIME_SCHEMA.read_text())["tools"]}
+    unexplained = ToolRegistry.RESERVED_NAMES - served - {"bash"}
+    assert not unexplained, f"{sorted(unexplained)} is reserved but is not a tool"

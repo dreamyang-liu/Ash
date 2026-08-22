@@ -15,10 +15,20 @@ from ash_sandbox.result import ToolResult
 
 SHA = "c" * 64
 
+#: The tools a runtime serves, as `tools/list` reports them. Declared here because
+#: dispatch now validates against the runtime's own declaration rather than a
+#: hardcoded table, so a backend that claims no tools is a backend that cannot be
+#: checked -- not one whose calls should all be refused.
+RUNTIME_TOOLS = [{"name": n, "description": "", "inputSchema": {"type": "object"}}
+                 for n in ("shell", "text_editor", "grep_files", "process",
+                           "web_fetch", "web_search", "wait_for_events", "artifact")]
+
+
 class FakeBackend(Backend):
-    def __init__(self, responses=None):
+    def __init__(self, responses=None, tools=None):
         self.calls = []
         self.responses = responses or {}
+        self.tools = RUNTIME_TOOLS if tools is None else tools
 
     async def call(self, tool_name, args, agent_id=""):
         self.calls.append((tool_name, dict(args)))
@@ -27,7 +37,7 @@ class FakeBackend(Backend):
         return ToolResult(output="ok", is_error=False)
 
     async def list_tools(self):
-        return []
+        return self.tools
 
     async def close(self):
         pass
@@ -45,14 +55,53 @@ def make_registry(binary=None):
     }))
     return reg
 
-def test_call_agent_tool_builtin_routes():
+def test_call_agent_tool_passes_a_runtime_name_through():
     backend = FakeBackend()
     sb = Sandbox(backend=backend)
     r = asyncio.run(sb.call_agent_tool("shell", {"command": "echo hi"}))
     assert not r.is_error
     assert backend.calls == [("shell", {"command": "echo hi"})]
-    # bash alias routes to shell via BUILTIN_ROUTES
-    asyncio.run(sb.call_agent_tool("bash", {"command": "ls"}))
+
+
+def test_an_alias_is_translated_and_is_not_builtin():
+    """`bash` -> `shell` used to be seeded into every registry by BUILTIN_ROUTES.
+    Aliases are empty by default now: the table's seven other entries were identity
+    mappings, and the allow-list they implied comes from the runtime instead."""
+    backend = FakeBackend()
+    default = Sandbox(backend=backend)
+    with pytest.raises(KeyError):
+        asyncio.run(default.call_agent_tool("bash", {"command": "ls"}))
+
+    aliased = Sandbox(backend=backend, tools=ToolRegistry(aliases={"bash": "shell"}))
+    asyncio.run(aliased.call_agent_tool("bash", {"command": "ls"}))
+    assert backend.calls[-1] == ("shell", {"command": "ls"})
+
+
+def test_a_tool_the_runtime_does_not_serve_is_rejected_by_name():
+    """The error names what the runtime actually has, which the old table could not:
+    it listed the runtime's tools by hand and had `artifact` missing."""
+    sb = Sandbox(backend=FakeBackend())
+    with pytest.raises(KeyError) as caught:
+        asyncio.run(sb.call_agent_tool("teleport", {}))
+    assert "teleport" in str(caught.value)
+    assert "shell" in str(caught.value)
+
+
+def test_the_runtimes_own_artifact_tool_is_callable():
+    """It was absent from BUILTIN_ROUTES, so dispatch rejected a tool the runtime
+    serves. Nothing in this repo called it that way, which is why it went unnoticed."""
+    backend = FakeBackend()
+    sb = Sandbox(backend=backend)
+    asyncio.run(sb.call_agent_tool("artifact", {"url": "https://example.com/a"}))
+    assert backend.calls[-1][0] == "artifact"
+
+
+def test_a_backend_that_reports_no_tools_is_not_a_runtime_with_none():
+    """An empty declaration means unverifiable, not empty. Refusing every call there
+    would be a worse failure than the hardcoded table this replaces."""
+    backend = FakeBackend(tools=[])
+    sb = Sandbox(backend=backend)
+    asyncio.run(sb.call_agent_tool("shell", {"command": "ls"}))
     assert backend.calls[-1][0] == "shell"
 
 def test_call_agent_tool_custom_url_two_steps():
@@ -376,3 +425,20 @@ def test_registries_are_isolated():
     r1, r2 = make_registry(), ToolRegistry()
     assert r1.is_custom_tool("analyzer")
     assert not r2.is_custom_tool("analyzer")  # no cross-instance leakage
+
+
+def test_the_old_routes_parameter_and_attribute_still_work():
+    """`ToolRegistry(routes=…)` and `.routes` are public API of an independently
+    versioned package, so removing BUILTIN_ROUTES must not break a caller who passes
+    or reads them. They now mean "aliases", which is all they ever carried that was
+    not an identity entry."""
+    reg = ToolRegistry(routes={"bash": "shell"})
+    assert reg.aliases == {"bash": "shell"}
+    assert reg.routes == {"bash": "shell"}
+    assert reg.route("bash", {"command": "ls"}) == ("shell", {"command": "ls"})
+
+
+def test_aliases_are_empty_by_default():
+    """They used to be seeded with the runtime's own tool names, which made every
+    call look like it needed translating."""
+    assert ToolRegistry().aliases == {}
