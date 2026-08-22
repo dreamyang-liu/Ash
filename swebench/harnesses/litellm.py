@@ -109,7 +109,8 @@ class LiteLLMHarness(BaseHarness):
             # One call, because schema, routing and custom tools have to agree.
             # `tools:` names a shipped panel or points at a manifest of your own.
             agent.use_panel(build_panel(c.get("tools", DEFAULT_PANEL),
-                                        agent_config.custom_tools_dir))
+                                        agent_config.custom_tools_dir,
+                                        registry=session.tools))
 
             # The agent hands in its own diff: it knows which files it fixed,
             # which is the one thing a harness reading git state cannot know.
