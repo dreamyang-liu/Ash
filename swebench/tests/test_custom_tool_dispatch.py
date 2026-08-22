@@ -70,7 +70,8 @@ def register_analyzer():
 def test_a_custom_tool_reaches_the_executor_under_its_own_name():
     """The loop no longer expands manifest tools: the executor does, and it
     memoises where the binary landed so a repeat call skips the download. One
-    call also means one seat decision -- tell Waggle about such a tool through
+    call also means one interceptor decision -- tell a coordination interceptor about such a
+    tool through
     `opaque_writers` so its drift scan still runs."""
     register_analyzer()
     calls = []
@@ -86,19 +87,28 @@ def test_a_custom_tool_reaches_the_executor_under_its_own_name():
     assert calls == [("analyzer", {"file": "main.py"})]
 
 
-def test_builtin_names_are_still_translated_for_the_interceptors():
-    """Unlike custom tools, builtins are routed here on purpose: a seat keyed on
-    `shell` must not go blind because a run is in bash_only mode."""
+def test_builtin_names_are_routed_through_their_compiled_view():
+    """Unlike custom tools, builtins are routed: the view names the runtime tool, so
+    an interceptor keyed on it cannot go blind, and arguments the view does not
+    expose never reach the runtime."""
     calls = []
 
     def executor(name, args):
-        calls.append(name)
+        calls.append((name, dict(args)))
         return ToolResult(success=True, output="ok", error="")
 
     agent = make_agent(executor)
-    agent._run_tool(make_tool_call("bash", {"command": "ls"}),
+    # truncate_mode is offered on shell and reaches the runtime; include_own is not
+    # offered on wait_for_events, so the call fails instead of quietly losing it.
+    agent._run_tool(make_tool_call("shell", {"command": "ls", "truncate_mode": "T1"}),
                     FakeConversation(), "turn1")
-    assert calls == ["shell"]
+    conv = FakeConversation()
+    agent._run_tool(make_tool_call("wait_for_events",
+                                   {"action": "wait", "include_own": True}),
+                    conv, "turn2")
+    assert calls == [("shell", {"command": "ls", "truncate_mode": "T1"})], calls
+    assert any("include_own" in str(r) for r in conv.tool_results), \
+        "the model should be told which argument was rejected"
 
 
 def test_an_unknown_tool_fails_before_reaching_the_executor():
@@ -189,3 +199,33 @@ def test_the_session_dispatches_through_the_sdk_not_a_raw_call():
     assert seen["name"] == "analyzer"
     assert seen["registry_has_customs"], \
         "a Sandbox starts with an empty registry; the loaded manifests must be passed"
+
+
+# --------------------------------------------------------------------------- #
+#  Reaching the harness
+# --------------------------------------------------------------------------- #
+
+def test_the_harness_loads_manifests_and_grows_the_schema():
+    """Dispatch was live and loading was not: runner.py called load_custom_tools,
+    nothing inherited that when it was deleted, and `custom_tools_dir` reached
+    AgentConfig from nowhere. A manifest-defined tool was therefore never in the
+    schema the model sees -- the feature was unreachable, not broken."""
+    import inspect
+    from swebench.harnesses import litellm
+
+    source = inspect.getsource(litellm)
+    assert "build_panel(" in source, "the panel builder is bypassed"
+    assert "custom_tools_dir" in source, "the config key never reaches the builder"
+
+
+def test_a_panel_is_named_by_config_not_chosen_by_a_branch():
+    """`tools:` was an enum of two values with an if/else per mode. It names a manifest
+    now -- a shipped one by name, or a path to your own -- so adding a panel does not
+    mean adding a branch."""
+    import inspect
+    from swebench.harnesses import litellm
+
+    source = inspect.getsource(litellm)
+    assert 'c.get("tools"' in source
+    assert 'tools_mode == "bash_only"' not in source, \
+        "the mode branch is back; panels are files, not an enum"

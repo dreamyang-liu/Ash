@@ -98,21 +98,28 @@ Pipeline rules:
 Assembly is plain Python — order is semantics, a list is the configuration:
 
 ```python
-# my_plugins.py        ash-mcp-proxy --plugins my_plugins.py
+# my_plugins.py        python -m swebench.mcp_server --plugins my_plugins.py
+#                      or, for a benchmark run: execution.interceptors: my_plugins.py
 PIPELINE = [
-    GuardrailInterceptor(read_before_edit=False),   # nudges; Waggle enforces below
+    AuditInterceptor("audit.jsonl"),        # outermost: sees rejected calls too
     ToolACLInterceptor({"investigator": {"text_editor", "grep_files"}}),  # planned
-    WaggleInterceptor(policy=TeamPolicy()),                   # coordination
-    TruncateInterceptor(),                                    # bound the result
-    AuditInterceptor("audit.jsonl"),                          # observe last (planned)
+    GuardrailInterceptor(),                 # read-before-edit / edit-streak nudges
+    TruncateInterceptor(),                  # bound what the result costs the model
+    OutcomePresenter(),                     # innermost: compose the text
 ]
 ```
 
-`GuardrailInterceptor` (`swebench/agent/guardrails.py`), `WaggleInterceptor` and
-`TruncateInterceptor` (`swebench/agent/interceptors.py`) exist today; the ACL and
-audit seats are still to be written. Note `read_before_edit=False` above: that
-rule is Waggle's when coordination is mounted, and two seats stating one rule
-tells the model the same thing twice.
+Shipping today, one package each under `swebench/agent/interceptors/`:
+`GuardrailInterceptor` (`guardrail/`), `TruncateInterceptor` (`truncate/`),
+`OutcomePresenter` (`present/`), assembled by `default_pipeline()`. The ACL and
+audit interceptors above are still to be written; `WaggleInterceptor` was removed
+with the multi-agent harnesses and returns as a plugin or a revert.
+
+Order is semantics. An audit interceptor goes outermost because a short circuit
+still unwinds the onion through everything already entered, so only an outer one
+sees calls the inner ones refuse. Truncation goes inside the annotating
+interceptors, or a warning appended before it would be elided along with the middle
+of the output it was appended to.
 
 ### Waggle — the coordination interceptor
 
@@ -215,7 +222,7 @@ call, measured) rather than event-based.
 
 **ADR-2: The proxy's core abstraction is interception, not coordination.**
 Guardrails, ACLs, audit, redaction, budgets and Waggle all need the same thing:
-a seat on the tool-call path. One generic `ToolInterceptor` chain serves all of
+a place on the tool-call path. One generic `ToolInterceptor` chain serves all of
 them; coordination is one plugin among peers. This is the same model as Claude
 Code's PreToolUse/PostToolUse hooks and Envoy filters.
 
@@ -250,7 +257,7 @@ localhost HTTP (milliseconds), which bounds the cost.
 | Command results | ✅ one `CommandOutcome` schema (`runtime/tools/boundedlog.go`) answered by both `shell` and `process read` — exit code, streams unmerged, byte counts, truncation flags; unpacked into SDK fields, rendered for the model by `OutcomePresenter` (`interceptors.py`) | more tools report an outcome as they grow one |
 | Policy hooks | ✅ `WagglePolicy` (`on_write`/`on_conflict`/`on_drift`/`on_commit`), run inside the file's critical section | + two reference policies (ownership ACL, auto-merge-then-reject) |
 | Sandbox source | ✅ `backend:` config picks the SDK pool (`swebench/backends.py`): `docker`, `microvm` (Firecracker/AgentENV, ~135 ms spawn), `k8s`. No call site names a pool | speculative `fork()` for `best-of-n` (share one exploration prefix) |
-| Harnesses (L3) | `litellm`, `claude-code`, `manager-worker`, `best-of-n` | + orchestrator-worker (ledger/replan), debate |
+| Harnesses (L3) | `litellm`, `claude-code` | restore `manager-worker` / `best-of-n` (removed while the single-agent path settles; the L2 machinery they used is still here), + orchestrator-worker (ledger/replan), debate |
 | Eval (L4) | SWE-bench (`extends:` configs, batch runner) | + more benchmarks; topology × coordination A/B matrix |
 
 ## Roadmap (ordered)

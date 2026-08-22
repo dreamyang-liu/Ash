@@ -81,26 +81,69 @@ class CallContext:
     metadata: dict = field(default_factory=dict)
 
 
+#  The four verdicts are the four things an interceptor can do about a call: let it
+#  through, change it, refuse it, or answer it. They are exhaustive rather than
+#  convenient — dropping one does not remove the need, it pushes callers onto a
+#  workaround that loses something. Each docstring below says which.
+#
+#  ``Continue`` and ``Reject`` are used by the guardrails. ``Rewrite`` and
+#  ``ShortCircuit`` currently have no production caller (Waggle was the last one),
+#  and are kept because the alternatives are worse in ways that are easy to
+#  measure and hard to notice — see below.
+
+
 @dataclass(frozen=True)
 class Continue:
-    """Let the call proceed unchanged."""
+    """Let the call proceed unchanged.
+
+    An observer needs a way to say "I looked and I am not interfering", distinct
+    from having no opinion. Audit and metering interceptors return only this.
+    """
 
 
 @dataclass(frozen=True)
 class Reject:
-    """Refuse the call; ``message`` becomes the failed result's output."""
+    """Refuse the call; ``message`` becomes the failed result's output.
+
+    Forces ``success=False``, which is the point: the model must see that its
+    call did not happen. Use it for a rule ("do not run `git stash`, it can lose
+    your edits"), never to deliver content -- see ``ShortCircuit``.
+    """
     message: str
 
 
 @dataclass(frozen=True)
 class Rewrite:
-    """Let the call proceed with ``new_args`` instead of ``ctx.args``."""
+    """Let the call proceed with ``new_args`` instead of ``ctx.args``.
+
+    An interceptor could instead mutate ``ctx.args`` in place -- ``CallContext`` is frozen,
+    but that only binds the fields, so the dict inside is writable. The difference
+    shows up in the ``after`` hooks: ``Rewrite`` derives a fresh context, so every
+    interceptor's ``after`` sees the args *its own* ``before`` saw, while an in-place edit
+    is visible to the interceptors outside it.
+
+    That distinction is what makes an audit interceptor trustworthy. It records "the agent
+    asked for X" on the way in and "the result was Y" on the way out; if an inner
+    interceptor rewrote the args in place, the pair no longer describes one request. With
+    ``Rewrite``, adding ``timeout 300`` to a pytest command is invisible to the
+    interceptors above -- they still see what the agent asked for.
+    """
     new_args: dict
 
 
 @dataclass(frozen=True)
 class ShortCircuit:
-    """Answer the call with ``result`` without reaching the inner executor."""
+    """Answer the call with ``result`` without reaching the inner executor.
+
+    The difference from ``Reject`` is that this result can be a *success*. A cache
+    interceptor that recognises a repeated `pytest` invocation has a real answer to give,
+    and giving it through ``Reject`` would hand the model ``success=False`` on a
+    passing test suite -- an agent reading that goes off to fix a test that was
+    never broken.
+
+    So: ``Reject`` is for calls that must not happen, ``ShortCircuit`` for calls
+    somebody else already answered (a cache, a mock, a redirect to another tool).
+    """
     result: ToolResult
 
 
@@ -113,7 +156,7 @@ _VERDICT_TYPES = (Continue, Reject, Rewrite, ShortCircuit)
 # --------------------------------------------------------------------------- #
 
 class ToolInterceptor:
-    """One seat on the tool-call path. Subclass and override the hooks."""
+    """One interceptor on the tool-call path. Subclass and override the hooks."""
 
     tools: "set[str] | Literal['*']" = "*"  # which tools this interceptor sees
     fail_mode: Literal["open", "closed"] = "open"
@@ -250,15 +293,15 @@ def piped_executor(pipeline: ToolPipeline, inner: Executor, agent_id: str,
       handed out -- a stale id would silently key coordination state to the
       wrong workspace.
     - ``ctx.metadata["executor"]`` carries ``inner`` so interceptors needing
-      probe traffic or arbitrated writes (Waggle) reach the sandbox without
+      probe traffic or arbitrated writes reach the sandbox without
       re-entering the pipeline.
     - Agents whose calls must be arbitrated together must share ONE pipeline
       instance (coordination state lives inside its interceptors). Blocking
-      interceptors (Waggle reservation waits) block the calling thread, so
+      interceptors (one waiting on a lock, say) block the calling thread, so
       give each agent its own thread -- the manager-worker layout.
     - The returned executor carries ``ash_pipeline``, so a host that would
       otherwise mount a chain of its own can see one is already in force and
-      not stack a second (``AshAgent`` checks this). Two seats enforcing one
+      not stack a second (``AshAgent`` checks this). Two interceptors enforcing one
       rule state it to the model twice.
     """
     def run(tool_name: str, args: dict) -> ToolResult:
@@ -286,12 +329,24 @@ def load_pipeline(path: str) -> ToolPipeline:
     The module is executed from ``path`` (ADR-3: policy and assembly are
     Python code, not a DSL). Raises ``ValueError`` if the file cannot be
     imported or does not define a module-level ``PIPELINE`` list.
+
+    Every failure is a ``ValueError`` naming the path, including the ones the
+    import machinery raises itself -- a missing file gave ``FileNotFoundError``
+    and a typo in the plugin gave ``SyntaxError``, neither mentioning that a
+    plugins file was what failed. The distinction matters because the caller
+    above is a benchmark run: a governance chain that fails to load must stop the
+    run loudly, not read as "no interceptors configured".
     """
     spec = importlib.util.spec_from_file_location("ash_mcp_plugins", path)
     if spec is None or spec.loader is None:
         raise ValueError(f"cannot import plugins module from {path!r}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:      # missing file, syntax error, import error, ...
+        raise ValueError(
+            f"cannot import plugins module from {path!r}: "
+            f"{type(exc).__name__}: {exc}") from exc
     interceptors = getattr(module, "PIPELINE", None)
     if not isinstance(interceptors, (list, tuple)):
         raise ValueError(f"{path!r} must define a module-level PIPELINE list")

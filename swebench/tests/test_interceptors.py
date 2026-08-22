@@ -28,18 +28,15 @@ from types import SimpleNamespace
 import pytest
 
 from swebench.agent import AshAgent
-from swebench.agent.guardrails import (
+from swebench.agent.pipeline import (RAW_ERROR, RAW_OUTPUT, CallContext,
+                                     ToolPipeline)
+from swebench.agent.interceptors import (
     EDIT_STREAK_LIMIT,
     GuardrailInterceptor,
     GuardrailState,
-)
-from swebench.agent.interceptors import (
-    RAW_ERROR,
-    RAW_OUTPUT,
     TruncateInterceptor,
     default_pipeline,
 )
-from swebench.agent.pipeline import CallContext, ToolPipeline
 from swebench.agent.trace import ToolTraceWriter
 from swebench.models import AgentConfig, ToolResult
 
@@ -137,7 +134,7 @@ def test_write_does_not_require_a_read_because_it_also_creates():
     """`view` on a nonexistent path fails, so a creating `write` could never
     satisfy read-before-edit: in warn mode that is noise on the documented
     "write a reproduce script" workflow, and in reject mode creating any new
-    file becomes impossible. Waggle pays for an existence probe and refuses only
+    file becomes impossible. An interceptor that can afford an existence probe may refuse
     blind *overwrites*; a rule that cannot afford the probe must not claim
     `write`."""
     pipe = ToolPipeline([GuardrailInterceptor()])
@@ -160,13 +157,15 @@ def test_write_still_counts_toward_the_edit_streak():
     assert "without running tests" in outputs[-1]
 
 
-def test_waggle_arbitrates_every_edit_command():
-    """Waggle keys off the same shared set, and it covers `write` — one place
-    to state "this call is an edit"."""
+def test_one_place_states_what_counts_as_an_edit():
+    """Two sets, one narrower than the other, and the difference is `write`:
+    everything that mutates a file (EDIT_COMMANDS, for streak counting) versus
+    everything that mutates *existing* content (CONTENT_EDIT_COMMANDS, for
+    read-before-edit). A coordination interceptor keys off the wider one; that
+    one left with Waggle, and the distinction is the part worth keeping."""
     from swebench.agent.tools import CONTENT_EDIT_COMMANDS, EDIT_COMMANDS
-    from swebench.agent.waggle import CoordinatedExecutor
-    assert CoordinatedExecutor.WRITE_COMMANDS == EDIT_COMMANDS
     assert "write" in EDIT_COMMANDS
+    assert "write" not in CONTENT_EDIT_COMMANDS
     assert CONTENT_EDIT_COMMANDS < EDIT_COMMANDS
 
 
@@ -182,22 +181,22 @@ def test_malformed_command_argument_is_not_a_policy_rejection(junk):
     assert result.error != "rejected by GuardrailInterceptor"
 
 
-def test_warning_survives_a_rejection_from_a_deeper_seat():
-    """The warning is stashed in `before` and emitted in `after`. A deeper seat
+def test_warning_survives_a_rejection_from_a_deeper_interceptor():
+    """The warning is stashed in `before` and emitted in `after`. A deeper interceptor
     rejecting must not swallow it — the guardrail was entered, so per the onion
     rules its `after` still runs."""
     from swebench.agent.pipeline import Reject, ToolInterceptor
 
     class DeepRejecter(ToolInterceptor):
         def before(self, ctx):
-            return Reject("deeper seat said no")
+            return Reject("deeper interceptor said no")
 
     ctx = _ctx("text_editor", {"command": "str_replace", "path": PATH,
                                "old_str": "a", "new_str": "b"})
     result = ToolPipeline([GuardrailInterceptor(), DeepRejecter()]) \
         .execute(ctx, lambda t, a: _ok())
     assert not result.success
-    assert "deeper seat said no" in result.output       # rejection preserved
+    assert "deeper interceptor said no" in result.output       # rejection preserved
     assert "without reading it first" in result.output  # warning still delivered
     assert "guardrail_warnings" not in ctx.metadata     # stash drained
 
@@ -385,17 +384,15 @@ def test_default_chain_presents_then_bounds_then_annotates():
 
 
 # --------------------------------------------------------------------------- #
-#  Composing with Waggle: one rule, one voice
+#  read_before_edit as a standalone switch
 # --------------------------------------------------------------------------- #
 
-def _waggle_chain(read_before_edit: bool):
-    from swebench.agent.waggle import WaggleInterceptor, WorkspaceCoordinator
-    from swebench.tests.test_waggle import FakeSandbox
+def _chain(read_before_edit: bool):
+    from swebench.tests.fake_sandbox import FakeSandbox
 
     sandbox = FakeSandbox({PATH: "base"})
     pipe = ToolPipeline([
         GuardrailInterceptor(enforcement="warn", read_before_edit=read_before_edit),
-        WaggleInterceptor(state=WorkspaceCoordinator(ttl=5.0)),
     ])
 
     def call(tool: str, args: dict) -> ToolResult:
@@ -407,24 +404,19 @@ def _waggle_chain(read_before_edit: bool):
     return call
 
 
-def test_read_before_edit_off_leaves_the_rule_to_waggle():
-    """Both seats enforcing one rule states it to the model twice; Waggle's
-    message is the better one (it names the version you are stale against)."""
+def test_read_before_edit_can_be_turned_off():
+    """The switch exists so a chain with a coordination interceptor below does not state
+    one rule twice -- that interceptor left with Waggle, but the switch is independent of
+    it and a chain composed by hand still needs it."""
     blind = {"command": "str_replace", "path": PATH, "old_str": "base",
              "new_str": "x"}
-    both = _waggle_chain(read_before_edit=True)("text_editor", blind)
-    assert both.output.count("without reading it first") == 1
-    assert "[WAGGLE]" in both.output                        # said twice
-
-    deferred = _waggle_chain(read_before_edit=False)("text_editor", blind)
-    assert not deferred.success                             # still enforced
-    assert "[WAGGLE]" in deferred.output
-    assert "without reading it first" not in deferred.output  # said once
+    assert "without reading it first" in _chain(True)("text_editor", blind).output
+    assert "without reading it first" not in _chain(False)("text_editor", blind).output
 
 
 def test_edit_streak_nudges_survive_with_read_before_edit_off():
     """Turning off one rule must not disable the other."""
-    call = _waggle_chain(read_before_edit=False)
+    call = _chain(read_before_edit=False)
     call("text_editor", {"command": "view", "path": PATH})
     outputs = [call("text_editor", {"command": "write", "path": PATH,
                                     "file_text": f"v{i}"}).output
@@ -492,19 +484,26 @@ def test_caller_supplied_pipeline_is_used_and_sees_agent_identity():
     assert seen == [("worker-3", "shared", "shell")]
 
 
-def test_interceptors_receive_the_routed_runtime_tool_not_the_agent_alias():
-    """bash_only mode: the model calls `bash`, the runtime tool is `shell`.
-    Interceptors must see what actually executes."""
+def test_interceptors_receive_the_runtime_tool_not_the_view_name():
+    """Interceptors are keyed on the runtime tool, so the loop routes first. A view may
+    rename the tool; what reaches an interceptor is what will actually execute.
+
+    This used to assert the `bash` -> `shell` alias, which no longer exists, and then
+    that an unoffered argument was silently dropped -- which was itself the defect the
+    panel compiler exists to stop. Now an unoffered argument is an error, so this
+    checks the part that is still true: routing happens before interception."""
     seen = []
 
     class Spy(TruncateInterceptor):
         def before(self, ctx):
-            seen.append(ctx.tool_name)
+            seen.append((ctx.tool_name, dict(ctx.args)))
             return super().before(ctx)
 
     agent = _agent(lambda n, a: _ok(), pipeline=ToolPipeline([Spy()]))
-    agent._run_tool(_tool_call("bash", {"command": "ls"}), _Conv(), "turn-1")
-    assert seen == ["shell"]
+    agent.use_panel("bash_only")
+    agent._run_tool(_tool_call("shell", {"command": "ls"}), _Conv(), "turn-1")
+
+    assert seen == [("shell", {"command": "ls"})]
 
 
 def test_guardrail_state_does_not_leak_between_runs(monkeypatch):
@@ -589,8 +588,7 @@ def test_trace_records_runtime_bytes_while_the_model_sees_bounded_output(tmp_pat
 
 def _args(**kw):
     import types
-    base = dict(plugins=None, coordinate=False, guardrails=None,
-                waggle_ttl=120.0, max_output_bytes=12000)
+    base = dict(plugins=None, guardrails=None, max_output_bytes=12000)
     base.update(kw)
     return types.SimpleNamespace(**base)
 
@@ -604,24 +602,36 @@ def test_proxy_bounds_output_whenever_it_mounts_the_chain():
     """Truncation only reaches proxy clients if the assembly actually includes
     it — the flag combinations, not the docstring, are the contract."""
     from swebench.mcp_server import _build_pipeline
-    for args in (_args(guardrails="warn"), _args(coordinate=True),
-                 _args(guardrails="warn", coordinate=True)):
+    for args in (_args(guardrails="warn"), _args(guardrails="reject")):
         names = [i.name for i in _build_pipeline(args).interceptors]
-        assert names[-1] == "TruncateInterceptor", names   # innermost seat
+        assert names[-1] == "TruncateInterceptor", names   # innermost interceptor
 
 
-def test_proxy_defers_read_before_edit_to_waggle_when_coordinating():
+def test_proxy_guardrails_enforce_read_before_edit():
+    """It used to be deferred to a coordination interceptor below, which is gone; with
+    guardrails as the only interceptor, the rule has to be on."""
     from swebench.mcp_server import _build_pipeline
-    seats = {i.name: i for i in
-             _build_pipeline(_args(guardrails="warn", coordinate=True)).interceptors}
-    assert seats["GuardrailInterceptor"].read_before_edit is False
-    assert _build_pipeline(_args(guardrails="warn")) \
-        .interceptors[0].read_before_edit is True
+    interceptors = {i.name: i for i in
+             _build_pipeline(_args(guardrails="warn")).interceptors}
+    assert interceptors["GuardrailInterceptor"].read_before_edit is True
+
+
+def test_a_plugins_file_replaces_the_assembly(tmp_path):
+    """How a coordination interceptor comes back after Waggle's removal: as a plugin."""
+    from swebench.mcp_server import _build_pipeline
+    path = tmp_path / "interceptors.py"
+    path.write_text(
+        "from swebench.agent.pipeline import ToolInterceptor\n"
+        "class MySeat(ToolInterceptor):\n    pass\n"
+        "PIPELINE = [MySeat()]\n")
+    names = [i.name for i in
+             _build_pipeline(_args(plugins=str(path))).interceptors]
+    assert names == ["MySeat"]
 
 
 def test_http_sessions_are_stable_for_an_identified_client():
     """Interceptor state is keyed by session identity, so a client that cannot
-    be identified gets a new one per request and no seat can hold state. MCP's
+    be identified gets a new one per request and no interceptor can hold state. MCP's
     own `initialize` hands out a sessionId; honoring it back is what makes
     read-before-edit satisfiable over HTTP."""
     from swebench.mcp_server import HttpMcpServer, SandboxPool
@@ -675,3 +685,50 @@ def test_a_plain_executor_still_gets_the_default_chain():
     conv = _Conv()
     agent._run_tool(_tool_call("shell", {"command": "cat big"}), conv, "turn-1")
     assert "characters truncated" in conv.results[0]
+
+
+# --------------------------------------------------------------------------- #
+#  An interceptor that rewrites a result must not destroy the rest of it
+# --------------------------------------------------------------------------- #
+
+def test_no_interceptor_drops_the_structured_outcome():
+    """Every interceptor here rebuilds ToolResult to change one field, and `outcome` has
+    to survive the rebuild: it is the runtime's structured report (exit code, the
+    two streams, byte counts), and an interceptor further out may want to read it.
+
+    The guardrail interceptor used to drop it. That was invisible while it was outermost
+    -- nothing downstream looked -- and became reachable as soon as `extra=` let a
+    caller mount an interceptor outside it. Swept across the chain rather than tested on
+    one interceptor, so a new interceptor inherits the check."""
+    from swebench.models import CommandOutcome
+
+    outcome = CommandOutcome(exit_code=1, stdout="out", stderr="err",
+                             stdout_bytes=3, stderr_bytes=3)
+    edit = {"command": "str_replace", "path": PATH, "old_str": "a", "new_str": "b"}
+
+    for interceptor in default_pipeline().interceptors:
+        # Long enough to trigger truncation, and an edit so the guardrail warns:
+        # each interceptor must be on its rewriting path, not its pass-through path.
+        incoming = ToolResult(success=False, output="x" * 40_000,
+                              error="y" * 40_000, outcome=outcome)
+        ctx = CallContext(agent_id="A", sandbox_id="sb", tool_name="text_editor",
+                          args=dict(edit), metadata={})
+        pipe = ToolPipeline([interceptor])
+        result = pipe.execute(ctx, lambda t, a: incoming)
+        assert result.outcome is outcome, \
+            f"{interceptor.name} dropped the outcome while rewriting the result"
+
+
+def test_the_whole_default_chain_preserves_the_outcome():
+    """End to end rather than one at a time: what the agent loop receives still
+    carries the structured report."""
+    from swebench.models import CommandOutcome
+
+    outcome = CommandOutcome(exit_code=1, stdout="out", stderr="err")
+    incoming = ToolResult(success=False, output="x" * 40_000, error=None,
+                          outcome=outcome)
+    ctx = CallContext(agent_id="A", sandbox_id="sb", tool_name="text_editor",
+                      args={"command": "str_replace", "path": PATH,
+                            "old_str": "a", "new_str": "b"}, metadata={})
+    result = default_pipeline().execute(ctx, lambda t, a: incoming)
+    assert result.outcome is outcome

@@ -1,12 +1,15 @@
-"""Compatibility shim: custom tools now live in the SDK (ash_sandbox.toolset).
+"""Manifest-defined tools, on top of the SDK's registry (ash_sandbox.toolset).
 
-Importers (verified via grep): agent/__init__.py (plan_custom_tool),
-agent/tools.py (CUSTOM_TOOL_SPECS), runner.py (load_custom_tools,
-custom_agent_schemas), tests/test_custom_tools.py, tests/test_custom_tool_
-dispatch.py. Public surface preserved on top of a process-default
-ToolRegistry; manifest schema unchanged (configs/custom_tools/README.md).
-Moved per user instruction: "tool 之类的可以用DSL 或者data 配置项来做"
-(SDK owns tool data; AshAgent is pure policy).
+A thin layer over one process-default ``ToolRegistry``: the SDK owns the tool data
+and the manifest schema (configs/custom_tools/README.md), and this module is where
+a harness loads them and asks for their schemas.
+
+Two halves, and they were split for a while. Dispatch is wired into the agent loop
+(``is_custom_tool`` / ``plan_custom_tool``, agent/__init__.py) and always worked.
+*Loading* was only ever called by runner.py -- a stale second CLI, since deleted --
+so nothing put manifests into the registry and ``custom_tools_dir`` reached
+``AgentConfig`` from nowhere. The feature was unreachable rather than broken, which
+is the failure mode a compatibility shim invites: the names all resolve.
 """
 
 from __future__ import annotations

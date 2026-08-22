@@ -43,5 +43,19 @@ class Conversation:
         self.trajectory.add_message("error", content)
 
     def append_to_last(self, suffix: str) -> None:
-        """Append text to the last user/tool message (used by the budget hook)."""
-        next(m for m in reversed(self.messages) if m["role"] in ("tool", "user"))["content"] += suffix
+        """Append text to the last user/tool message, in both records.
+
+        Both, because this class exists so the loop never updates two records by
+        hand -- and this method used to update one. The trajectory is what the
+        eval layer reads afterwards, so text appended here was invisible to it:
+        anything the model was asked mid-run left no trace of having been asked.
+        """
+        model_msg = next(m for m in reversed(self.messages)
+                         if m["role"] in ("tool", "user"))
+        model_msg["content"] += suffix
+        # The trajectory records tool results under a different role name, so
+        # match on the saved spelling rather than the model-facing one.
+        saved = next((m for m in reversed(self.trajectory.messages)
+                      if m["role"] in ("tool_result", "user")), None)
+        if saved is not None:
+            saved["content"] = (saved.get("content") or "") + suffix

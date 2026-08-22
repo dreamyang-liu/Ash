@@ -1,24 +1,26 @@
 """Pluggable agent harnesses for SWE-bench evaluation.
 
-Each harness implements a different agent backend:
-- litellm: Custom agent loop using litellm (any model)
-- claude_code: Claude Code CLI via MCP
-- manager_worker: explore -> decompose -> parallel workers on one shared sandbox
-- best_of_n: N isolated parallel candidates, one patch selected
-- codex: OpenAI Codex CLI (future)
+A harness is a topology: how many agents, how many worktrees, who reports the
+answer. Two today:
+
+- litellm: one agent, one sandbox — the custom loop, any litellm model
+- claude_code: the Claude Code CLI over MCP
+
+``manager-worker`` (a manager decomposing work across workers sharing one sandbox)
+and ``best-of-n`` (N isolated candidates, one patch selected) lived here too, and
+were removed while the single-agent path is being settled. Both worked; what they
+exercised in L2 — Waggle's optimistic concurrency, several agents sharing one
+chain through ``executor_for(pipeline=)`` — is still here and still tested, so
+bringing them back is a revert rather than a rewrite.
 """
 
 from .base import BaseHarness
 from .litellm import LiteLLMHarness
 from .claude_code import ClaudeCodeHarness
-from .manager_worker import ManagerWorkerHarness
-from .best_of_n import BestOfNHarness
 
 HARNESSES = {
     "litellm": LiteLLMHarness,
     "claude-code": ClaudeCodeHarness,
-    "manager-worker": ManagerWorkerHarness,
-    "best-of-n": BestOfNHarness,
     # "codex": CodexHarness,
 }
 

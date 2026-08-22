@@ -1,94 +1,109 @@
-# SWE-bench Benchmark for ash-cli
+# SWE-bench evaluation harness
 
-Run an LLM agent with a bash tool on SWE-bench instances in isolated Docker sandboxes.
+Runs an LLM agent against SWE-bench instances in isolated sandboxes — containers,
+Firecracker microVMs, or Kubernetes pods, chosen by config rather than by code.
 
-## Quick Start
+## Quick start
 
 ```bash
-# Install dependencies
-pip install litellm datasets
+pip install litellm pyyaml datasets
+pip install ./sdk                      # the ash-sandbox client
+export ANTHROPIC_API_KEY=sk-...        # or AWS creds for Bedrock, etc.
 
-# Set API key (Claude, GPT-4, Gemini, etc. via litellm)
-export ANTHROPIC_API_KEY=sk-...
+# One instance
+python -m swebench -c swebench/configs/bedrock-sonnet46.yaml -i django__django-11848
 
-# Run on a single instance
-python -m swebench.runner -i sympy__sympy-15599
+# A full run (workers come from the config, or -w)
+python -m swebench -c swebench/configs/bedrock-sonnet46.yaml
 
-# Run batch on SWE-bench Lite
-python -m swebench.runner --subset lite --split test -o results/
+# The same config on Firecracker microVMs instead of containers
+python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
 
-# Run on SWE-bench Verified with 4 workers
-python -m swebench.runner --subset verified --split test -w 4 -o results/
+# A different harness (topology)
+python -m swebench -c swebench/configs/claude-opus.yaml --harness claude-code
 ```
+
+`python -m swebench` is the only entry point. Configs are YAML and compose via
+`extends:`; CLI flags override file values, which override defaults. See
+`__main__.py` for the flag-to-section mapping, and `configs/` for examples.
 
 ## Prerequisites
 
-- `ash` binary on PATH (or use `--ash-binary ./target/release/ash`)
-- Docker running (the runner creates Docker containers per instance)
-- The swebench Docker images pulled or pullable
+- Python ≥ 3.10, plus the `ash-sandbox` SDK (`pip install ./sdk`)
+- A sandbox backend, selected with `--backend` or `execution.backend`:
+  - `docker` (default) — Docker running, SWE-bench images pullable
+  - `microvm` — an AgentENV server; settings under `execution.microvm`, or
+    `AENV_SERVER_URL` / `AENV_API_KEY`
+  - `k8s` — the control plane and gateway from `k8s-scaffold/`
+- Nothing needs installing inside the image: the `ash-runtime` binary is either
+  mounted (`--runtime-bin`) or fetched by `bootstrap.sh` at startup.
 
-## Evaluate Results
-
-```bash
-# Using sb-cli (free cloud evaluation)
-pip install sb-cli
-sb-cli submit swe-bench_verified test --predictions_path results/preds.json --run_id my-run
-```
-
-## Architecture
+## Layout
 
 ```
 swebench/
-├── AGENT.md       # System prompt / manual given to the LLM
-├── types.py       # Core types: AgentConfig, Trajectory, ToolResult, CostTracker
-├── ash_cli.py     # AshSession: session lifecycle + bash execution via ash CLI
-├── tools.py       # Single "bash" tool schema (OpenAI function calling format)
-├── agent.py       # AshAgent: litellm agent loop
-└── runner.py      # CLI runner for single/batch execution
+├── __main__.py       # CLI entry: config loading, flag merge, dispatch
+├── batch.py          # Parallel execution + live dashboard
+├── dataset.py        # Instance loading, image resolution, task prompts
+├── models.py         # Generic types: ToolResult, CommandOutcome, AgentConfig,
+│                     #   CostTracker, Trajectory
+├── backends.py       # Sandbox backend from config (docker | microvm | k8s)
+├── sandbox.py        # AshSession: sandbox lifecycle + the executor seam
+├── prediction.py     # The SWE-bench prediction format (eval layer)
+├── submission.py     # Asking the agent to hand in its patch (eval layer)
+├── patch.py          # Diffing a worktree, for shared-tree topologies
+├── agent/            # The agent loop and the L2 interceptor pipeline:
+│   ├── pipeline.py   #   the onion: verdicts, CallContext, ToolPipeline
+│   ├── interceptors/ #   one package each — guardrail, truncate,
+│   │                 #   present — plus the default assembly
+│   └── ...           #   the loop itself: conversation, llm, tools, prompts,
+│                     #   hooks, trace
+├── harnesses/        # Pluggable topologies; base.py defines the API
+├── configs/          # Per-model YAML, composed with `extends:`
+├── mcp_server.py     # MCP proxy: the same pipeline for external agents
+└── rollout_server.py # RL rollout endpoint (agent + in-sandbox grading)
 ```
 
-## How It Works
+## How a run works
 
-1. **Session Setup** — `ash session create --image <swebench-image>` creates a Docker sandbox with ash-mcp running inside
-2. **Agent Loop** — The LLM gets AGENT.md as system prompt + the issue. It has one tool: `bash`. Commands run via `ash --session <id> run "<command>"`
-3. **Patch Extraction** — After the agent finishes, `ash --session <id> git-diff` captures the changes
-4. **Cleanup** — `ash session destroy <id>` removes the container
+1. **Sandbox** — `AshSession.create(image)` starts one from the configured
+   backend and connects to the `ash-runtime` serving tools inside it.
+2. **Agent loop** — the model gets a system prompt and the issue, and drives the
+   runtime's tools (`shell`, `text_editor`, `process`, `grep_files`, `web_*`; or a
+   single `bash` tool with `tools: bash_only`). Every call crosses one seam —
+   `executor(tool_name, args) -> ToolResult` — which is where output truncation,
+   guardrails, and multi-agent coordination mount as interceptors.
+3. **Submission** — the agent is asked for its own diff, with steps reserved so it
+   still has turns to answer in (`submission.py`); it knows which files it changed,
+   which a harness reading git state can only guess. Shared-worktree topologies
+   diff the tree instead, since there no single agent knows the change set.
+4. **Cleanup** — `session.destroy()` runs in a `finally`, so the sandbox goes away
+   even when the run raises.
 
-## CLI Options
+Output lands in `results/<run>/`: `preds.json`, plus per-instance trajectories and
+traces. Treat it as generated data.
 
-```
-python -m swebench.runner [OPTIONS]
+## Harnesses
 
-Dataset:
-  --subset SUBSET       lite, verified, or full (default: lite)
-  --split SPLIT         Dataset split (default: test)
-  --instance ID         Single instance by ID or index
-  --slice SPEC          Slice (e.g., "0:10")
-  --filter REGEX        Filter instance IDs
+Registered in `harnesses/__init__.py`:
 
-Model:
-  --model MODEL         litellm model name (default: anthropic/claude-sonnet-4-5-20250929)
-  --step-limit N        Max agent steps (default: 250)
-  --cost-limit N        Max cost in USD (default: 3.0)
-  --temperature T       Sampling temperature (default: 0.0)
+| Harness       | Topology                                     |
+|---------------|----------------------------------------------|
+| `litellm`     | one agent, one sandbox — any litellm model    |
+| `claude-code` | the Claude Code CLI, driven over MCP         |
 
-Ash:
-  --ash-binary PATH     Path to ash binary (default: ash)
+Add one by subclassing `BaseHarness` and registering it in `HARNESSES`.
 
-Execution:
-  --output DIR          Output directory (default: swebench_results/)
-  --workers N           Parallel workers (default: 1)
-```
+`manager-worker` and `best-of-n` were removed while the single-agent path is being
+settled, and Waggle (the write-arbitration interceptor they used) with them.
+Mounting one
+shared chain across several agents still works and is still tested — a
+coordination interceptor comes back as a plugin, or by reverting.
 
-## Tool Flow
+## Evaluating results
 
-```
-LLM → tool_call(bash, {command: "ash grep 'def solve' src/"})
-  → AshAgent._execute_tool_calls()
-    → AshSession.run_command("ash grep 'def solve' src/")
-      → subprocess: ash --session <id> run "ash grep 'def solve' src/"
-        → ash CLI → Gateway → ash-mcp inside Docker container
-      ← stdout/stderr as ToolResult
-    ← observation message
-  ← append to messages, next LLM call
+```bash
+pip install sb-cli
+sb-cli submit swe-bench_verified test \
+  --predictions_path results/<run>/preds.json --run_id my-run
 ```

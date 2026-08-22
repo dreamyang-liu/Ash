@@ -198,7 +198,11 @@ def test_every_harness_passes_its_backend_config_through():
     """A harness that forgot this would silently keep running on Docker while
     the config said otherwise."""
     root = Path(__file__).resolve().parents[1] / "harnesses"
-    for name in ("litellm.py", "best_of_n.py", "manager_worker.py"):
-        source = (root / name).read_text()
+    # Enumerated, not listed by name: a hardcoded list silently stops covering a
+    # harness that gets added, and breaks when one is removed.
+    for path in sorted(root.glob("*.py")):
+        source = path.read_text()
+        if "AshSession(" not in source:
+            continue                      # this harness does not open one
         assert "backend=backend_config(c)" in source, \
-            f"{name} builds an AshSession without passing the backend config"
+            f"{path.name} builds an AshSession without passing the backend config"

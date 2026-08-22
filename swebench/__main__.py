@@ -12,7 +12,6 @@ Usage:
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -84,17 +83,6 @@ def _flatten_config(config: dict) -> dict:
         ("claude", "max_budget"): "max_budget",
         ("claude", "timeout"): "timeout",
         ("claude", "permission_mode"): "permission_mode",
-        # manager_worker harness
-        ("manager_worker", "n_workers"): "n_workers",
-        ("manager_worker", "max_rounds"): "max_rounds",
-        ("manager_worker", "manager_step_limit"): "manager_step_limit",
-        ("manager_worker", "worker_step_limit"): "worker_step_limit",
-        ("manager_worker", "waggle"): "waggle",
-        ("manager_worker", "waggle_ttl"): "waggle_ttl",
-        # best_of_n harness
-        ("best_of_n", "n_candidates"): "n_candidates",
-        ("best_of_n", "selection"): "selection",
-        ("best_of_n", "temperature_jitter"): "temperature_jitter",
         # dataset
         ("dataset", "subset"): "subset",
         ("dataset", "split"): "split",
@@ -113,6 +101,8 @@ def _flatten_config(config: dict) -> dict:
         ("execution", "k8s"): "k8s",
         ("execution", "image_template"): "image_template",
         ("execution", "harness"): "harness",
+        # A Python file of your own interceptors; see agent/interceptors/.
+        ("execution", "interceptors"): "interceptors",
     }
 
     flat = {}

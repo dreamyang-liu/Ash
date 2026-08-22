@@ -6,11 +6,16 @@ from pathlib import Path
 from .base import BaseHarness
 from ..dataset import resolve_image, format_task_prompt, image_registry_for_subset
 from ..backends import backend_config
+from ..prediction import failure, prediction
+from ..submission import (DEFAULT_RESERVE_STEPS, SUBMISSION_KEY,
+                          extract_submission, reserve_submission)
 from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent
 from ..agent.trace import new_run_id
-from ..agent.tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA
+from ..agent.tools import DEFAULT_PANEL, build_panel
+from ..agent.interceptors import default_pipeline
+from ..agent.pipeline import load_pipeline
 from .. import style as S
 
 
@@ -52,6 +57,7 @@ class LiteLLMHarness(BaseHarness):
                 return self._fail(instance_id, "session_failed")
 
             agent_config = AgentConfig(
+                custom_tools_dir=c.get("custom_tools_dir"),
                 model=c.get("model", "openai/Qwen/Qwen3-Coder-30B-A3B-Instruct"),
                 api_base=c.get("api_base"),
                 api_key=c.get("api_key"),
@@ -90,20 +96,47 @@ class LiteLLMHarness(BaseHarness):
             )
             if quiet:
                 agent.stream = False
-            tools_mode = c.get("tools", "default")
-            agent.set_tools_schema(BASH_ONLY_SCHEMA if tools_mode == "bash_only" else TOOLS_SCHEMA)
+            # Your own L2 interceptors, mounted outside the defaults. `interceptors` is
+            # a path to a Python file holding `PIPELINE = [MyInterceptor()]` --
+            # a file rather than a config schema because policy is code (ADR-3):
+            # a YAML dialect for "reject writes under src/ unless ..." becomes a
+            # crippled programming language. Absent, the agent mounts the
+            # defaults exactly as before.
+            plugins = c.get("interceptors")
+            if plugins:
+                agent.pipeline = default_pipeline(
+                    extra=load_pipeline(plugins).interceptors)
+            # One call, because schema, routing and custom tools have to agree.
+            # `tools:` names a shipped panel or points at a manifest of your own.
+            agent.use_panel(build_panel(c.get("tools", DEFAULT_PANEL),
+                                        agent_config.custom_tools_dir))
+
+            # The agent hands in its own diff: it knows which files it fixed,
+            # which is the one thing a harness reading git state cannot know.
+            # The reserve buys the turns to do it before the budget is gone.
+            reserve = int(c.get("submission_reserve_steps",
+                                DEFAULT_RESERVE_STEPS))
+            if reserve > 0:
+                before_query, before_finish = reserve_submission(
+                    reserve, agent_config.workdir)
+                agent.before_query_hooks.append(before_query)
+                agent.before_finish_hooks.append(before_finish)
 
             if agent_config.instance_template:
                 task = instance.get("problem_statement", "")
             else:
                 task = format_task_prompt(instance)
             exit_status = agent.run(task, instance_id=instance_id)
-            patch = session.get_patch()
+            # No fallback to git: if the agent did not hand anything in, the
+            # prediction is empty and exit_status says why. Extracting a patch
+            # anyway would substitute our guess for the agent's judgement.
+            patch = extract_submission(agent.trajectory) if reserve > 0 \
+                else session.get_patch()
 
             # Save trajectory
             agent.trajectory.info = {
                 "exit_status": exit_status,
-                "submission": patch,
+                SUBMISSION_KEY: patch,
                 "model": agent_config.model,
             }
             agent.trajectory.cost = agent.cost
@@ -115,12 +148,7 @@ class LiteLLMHarness(BaseHarness):
                 print(S.kv("cost    ", S.cost(agent.cost.total_cost, agent.cost.api_calls)))
                 print(S.kv("patch   ", S.patch_info(patch)))
 
-            return {
-                "instance_id": instance_id,
-                "model_patch": patch,
-                "model_name_or_path": agent_config.model,
-                "exit_status": exit_status,
-            }
+            return prediction(instance_id, agent_config.model, patch, exit_status)
 
         except Exception as e:
             if not quiet and not self._dashboard:
@@ -131,9 +159,4 @@ class LiteLLMHarness(BaseHarness):
             session.destroy()
 
     def _fail(self, instance_id: str, status: str) -> dict:
-        return {
-            "instance_id": instance_id,
-            "model_patch": "",
-            "model_name_or_path": self.config.get("model", "unknown"),
-            "exit_status": status,
-        }
+        return failure(instance_id, self.config.get("model"), status)

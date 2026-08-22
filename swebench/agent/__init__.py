@@ -6,7 +6,7 @@ retries in `llm.py`, prompts in `prompts.py`, conversation/trajectory state in
 also owns tool dispatch, so a manifest-defined tool is handed over by name and
 expanded there rather than here. Tool-path
 concerns (guardrails, output truncation) are L2 interceptors on a `ToolPipeline`
-(`interceptors.py`, `guardrails.py`) rather than loop code, so the MCP proxy and
+(`interceptors/`) rather than loop code, so the MCP proxy and
 harness-side mounts get them too; model-path concerns (budget warnings) remain
 `hooks.py`. What remains here is the loop: query the model, run tool calls,
 repeat.
@@ -22,13 +22,14 @@ from ..models import AgentConfig, CostTracker, ToolResult, Trajectory
 from .prompts import build_system_prompt, build_instance_message  # re-exported
 from .conversation import Conversation
 from .llm import LLMClient, ThinkingLoopError
-from .pipeline import EXECUTOR, CallContext, ToolPipeline, mounted_pipeline
-from .tools import tool_summary, TOOLS_SCHEMA, BASH_ONLY_SCHEMA, route_agent_tool, is_custom_tool
+from .pipeline import (EXECUTOR, RAW_ERROR, RAW_OUTPUT, CallContext,
+                       ToolPipeline, mounted_pipeline)
+from .tools import DEFAULT_PANEL, load_panel, tool_summary, is_custom_tool
 from .trace import ToolTraceWriter, new_run_id
-from . import hooks, interceptors
+from . import hooks
+from . import interceptors
 
-__all__ = ["AshAgent", "build_system_prompt", "build_instance_message",
-           "TOOLS_SCHEMA", "BASH_ONLY_SCHEMA"]
+__all__ = ["AshAgent", "build_system_prompt", "build_instance_message"]
 
 
 class AshAgent:
@@ -61,16 +62,56 @@ class AshAgent:
         self.sandbox_id = sandbox_id
         self.trajectory = Trajectory()
         self.cost = CostTracker()
-        self._tools_schema: list[dict] = []
+        # The panel this agent offers, and the views that route its calls. Held per
+        # agent rather than in a module global: routing used to resolve against a
+        # process-wide "active panel", so two agents in one process -- which is what
+        # batch mode is -- could not have different ones.
+        self._panel = None
         self._trace_file = None
         self._event_trace: Optional[ToolTraceWriter] = None
         self._warned = False
         self.stream = True                # set False to disable streaming (parallel mode)
+        #: Scratch space for hooks, cleared at the start of every run. A hook
+        #: that fires "once" needs somewhere to remember that, and an agent
+        #: reused for a second run must not inherit the first run's memory.
+        self.hook_state: dict = {}
         self.before_query_hooks = list(hooks.DEFAULT_BEFORE_QUERY)
+        self.before_finish_hooks = list(hooks.DEFAULT_BEFORE_FINISH)
         self.result_processors = list(hooks.DEFAULT_RESULT_PROCESSORS)
 
+    def use_panel(self, panel) -> None:
+        """Offer this panel, and route through its views.
+
+        Takes a ``ToolPanel``, a manifest name, or a path. Schema and routing arrive
+        together because they have to agree: setting one without the other is how the
+        panel and the routing table came to disagree in the first place.
+        """
+        from .tools import ToolPanel
+
+        self._panel = panel if isinstance(panel, ToolPanel) else load_panel(panel)
+
+    @property
+    def panel(self):
+        """This agent's panel, loading the default one if none was set."""
+        if self._panel is None:
+            self.use_panel(DEFAULT_PANEL)
+        return self._panel
+
+    @property
+    def tools_schema(self) -> list[dict]:
+        """The schema handed to the model."""
+        return self.panel.schema
+
     def set_tools_schema(self, schema: list[dict]):
-        self._tools_schema = schema
+        """Set a raw schema list, bypassing panel compilation.
+
+        Kept for callers that build a schema by other means (a test, or a harness
+        driving a non-Ash tool set). Routing still needs views, so a panel is loaded
+        for that; prefer :meth:`use_panel`, which keeps the two in step.
+        """
+        from .tools import ToolPanel
+
+        self._panel = ToolPanel(schema=schema, views=self.panel.views)
 
     def _trace(self, text: str):
         if self._trace_file:
@@ -96,7 +137,8 @@ class AshAgent:
         """This call's executor, wrapped in the L2 pipeline if one is mounted.
 
         ``metadata`` is the call's shared scratch space: interceptors read the
-        raw executor from it (Waggle's probe traffic) and write back facts the
+        raw executor from it (probe traffic that must not re-enter the chain) and
+        write back facts the
         loop needs afterwards (the pre-truncation output).
         """
         if self._pipeline is None:
@@ -132,17 +174,21 @@ class AshAgent:
             # artifact->shell (ash_sandbox.Sandbox.call_agent_tool), which also
             # remembers where the binary landed, so a repeat call skips the
             # download round-trip. Interceptors therefore see one opaque call --
-            # tell Waggle about any such tool via `opaque_writers` so its drift
-            # scan still runs (see waggle.py).
+            # a coordination interceptor cannot see how such a tool touches files, so it
+            # must be told the tool's name to watch it at all.
             exec_name, exec_args = name, dict(args)
         else:
-            # Builtin names ARE translated here, even though the executor would
-            # do it too: `bash` must reach the interceptors as `shell`, or a
-            # bash_only run would hide every command from the seats that key on
-            # the runtime tool -- Waggle's drift scan above all.
+            # Builtin names ARE translated here, even though the executor would do
+            # it too: a renamed view must reach the interceptors under the runtime's
+            # name, or one keyed on `shell` goes blind -- a drift scan above all.
+            # A ValueError here is an argument the view does not offer, reported to
+            # the model rather than dropped.
             try:
-                exec_name, exec_args = route_agent_tool(name, args)
-            except KeyError as exc:
+                # `panel` rather than `_panel`: routing must not depend on someone
+                # having called use_panel() first. The loop reaches this line before
+                # run() on any caller that dispatches a tool directly.
+                exec_name, exec_args = self.panel.route(name, args)
+            except (KeyError, ValueError) as exc:
                 exec_name, exec_args = name, dict(args)
                 result = ToolResult(success=False, output="", error=str(exc))
                 error_kind = "routing"
@@ -170,8 +216,8 @@ class AshAgent:
         # Interceptors may have annotated or bounded the result; the trace
         # records what the runtime returned, the conversation gets what the
         # interceptors produced.
-        runtime_output = metadata.get(interceptors.RAW_OUTPUT, result.output)
-        runtime_error = metadata.get(interceptors.RAW_ERROR, result.error)
+        runtime_output = metadata.get(RAW_OUTPUT, result.output)
+        runtime_error = metadata.get(RAW_ERROR, result.error)
         content = _observation(result.success, result.output, result.error)
         for proc in self.result_processors:
             content = proc(content, name, args, result)
@@ -244,6 +290,7 @@ class AshAgent:
         self.trajectory.instance_id = instance_id
         self.cost = CostTracker()
         self._warned = False
+        self.hook_state = {}
         active_run_id = self.run_id or new_run_id()
         if self.trace_dir:
             self.trace_dir.mkdir(parents=True, exist_ok=True)
@@ -256,7 +303,7 @@ class AshAgent:
                 sandbox_id=self.sandbox_id,
             )
 
-        llm = LLMClient(self.config, self.cost, self._tools_schema, trace=self._trace, on_step=self.on_step)
+        llm = LLMClient(self.config, self.cost, self.tools_schema, trace=self._trace, on_step=self.on_step)
         llm.stream = self.stream
         self._pipeline = None             # re-resolved per run (see __init__)
 
@@ -283,7 +330,9 @@ class AshAgent:
                     for tc in message.tool_calls:
                         self._run_tool(tc, conv, turn_id)
                 elif self._nudge(conv, message) == "completed":
-                    return "completed"
+                    # A hook may want one more turn before we call it a day.
+                    if not any(h(self, conv) for h in self.before_finish_hooks):
+                        return "completed"
         finally:
             if self._trace_file:
                 self._trace_file.close()

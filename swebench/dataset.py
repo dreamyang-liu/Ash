@@ -1,6 +1,8 @@
 """Dataset loading and instance utilities for SWE-bench / SWE-Gym."""
 
+import json
 import re
+import shlex
 
 try:
     from datasets import load_dataset
@@ -85,3 +87,41 @@ Do NOT modify test files. After making your changes, verify them by running rele
 def image_registry_for_subset(subset: str) -> str:
     """Return the image registry key for a dataset subset."""
     return "xingyaoww" if subset.startswith("gym") else "swebench"
+
+
+#: Django test ids read ``test_name (module.Class)``; its runner wants
+#: ``module.Class.test_name``.
+_DJANGO_TEST_ID = re.compile(r"^(\S+)\s+\(([^)]+)\)$")
+
+
+def parse_test_list(raw: object) -> list[str]:
+    """Parse FAIL_TO_PASS / PASS_TO_PASS — a JSON list *string* in SWE-bench."""
+    if isinstance(raw, list):
+        return [str(t) for t in raw]
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return [str(t) for t in parsed] if isinstance(parsed, list) else []
+
+
+def build_test_command(repo: str, test_id: str) -> str:
+    """Shell command whose exit code says whether one test passes.
+
+    django ids need django's own runner; the other SWE-bench Verified repos are
+    pytest-collectable. A test id the runner cannot collect simply fails, so a
+    caller using this as a signal degrades rather than crashing.
+
+    Lives here rather than with a harness because it is a fact about the dataset's
+    repos, not about any one topology -- it was in the best-of-n harness, which is
+    why deleting that harness would have taken the rollout server's grading with
+    it.
+    """
+    if repo == "django/django":
+        m = _DJANGO_TEST_ID.match(test_id.strip())
+        spec = f"{m.group(2)}.{m.group(1)}" if m else test_id
+        return ("./tests/runtests.py --verbosity 0 --settings=test_sqlite "
+                f"--parallel 1 {shlex.quote(spec)}")
+    return f"python -m pytest -x -q {shlex.quote(test_id)}"

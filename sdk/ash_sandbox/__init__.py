@@ -4,7 +4,6 @@ from .backends import Backend, HTTPBackend, MCPBackend, CLIBackend, GatewayBacke
 from .sandbox import Sandbox
 from .pool import DockerPool, MicroVMPool, Pool, SandboxPool
 from .toolset import (
-    BUILTIN_ROUTES,
     CustomToolPlan,
     CustomToolSpec,
     ManifestError,
@@ -26,7 +25,6 @@ __all__ = [
     "DockerPool",
     "MicroVMPool",
     "SandboxPool",
-    "BUILTIN_ROUTES",
     "CustomToolPlan",
     "CustomToolSpec",
     "ManifestError",

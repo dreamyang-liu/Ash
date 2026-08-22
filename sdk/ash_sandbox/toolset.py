@@ -1,4 +1,4 @@
-"""Data-driven tool layer: builtin routes and custom tools as configuration.
+"""Data-driven tool layer: custom tools and name aliases as configuration.
 
 Callers: sandbox.py (Sandbox.call_agent_tool dispatch), exported via
 __init__.py; swebench/agent/{tools,custom_tools}.py become re-export shims.
@@ -8,10 +8,9 @@ Data schema: same manifest YAML/JSON as configs/custom_tools/README.md.
 
 Everything an agent-facing tool *is* lives here as data:
 
-- BUILTIN_ROUTES: agent tool name -> runtime tool name (plain dict)
 - CustomToolSpec: manifest-defined binary tool (URL+optional sha256, or
   image-local path) with parameters compiled into discrete argv slots
-- ToolRegistry: an *instance* holding routes + custom specs, so different
+- ToolRegistry: an *instance* holding name aliases + custom specs, so different
   sessions/tasks can carry different tool panels without global state
 
 Security invariant (custom tools): parameters may only land in discrete
@@ -44,17 +43,6 @@ DEFAULT_TIMEOUT_SECONDS = 60
 MAX_TIMEOUT_SECONDS = 600
 
 # Agent-facing name -> runtime tool name. Pure data; extend or override by
-# constructing ToolRegistry(routes={...}).
-BUILTIN_ROUTES: dict[str, str] = {
-    "shell": "shell",
-    "bash": "shell",  # bash_only-mode alias
-    "text_editor": "text_editor",
-    "grep_files": "grep_files",
-    "process": "process",
-    "web_fetch": "web_fetch",
-    "web_search": "web_search",
-    "wait_for_events": "wait_for_events",
-}
 
 
 class ManifestError(ValueError):
@@ -283,22 +271,57 @@ class CustomToolPlan:
 
 
 class ToolRegistry:
-    """A tool panel: builtin routes + custom tool specs, as an instance.
+    """A tool panel: name aliases + custom tool specs, as an instance.
 
-    Each session/task can carry its own registry — no cross-task global
-    state. The default panel is BUILTIN_ROUTES with no custom tools.
+    Each session/task can carry its own registry — no cross-task global state.
+
+    ``aliases`` maps an agent-facing name onto a runtime tool, and is empty by
+    default. It used to be seeded from a ``BUILTIN_ROUTES`` table of the runtime's
+    own tools -- seven identity entries plus one real mapping (``bash`` -> ``shell``)
+    -- which made it look like every call needed translating. It did not: the table's
+    real job was to reject names the runtime does not serve, and the runtime already
+    knows which those are. So the allow-list comes from the runtime now (see
+    ``Sandbox.execute_tool_call``) and this holds only genuine renames.
+
+    That also fixes a case the table got wrong: ``artifact`` was missing from it, so
+    calling the runtime's own ``artifact`` tool through ``execute_tool_call`` was
+    rejected as unknown.
     """
 
-    def __init__(self, routes: dict[str, str] | None = None) -> None:
-        self.routes: dict[str, str] = dict(routes if routes is not None else BUILTIN_ROUTES)
+    def __init__(self, routes: dict[str, str] | None = None,
+                 aliases: dict[str, str] | None = None) -> None:
+        # `routes` is the old parameter name, kept so existing callers keep working.
+        self.aliases: dict[str, str] = dict(aliases or routes or {})
         self.custom_specs: dict[str, CustomToolSpec] = {}
+
+    @property
+    def routes(self) -> dict[str, str]:
+        """Deprecated alias for :attr:`aliases`."""
+        return self.aliases
 
     # --- custom tool management ---
 
+    #: Names a custom tool may not take. The runtime's own tools, because dispatch
+    #: checks `is_custom_tool` first: a custom tool called `shell` would shadow the
+    #: real one and every shell call would silently become a binary invocation.
+    #:
+    #: Hardcoded, unlike the dispatch allow-list, and deliberately so. Registration
+    #: happens while manifests load -- before any sandbox exists, so there is no
+    #: declaration to consult -- and a name that collides on *some* runtime is a bad
+    #: name regardless. Keep in step with `runtime/tools/`; the swebench panel tests
+    #: compare the two.
+    RESERVED_NAMES = frozenset({
+        "shell", "text_editor", "grep_files", "process",
+        "web_fetch", "web_search", "wait_for_events", "artifact", "bash",
+    })
+
     def register(self, spec: CustomToolSpec) -> None:
         """Register a custom tool spec, refusing collisions with builtins."""
-        if spec.name in self.routes:
-            raise ManifestError(f"custom tool {spec.name!r} collides with a builtin tool")
+        if spec.name in self.RESERVED_NAMES:
+            raise ManifestError(
+                f"custom tool {spec.name!r} collides with a builtin tool")
+        if spec.name in self.aliases:
+            raise ManifestError(f"custom tool {spec.name!r} collides with an alias")
         self.custom_specs[spec.name] = spec
 
     def load_manifests(self, directory: str | Path) -> list[CustomToolSpec]:
@@ -329,11 +352,14 @@ class ToolRegistry:
         return name in self.custom_specs
 
     def route(self, name: str, args: dict) -> tuple[str, dict]:
-        """Translate a builtin agent tool call to a runtime tool call."""
-        runtime_tool = self.routes.get(name)
-        if runtime_tool is None:
-            raise KeyError(f"unknown agent tool: {name}")
-        return runtime_tool, dict(args)
+        """Translate an agent-facing tool call into a runtime call.
+
+        An alias is applied if one is registered; otherwise the name passes through.
+        Whether the result names a tool the runtime serves is checked by the caller
+        against the runtime's own declaration -- a hardcoded list here could only
+        ever be a second opinion, and was already wrong about ``artifact``.
+        """
+        return self.aliases.get(name, name), dict(args)
 
     def plan_custom_tool(self, name: str, args: dict) -> CustomToolPlan:
         """Resolve a custom tool call into an execution plan."""

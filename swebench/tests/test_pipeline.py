@@ -1,8 +1,7 @@
-"""Unit tests for the tool interceptor pipeline (swebench.agent.pipeline)
-and for Waggle mounted as an interceptor (swebench.agent.waggle).
+"""Unit tests for the tool interceptor pipeline (swebench.agent.pipeline).
 
-No Docker, no model calls — the sandbox is the in-memory FakeSandbox from
-test_waggle (imported, not copied).
+No Docker, no model calls — the interceptors are exercised against plain
+functions, and where a filesystem is needed, tests/fake_sandbox.py stands in.
 
 Covered:
 - onion ordering: befores in order, afters in REVERSE
@@ -10,21 +9,15 @@ Covered:
 - Rewrite composition + context immutability
 - per-interceptor fail-open vs fail-closed (before and after hooks)
 - tools filtering, inner-exception conversion, plugin loading
-- WaggleInterceptor reproduces CoordinatedExecutor's OCC behavior
-- WagglePolicy hooks: on_write / on_conflict / on_drift / on_commit,
-  hook-exception fallback to default OCC
 - piped_executor: the harness-side mount (identity binding, raw-executor
-  metadata, per-call sandbox-id resolution, two mounted agents sharing
-  Waggle arbitration)
+  metadata, per-call sandbox-id resolution, and two agents sharing one
+  stateful interceptor -- what a multi-agent topology needs from the mount)
 """
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
-from swebench.agent import waggle
 from swebench.agent.pipeline import (
     CallContext,
     Continue,
@@ -36,16 +29,7 @@ from swebench.agent.pipeline import (
     load_pipeline,
     piped_executor,
 )
-from swebench.agent.waggle import (
-    Allow,
-    CoordinatedExecutor,
-    Ignore,
-    WaggleInterceptor,
-    WagglePolicy,
-    WorkspaceCoordinator,
-)
 from swebench.models import ToolResult
-from swebench.tests.test_waggle import FakeSandbox
 
 PATH = "/testbed/target.txt"
 
@@ -323,243 +307,6 @@ def test_load_pipeline_requires_module_level_list(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  WaggleInterceptor: OCC behavior reproduced through the pipeline
-# --------------------------------------------------------------------------- #
-
-def _waggle_setup(files: dict[str, str] | None = None, ttl: float = 5.0,
-                  policy: WagglePolicy | None = None):
-    sandbox = FakeSandbox(files)
-    interceptor = WaggleInterceptor(state=WorkspaceCoordinator(ttl=ttl), policy=policy)
-    pipe = ToolPipeline([interceptor])
-
-    def call(agent: str, tool: str, args: dict) -> ToolResult:
-        executor = sandbox.executor()
-        ctx = CallContext(agent_id=agent, sandbox_id="default", tool_name=tool,
-                          args=dict(args), metadata={"executor": executor})
-        return pipe.execute(ctx, executor)
-
-    return sandbox, interceptor, call
-
-
-def _read(call, agent: str, path: str = PATH) -> ToolResult:
-    return call(agent, "text_editor", {"command": "view", "path": path})
-
-
-def _write(call, agent: str, text: str, path: str = PATH) -> ToolResult:
-    return call(agent, "text_editor",
-                {"command": "write", "path": path, "file_text": text})
-
-
-def test_waggle_interceptor_read_write_records_history():
-    sandbox, icpt, call = _waggle_setup({PATH: "base"})
-    assert _read(call, "A").success
-    assert _write(call, "A", "v2 content").success
-    rec = icpt.state.file("default", PATH)
-    assert rec.version == 2
-    assert [r.op for r in rec.history] == ["baseline", "write"]
-    assert sandbox.read(PATH) == "v2 content"
-
-
-def test_waggle_interceptor_rejects_blind_write():
-    sandbox, _, call = _waggle_setup({PATH: "base"})
-    result = _write(call, "A", "blind")
-    assert not result.success
-    assert "text_editor view first" in result.output
-    assert sandbox.read(PATH) == "base"
-
-
-def test_waggle_interceptor_stale_write_rejected_then_retry_wins():
-    sandbox, icpt, call = _waggle_setup({PATH: "line1\nline2"})
-    _read(call, "A"), _read(call, "B")
-    assert _write(call, "A", "line1\nline2 changed by A").success
-    rejection = _write(call, "B", "line1 changed by B\nline2")
-    assert not rejection.success
-    assert "[WAGGLE]" in rejection.output
-    assert "your snapshot : v1" in rejection.output
-    assert "+line2 changed by A" in rejection.output       # unified diff present
-    reservation = icpt.state.file("default", PATH).reservation
-    assert reservation and reservation.agent == "B"        # loser is protected
-    _read(call, "B")
-    assert _write(call, "B", "merged by B").success
-    assert sandbox.read(PATH) == "merged by B"
-
-
-def test_waggle_interceptor_detects_shell_drift():
-    sandbox, icpt, call = _waggle_setup({PATH: "base"})
-    _read(call, "A"), _read(call, "B")
-    sandbox.mutate(PATH, "changed out of band")
-    call("B", "shell", {"command": "run-something"})
-    rec = icpt.state.file("default", PATH)
-    assert rec.version == 2
-    assert rec.history[-1].op == "external"
-    rejection = _write(call, "A", "based on stale v1")
-    assert not rejection.success
-    assert "external (detected by B)" in rejection.output
-
-
-def test_waggle_interceptor_matches_coordinated_executor_ledger():
-    """Same op sequence through both mountings -> identical version ledger."""
-    script = [("A", "read", ""), ("B", "read", ""), ("A", "write", "by A"),
-              ("B", "write", "by B"), ("B", "read", ""), ("B", "write", "by B v2")]
-
-    def run_via_executor():
-        sandbox = FakeSandbox({PATH: "base"})
-        state = WorkspaceCoordinator(ttl=5.0)
-        agents = {a: CoordinatedExecutor(sandbox.executor(), state, agent_id=a)
-                  for a in ("A", "B")}
-        outcomes = []
-        for agent, op, text in script:
-            if op == "read":
-                outcomes.append(agents[agent]("text_editor", {"command": "view", "path": PATH}).success)
-            else:
-                outcomes.append(agents[agent]("text_editor", {
-                    "command": "write", "path": PATH, "file_text": text}).success)
-        return outcomes, state.dump()
-
-    def run_via_pipeline():
-        _, icpt, call = _waggle_setup({PATH: "base"})
-        outcomes = [(_read(call, agent) if op == "read"
-                     else _write(call, agent, text)).success
-                    for agent, op, text in script]
-        return outcomes, icpt.dump()
-
-    exec_outcomes, exec_dump = run_via_executor()
-    pipe_outcomes, pipe_dump = run_via_pipeline()
-
-    def strip(dump: dict) -> dict:  # timestamps differ run-to-run
-        return {key: [{f: r[f] for f in ("version", "author", "op", "bytes")}
-                      for r in records]
-                for key, records in dump.items()}
-
-    assert exec_outcomes == pipe_outcomes == [True, True, True, False, True, True]
-    assert strip(exec_dump) == strip(pipe_dump)
-
-
-def test_waggle_interceptor_fails_closed_without_executor_metadata():
-    sandbox = FakeSandbox({PATH: "base"})
-    pipe = ToolPipeline([WaggleInterceptor(state=WorkspaceCoordinator(ttl=5.0))])
-    ctx = CallContext(agent_id="A", sandbox_id="default", tool_name="text_editor",
-                      args={"command": "write", "path": PATH, "file_text": "x"},
-                      metadata={})                         # executor missing
-    result = pipe.execute(ctx, sandbox.executor())
-    assert not result.success
-    assert result.error == "rejected by WaggleInterceptor"
-    assert sandbox.read(PATH) == "base"                    # nothing written
-
-
-# --------------------------------------------------------------------------- #
-#  WagglePolicy hooks (invoked inside the arbitration critical section)
-# --------------------------------------------------------------------------- #
-
-class _RejectWrites(WagglePolicy):
-    def on_write(self, ctx):
-        return waggle.Reject("A owns this file")
-
-
-def test_policy_on_write_reject_blocks_the_write():
-    sandbox, _, call = _waggle_setup({PATH: "base"}, policy=_RejectWrites())
-    _read(call, "B")
-    result = _write(call, "B", "denied")
-    assert not result.success
-    assert "rejected by policy" in result.output
-    assert "A owns this file" in result.output
-    assert sandbox.read(PATH) == "base"
-
-
-class _AllowAll(WagglePolicy):
-    def on_write(self, ctx):
-        return Allow()
-
-
-def test_policy_on_write_allow_bypasses_occ():
-    sandbox, icpt, call = _waggle_setup({PATH: "base"}, policy=_AllowAll())
-    result = _write(call, "B", "forced")                   # B never read the file
-    assert result.success
-    assert sandbox.read(PATH) == "forced"
-    assert icpt.state.file("default", PATH).history[-1].author == "B"
-
-
-class _LastWriterWins(WagglePolicy):
-    def on_conflict(self, ctx):
-        assert ctx.diff                                    # kernel-computed context
-        assert ctx.snapshot_version == 1
-        return Allow()
-
-
-def test_policy_on_conflict_allow_overrides_stale_rejection():
-    sandbox, _, call = _waggle_setup({PATH: "base"}, policy=_LastWriterWins())
-    _read(call, "A"), _read(call, "B")
-    assert _write(call, "A", "by A").success
-    result = _write(call, "B", "by B")                     # stale, but policy allows
-    assert result.success
-    assert sandbox.read(PATH) == "by B"
-
-
-class _CommitLog(WagglePolicy):
-    def __init__(self):
-        self.commits = []
-
-    def on_commit(self, ctx):
-        self.commits.append((ctx.agent_id, ctx.path, ctx.current_version))
-
-
-def test_policy_on_commit_observes_commits():
-    policy = _CommitLog()
-    _, _, call = _waggle_setup({PATH: "base"}, policy=policy)
-    _read(call, "A")
-    assert _write(call, "A", "v2").success
-    assert policy.commits == [("A", PATH, 2)]
-
-
-class _IgnoreDrift(WagglePolicy):
-    def on_drift(self, ctx):
-        return Ignore()
-
-
-def test_policy_on_drift_ignore_skips_recording():
-    sandbox, icpt, call = _waggle_setup({PATH: "base"}, policy=_IgnoreDrift())
-    _read(call, "A")
-    sandbox.mutate(PATH, "out of band")
-    call("A", "shell", {"command": "anything"})
-    assert icpt.state.file("default", PATH).version == 1   # drift not recorded
-
-
-class _Crashing(WagglePolicy):
-    def on_write(self, ctx):
-        raise RuntimeError("policy bug")
-
-    def on_conflict(self, ctx):
-        raise RuntimeError("policy bug")
-
-
-def test_policy_exception_falls_back_to_default_occ(caplog):
-    sandbox, _, call = _waggle_setup({PATH: "base"}, policy=_Crashing())
-    with caplog.at_level("WARNING", logger="ash.waggle"):
-        result = _write(call, "A", "blind")                # default OCC: unread -> reject
-    assert not result.success
-    assert "text_editor view first" in result.output
-    assert any("on_write" in r.message for r in caplog.records)
-    _read(call, "A")
-    assert _write(call, "A", "v2").success                 # normal path still works
-    assert sandbox.read(PATH) == "v2"
-
-
-class _AlwaysWait(WagglePolicy):
-    def on_write(self, ctx):
-        return waggle.Wait()
-
-
-def test_policy_wait_times_out_within_the_write_deadline():
-    _, _, call = _waggle_setup({PATH: "base"}, ttl=0.4, policy=_AlwaysWait())
-    _read(call, "A")
-    start = time.monotonic()
-    result = _write(call, "A", "never lands")
-    assert not result.success
-    assert "[WAGGLE]" in result.output and "on hold" in result.output
-    assert time.monotonic() - start < 5.0
-
-
-# --------------------------------------------------------------------------- #
 #  piped_executor — the harness-side mount
 # --------------------------------------------------------------------------- #
 
@@ -592,8 +339,8 @@ def test_piped_executor_binds_identity_and_supplies_raw_executor():
     execute("shell", {})
     assert seen["agent"] == "worker-1"
     assert seen["sandbox"] == "sb-42"
-    # Waggle's contract: the raw executor rides in metadata so probe traffic
-    # and arbitrated writes never re-enter the pipeline.
+    # The contract for probe traffic: the raw executor rides in metadata so a
+    # interceptor's own calls never re-enter the pipeline.
     assert seen["raw"] is inner
 
 
@@ -636,26 +383,129 @@ def test_piped_executor_does_not_leak_arg_mutations_between_layers():
     assert original == {"command": "ls"}
 
 
-def test_two_mounted_agents_share_waggle_arbitration():
-    # End-to-end through the mount: same kernel, two executors, OCC fires.
-    # This is the manager-worker layout expressed via executor_for(pipeline=).
-    sandbox = FakeSandbox({PATH: "base"})
-    pipeline = ToolPipeline([WaggleInterceptor()])   # ONE shared instance
-    a = piped_executor(pipeline, sandbox.executor(), agent_id="A")
-    b = piped_executor(pipeline, sandbox.executor(), agent_id="B")
+def test_two_mounted_agents_share_one_chain_and_its_state():
+    """One interceptor instance, two executors: state is shared, so an interceptor can
+    arbitrate between agents. This is what a multi-agent topology needs from the
+    mount, and it was previously asserted through Waggle -- the property belongs to
+    piped_executor, so it is checked here without a coordinator.
+    """
+    class FirstWriterWins(ToolInterceptor):
+        """Minimal arbitration: whoever writes a path first owns it."""
+        tools = {"text_editor"}
 
-    for execute in (a, b):
-        assert execute("text_editor", {"command": "view", "path": PATH}).success
-    assert a("text_editor", {"command": "write", "path": PATH,
-                             "file_text": "A wins"}).success
-    stale = b("text_editor", {"command": "write", "path": PATH,
-                              "file_text": "B stale"})
-    assert not stale.success
-    assert "[WAGGLE]" in stale.output          # rejection carries the diff
-    assert sandbox.read(PATH) == "A wins"      # no lost update
+        def __init__(self):
+            self.owner: dict[str, str] = {}
 
-    # The loser re-reads and re-applies — the LLM-as-merge-engine loop.
-    assert b("text_editor", {"command": "view", "path": PATH}).success
-    assert b("text_editor", {"command": "write", "path": PATH,
-                             "file_text": "B rebased"}).success
-    assert sandbox.read(PATH) == "B rebased"
+        def before(self, ctx):
+            path = ctx.args.get("path", "")
+            held = self.owner.setdefault(path, ctx.agent_id)
+            if held != ctx.agent_id:
+                return Reject(f"{path} is held by {held}")
+            return Continue()
+
+    interceptor = FirstWriterWins()                  # ONE shared instance
+    pipeline = ToolPipeline([interceptor])
+    a = piped_executor(pipeline, lambda t, args: _ok(), agent_id="A")
+    b = piped_executor(pipeline, lambda t, args: _ok(), agent_id="B")
+
+    assert a("text_editor", {"command": "write", "path": PATH}).success
+    loser = b("text_editor", {"command": "write", "path": PATH})
+    assert not loser.success and "held by A" in loser.output
+    assert interceptor.owner[PATH] == "A", \
+        "the two mounts did not share the interceptor's state"
+
+
+# --------------------------------------------------------------------------- #
+#  Why the verdicts are four and not two
+# --------------------------------------------------------------------------- #
+#  Rewrite and ShortCircuit have no production caller since Waggle was removed,
+#  so these pin what would be lost by deleting them. Both failures are quiet:
+#  the workaround runs fine and reports the wrong thing.
+
+def test_rewrite_keeps_each_interceptors_after_consistent_with_its_own_before():
+    """An audit interceptor records "the agent asked for X" on the way in and "the result
+    was Y" on the way out. Rewrite derives a fresh context, so an inner interceptor adding
+    `timeout 300` cannot make that pair describe two different requests."""
+    class Auditor(ToolInterceptor):
+        def __init__(self):
+            self.at_before = self.at_after = None
+
+        def before(self, ctx):
+            self.at_before = ctx.args["command"]
+            return Continue()
+
+        def after(self, ctx, result):
+            self.at_after = ctx.args["command"]
+            return result
+
+    class AddTimeout(ToolInterceptor):
+        def before(self, ctx):
+            return Rewrite({**ctx.args, "command": "timeout 300 " + ctx.args["command"]})
+
+    auditor = Auditor()
+    inner_saw = {}
+
+    def inner(tool, args):
+        inner_saw.update(args)
+        return _ok()
+
+    piped_executor(ToolPipeline([auditor, AddTimeout()]), inner,
+                   agent_id="A")("shell", {"command": "pytest -x"})
+
+    assert auditor.at_before == auditor.at_after == "pytest -x"
+    assert inner_saw["command"] == "timeout 300 pytest -x", "the rewrite never applied"
+
+
+def test_mutating_args_in_place_is_what_rewrite_avoids():
+    """The workaround, shown failing: CallContext is frozen, but that binds the
+    fields, not the dict inside -- so an in-place edit leaks outward and the outer
+    interceptor's after no longer matches its own before."""
+    class Auditor(ToolInterceptor):
+        def __init__(self):
+            self.at_before = self.at_after = None
+
+        def before(self, ctx):
+            self.at_before = ctx.args["command"]
+            return Continue()
+
+        def after(self, ctx, result):
+            self.at_after = ctx.args["command"]
+            return result
+
+    class MutateInPlace(ToolInterceptor):
+        def before(self, ctx):
+            ctx.args["command"] = "timeout 300 " + ctx.args["command"]
+            return Continue()
+
+    auditor = Auditor()
+    piped_executor(ToolPipeline([auditor, MutateInPlace()]),
+                   lambda t, a: _ok(), agent_id="A")("shell", {"command": "pytest -x"})
+
+    assert auditor.at_before == "pytest -x"
+    assert auditor.at_after == "timeout 300 pytest -x"   # the leak Rewrite prevents
+
+
+def test_short_circuit_can_answer_successfully_and_reject_cannot():
+    """A cache interceptor holding a passing test result has to report success. Through
+    Reject it would report failure on a green suite, and an agent reading that goes
+    off to fix a test that was never broken."""
+    answer = ToolResult(success=True, output="5 passed")
+
+    class Cache(ToolInterceptor):
+        def before(self, ctx):
+            return ShortCircuit(answer)
+
+    class CacheViaReject(ToolInterceptor):
+        def before(self, ctx):
+            return Reject("5 passed")
+
+    def inner(tool, args):
+        raise AssertionError("the inner executor should not be reached")
+
+    served = ToolPipeline([Cache()]).execute(
+        CallContext("A", "sb", "shell", {"command": "pytest"}), inner)
+    assert served.success is True and served.output == "5 passed"
+
+    faked = ToolPipeline([CacheViaReject()]).execute(
+        CallContext("A", "sb", "shell", {"command": "pytest"}), inner)
+    assert faked.success is False, "Reject must keep meaning 'this did not happen'"
