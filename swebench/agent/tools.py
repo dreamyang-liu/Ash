@@ -106,23 +106,47 @@ def build_panel(name_or_path: str = DEFAULT_PANEL,
                 custom_tools_dir: "str | None" = None) -> ToolPanel:
     """The complete panel: compiled views plus manifest-defined custom tools.
 
+    Custom tools come from two places, and both are optional:
+
+    * a ``custom_tools:`` section in the panel manifest, for tools that belong to this
+      panel -- one file describes the whole surface a model is offered
+    * ``custom_tools_dir``, a directory of one-tool manifests, for a drop-in set shared
+      across panels (configs/custom_tools/README.md)
+
+    A name defined in both is an error rather than a silent overwrite: the registry
+    stores by name, so whichever loaded second would have won quietly.
+
     One function because the pieces have to arrive together and did not: the litellm
     harness loaded custom tools and the rollout server did not, so a manifest-defined
-    tool existed for one caller and not the other. Assembling a panel by hand at each
-    call site is the same mistake the prediction format and the routing table already
-    made here.
+    tool existed for one caller and not the other.
 
-    Custom tools are dispatched by the session executor (artifact + shell), so they
-    are not views and get no routing entry -- ``is_custom_tool`` catches them first.
+    Custom tools are dispatched by the session executor (artifact + shell), so they are
+    not views and get no routing entry -- ``is_custom_tool`` catches them first.
     """
-    from .custom_tools import custom_agent_schemas, load_custom_tools
+    from ash_sandbox.toolset import parse_manifest
 
-    panel = load_panel(name_or_path)
-    load_custom_tools(custom_tools_dir)
+    from .custom_tools import (custom_agent_schemas, load_custom_tools,
+                               register)
+
+    manifest = _read_manifest(resolve_panel(name_or_path))
+    specs = [parse_agent_tool(t) for t in manifest["agent_tools"]]
+    schema = compile_panel(specs, load_declaration(RUNTIME_SCHEMA))
+
+    inline = [parse_manifest(t) for t in (manifest.get("custom_tools") or ())]
+    from_dir = load_custom_tools(custom_tools_dir)
+    clash = {s.name for s in inline} & {s.name for s in from_dir}
+    if clash:
+        raise ValueError(
+            f"custom tool(s) {', '.join(sorted(clash))} are defined both in "
+            f"{name_or_path} and in {custom_tools_dir}; the registry keys by name, so "
+            f"one would silently replace the other")
+    for spec in inline:
+        register(spec)
+
     extra = custom_agent_schemas()
     if not extra:
-        return panel
-    return ToolPanel(schema=panel.schema + extra, views=panel.views)
+        return ToolPanel(schema=schema, views={s.name: s for s in specs})
+    return ToolPanel(schema=schema + extra, views={s.name: s for s in specs})
 
 
 #: text_editor commands that modify a file. The single source of truth for

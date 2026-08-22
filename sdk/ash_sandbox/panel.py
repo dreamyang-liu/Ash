@@ -104,10 +104,19 @@ class AgentToolSpec:
     stop, one layer up. The model asks for something, is not told no, and does not
     get it.
 
-    Two spellings, because most views rename nothing::
+    Three spellings, because most views rename nothing::
 
         arguments: [command, tail]          # offered under the runtime's own names
         arguments: {cmd: command}           # offered as `cmd`, sent as `command`
+        arguments:                          # ...and reworded for this view
+          target:
+            name: command
+            description: A pytest node id, or omit to run everything
+
+    Types, enums and defaults are always the runtime's -- a view may not declare them,
+    because it could then contradict the tool it dispatches to. Descriptions are the
+    exception: a renamed argument inherits prose written about the original, so
+    `run_tests(target=…)` came out described as "Shell command to execute".
 
     An earlier version had `expose` and `hide` as separate fields, on the theory that
     a withheld parameter should be declared so a decision could not be mistaken for
@@ -120,6 +129,8 @@ class AgentToolSpec:
     description: str = ""
     #: model-facing name -> runtime name. Also the whitelist.
     arguments: dict[str, str] = field(default_factory=dict)
+    #: model-facing name -> description, where the view rewords one.
+    argument_docs: dict[str, str] = field(default_factory=dict)
     #: Parameters the model must supply, in model-facing names. Defaults to whatever
     #: the runtime requires among those offered.
     required: tuple[str, ...] = ()
@@ -147,24 +158,45 @@ class AgentToolSpec:
         return self.runtime_tool, {self.arguments[k]: v for k, v in args.items()}
 
 
-def _parse_arguments(name: str, raw) -> dict[str, str]:
-    """`[a, b]` or `{model_name: runtime_name}` into one mapping."""
+def _parse_arguments(name: str, raw) -> "tuple[dict[str, str], dict[str, str]]":
+    """`arguments` into (offered -> runtime name, offered -> reworded description)."""
     if raw is None:
         raise PanelError(
             f"{name}: set `arguments` to the parameters this view offers -- a list "
             f"of runtime names, or a mapping of model-facing name to runtime name")
-    if isinstance(raw, dict):
-        for offered, runtime_arg in raw.items():
-            if not isinstance(runtime_arg, str) or not runtime_arg:
-                raise PanelError(
-                    f"{name}.arguments[{offered!r}] must name a runtime argument")
-        return dict(raw)
     if isinstance(raw, (list, tuple)):
         for entry in raw:
             if not isinstance(entry, str) or not entry:
                 raise PanelError(f"{name}.arguments must be a list of names")
-        return {entry: entry for entry in raw}
-    raise PanelError(f"{name}.arguments must be a list or a mapping")
+        return {entry: entry for entry in raw}, {}
+    if not isinstance(raw, dict):
+        raise PanelError(f"{name}.arguments must be a list or a mapping")
+
+    mapping: dict[str, str] = {}
+    docs: dict[str, str] = {}
+    for offered, target in raw.items():
+        if isinstance(target, str) and target:
+            mapping[offered] = target
+            continue
+        if isinstance(target, dict):
+            runtime_arg = target.get("name") or offered
+            if not isinstance(runtime_arg, str) or not runtime_arg:
+                raise PanelError(f"{name}.arguments[{offered!r}].name must be a string")
+            unknown = set(target) - {"name", "description"}
+            if unknown:
+                raise PanelError(
+                    f"{name}.arguments[{offered!r}] does not take "
+                    f"{', '.join(sorted(unknown))}; a view may set `name` and "
+                    f"`description` only -- type, enum and default are the runtime's, "
+                    f"and a view that could restate them could contradict it")
+            mapping[offered] = runtime_arg
+            if target.get("description"):
+                docs[offered] = str(target["description"])
+            continue
+        raise PanelError(
+            f"{name}.arguments[{offered!r}] must be a runtime argument name, or a "
+            f"mapping with `name` and/or `description`")
+    return mapping, docs
 
 
 def parse_agent_tool(raw: dict) -> AgentToolSpec:
@@ -176,11 +208,13 @@ def parse_agent_tool(raw: dict) -> AgentToolSpec:
     name = raw.get("name") or ""
     if not name:
         raise PanelError("agent tool has no name")
+    arguments, argument_docs = _parse_arguments(name, raw.get("arguments"))
     return AgentToolSpec(
         name=name,
         runtime_tool=raw.get("runtime_tool") or name,
         description=raw.get("description") or "",
-        arguments=_parse_arguments(name, raw.get("arguments")),
+        arguments=arguments,
+        argument_docs=argument_docs,
         required=tuple(raw.get("required") or ()),
     )
 
@@ -230,8 +264,12 @@ def _portable(schema: dict) -> dict:
 def _parameters(spec: AgentToolSpec, runtime: RuntimeDeclaration) -> dict:
     """The offered parameters, under the names the model uses."""
     known = runtime.parameters_of(spec.runtime_tool)
-    properties = {offered: _portable(known[runtime_arg])
-                  for offered, runtime_arg in spec.arguments.items()}
+    properties = {}
+    for offered, runtime_arg in spec.arguments.items():
+        prop = _portable(known[runtime_arg])
+        if offered in spec.argument_docs:
+            prop["description"] = spec.argument_docs[offered]
+        properties[offered] = prop
     required = list(spec.required) or [
         offered for offered, runtime_arg in spec.arguments.items()
         if runtime_arg in runtime.required_of(spec.runtime_tool)]

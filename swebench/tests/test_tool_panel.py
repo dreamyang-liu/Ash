@@ -26,7 +26,6 @@ from ash_sandbox.panel import (  # noqa: E402
 )
 
 from swebench.agent.tools import (  # noqa: E402
-    DEFAULT_PANEL,
     PANEL_DIR,
     RUNTIME_SCHEMA,
     build_panel,
@@ -35,6 +34,24 @@ from swebench.agent.tools import (  # noqa: E402
 )
 
 DECL = load_declaration(RUNTIME_SCHEMA)
+
+
+@pytest.fixture(autouse=True)
+def clean_registry():
+    """Custom tools register on a process-default registry, so a test that adds one
+    leaks into every test after it -- which is how this module's first assertion about
+    a panel's contents started failing in the suite while passing alone.
+
+    Autouse rather than opt-in: the leak is invisible until some later test happens to
+    count the tools in a panel, and by then the culprit is several files away. Worth
+    noting that the registry being a process global is the same shape as the panel
+    global fixed in this branch; custom tools still have it."""
+    from swebench.agent.custom_tools import DEFAULT_REGISTRY
+
+    before = dict(DEFAULT_REGISTRY.custom_specs)
+    yield
+    DEFAULT_REGISTRY.custom_specs.clear()
+    DEFAULT_REGISTRY.custom_specs.update(before)
 
 
 # --------------------------------------------------------------------------- #
@@ -325,3 +342,94 @@ def test_both_consumers_use_the_one_builder():
         assert "build_panel(" in source, f"{module.__name__} assembles its own panel"
         assert "set_tools_schema" not in source, \
             f"{module.__name__} sets a raw schema, bypassing routing"
+
+
+# --------------------------------------------------------------------------- #
+#  One file for the whole tool surface
+# --------------------------------------------------------------------------- #
+
+COMPLETE = """
+agent_tools:
+  - name: shell
+    arguments: [command, tail]
+    required: [command]
+  - name: run_tests
+    runtime_tool: shell
+    description: Run the test suite.
+    arguments:
+      target:
+        name: command
+        description: A pytest node id, or the whole command.
+    required: [target]
+
+custom_tools:
+  - name: lint
+    description: Lint with ruff
+    binary: {path: /usr/bin/ruff}
+    parameters:
+      target: {type: string, required: true, map: {positional: 0}}
+      fix: {type: boolean, map: {flag: "--fix"}}
+"""
+
+
+def test_one_manifest_can_declare_both_kinds(tmp_path):
+    """Views and external binaries in one file: it is one question -- what is this
+    model offered -- and it used to need two files to answer."""
+    path = tmp_path / "complete.yaml"
+    path.write_text(COMPLETE)
+    panel = build_panel(str(path))
+
+    names = [t["function"]["name"] for t in panel.schema]
+    assert names == ["shell", "run_tests", "lint"]
+    assert set(panel.views) == {"shell", "run_tests"}, \
+        "a custom tool is dispatched as a binary, so it gets no routing view"
+
+
+def test_a_view_may_reword_an_argument_but_not_retype_it(tmp_path):
+    """The type is the runtime's: a view that could restate it could contradict the
+    tool it dispatches to. The description is not, because a renamed argument
+    otherwise inherits prose about the original -- `run_tests(target=…)` came out
+    described as "Shell command to execute"."""
+    path = tmp_path / "complete.yaml"
+    path.write_text(COMPLETE)
+    target = next(t["function"] for t in build_panel(str(path)).schema
+                  if t["function"]["name"] == "run_tests")["parameters"]["properties"]["target"]
+
+    assert target["description"] == "A pytest node id, or the whole command."
+    assert target["type"] == "string", "the runtime's type must survive the rewording"
+
+    with pytest.raises(PanelError) as caught:
+        parse_agent_tool({"name": "run", "runtime_tool": "shell",
+                          "arguments": {"target": {"name": "command",
+                                                   "type": "integer"}}})
+    assert "type" in str(caught.value)
+
+
+def test_a_custom_tool_defined_twice_is_an_error(tmp_path):
+    """The registry keys by name, so the second load would quietly replace the first."""
+    path = tmp_path / "complete.yaml"
+    path.write_text(COMPLETE)
+    directory = tmp_path / "drop_in"
+    directory.mkdir()
+    (directory / "lint.yaml").write_text(
+        "name: lint\ndescription: another lint\n"
+        "binary: {path: /usr/bin/other}\n"
+        "parameters: {target: {type: string, map: {positional: 0}}}\n")
+
+    with pytest.raises(ValueError) as caught:
+        build_panel(str(path), str(directory))
+    assert "lint" in str(caught.value)
+
+
+def test_both_sources_load_together(tmp_path):
+    """A panel's own tools plus a shared drop-in directory."""
+    path = tmp_path / "complete.yaml"
+    path.write_text(COMPLETE)
+    directory = tmp_path / "drop_in"
+    directory.mkdir()
+    (directory / "fmt.yaml").write_text(
+        "name: fmt\ndescription: format\nbinary: {path: /usr/bin/black}\n"
+        "parameters: {target: {type: string, map: {positional: 0}}}\n")
+
+    names = [t["function"]["name"] for t in build_panel(str(path), str(directory)).schema]
+    assert "lint" in names and "fmt" in names
