@@ -64,13 +64,49 @@ test caught this because the contract test compared `TOOLS_SCHEMA` against
         compile  ───►  the panel the model sees
 ```
 
-An **agent tool** is a view of a runtime tool. It may rename it, hide parameters,
-rename or remap arguments, and give a description written for the task rather than
-for the tool. `bash_only` mode is one such view: a single tool with only `command`.
+An **agent tool** is a view of a runtime tool. It may rename it, offer a subset of its
+parameters under names of your choosing, and describe both the tool and those
+parameters for the task rather than for the runtime. `bash_only` mode is one such view:
+a single tool with only `command`.
+
+Types, enums and defaults are always the runtime's. A view may not restate them,
+because it could then contradict the tool it dispatches to — a view claiming `integer`
+where the runtime takes a string would have the model send something that cannot work.
+Descriptions are the exception, because a renamed argument otherwise inherits prose
+written about the original: `run_tests(target=…)` came out described as "Shell command
+to execute".
 
 A **custom tool** is not a view of anything — it is an external binary, expanded by
 the SDK into `artifact` (fetch + verify) then `shell`. Its parameters compile into
 discrete argv slots and are never interpreted by a shell.
+
+Both go in one manifest, because they answer one question — what is this model
+offered:
+
+```yaml
+agent_tools:
+  - name: run_tests
+    runtime_tool: shell
+    description: Run the test suite.
+    arguments:
+      target:
+        name: command                       # the runtime argument this maps onto
+        description: A pytest node id, or the whole command.
+    required: [target]
+
+custom_tools:
+  - name: lint
+    description: Lint Python files with ruff
+    binary: {path: /usr/bin/ruff}           # or url + sha256, fetched on first use
+    parameters:
+      target: {type: string, required: true, map: {positional: 0}}
+      fix: {type: boolean, map: {flag: "--fix"}}
+```
+
+`custom_tools_dir` still loads a directory of one-tool manifests, for a set shared
+across panels (configs/custom_tools/README.md). A name defined in both places is an
+error rather than a silent overwrite: the registry keys by name, so whichever loaded
+second would have won quietly.
 
 ## Rules the compiler enforces
 
