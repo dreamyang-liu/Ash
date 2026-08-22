@@ -13,7 +13,7 @@ There are four independently-versioned pieces:
 
 | Piece            | Language | Path             | Role                                                        |
 |------------------|----------|------------------|-------------------------------------------------------------|
-| `ash-runtime`    | Go       | `runtime/`       | The binary that runs *inside* every sandbox; serves 7 tools |
+| `ash-runtime`    | Go       | `runtime/`       | The binary that runs *inside* every sandbox; serves 8 tools |
 | `ash-sandbox`    | Python   | `sdk/`           | Async client SDK to drive runtimes and pools                |
 | SWE-bench harness| Python   | `swebench/`      | Evaluation harness (agent loop + benchmark runner)          |
 | K8s control plane| Go       | `k8s-scaffold/`  | Control plane + gateway for fleet-scale sandboxes           |
@@ -27,7 +27,10 @@ There are four independently-versioned pieces:
 .
 ├── runtime/                 # Go sandbox runtime (the ash-runtime binary)
 │   ├── main.go              # JSON-RPC server: HTTP (/), MCP (/mcp), and stdio modes
-│   ├── tools/               # 7 tool implementations (shell, process, readfile, edit, grep, web)
+│   ├── tools/               # 8 tool implementations (shell, process, text_editor,
+│   │                        #   grep_files, web_fetch, web_search, artifact, wait_for_events)
+│   ├── schema/tools.json    # `--dump-schema` output, checked in; the panel compiles
+│   │                        #   against it, and a test fails when it goes stale
 │   └── events/              # Notification system (e.g. process_exited)
 ├── sdk/                     # Python async client — package `ash_sandbox`
 │   └── ash_sandbox/
@@ -36,12 +39,17 @@ There are four independently-versioned pieces:
 │       ├── pool.py          # DockerPool (local) + MicroVMPool (Firecracker) + SandboxPool (k8s)
 │       ├── result.py        # ToolResult
 │       └── cli.py           # `ash-sandbox` console script
-├── swebench/                # SWE-bench evaluation harness
-│   ├── __main__.py          # CLI entry (`python -m swebench`), YAML config loader w/ `extends`
-│   ├── agent/               # Agent loop + L2 pipeline: conversation, llm, tools, prompts,
-│   │                        #   pipeline + interceptors/ (guardrail, truncate, present)
-│   ├── harnesses/           # Pluggable backends: litellm, claude-code (base.py defines API)
-│   ├── configs/             # Per-model YAML configs (inherit via `extends:`)
+├── swebench/                # SWE-bench evaluation harness — see "The four layers"
+│   ├── __main__.py          # CLI entry (`python -m swebench`), YAML config w/ `extends`
+│   ├── agent/               # L2: the interceptor chain + this repo's agent loop
+│   │   ├── pipeline.py      #   the onion: verdicts, CallContext, ToolPipeline
+│   │   ├── interceptors/    #   one package each: guardrail, truncate, present
+│   │   └── tools.py         #   panel compilation + routing (ToolPanel)
+│   ├── harnesses/           # L3 topologies: litellm, claude-code (base.py = the API)
+│   ├── configs/             # Per-model YAML (`extends:`) + tool_panels/
+│   ├── sandbox.py           # AshSession: sandbox lifecycle + the executor seam
+│   ├── mcp_server.py        # MCP proxy: the same chain, for external agents
+│   ├── submission.py        # L4: asking the agent for its own patch
 │   ├── batch.py             # Parallel execution + dashboard
 │   └── dataset.py           # Loads SWE-bench instances
 ├── k8s-scaffold/            # K8s infrastructure (Go)
@@ -52,22 +60,116 @@ There are four independently-versioned pieces:
 └── results/                 # SWE-bench run outputs (large; not source — do not edit by hand)
 ```
 
+## The four layers
+
+Each layer knows only the one below it, and the boundaries are load-bearing: several of
+the defects in this repo's history were one layer answering a question that belonged to
+another.
+
+```
+┌─ L4  EVAL ───────────────────────────────── swebench/{__main__,batch,dataset,
+│  What counts as an answer. Only this layer            prediction,submission}.py
+│  knows what SWE-bench is.
+│    __main__.py    the only entry point; YAML + `extends` + flag overrides
+│    submission.py  asks the agent for its own patch, reserving steps to do it in
+│    prediction.py  the preds.json format the grader reads
+└───────────────────────┬──────────────────────────────────────────────────────
+      harness.run_instance(instance) -> prediction
+┌─ L3  HARNESS ────────────────────────────── swebench/harnesses/
+│  Topology: how many agents, how many worktrees, who reports the answer.
+│    litellm       one agent, one sandbox — any litellm model
+│    claude-code   the Claude Code CLI over MCP; reaches L2 as an external
+│                  agent (its own subprocess) and uses none of the shared layer
+└───────────────────────┬──────────────────────────────────────────────────────
+      ⇩ the one seam:  executor(tool_name, args) -> ToolResult
+┌─ L2  TOOL PATH ──────────────────────────── swebench/agent/
+│  Two halves. Keep them apart when reading:
+│
+│    the interceptor chain     pipeline.py + interceptors/
+│      An onion around one executor: `before` in order, `after` in reverse.
+│      Four verdicts — Continue / Rewrite / Reject / ShortCircuit — and per
+│      interceptor fail-open or fail-closed. Never raises; every failure comes
+│      back as a ToolResult, because the caller above is an agent loop and an
+│      escaped exception kills a whole run.
+│      Ships guardrail (read-before-edit, edit streaks), truncate (bound one
+│      result), present (compose the model's text from the runtime's report).
+│      Mount your own: `default_pipeline(extra=[...])`, or
+│      `execution.interceptors: my_file.py`.
+│
+│    the agent loop           __init__.py + llm, conversation, prompts, hooks,
+│                             trace, tools, custom_tools
+│      This repo's own agent. A consumer of the chain, not part of it —
+│      sandbox.py and mcp_server.py mount the chain without it.
+└───────────────────────┬──────────────────────────────────────────────────────
+      JSON-RPC over HTTP / MCP / stdio
+┌─ L1  RUNTIME (Go, inside the sandbox) ───── runtime/
+│  Executes and reports. 8 tools, one fixed protocol.
+└──────────────────────────────────────────────────────────────────────────────
+
+Two mount points, one chain:      sandbox.py      this repo's agents
+                                  mcp_server.py   external agents, over MCP
+```
+
+Things that are configuration rather than code, each with one module that owns the
+decision:
+
+| | config | owner |
+|---|---|---|
+| where sandboxes come from | `execution.backend`: docker / microvm / k8s | `backends.py` |
+| what tools a model sees | `agent.tools` → a panel manifest | `agent/tools.py` |
+| what governs each call | `execution.interceptors` → a Python file | `agent/pipeline.py` |
+| which topology runs | `--harness` | `harnesses/__init__.py` |
+
+No call site names a `Pool`, a tool schema, or an interceptor class directly.
+
+### Scope, and why it keeps mattering
+
+State that belongs to one run must not live at module level. Three separate bugs came
+from that: the active tool panel, the agent→runtime routing table, and the custom-tool
+registry were each a process-wide singleton, so two configurations in one process saw
+each other's. A benchmark run never noticed (one configuration, all workers alike); the
+rollout server, which builds a configuration per request, is where it would have shown.
+An `AshSession` owns its tool registry, an `AshAgent` owns its panel.
+
 ## The tool protocol (the core contract)
 
-`ash-runtime` exposes exactly **6 tools** over JSON-RPC. Changing this set is a breaking
-change — keep the Go implementation, the SDK, and the SWE-bench agent tool list in sync.
+`ash-runtime` serves **8 tools** over JSON-RPC. Changing this set is a breaking change.
 
-| Tool          | Purpose                                                            |
-|---------------|-------------------------------------------------------------------|
-| `shell`       | Run a command. `background: true` returns a pid.                  |
-| `process`     | Read output of / kill a background process.                       |
-| `text_editor` | `view` / `write` / `str_replace` / `insert`.                     |
-| `grep_files`  | Ripgrep search (pattern, glob, limit). Requires `ripgrep`.        |
-| `web_fetch`   | Fetch a URL as html / text / markdown.                           |
-| `web_search`  | Multi-engine search (Google, DuckDuckGo, Brave).                 |
+| Tool              | Purpose                                                        |
+|-------------------|----------------------------------------------------------------|
+| `shell`           | Run a command. `background: true` returns a pid.               |
+| `process`         | Read output of / kill a background process.                    |
+| `text_editor`     | `view` / `write` / `str_replace` / `insert`.                   |
+| `grep_files`      | Ripgrep search (pattern, glob, limit). Requires `ripgrep`.     |
+| `web_fetch`       | Fetch a URL as html / text / markdown.                         |
+| `web_search`      | Multi-engine search (Google, DuckDuckGo, Brave).               |
+| `artifact`        | Fetch + verify a binary. Backs manifest-defined custom tools.  |
+| `wait_for_events` | Observe async facts (process exits, tool calls). Opt-in.       |
 
-Runtime run modes: `--mode http` (default, port 3000), `--mode stdio`, and the `POST /mcp`
-endpoint (MCP protocol version `2025-03-26`).
+The set is declared once, in Go, and everything downstream is derived from it:
+
+```
+runtime/tools/*.go  Schema()          ← authoritative; it executes the calls
+        │  ash-runtime --dump-schema
+        ▼
+runtime/schema/tools.json             ← checked in, so a panel compiles with no sandbox
+        │  + swebench/configs/tool_panels/*.yaml   (what to offer, and how)
+        ▼
+the panel a model sees                ← compiled; see docs/TOOL_PANEL.md
+```
+
+So adding a tool means editing the Go, regenerating `tools.json`, and naming it in a
+panel manifest if a model should see it. A test fails if `tools.json` is stale, and
+another fails if a panel offers a parameter the runtime does not accept — that check
+exists because the hand-written panel it replaced had drifted on four of seven tools,
+one of them offering `web_fetch(max_length=…)`, which the runtime silently ignored.
+
+Not every runtime tool is offered to a model: `artifact` is machinery the SDK uses to
+expand a custom tool, so a panel that listed it would hand the model a download
+primitive.
+
+Runtime run modes: `--mode http` (default, port 3000), `--mode stdio`, the `POST /mcp`
+endpoint (MCP protocol version `2025-03-26`), and `--dump-schema` (print and exit).
 
 ## Common commands
 
@@ -131,10 +233,21 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
 - Configs are YAML and compose via `extends: <name>` (resolved against `configs/`); CLI flags
   override file values which override defaults. See `swebench/__main__.py` for the flag/section
   mapping.
-- Two harnesses today (`swebench/harnesses/__init__.py`): `litellm` (custom agent loop, any
-  model) and `claude-code` (Claude Code CLI via MCP). Add new ones by subclassing
-  `BaseHarness` and registering in `HARNESSES`.
-- Output lands in `results/<harness>/...`. Treat `results/` as generated data.
+- **The tool panel** is compiled, not written (`docs/TOOL_PANEL.md`): `agent.tools`
+  names a manifest — a shipped one (`swebench/configs/tool_panels/bash_only.yaml`) or a path to your own.
+  A manifest declares views of runtime tools (rename, offer a subset of parameters,
+  reword them) and, under `custom_tools:`, external binaries. `custom_tools_dir` still
+  loads a directory of one-tool manifests.
+- **Interceptors** are config too: `execution.interceptors: my_file.py`, where the file
+  exports `PIPELINE = [MyInterceptor()]`. They mount outside the defaults, so they see a
+  call before truncation spends anything on it and still see calls the inner ones reject.
+- Two harnesses today (`swebench/harnesses/__init__.py`): `litellm` (custom agent loop,
+  any model) and `claude-code` (Claude Code CLI via MCP, which reaches L2 as an external
+  agent and shares none of this layer). Add new ones by subclassing `BaseHarness` and
+  registering in `HARNESSES`. `manager-worker` and `best-of-n` were removed while the
+  single-agent path settles, along with Waggle, the write-arbitration interceptor they
+  used; the mount they relied on (several agents, one shared chain) still works.
+- Output lands in `results/<run>/`. Treat `results/` as generated data.
 
 ### Kubernetes stack
 
@@ -158,9 +271,11 @@ The gateway routes requests to the right pod by sandbox ID using a Redis routing
 
 ## Conventions & guardrails
 
-- **Keep the three tool views in sync.** Any change to the 7-tool set or a tool's
-  arguments must land in `runtime/tools/`, the SDK (`sdk/ash_sandbox/`), and the SWE-bench
-  agent tool list together.
+- **The tool set is declared once, in Go.** Change `runtime/tools/`, then regenerate
+  `runtime/schema/tools.json` (`./ash-runtime --dump-schema > runtime/schema/tools.json`)
+  and name the tool in a panel manifest if a model should see it. This used to be a rule
+  asking three hand-written copies to be edited together; the panel is compiled now and
+  CI fails on a stale schema or a panel that offers a parameter the runtime rejects.
 - **Go**: `gofmt`/`goimports` clean, wrap errors with `%w`, run `go vet ./...`. Small
   interfaces, accept interfaces / return structs.
 - **Python**: PEP 8, type annotations on signatures, prefer immutable dataclasses; the SDK is
