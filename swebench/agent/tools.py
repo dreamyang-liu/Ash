@@ -67,13 +67,29 @@ def _read_manifest(path: Path) -> dict:
 
 @dataclass(frozen=True)
 class ToolPanel:
-    """One panel: the schema the model sees, and the views that route its calls.
+    """One panel: the schema the model sees, the views that route its calls, and the
+    registry holding its manifest-defined tools.
 
-    Both come from one manifest and travel together. Keeping them apart is how the
-    routing table and the schema came to disagree.
+    All three come from one manifest and travel together. Keeping them apart is how the
+    routing table and the schema came to disagree, and how the agent loop and the
+    session came to read custom tools from a process-wide registry that any other
+    configuration could also write to.
     """
     schema: list[dict]
     views: dict            # model-facing name -> AgentToolSpec
+    registry: "object | None" = None    # ToolRegistry; None = the process default
+
+    def is_custom_tool(self, name: str) -> bool:
+        """Whether this panel dispatches ``name`` as a manifest-defined binary.
+
+        Asked by the agent loop before routing: a custom tool is expanded into
+        artifact+shell by the session executor rather than mapped onto a runtime tool.
+        Answered from this panel's registry, so the loop and the session cannot
+        disagree about what is custom -- they hold the same one.
+        """
+        from .custom_tools import DEFAULT_REGISTRY
+
+        return (self.registry or DEFAULT_REGISTRY).is_custom_tool(name)
 
     def route(self, name: str, args: dict) -> tuple[str, dict]:
         """Translate an agent-facing call into a runtime call.
@@ -103,7 +119,8 @@ def load_panel(name_or_path: str = DEFAULT_PANEL,
 
 
 def build_panel(name_or_path: str = DEFAULT_PANEL,
-                custom_tools_dir: "str | None" = None) -> ToolPanel:
+                custom_tools_dir: "str | None" = None,
+                registry: "object | None" = None) -> ToolPanel:
     """The complete panel: compiled views plus manifest-defined custom tools.
 
     Custom tools come from two places, and both are optional:
@@ -113,40 +130,41 @@ def build_panel(name_or_path: str = DEFAULT_PANEL,
     * ``custom_tools_dir``, a directory of one-tool manifests, for a drop-in set shared
       across panels (configs/custom_tools/README.md)
 
-    A name defined in both is an error rather than a silent overwrite: the registry
-    stores by name, so whichever loaded second would have won quietly.
+    A name defined in both is an error rather than a silent overwrite: a registry stores
+    by name, so whichever loaded second would have won quietly.
+
+    ``registry`` is where they land, and should be the session's -- a sandbox is one
+    tool surface, so that is the natural scope. Left out, they land in the process
+    default, which two configurations in one process would then share: a manifest loaded
+    for the first stayed visible to the second.
 
     One function because the pieces have to arrive together and did not: the litellm
     harness loaded custom tools and the rollout server did not, so a manifest-defined
     tool existed for one caller and not the other.
-
-    Custom tools are dispatched by the session executor (artifact + shell), so they are
-    not views and get no routing entry -- ``is_custom_tool`` catches them first.
     """
     from ash_sandbox.toolset import parse_manifest
 
-    from .custom_tools import (custom_agent_schemas, load_custom_tools,
-                               register)
+    from .custom_tools import (DEFAULT_REGISTRY, custom_agent_schemas,
+                               load_custom_tools, register)
 
+    target = registry or DEFAULT_REGISTRY
     manifest = _read_manifest(resolve_panel(name_or_path))
     specs = [parse_agent_tool(t) for t in manifest["agent_tools"]]
     schema = compile_panel(specs, load_declaration(RUNTIME_SCHEMA))
 
     inline = [parse_manifest(t) for t in (manifest.get("custom_tools") or ())]
-    from_dir = load_custom_tools(custom_tools_dir)
+    from_dir = load_custom_tools(custom_tools_dir, target)
     clash = {s.name for s in inline} & {s.name for s in from_dir}
     if clash:
         raise ValueError(
             f"custom tool(s) {', '.join(sorted(clash))} are defined both in "
-            f"{name_or_path} and in {custom_tools_dir}; the registry keys by name, so "
+            f"{name_or_path} and in {custom_tools_dir}; a registry keys by name, so "
             f"one would silently replace the other")
     for spec in inline:
-        register(spec)
+        register(spec, target)
 
-    extra = custom_agent_schemas()
-    if not extra:
-        return ToolPanel(schema=schema, views={s.name: s for s in specs})
-    return ToolPanel(schema=schema + extra, views={s.name: s for s in specs})
+    return ToolPanel(schema=schema + custom_agent_schemas(target),
+                     views={s.name: s for s in specs}, registry=target)
 
 
 #: text_editor commands that modify a file. The single source of truth for
@@ -162,17 +180,6 @@ EDIT_COMMANDS = frozenset({"str_replace", "insert", "write"})
 #: that cannot afford the probe must not claim to cover `write`, or creating a
 #: new file becomes an unsatisfiable warning — or, when enforced, impossible.
 CONTENT_EDIT_COMMANDS = frozenset({"str_replace", "insert"})
-
-
-def is_custom_tool(name: str) -> bool:
-    """Whether name is a registered manifest-defined custom tool.
-
-    Custom tools do not go through route_agent_tool; the session executor
-    uses custom_tools.plan_custom_tool to expand them into artifact+shell.
-    """
-    from .custom_tools import CUSTOM_TOOL_SPECS
-
-    return name in CUSTOM_TOOL_SPECS
 
 
 def truncate_output(content: str, max_len: int = 12000) -> str:

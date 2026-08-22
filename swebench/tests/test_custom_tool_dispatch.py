@@ -55,7 +55,7 @@ class FakeConversation:
         self.tool_results.append((a, kw))
 
 
-def register_analyzer():
+def register_analyzer(registry=None):
     register(parse_manifest({
         "name": "analyzer",
         "description": "test analyzer",
@@ -64,7 +64,7 @@ def register_analyzer():
             "file": {"type": "string", "required": True, "map": {"positional": 0}},
         },
         "timeout": 15,
-    }))
+    }), registry)
 
 
 def test_a_custom_tool_reaches_the_executor_under_its_own_name():
@@ -189,9 +189,11 @@ def test_the_session_dispatches_through_the_sdk_not_a_raw_call():
             seen["via"] = "call"
             return SdkToolResult(output="ok", is_error=False)
 
-    register_analyzer()                      # puts a spec in the default registry
     session = AshSession(quiet=True)
     session._sandbox = FakeSandbox()
+    # Into this session's registry, not the process default. The default is shared, so
+    # a manifest loaded for one configuration stayed visible to the next.
+    register_analyzer(session.tools)
     result = session.execute("analyzer", {"file": "m.py"})
 
     assert result.success

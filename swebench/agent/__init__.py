@@ -24,7 +24,7 @@ from .conversation import Conversation
 from .llm import LLMClient, ThinkingLoopError
 from .pipeline import (EXECUTOR, RAW_ERROR, RAW_OUTPUT, CallContext,
                        ToolPipeline, mounted_pipeline)
-from .tools import DEFAULT_PANEL, load_panel, tool_summary, is_custom_tool
+from .tools import DEFAULT_PANEL, load_panel, tool_summary
 from .trace import ToolTraceWriter, new_run_id
 from . import hooks
 from . import interceptors
@@ -169,7 +169,7 @@ class AshAgent:
 
         result = None
         error_kind = None
-        if is_custom_tool(name):
+        if self.panel.is_custom_tool(name):
             # Passed through under its own name. The executor expands it into
             # artifact->shell (ash_sandbox.Sandbox.call_agent_tool), which also
             # remembers where the binary landed, so a repeat call skips the

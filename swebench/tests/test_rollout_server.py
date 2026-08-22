@@ -131,7 +131,8 @@ def make_deps(session: FakeSession, instance: dict = INSTANCE,
             seen_subsets.append(subset)
         return instances[instance_id]  # KeyError for unknown ids
 
-    def make_agent(config: AgentConfig, executor: Callable) -> FakeAgent:
+    def make_agent(config: AgentConfig, executor: Callable,
+                   session=None) -> FakeAgent:
         if seen_configs is not None:
             seen_configs.append(config)
         agent = FakeAgent(executor, **(agent_kwargs or {}))
@@ -279,7 +280,8 @@ def test_sandbox_creation_failure_returns_zero_reward_and_destroys():
 def test_agent_crash_returns_zero_reward_and_destroys_session():
     session = FakeSession()
 
-    def exploding_make_agent(config: AgentConfig, executor: Callable):
+    def exploding_make_agent(config: AgentConfig, executor: Callable,
+                             session=None):
         raise RuntimeError("boom")
 
     deps = EpisodeDeps(get_instance=lambda i, s: INSTANCE,

@@ -433,3 +433,78 @@ def test_both_sources_load_together(tmp_path):
 
     names = [t["function"]["name"] for t in build_panel(str(path), str(directory)).schema]
     assert "lint" in names and "fmt" in names
+
+
+# --------------------------------------------------------------------------- #
+#  Custom tools belong to a session, not to the process
+# --------------------------------------------------------------------------- #
+
+def _tool_dir(root, name, binary):
+    d = root / name
+    d.mkdir()
+    (d / f"{name}.yaml").write_text(
+        f"name: {name}\ndescription: {name}\nbinary: {{path: {binary}}}\n"
+        f"parameters: {{target: {{type: string, map: {{positional: 0}}}}}}\n")
+    return str(d)
+
+
+def test_two_configurations_do_not_see_each_others_custom_tools(tmp_path):
+    """The registry used to be a process global that build_panel wrote into, so a
+    manifest loaded for one configuration stayed visible to the next. A benchmark run
+    never noticed -- one configuration, all workers alike -- but the rollout server
+    builds a configuration per request."""
+    from ash_sandbox.toolset import ToolRegistry
+
+    a = build_panel("default", _tool_dir(tmp_path, "lint", "/usr/bin/ruff"),
+                    registry=ToolRegistry())
+    b = build_panel("default", _tool_dir(tmp_path, "fmt", "/usr/bin/black"),
+                    registry=ToolRegistry())
+
+    assert a.is_custom_tool("lint") and not a.is_custom_tool("fmt")
+    assert b.is_custom_tool("fmt") and not b.is_custom_tool("lint")
+    assert "fmt" not in [t["function"]["name"] for t in a.schema]
+
+
+def test_a_session_owns_its_tool_surface(tmp_path):
+    """One sandbox is one tool surface, so the session is the scope -- and it holds the
+    registry from construction, before any sandbox is spawned, so a panel can be
+    compiled into it whenever the harness gets there."""
+    from swebench.sandbox import AshSession
+
+    one, two = AshSession(quiet=True), AshSession(quiet=True)
+    assert one.tools is not two.tools
+
+    build_panel("default", _tool_dir(tmp_path, "lint", "/usr/bin/ruff"),
+                registry=one.tools)
+    build_panel("default", _tool_dir(tmp_path, "fmt", "/usr/bin/black"),
+                registry=two.tools)
+
+    assert sorted(one.tools.custom_specs) == ["lint"]
+    assert sorted(two.tools.custom_specs) == ["fmt"]
+
+
+def test_the_loop_and_the_executor_read_one_registry():
+    """The loop asks the panel what is custom; the session executor dispatches from its
+    registry. Two registries would mean the loop passing a tool through as custom that
+    the executor cannot expand -- so the panel carries the one it was built with."""
+    import inspect
+
+    import swebench.agent as agent_module
+    from swebench.agent import tools as tools_module
+    from swebench.harnesses import litellm
+    from swebench import rollout_server, sandbox
+
+    assert "self.panel.is_custom_tool(" in inspect.getsource(agent_module), \
+        "the loop should ask its panel, not a module-level global"
+    assert "registry=self.tools" in inspect.getsource(sandbox), \
+        "the session should dispatch from its own registry"
+    for module in (litellm, rollout_server):
+        assert "registry=session.tools" in inspect.getsource(module), \
+            f"{module.__name__} should build the panel into the session's registry"
+    # The method on ToolPanel is the one to keep; a module-level function is not,
+    # because it could only read the process registry. Matched at column 0.
+    assert not any(line.startswith("def is_custom_tool")
+                   for line in inspect.getsource(tools_module).splitlines()), \
+        "a module-level is_custom_tool would read the process registry again"
+    assert "def is_custom_tool(self" in inspect.getsource(tools_module), \
+        "ToolPanel should answer this, so the loop asks the panel it was given"

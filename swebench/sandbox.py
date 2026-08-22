@@ -10,7 +10,7 @@ from ash_sandbox import Pool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
 
 from . import style as S
-from .agent.custom_tools import DEFAULT_REGISTRY
+from ash_sandbox.toolset import ToolRegistry
 from .backends import build_pool
 from .models import ToolResult
 from .patch import UNTRACKED_LIST, WORKDIR, extract_patch
@@ -44,6 +44,15 @@ class AshSession:
         self.backend = backend or {}
         self._pool: Optional[Pool] = None
         self._sandbox: Optional[Sandbox] = None
+        # This session's manifest-defined tools. One sandbox is one tool surface, so
+        # that is the scope -- and it exists from construction, before any sandbox is
+        # spawned, so a panel can be compiled into it whenever the harness gets there.
+        #
+        # Not the process-default registry, which is what this used to pass: a manifest
+        # loaded for one configuration stayed visible to the next, so two configurations
+        # in one process saw each other's tools. Hand this to `build_panel(registry=…)`
+        # and the loop and the executor are looking at the same set.
+        self.tools = ToolRegistry()
         self._base_commit: str = ""
         #: Untracked paths present before the agent ran (see get_patch).
         self._baseline_untracked: set[str] = set()
@@ -172,10 +181,10 @@ class AshSession:
         # call_agent_tool, not call: it owns the agent-facing tool surface --
         # builtin routing plus manifest-defined tools, whose artifact->shell
         # expansion it also memoises, so a repeat call skips the download
-        # round-trip. The registry is passed explicitly because manifests load
-        # into the process-default one while a Sandbox starts with its own.
+        # round-trip. This session's registry is passed explicitly: the Sandbox has one
+        # of its own, but the panel compiled for this run loaded into ours.
         sdk_result: SdkToolResult = await self._sandbox.call_agent_tool(
-            tool_name, call_args, registry=DEFAULT_REGISTRY, agent_id=agent_id)
+            tool_name, call_args, registry=self.tools, agent_id=agent_id)
         return ToolResult.from_sdk(sdk_result)
 
     def get_patch(self) -> str:

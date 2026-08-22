@@ -96,13 +96,16 @@ class EpisodeDeps:
 
     ``get_instance(instance_id, subset)`` returns a SWE-bench instance dict
     (raising on unknown ids); ``make_session()`` returns an AshSession-like
-    object (create/execute/get_patch/destroy); ``make_agent(config, executor)``
-    returns an AshAgent-like object (run/cost).
+    object (create/execute/get_patch/destroy); ``make_agent(config, executor, session)``
+    returns an AshAgent-like object (run/cost). The session is handed over because the
+    agent's manifest-defined tools have to land in that session's registry -- the loop
+    asks it what is custom and the executor dispatches from it, so one registry or they
+    disagree.
     """
 
     get_instance: Callable[[str, str], dict]
     make_session: Callable[[], Any]
-    make_agent: Callable[[AgentConfig, Callable[[str, dict], Any]], Any]
+    make_agent: Callable[[AgentConfig, Callable[[str, dict], Any], Any], Any]
     subset: str = DEFAULT_SUBSET
     step_limit: int = DEFAULT_STEP_LIMIT
     cost_limit: float = UNLIMITED_COST
@@ -159,7 +162,7 @@ def _run_and_grade(request: dict[str, Any], instance: dict, session: Any,
     # Wrap the agent's own channel, not the harness's: grading traffic below
     # runs on session.execute and should not be attributed to the agent.
     executor = CountingExecutor(session.executor_for(AGENT_ID))
-    agent = deps.make_agent(config, executor)
+    agent = deps.make_agent(config, executor, session)
 
     agent_started = time.monotonic()
     exit_status = agent.run(format_task_prompt(instance),
@@ -382,14 +385,16 @@ def build_default_deps(subset: str, runtime_bin: Optional[str], step_limit: int,
         return AshSession(runtime_bin=runtime_bin, quiet=True)
 
     def make_agent(config: AgentConfig,
-                   executor: Callable[[str, dict], Any]) -> AshAgent:
+                   executor: Callable[[str, dict], Any],
+                   session: AshSession) -> AshAgent:
         agent = AshAgent(config, executor=executor, agent_id=AGENT_ID)
         agent.stream = False
         # Same builder as the harness: this used to set the default schema
         # directly and so never loaded manifest-defined tools, which existed
         # for a benchmark run and not for a rollout.
         agent.use_panel(build_panel(getattr(config, "tools", DEFAULT_PANEL),
-                                    config.custom_tools_dir))
+                                    config.custom_tools_dir,
+                                    registry=session.tools))
         return agent
 
     return EpisodeDeps(

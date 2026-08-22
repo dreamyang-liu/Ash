@@ -30,26 +30,36 @@ from ash_sandbox.toolset import (  # noqa: F401  (re-exports)
 # Default manifest location (repo-relative), overridable per run.
 DEFAULT_MANIFEST_DIR = Path(__file__).resolve().parents[2] / "configs" / "custom_tools"
 
-# Process-default registry backing the module-level API below. Harnesses
-# that need per-task tool panels should construct their own ToolRegistry
-# and use Sandbox.call_agent_tool(..., registry=...) instead.
+# Process-default registry, for callers with nothing better to pass. Every function
+# below takes a `registry` and falls back to this one.
+#
+# Sharing it is a trap and was one: a manifest loaded for one configuration stayed
+# visible to the next, so two configurations in one process saw each other's tools.
+# A benchmark run never noticed -- one configuration, all workers alike -- but the
+# rollout server builds a configuration per request. `AshSession` owns a registry now
+# (one sandbox, one tool surface) and passes it through, which is what the SDK intended:
+# ToolRegistry is an instance so "different sessions/tasks can carry different tool
+# panels without global state".
 DEFAULT_REGISTRY = ToolRegistry()
 
 # Backward-compatible view of the default registry's specs.
 CUSTOM_TOOL_SPECS = DEFAULT_REGISTRY.custom_specs
 
 
-def register(spec: CustomToolSpec) -> None:
-    """Register a custom tool on the process-default registry."""
-    DEFAULT_REGISTRY.register(spec)
+def register(spec: CustomToolSpec,
+             registry: "ToolRegistry | None" = None) -> None:
+    """Register a custom tool."""
+    (registry or DEFAULT_REGISTRY).register(spec)
 
 
-def load_manifests(directory: str | Path) -> list[CustomToolSpec]:
-    """Load and register all manifests in a directory (default registry)."""
-    return DEFAULT_REGISTRY.load_manifests(directory)
+def load_manifests(directory: str | Path,
+                   registry: "ToolRegistry | None" = None) -> list[CustomToolSpec]:
+    """Load and register all manifests in a directory."""
+    return (registry or DEFAULT_REGISTRY).load_manifests(directory)
 
 
-def load_custom_tools(directory: str | Path | None = None) -> list[CustomToolSpec]:
+def load_custom_tools(directory: str | Path | None = None,
+                      registry: "ToolRegistry | None" = None) -> list[CustomToolSpec]:
     """Load manifests from `directory`, or the default location.
 
     - explicit directory: must exist (typo of a user-passed path is an error)
@@ -59,17 +69,18 @@ def load_custom_tools(directory: str | Path | None = None) -> list[CustomToolSpe
         directory = Path(directory)
         if not directory.is_dir():
             raise ManifestError(f"custom tools dir not found: {directory}")
-        return load_manifests(directory)
+        return load_manifests(directory, registry)
     if DEFAULT_MANIFEST_DIR.is_dir():
-        return load_manifests(DEFAULT_MANIFEST_DIR)
+        return load_manifests(DEFAULT_MANIFEST_DIR, registry)
     return []
 
 
-def custom_agent_schemas() -> list[dict]:
+def custom_agent_schemas(registry: "ToolRegistry | None" = None) -> list[dict]:
     """Function-calling schemas for all registered custom tools."""
-    return DEFAULT_REGISTRY.custom_agent_schemas()
+    return (registry or DEFAULT_REGISTRY).custom_agent_schemas()
 
 
-def plan_custom_tool(name: str, args: dict) -> CustomToolPlan:
+def plan_custom_tool(name: str, args: dict,
+                     registry: "ToolRegistry | None" = None) -> CustomToolPlan:
     """Resolve a custom tool call into an execution plan (default registry)."""
-    return DEFAULT_REGISTRY.plan_custom_tool(name, args)
+    return (registry or DEFAULT_REGISTRY).plan_custom_tool(name, args)
