@@ -50,7 +50,8 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
 
-from .agent import AshAgent, TOOLS_SCHEMA
+from .agent import AshAgent
+from .agent.tools import DEFAULT_PANEL, build_panel
 from .dataset import (
     build_test_command,
     format_task_prompt,
@@ -384,7 +385,11 @@ def build_default_deps(subset: str, runtime_bin: Optional[str], step_limit: int,
                    executor: Callable[[str, dict], Any]) -> AshAgent:
         agent = AshAgent(config, executor=executor, agent_id=AGENT_ID)
         agent.stream = False
-        agent.set_tools_schema(TOOLS_SCHEMA)
+        # Same builder as the harness: this used to set the default schema
+        # directly and so never loaded manifest-defined tools, which existed
+        # for a benchmark run and not for a rollout.
+        agent.use_panel(build_panel(getattr(config, "tools", DEFAULT_PANEL),
+                                    config.custom_tools_dir))
         return agent
 
     return EpisodeDeps(

@@ -26,14 +26,12 @@ from ash_sandbox.panel import (  # noqa: E402
 )
 
 from swebench.agent.tools import (  # noqa: E402
-    AGENT_TOOLS,
-    BASH_ONLY_SCHEMA,
-    PANELS,
+    DEFAULT_PANEL,
+    PANEL_DIR,
     RUNTIME_SCHEMA,
-    TOOLS_SCHEMA,
-    compile_agent_panel,
-    route_agent_tool,
-    use_panel,
+    build_panel,
+    load_panel,
+    resolve_panel,
 )
 
 DECL = load_declaration(RUNTIME_SCHEMA)
@@ -77,9 +75,7 @@ def test_the_checked_in_declaration_matches_the_runtime():
 # --------------------------------------------------------------------------- #
 
 def _spec(**kw) -> AgentToolSpec:
-    base = {"name": "shell", "expose": ["command"],
-            "hide": ["background", "env", "max_output_bytes", "stdin", "tail",
-                     "timeout", "truncate_mode", "working_dir"]}
+    base = {"name": "shell", "arguments": ["command"]}
     base.update(kw)
     return parse_agent_tool(base)
 
@@ -89,9 +85,7 @@ def test_a_parameter_the_runtime_does_not_accept_is_refused():
     the model would believe it took effect."""
     with pytest.raises(PanelError) as caught:
         compile_panel([_spec(name="web_fetch", runtime_tool="web_fetch",
-                             expose=["url", "max_length"],
-                             hide=["format", "headers", "timeout",
-                                   "max_output_bytes", "truncate_mode"])], DECL)
+                             arguments=["url", "max_length"])], DECL)
     assert "max_length" in str(caught.value)
 
 
@@ -101,18 +95,20 @@ def test_a_view_of_a_tool_the_runtime_does_not_serve_is_refused():
     assert "pytest" in str(caught.value)
 
 
-def test_a_parameter_that_is_neither_exposed_nor_hidden_is_refused():
-    """Silence cannot be told from an oversight, so the compiler makes you say which."""
+def test_a_view_without_arguments_is_refused():
+    """`arguments` is the parameter surface; omitting it is not "offer everything"."""
     with pytest.raises(PanelError) as caught:
-        compile_panel([parse_agent_tool({"name": "shell", "expose": ["command"]})], DECL)
-    assert "says nothing about" in str(caught.value)
+        compile_panel([parse_agent_tool({"name": "shell"})], DECL)
+    assert "arguments" in str(caught.value)
 
 
-def test_hiding_a_parameter_that_does_not_exist_is_refused():
-    """A stale `hide` entry would hide a real mismatch from the next reader."""
+def test_a_view_must_offer_what_the_runtime_requires():
+    """Withholding a required parameter makes every call fail, so it is refused at
+    compile time rather than on the model's first attempt."""
     with pytest.raises(PanelError) as caught:
-        compile_panel([_spec(hide=list(_spec().hide) + ["max_length"])], DECL)
-    assert "max_length" in str(caught.value)
+        compile_panel([_spec(name="text_editor", runtime_tool="text_editor",
+                             arguments=["command"])], DECL)   # `path` is required
+    assert "path" in str(caught.value)
 
 
 def test_two_views_may_not_share_a_name():
@@ -123,7 +119,7 @@ def test_two_views_may_not_share_a_name():
 def test_provider_hostile_schema_keys_are_stripped():
     """`shell.env` is declared with additionalProperties; some providers reject it,
     and the hand-written panel dropped it silently. Now it is dropped on purpose."""
-    panel = compile_agent_panel("default")
+    panel = load_panel("default").schema
     env = next(t["function"] for t in panel
                if t["function"]["name"] == "shell")["parameters"]["properties"]["env"]
     assert "additionalProperties" not in env
@@ -137,9 +133,7 @@ def test_provider_hostile_schema_keys_are_stripped():
 def test_a_view_can_rename_the_tool_and_its_arguments():
     panel = compile_panel([parse_agent_tool({
         "name": "run", "runtime_tool": "shell", "description": "run something",
-        "expose": ["cmd"], "arguments": {"cmd": "command"}, "required": ["cmd"],
-        "hide": ["background", "env", "max_output_bytes", "stdin", "tail",
-                 "timeout", "truncate_mode", "working_dir"]})], DECL)
+        "arguments": {"cmd": "command"}, "required": ["cmd"]})], DECL)
     fn = panel[0]["function"]
     assert fn["name"] == "run"
     assert set(fn["parameters"]["properties"]) == {"cmd"}
@@ -149,10 +143,8 @@ def test_a_view_can_rename_the_tool_and_its_arguments():
 def test_a_rename_onto_a_nonexistent_argument_is_refused():
     with pytest.raises(PanelError) as caught:
         compile_panel([parse_agent_tool({
-            "name": "run", "runtime_tool": "shell", "expose": ["cmd"],
-            "arguments": {"cmd": "cmdline"},
-            "hide": ["background", "command", "env", "max_output_bytes", "stdin",
-                     "tail", "timeout", "truncate_mode", "working_dir"]})], DECL)
+            "name": "run", "runtime_tool": "shell",
+            "arguments": {"cmd": "cmdline"}})], DECL)
     assert "cmdline" in str(caught.value)
 
 
@@ -160,45 +152,46 @@ def test_a_rename_onto_a_nonexistent_argument_is_refused():
 #  Routing comes from the same views
 # --------------------------------------------------------------------------- #
 
-def test_routing_drops_arguments_the_view_does_not_offer():
-    """Forwarding them would reach the runtime as keys it ignores -- the failure the
-    compiler exists to prevent, arriving through the back door."""
-    tool, args = route_agent_tool("wait_for_events",
-                                  {"action": "wait", "include_own": True})
-    assert tool == "wait_for_events"
-    assert args == {"action": "wait"}, "include_own is hidden and must not be forwarded"
+def test_an_argument_the_view_does_not_offer_is_an_error_not_a_drop():
+    """Dropping it would leave the model believing a setting took effect, which is the
+    `max_length` defect this whole mechanism exists to stop. An earlier version of the
+    routing did exactly that, and a test pinned the behaviour in place."""
+    panel = load_panel("bash_only")
+    with pytest.raises(ValueError) as caught:
+        panel.route("shell", {"command": "ls", "max_output_bytes": 20000})
+    assert "max_output_bytes" in str(caught.value)
+    assert "command" in str(caught.value), "the error should say what is accepted"
 
 
 def test_each_panel_routes_through_its_own_views():
-    """Both panels define `shell` with different parameters. Merging them into one
-    table let bash_only's one-parameter view shadow the default's, so a `tail` the
-    model had legitimately been offered was dropped."""
-    assert route_agent_tool("shell", {"command": "ls", "tail": 5}) == \
+    """Both panels define `shell` with different parameters. Routing used to resolve
+    against a process-wide active panel, so two agents in one process could not have
+    different ones -- and batch mode is two agents in one process."""
+    default, bash_only = load_panel("default"), load_panel("bash_only")
+    assert default.route("shell", {"command": "ls", "tail": 5}) == \
         ("shell", {"command": "ls", "tail": 5})
-    use_panel("bash_only")
-    try:
-        assert route_agent_tool("shell", {"command": "ls", "tail": 5}) == \
-            ("shell", {"command": "ls"})
-    finally:
-        use_panel("default")
+    with pytest.raises(ValueError):
+        bash_only.route("shell", {"command": "ls", "tail": 5})
 
 
 def test_an_unknown_tool_is_rejected_before_the_runtime():
     with pytest.raises(KeyError):
-        route_agent_tool("no_such_tool", {})
+        load_panel("default").route("no_such_tool", {})
 
 
 def test_bash_is_gone_as_a_tool_name():
     """bash_only mode offers a view named `shell`. The old `bash` name existed only
     to be mapped back onto `shell`, which is why the route table existed."""
-    assert [t["function"]["name"] for t in BASH_ONLY_SCHEMA] == ["shell"]
-    assert "bash" not in AGENT_TOOLS["bash_only"]
-    assert "bash" not in AGENT_TOOLS["default"]
+    for name in ("default", "bash_only"):
+        panel = load_panel(name)
+        assert "bash" not in panel.views
+        assert "bash" not in [t["function"]["name"] for t in panel.schema]
 
 
 def test_bash_only_offers_exactly_one_tool_with_one_parameter():
-    assert len(BASH_ONLY_SCHEMA) == 1
-    params = BASH_ONLY_SCHEMA[0]["function"]["parameters"]
+    panel = load_panel("bash_only")
+    assert [t["function"]["name"] for t in panel.schema] == ["shell"]
+    params = panel.schema[0]["function"]["parameters"]
     assert set(params["properties"]) == {"command"}
     assert params["required"] == ["command"]
 
@@ -209,8 +202,10 @@ def test_bash_only_offers_exactly_one_tool_with_one_parameter():
 
 def test_every_shipped_panel_compiles():
     """A manifest that disagrees with the runtime must fail here, not at run time."""
-    for name in PANELS:
-        assert compile_agent_panel(name), f"{name} compiled to an empty panel"
+    shipped = sorted(p.stem for p in PANEL_DIR.glob("*.y*ml"))
+    assert shipped, "no panels shipped"
+    for name in shipped:
+        assert load_panel(name).schema, f"{name} compiled to an empty panel"
 
 
 def test_the_prompt_for_bash_only_names_the_tool_it_offers():
@@ -248,3 +243,85 @@ def test_reserved_names_are_real_tools_or_documented_aliases():
     served = {t["name"] for t in json.loads(RUNTIME_SCHEMA.read_text())["tools"]}
     unexplained = ToolRegistry.RESERVED_NAMES - served - {"bash"}
     assert not unexplained, f"{sorted(unexplained)} is reserved but is not a tool"
+
+
+# --------------------------------------------------------------------------- #
+#  A panel is a file
+# --------------------------------------------------------------------------- #
+
+def test_a_bare_name_resolves_to_a_shipped_panel():
+    """`tools: bash_only` keeps working; it was an enum of two values before."""
+    assert resolve_panel("bash_only") == PANEL_DIR / "bash_only.yaml"
+
+
+def test_a_path_resolves_to_that_file(tmp_path):
+    """How a caller ships their own panel without adding it to this repo."""
+    mine = tmp_path / "mine.yaml"
+    mine.write_text("agent_tools:\n  - name: shell\n    arguments: [command]\n")
+    assert resolve_panel(str(mine)) == mine
+    assert [t["function"]["name"] for t in load_panel(str(mine)).schema] == ["shell"]
+
+
+def test_an_unknown_name_says_what_is_available():
+    with pytest.raises(ValueError) as caught:
+        resolve_panel("does_not_exist")
+    assert "bash_only" in str(caught.value)
+
+
+def test_a_missing_path_is_reported_as_such(tmp_path):
+    with pytest.raises(ValueError) as caught:
+        resolve_panel(str(tmp_path / "nope.yaml"))
+    assert "nope.yaml" in str(caught.value)
+
+
+# --------------------------------------------------------------------------- #
+#  Schema and routing travel together
+# --------------------------------------------------------------------------- #
+
+def test_an_agents_panel_is_its_own(tmp_path):
+    """Two agents in one process must be able to offer different panels. Routing used
+    to resolve against a module-level global that `use_panel()` mutated, so the second
+    agent silently changed the first one's routing. Batch mode runs several workers in
+    one process."""
+    from swebench.agent import AshAgent
+    from swebench.models import AgentConfig, ToolResult
+
+    a = AshAgent(AgentConfig(), executor=lambda t, args: ToolResult(True, "ok"))
+    b = AshAgent(AgentConfig(), executor=lambda t, args: ToolResult(True, "ok"))
+    a.use_panel("default")
+    b.use_panel("bash_only")
+
+    assert len(a.tools_schema) == 7
+    assert len(b.tools_schema) == 1
+    assert a._panel.route("shell", {"command": "ls", "tail": 5})[1] == \
+        {"command": "ls", "tail": 5}, "b's panel leaked into a"
+
+
+def test_build_panel_includes_manifest_defined_tools(tmp_path):
+    """The rollout server set the schema directly and so never loaded custom tools: a
+    manifest-defined tool existed for a benchmark run and not for a rollout. One
+    builder now, so a caller cannot do half of it."""
+    (tmp_path / "t.json").write_text(json.dumps({
+        "name": "fast_search", "description": "search",
+        "binary": {"path": "/usr/bin/rg"},
+        "parameters": {"pattern": {"type": "string", "required": True,
+                                   "map": {"positional": 0}}}}))
+    panel = build_panel("default", str(tmp_path))
+    names = [t["function"]["name"] for t in panel.schema]
+    assert "fast_search" in names
+    assert "shell" in names, "the builtin views must survive alongside custom tools"
+    assert "fast_search" not in panel.views, \
+        "custom tools dispatch via artifact+shell, not through a view"
+
+
+def test_both_consumers_use_the_one_builder():
+    """Guards the split that caused it: two call sites assembling this by hand."""
+    import inspect
+    from swebench import rollout_server
+    from swebench.harnesses import litellm
+
+    for module in (litellm, rollout_server):
+        source = inspect.getsource(module)
+        assert "build_panel(" in source, f"{module.__name__} assembles its own panel"
+        assert "set_tools_schema" not in source, \
+            f"{module.__name__} sets a raw schema, bypassing routing"

@@ -1,20 +1,23 @@
-"""Tool schemas for the SWE-bench agent — compiled, not written.
+"""The tool panel the agent offers — compiled, not written.
 
-The panel the model sees is built from the runtime's own declaration
-(``runtime/schema/tools.json``, produced by ``ash-runtime --dump-schema``) plus a
-manifest saying what to offer and how (``configs/tool_panels/*.json``). See
+Built from the runtime's own declaration (``runtime/schema/tools.json``, produced by
+``ash-runtime --dump-schema``) plus a manifest saying what to offer and how. See
 docs/TOOL_PANEL.md for the model and the rules.
 
-It used to be a hand-written literal here -- 261 lines of it -- and it had drifted
-from the runtime on four of seven tools. The worst was ``web_fetch(max_length=…)``,
-a parameter the runtime dropped: asking for it returned unbounded output with no
-error, so the model believed it had a limit it did not have.
+It used to be a hand-written literal here -- 261 lines of it -- and had drifted from
+the runtime on four of seven tools. The worst was ``web_fetch(max_length=…)``, a
+parameter the runtime dropped: asking for it returned unbounded output with no error,
+so the model believed it had a limit it did not have.
 
-``PANELS`` maps a config's ``tools:`` value to a manifest. ``TOOLS_SCHEMA`` and
-``BASH_ONLY_SCHEMA`` remain as the compiled panels, so callers are unchanged.
+A panel is a file, named by ``tools:`` in config. ``ToolPanel`` bundles the compiled
+schema with the views that route calls, because those two must come from the same
+manifest and an earlier version let them drift: the panel lived in a module-level
+global that ``use_panel()`` mutated, so a process running two agents could only have
+one panel between them. Batch mode runs several workers in one process.
 """
 
 from pathlib import Path
+from dataclasses import dataclass
 
 from ash_sandbox.panel import compile_panel, load_declaration, parse_agent_tool
 
@@ -25,61 +28,102 @@ _REPO = Path(__file__).resolve().parents[2]
 #: that is not regenerated here fails a test rather than reaching a model.
 RUNTIME_SCHEMA = _REPO / "runtime" / "schema" / "tools.json"
 
-#: `tools:` config value -> panel manifest.
-PANELS = {
-    "default": _REPO / "swebench" / "configs" / "tool_panels" / "default.json",
-    "bash_only": _REPO / "swebench" / "configs" / "tool_panels" / "bash_only.json",
-}
+#: Where a bare `tools:` name (rather than a path) is looked up.
+PANEL_DIR = _REPO / "swebench" / "configs" / "tool_panels"
+
+DEFAULT_PANEL = "default"
 
 
-def _panel_specs(panel: str):
-    """The agent-tool views a panel manifest declares."""
-    import json
+def resolve_panel(name_or_path: str) -> Path:
+    """A `tools:` value as a manifest path.
 
-    manifest = PANELS.get(panel)
-    if manifest is None:
-        raise ValueError(f"unknown tool panel {panel!r}; have {', '.join(sorted(PANELS))}")
-    return [parse_agent_tool(t)
-            for t in json.loads(manifest.read_text())["agent_tools"]]
-
-
-def compile_agent_panel(panel: str = "default", format: str = "openai") -> list[dict]:
-    """The panel for a `tools:` mode, compiled and validated. Raises on mismatch.
-
-    Raising is deliberate: falling back to a stale panel is how the hand-written one
-    drifted for months without anyone noticing.
+    A bare name is looked up in ``configs/tool_panels`` -- so `tools: bash_only` keeps
+    working -- and anything with a separator or suffix is taken as a path, which is how
+    a caller supplies their own panel without adding it to this repo.
     """
-    return compile_panel(_panel_specs(panel),
-                         load_declaration(RUNTIME_SCHEMA), format)
+    candidate = Path(name_or_path)
+    if candidate.suffix or len(candidate.parts) > 1:
+        if not candidate.is_file():
+            raise ValueError(f"no tool panel at {candidate}")
+        return candidate
+    for suffix in (".yaml", ".yml", ".json"):
+        shipped = PANEL_DIR / f"{name_or_path}{suffix}"
+        if shipped.is_file():
+            return shipped
+    available = sorted(p.stem for p in PANEL_DIR.glob("*.y*ml"))
+    raise ValueError(
+        f"unknown tool panel {name_or_path!r}; shipped panels are "
+        f"{', '.join(available)}, or give a path to your own")
 
 
-TOOLS_SCHEMA = compile_agent_panel("default")
-BASH_ONLY_SCHEMA = compile_agent_panel("bash_only")
-
-#: Views by panel, then by the name the model calls them. Per panel, not merged:
-#: the panels are alternatives and both define `shell`, so a single flat dict let
-#: bash_only's one-parameter view shadow the default's -- routing then dropped a
-#: `tail` argument the model had legitimately been offered.
-#:
-#: Routing reads these because a view already knows its runtime tool and its argument
-#: names, leaving a route table nothing to say. `BUILTIN_ROUTES` was that table --
-#: seven identity entries plus one real mapping (`bash` -> `shell`), which existed
-#: only so an interceptor keyed on `shell` would not go blind in bash_only mode. That
-#: mode's view is now named `shell` outright, so the entry and the table are gone.
-AGENT_TOOLS = {panel: {spec.name: spec for spec in _panel_specs(panel)}
-               for panel in PANELS}
-
-#: The panel routing resolves against. A run picks one (`tools:` in config) and the
-#: agent loop sets it, so a bash_only run routes through bash_only's views.
-_active_panel = "default"
+def _read_manifest(path: Path) -> dict:
+    text = path.read_text()
+    if path.suffix == ".json":
+        import json
+        return json.loads(text)
+    import yaml
+    return yaml.safe_load(text)
 
 
-def use_panel(panel: str) -> None:
-    """Select the panel that ``route_agent_tool`` resolves against."""
-    if panel not in AGENT_TOOLS:
-        raise ValueError(f"unknown tool panel {panel!r}; have {', '.join(sorted(AGENT_TOOLS))}")
-    global _active_panel
-    _active_panel = panel
+@dataclass(frozen=True)
+class ToolPanel:
+    """One panel: the schema the model sees, and the views that route its calls.
+
+    Both come from one manifest and travel together. Keeping them apart is how the
+    routing table and the schema came to disagree.
+    """
+    schema: list[dict]
+    views: dict            # model-facing name -> AgentToolSpec
+
+    def route(self, name: str, args: dict) -> tuple[str, dict]:
+        """Translate an agent-facing call into a runtime call.
+
+        The loop routes before handing a call to its executor, so interceptors always
+        see the runtime tool: one keyed on `shell` must not go blind because a view
+        renamed it. An argument the view does not offer raises -- dropping it would
+        leave the model believing a setting took effect.
+        """
+        view = self.views.get(name)
+        if view is None:
+            raise KeyError(f"unknown agent tool: {name}")
+        return view.route(args)
+
+
+def load_panel(name_or_path: str = DEFAULT_PANEL,
+               format: str = "openai") -> ToolPanel:
+    """Compile a panel manifest against the checked-in runtime declaration.
+
+    Raises on any disagreement. Falling back to something stale is how the
+    hand-written panel drifted for months without anyone noticing.
+    """
+    manifest = _read_manifest(resolve_panel(name_or_path))
+    specs = [parse_agent_tool(t) for t in manifest["agent_tools"]]
+    schema = compile_panel(specs, load_declaration(RUNTIME_SCHEMA), format)
+    return ToolPanel(schema=schema, views={s.name: s for s in specs})
+
+
+def build_panel(name_or_path: str = DEFAULT_PANEL,
+                custom_tools_dir: "str | None" = None) -> ToolPanel:
+    """The complete panel: compiled views plus manifest-defined custom tools.
+
+    One function because the pieces have to arrive together and did not: the litellm
+    harness loaded custom tools and the rollout server did not, so a manifest-defined
+    tool existed for one caller and not the other. Assembling a panel by hand at each
+    call site is the same mistake the prediction format and the routing table already
+    made here.
+
+    Custom tools are dispatched by the session executor (artifact + shell), so they
+    are not views and get no routing entry -- ``is_custom_tool`` catches them first.
+    """
+    from .custom_tools import custom_agent_schemas, load_custom_tools
+
+    panel = load_panel(name_or_path)
+    load_custom_tools(custom_tools_dir)
+    extra = custom_agent_schemas()
+    if not extra:
+        return panel
+    return ToolPanel(schema=panel.schema + extra, views=panel.views)
+
 
 #: text_editor commands that modify a file. The single source of truth for
 #: "this call is an edit", shared by everything that has to reason about it:
@@ -94,24 +138,6 @@ EDIT_COMMANDS = frozenset({"str_replace", "insert", "write"})
 #: that cannot afford the probe must not claim to cover `write`, or creating a
 #: new file becomes an unsatisfiable warning — or, when enforced, impossible.
 CONTENT_EDIT_COMMANDS = frozenset({"str_replace", "insert"})
-
-
-def route_agent_tool(name: str, args: dict) -> tuple[str, dict]:
-    """Translate an agent-facing tool call into a runtime call.
-
-    The agent loop routes before handing a call to its executor, so interceptors
-    always see the runtime tool: one keyed on `shell` must not go blind because a
-    view renamed it.
-
-    Arguments a view does not expose are dropped rather than forwarded. The panel
-    told the model what exists; passing anything else through would reach the runtime
-    as a key it silently ignores, which is the failure this whole mechanism exists to
-    prevent.
-    """
-    spec = AGENT_TOOLS[_active_panel].get(name)
-    if spec is None:
-        raise KeyError(f"unknown agent tool: {name}")
-    return spec.route(args)
 
 
 def is_custom_tool(name: str) -> bool:

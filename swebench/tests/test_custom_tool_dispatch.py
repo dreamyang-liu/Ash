@@ -98,15 +98,17 @@ def test_builtin_names_are_routed_through_their_compiled_view():
         return ToolResult(success=True, output="ok", error="")
 
     agent = make_agent(executor)
-    # include_own is hidden on wait_for_events, so it must not reach the runtime;
-    # truncate_mode is exposed on shell and must.
+    # truncate_mode is offered on shell and reaches the runtime; include_own is not
+    # offered on wait_for_events, so the call fails instead of quietly losing it.
     agent._run_tool(make_tool_call("shell", {"command": "ls", "truncate_mode": "T1"}),
                     FakeConversation(), "turn1")
+    conv = FakeConversation()
     agent._run_tool(make_tool_call("wait_for_events",
                                    {"action": "wait", "include_own": True}),
-                    FakeConversation(), "turn2")
-    assert calls == [("shell", {"command": "ls", "truncate_mode": "T1"}),
-                     ("wait_for_events", {"action": "wait"})], calls
+                    conv, "turn2")
+    assert calls == [("shell", {"command": "ls", "truncate_mode": "T1"})], calls
+    assert any("include_own" in str(r) for r in conv.tool_results), \
+        "the model should be told which argument was rejected"
 
 
 def test_an_unknown_tool_fails_before_reaching_the_executor():
@@ -212,18 +214,18 @@ def test_the_harness_loads_manifests_and_grows_the_schema():
     from swebench.harnesses import litellm
 
     source = inspect.getsource(litellm)
-    assert "load_custom_tools(" in source, "manifests are never loaded"
-    assert "custom_agent_schemas()" in source, "the schema never grows"
-    assert 'custom_tools_dir=c.get("custom_tools_dir")' in source, \
-        "the config key does not reach AgentConfig"
+    assert "build_panel(" in source, "the panel builder is bypassed"
+    assert "custom_tools_dir" in source, "the config key never reaches the builder"
 
 
-def test_custom_tools_are_absent_in_bash_only_mode():
-    """One tool means one tool: growing the schema would contradict the mode."""
+def test_a_panel_is_named_by_config_not_chosen_by_a_branch():
+    """`tools:` was an enum of two values with an if/else per mode. It names a manifest
+    now -- a shipped one by name, or a path to your own -- so adding a panel does not
+    mean adding a branch."""
     import inspect
     from swebench.harnesses import litellm
 
     source = inspect.getsource(litellm)
-    bash_branch = source[source.index('if tools_mode == "bash_only"'):]
-    bash_branch = bash_branch[:bash_branch.index("else:")]
-    assert "custom_agent_schemas" not in bash_branch
+    assert 'c.get("tools"' in source
+    assert 'tools_mode == "bash_only"' not in source, \
+        "the mode branch is back; panels are files, not an enum"

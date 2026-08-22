@@ -14,7 +14,7 @@ Usage:
 from .models import AgentConfig, CostTracker, ToolResult, Trajectory
 from .sandbox import AshSession
 from .agent import AshAgent
-from .agent.tools import TOOLS_SCHEMA
+from .agent.tools import build_panel, load_panel
 from .dataset import load_instances, resolve_image, format_task_prompt
 
 __all__ = [
@@ -22,7 +22,8 @@ __all__ = [
     "AshAgent",
     "AshSession",
     "CostTracker",
-    "TOOLS_SCHEMA",
+    "build_panel",
+    "load_panel",
     "ToolResult",
     "Trajectory",
     "load_instances",

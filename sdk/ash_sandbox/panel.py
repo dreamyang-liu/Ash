@@ -9,25 +9,22 @@ not be bounded.
 
 Two kinds of declaration, and they are different things:
 
-    AgentToolSpec    a *view* of a runtime tool -- rename it, hide parameters,
-                     remap argument names, describe it for the task at hand
+    AgentToolSpec    a *view* of a runtime tool -- rename it, offer a subset of its
+                     parameters under names of your choosing, describe it for the task
     CustomToolSpec   an external binary (toolset.py), expanded into artifact+shell
 
-Compiling validates against the runtime's declaration, which is the whole point:
+A view's `arguments` is both the mapping and the whitelist: what is in it is offered,
+what is not does not exist for that view. Compiling validates against the runtime's
+declaration, which is the whole point:
 
     1. every agent tool targets a runtime tool that exists
-    2. every exposed parameter exists on that tool
-    3. hiding a parameter is allowed, and has to be said out loud
+    2. every offered parameter exists on that tool
+    3. every parameter the runtime *requires* is offered, or no call can succeed
     4. names do not collide
 
 Rule 1 is also why there is no route table. A mapping exists where something is
 actually mapped; the seven identity entries that used to sit in `BUILTIN_ROUTES`
 were an indirection layer carrying nothing.
-
-Rule 3 matters more than it looks. A panel narrower than the runtime is often
-correct -- `truncate_mode` and `max_output_bytes` let a model raise its own output
-budget, going around the truncation interceptor -- but until it is declared, a
-reader cannot tell that decision from an oversight.
 """
 
 from __future__ import annotations
@@ -100,40 +97,74 @@ def load_declaration(source: "str | Path | dict") -> RuntimeDeclaration:
 class AgentToolSpec:
     """One tool as the model sees it, defined over a runtime tool.
 
-    ``expose`` is the whitelist of parameters the model may pass, named as the model
-    sees them. ``hide`` records parameters deliberately withheld -- redundant for
-    the machine, load-bearing for the reader, and checked, so a stale entry cannot
-    quietly describe a parameter that no longer exists.
+    ``arguments`` is the whole parameter surface: it maps the names the model uses
+    onto the runtime's, and by doing so says which parameters exist at all. Anything
+    absent from it is not part of this view, and calling with it is an error rather
+    than a silent drop -- a dropped argument is the failure this module was built to
+    stop, one layer up. The model asks for something, is not told no, and does not
+    get it.
 
-    ``arguments`` renames: ``{"cmd": "command"}`` offers ``cmd`` and calls the
-    runtime with ``command``. Renaming is the only transformation -- a value that
-    needed rewriting would be policy, and policy belongs in an interceptor where it
-    can be tested and traced.
+    Two spellings, because most views rename nothing::
+
+        arguments: [command, tail]          # offered under the runtime's own names
+        arguments: {cmd: command}           # offered as `cmd`, sent as `command`
+
+    An earlier version had `expose` and `hide` as separate fields, on the theory that
+    a withheld parameter should be declared so a decision could not be mistaken for
+    an oversight. It cost more than it bought: every manifest had to be edited when
+    the runtime grew a parameter, and the dangerous direction -- offering something
+    the runtime does not accept -- is caught by validating these names anyway.
     """
     name: str
     runtime_tool: str
     description: str = ""
-    expose: tuple[str, ...] = ()
-    hide: tuple[str, ...] = ()
+    #: model-facing name -> runtime name. Also the whitelist.
     arguments: dict[str, str] = field(default_factory=dict)
-    #: Parameters the model must supply, when the view is stricter than the runtime.
+    #: Parameters the model must supply, in model-facing names. Defaults to whatever
+    #: the runtime requires among those offered.
     required: tuple[str, ...] = ()
 
-    def runtime_name_of(self, exposed: str) -> str:
-        return self.arguments.get(exposed, exposed)
+    @property
+    def offered(self) -> tuple[str, ...]:
+        return tuple(self.arguments)
+
+    def runtime_name_of(self, offered: str) -> str:
+        return self.arguments[offered]
 
     def route(self, args: dict) -> tuple[str, dict]:
         """Translate a call on this view into a runtime call.
 
-        Unknown arguments are dropped rather than forwarded: the panel told the
-        model what exists, and passing something else through would reach the
-        runtime as a silently ignored key -- the `max_length` failure again.
+        Raises on an argument this view does not offer. Dropping it quietly would
+        leave the model believing a setting took effect -- exactly the `max_length`
+        defect that motivated compiling the panel, and an earlier version of this
+        method did precisely that.
         """
-        out = {}
-        for key, value in args.items():
-            if key in self.arguments or key in self.expose:
-                out[self.runtime_name_of(key)] = value
-        return self.runtime_tool, out
+        unknown = set(args) - set(self.arguments)
+        if unknown:
+            raise ValueError(
+                f"{self.name} does not take {', '.join(sorted(unknown))}; "
+                f"it takes {', '.join(sorted(self.arguments)) or 'no arguments'}")
+        return self.runtime_tool, {self.arguments[k]: v for k, v in args.items()}
+
+
+def _parse_arguments(name: str, raw) -> dict[str, str]:
+    """`[a, b]` or `{model_name: runtime_name}` into one mapping."""
+    if raw is None:
+        raise PanelError(
+            f"{name}: set `arguments` to the parameters this view offers -- a list "
+            f"of runtime names, or a mapping of model-facing name to runtime name")
+    if isinstance(raw, dict):
+        for offered, runtime_arg in raw.items():
+            if not isinstance(runtime_arg, str) or not runtime_arg:
+                raise PanelError(
+                    f"{name}.arguments[{offered!r}] must name a runtime argument")
+        return dict(raw)
+    if isinstance(raw, (list, tuple)):
+        for entry in raw:
+            if not isinstance(entry, str) or not entry:
+                raise PanelError(f"{name}.arguments must be a list of names")
+        return {entry: entry for entry in raw}
+    raise PanelError(f"{name}.arguments must be a list or a mapping")
 
 
 def parse_agent_tool(raw: dict) -> AgentToolSpec:
@@ -145,24 +176,11 @@ def parse_agent_tool(raw: dict) -> AgentToolSpec:
     name = raw.get("name") or ""
     if not name:
         raise PanelError("agent tool has no name")
-    target = raw.get("runtime_tool") or name
-    expose = raw.get("expose")
-    hide = tuple(raw.get("hide") or ())
-    if expose is None and not hide:
-        raise PanelError(
-            f"{name}: set `expose` (the parameters to offer) or `hide` (the ones to "
-            f"withhold); a view that says neither cannot be told from an oversight")
-    arguments = dict(raw.get("arguments") or {})
-    for exposed, runtime_arg in arguments.items():
-        if not isinstance(runtime_arg, str) or not runtime_arg:
-            raise PanelError(f"{name}.arguments[{exposed!r}] must name a runtime argument")
     return AgentToolSpec(
         name=name,
-        runtime_tool=target,
+        runtime_tool=raw.get("runtime_tool") or name,
         description=raw.get("description") or "",
-        expose=tuple(expose) if expose is not None else (),
-        hide=hide,
-        arguments=arguments,
+        arguments=_parse_arguments(name, raw.get("arguments")),
         required=tuple(raw.get("required") or ()),
     )
 
@@ -179,44 +197,28 @@ def _validate(spec: AgentToolSpec, runtime: RuntimeDeclaration) -> None:
             f"runtime (v{runtime.version}) does not serve. Available: {available}")
 
     known = runtime.parameters_of(spec.runtime_tool)
-    for exposed in spec.expose:
-        runtime_arg = spec.runtime_name_of(exposed)
+    for offered, runtime_arg in spec.arguments.items():
         if runtime_arg not in known:
-            hint = (f" (renamed from {exposed!r})" if runtime_arg != exposed else "")
+            hint = f" (offered as {offered!r})" if runtime_arg != offered else ""
             raise PanelError(
-                f"{spec.name} exposes {runtime_arg!r}{hint}, which "
+                f"{spec.name} offers {runtime_arg!r}{hint}, which "
                 f"{spec.runtime_tool!r} does not accept. This is the defect the "
                 f"compiler exists for: the runtime ignores an unknown argument, so "
                 f"the model would believe it took effect. "
                 f"Accepted: {', '.join(sorted(known))}")
-    for hidden in spec.hide:
-        if spec.runtime_name_of(hidden) not in known:
-            raise PanelError(
-                f"{spec.name} hides {hidden!r}, which {spec.runtime_tool!r} does not "
-                f"have -- a stale entry hides a real mismatch from the next reader")
     for name in spec.required:
-        if name not in spec.expose:
-            raise PanelError(f"{spec.name} requires {name!r} without exposing it")
+        if name not in spec.arguments:
+            raise PanelError(f"{spec.name} requires {name!r} without offering it")
 
-    # Accounted for under runtime names, because that is what `known` holds: a view
-    # exposing `cmd` -> `command` has accounted for `command`, and comparing the
-    # model-facing name would have demanded it be hidden as well as exposed.
-    accounted = {spec.runtime_name_of(name) for name in spec.expose} | \
-                {spec.runtime_name_of(name) for name in spec.hide}
-    unaccounted = set(known) - accounted
-    if unaccounted:
+    # A runtime argument the runtime itself requires must be offered, or the model
+    # cannot make a valid call at all.
+    unreachable = runtime.required_of(spec.runtime_tool) - set(spec.arguments.values())
+    if unreachable:
         raise PanelError(
-            f"{spec.name} says nothing about {', '.join(sorted(unaccounted))} on "
-            f"{spec.runtime_tool!r}: list them in `expose` to offer them, or in "
-            f"`hide` to withhold them on purpose")
+            f"{spec.name} does not offer {', '.join(sorted(unreachable))}, which "
+            f"{spec.runtime_tool!r} requires -- every call would fail")
 
 
-#: JSON-Schema keys a function-calling panel may carry per parameter. Deliberately
-#: small: providers disagree about the rest, and one of them rejecting a key means a
-#: run that cannot start. `additionalProperties` is the concrete case -- the runtime
-#: declares it on `shell.env` (a string->string map), the hand-written panel dropped
-#: it without saying so, and a contract test has been enforcing its absence since
-#: before that panel was compiled.
 PANEL_FIELD_KEYS = frozenset({"type", "items", "enum", "default", "description"})
 
 
@@ -226,13 +228,13 @@ def _portable(schema: dict) -> dict:
 
 
 def _parameters(spec: AgentToolSpec, runtime: RuntimeDeclaration) -> dict:
-    """The exposed subset of the runtime's parameter schema, under model-facing names."""
+    """The offered parameters, under the names the model uses."""
     known = runtime.parameters_of(spec.runtime_tool)
-    properties = {name: _portable(known[spec.runtime_name_of(name)])
-                  for name in spec.expose}
+    properties = {offered: _portable(known[runtime_arg])
+                  for offered, runtime_arg in spec.arguments.items()}
     required = list(spec.required) or [
-        name for name in spec.expose
-        if spec.runtime_name_of(name) in runtime.required_of(spec.runtime_tool)]
+        offered for offered, runtime_arg in spec.arguments.items()
+        if runtime_arg in runtime.required_of(spec.runtime_tool)]
     return {"type": "object", "properties": properties, "required": required}
 
 

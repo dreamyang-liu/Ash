@@ -6,7 +6,9 @@ generation:
   prompt_cache: true
 
 agent:
-  tools: default         # "default" (structured tools) | "bash_only" (single bash tool)
+  # A panel manifest: a shipped name (configs/tool_panels/*.yaml) or a path to
+  # your own. See docs/TOOL_PANEL.md.
+  tools: default
   system_template: |
     You are a helpful assistant that can interact with a computer to solve software engineering tasks.
   instance_template: |

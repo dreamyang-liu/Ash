@@ -24,13 +24,12 @@ from .conversation import Conversation
 from .llm import LLMClient, ThinkingLoopError
 from .pipeline import (EXECUTOR, RAW_ERROR, RAW_OUTPUT, CallContext,
                        ToolPipeline, mounted_pipeline)
-from .tools import tool_summary, TOOLS_SCHEMA, BASH_ONLY_SCHEMA, route_agent_tool, is_custom_tool
+from .tools import DEFAULT_PANEL, load_panel, tool_summary, is_custom_tool
 from .trace import ToolTraceWriter, new_run_id
 from . import hooks
 from . import interceptors
 
-__all__ = ["AshAgent", "build_system_prompt", "build_instance_message",
-           "TOOLS_SCHEMA", "BASH_ONLY_SCHEMA"]
+__all__ = ["AshAgent", "build_system_prompt", "build_instance_message"]
 
 
 class AshAgent:
@@ -63,7 +62,11 @@ class AshAgent:
         self.sandbox_id = sandbox_id
         self.trajectory = Trajectory()
         self.cost = CostTracker()
-        self._tools_schema: list[dict] = []
+        # The panel this agent offers, and the views that route its calls. Held per
+        # agent rather than in a module global: routing used to resolve against a
+        # process-wide "active panel", so two agents in one process -- which is what
+        # batch mode is -- could not have different ones.
+        self._panel = None
         self._trace_file = None
         self._event_trace: Optional[ToolTraceWriter] = None
         self._warned = False
@@ -76,8 +79,39 @@ class AshAgent:
         self.before_finish_hooks = list(hooks.DEFAULT_BEFORE_FINISH)
         self.result_processors = list(hooks.DEFAULT_RESULT_PROCESSORS)
 
+    def use_panel(self, panel) -> None:
+        """Offer this panel, and route through its views.
+
+        Takes a ``ToolPanel``, a manifest name, or a path. Schema and routing arrive
+        together because they have to agree: setting one without the other is how the
+        panel and the routing table came to disagree in the first place.
+        """
+        from .tools import ToolPanel
+
+        self._panel = panel if isinstance(panel, ToolPanel) else load_panel(panel)
+
+    @property
+    def panel(self):
+        """This agent's panel, loading the default one if none was set."""
+        if self._panel is None:
+            self.use_panel(DEFAULT_PANEL)
+        return self._panel
+
+    @property
+    def tools_schema(self) -> list[dict]:
+        """The schema handed to the model."""
+        return self.panel.schema
+
     def set_tools_schema(self, schema: list[dict]):
-        self._tools_schema = schema
+        """Set a raw schema list, bypassing panel compilation.
+
+        Kept for callers that build a schema by other means (a test, or a harness
+        driving a non-Ash tool set). Routing still needs views, so a panel is loaded
+        for that; prefer :meth:`use_panel`, which keeps the two in step.
+        """
+        from .tools import ToolPanel
+
+        self._panel = ToolPanel(schema=schema, views=self.panel.views)
 
     def _trace(self, text: str):
         if self._trace_file:
@@ -144,13 +178,17 @@ class AshAgent:
             # must be told the tool's name to watch it at all.
             exec_name, exec_args = name, dict(args)
         else:
-            # Builtin names ARE translated here, even though the executor would
-            # do it too: `bash` must reach the interceptors as `shell`, or a
-            # bash_only run would hide every command from the interceptors that key on
-            # the runtime tool -- a drift scan above all.
+            # Builtin names ARE translated here, even though the executor would do
+            # it too: a renamed view must reach the interceptors under the runtime's
+            # name, or one keyed on `shell` goes blind -- a drift scan above all.
+            # A ValueError here is an argument the view does not offer, reported to
+            # the model rather than dropped.
             try:
-                exec_name, exec_args = route_agent_tool(name, args)
-            except KeyError as exc:
+                # `panel` rather than `_panel`: routing must not depend on someone
+                # having called use_panel() first. The loop reaches this line before
+                # run() on any caller that dispatches a tool directly.
+                exec_name, exec_args = self.panel.route(name, args)
+            except (KeyError, ValueError) as exc:
                 exec_name, exec_args = name, dict(args)
                 result = ToolResult(success=False, output="", error=str(exc))
                 error_kind = "routing"
@@ -265,7 +303,7 @@ class AshAgent:
                 sandbox_id=self.sandbox_id,
             )
 
-        llm = LLMClient(self.config, self.cost, self._tools_schema, trace=self._trace, on_step=self.on_step)
+        llm = LLMClient(self.config, self.cost, self.tools_schema, trace=self._trace, on_step=self.on_step)
         llm.stream = self.stream
         self._pipeline = None             # re-resolved per run (see __init__)
 

@@ -13,8 +13,7 @@ from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent
 from ..agent.trace import new_run_id
-from ..agent.tools import TOOLS_SCHEMA, BASH_ONLY_SCHEMA, use_panel
-from ..agent.custom_tools import custom_agent_schemas, load_custom_tools
+from ..agent.tools import DEFAULT_PANEL, build_panel
 from ..agent.interceptors import default_pipeline
 from ..agent.pipeline import load_pipeline
 from .. import style as S
@@ -107,20 +106,11 @@ class LiteLLMHarness(BaseHarness):
             if plugins:
                 agent.pipeline = default_pipeline(
                     extra=load_pipeline(plugins).interceptors)
-            tools_mode = c.get("tools", "default")
-            # Routing resolves against the active panel, so selecting it is part of
-            # selecting the mode: a bash_only run must route through bash_only's
-            # views, which expose one parameter.
-            use_panel(tools_mode)
-            if tools_mode == "bash_only":
-                agent.set_tools_schema(BASH_ONLY_SCHEMA)
-            else:
-                # Manifest-defined tools, if any. Loading them was the deleted
-                # runner.py's job and nothing inherited it, so `custom_tools_dir`
-                # reached AgentConfig from nowhere and the schema never grew:
-                # the dispatch half of the feature was live and unreachable.
-                load_custom_tools(agent_config.custom_tools_dir)
-                agent.set_tools_schema(TOOLS_SCHEMA + custom_agent_schemas())
+            # One call, because schema, routing and custom tools have to agree.
+            # `tools:` names a shipped panel or points at a manifest of your own.
+            agent.use_panel(build_panel(c.get("tools", DEFAULT_PANEL),
+                                        agent_config.custom_tools_dir))
+
             # The agent hands in its own diff: it knows which files it fixed,
             # which is the one thing a harness reading git state cannot know.
             # The reserve buys the turns to do it before the budget is gone.

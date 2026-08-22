@@ -1,0 +1,59 @@
+# The tool panel the model sees, compiled against the runtime's own declaration
+# (ash-runtime --dump-schema). See docs/TOOL_PANEL.md.
+#
+# `arguments` is the whole parameter surface: what is listed is offered, what is not
+# does not exist for this view. A call using something else is an error, not a silent
+# drop -- a dropped argument leaves the model believing a setting took effect.
+#
+# A list means "offered under the runtime's own names". A mapping renames:
+#   arguments: {cmd: command}     # model calls it `cmd`, runtime gets `command`
+
+agent_tools:
+  - name: shell
+    description: |-
+      Execute a shell command synchronously or in the background.
+      Use for: running tests (pytest), installing packages (pip), git operations, and any other shell commands.
+      Working directory defaults to /testbed.
+    arguments: [background, command, env, max_output_bytes, stdin, tail, timeout, truncate_mode, working_dir]
+    required: [command]
+
+  - name: text_editor
+    description: |-
+      View or edit files.
+      Commands:
+        view: Read file contents (optionally a line range)
+        str_replace: Replace exact text in a file
+        insert: Insert text after a specific line
+        write: Write full content to a file (creates or overwrites)
+    arguments: [command, file_text, insert_line, insert_text, max_output_bytes, new_str, old_str, path, truncate_mode, view_range]
+    required: [command, path]
+
+  - name: grep_files
+    description: |-
+      Search files using ripgrep with a regex pattern.
+      Use for finding code patterns, function definitions, imports, etc.
+    arguments: [include, limit, max_output_bytes, path, pattern, truncate_mode]
+    required: [pattern]
+
+  - name: process
+    description: |-
+      Manage a background process started with shell(background=true).
+      Actions:
+        read: Get the current bounded output snapshot
+        kill: Terminate the process
+    arguments: [action, pid, tail]
+    required: [pid, action]
+
+  - name: web_fetch
+    arguments: [format, headers, max_output_bytes, timeout, truncate_mode, url]
+    required: [url]
+
+  - name: web_search
+    arguments: [backend, max_results, query]
+    required: [query]
+
+  - name: wait_for_events
+    description: |-
+      Observe asynchronous sandbox facts. Delivery is opt-in: action=subscribe registers interest in event kinds (optionally narrowed to specific sources) so they arrive with later tool responses; action=wait (the default) blocks until a matching event occurs or the timeout elapses -- use it instead of polling in a loop when waiting on background work. Events expire automatically after their time-to-live.
+    arguments: [action, kinds, sources, timeout]
+    # not offered: include_own

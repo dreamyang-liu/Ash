@@ -6,7 +6,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from swebench.agent.tools import AGENT_TOOLS, TOOLS_SCHEMA, route_agent_tool
+from swebench.agent.tools import load_panel
+
+_PANEL = load_panel()
+TOOLS_SCHEMA = _PANEL.schema
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "sdk"))
 
@@ -119,7 +122,7 @@ def test_every_offered_tool_routes_to_a_real_runtime_tool():
     """The panel and the routing come from one compiled set of views, so they cannot
     disagree -- this checks the set itself lands on tools the runtime serves."""
     functions = _function_by_name()
-    views = AGENT_TOOLS["default"]
+    views = _PANEL.views
 
     assert set(views) == set(functions)
     assert {v.runtime_tool for v in views.values()} <= RUNTIME_TOOL_NAMES
@@ -128,7 +131,7 @@ def test_every_offered_tool_routes_to_a_real_runtime_tool():
         agent_required = set(functions[name]["parameters"].get("required", []))
         runtime_required = set(RUNTIME_REQUIRED[view.runtime_tool])
         exposed_required = {r for r in runtime_required
-                            if r in {view.runtime_name_of(e) for e in view.expose}}
+                            if r in set(view.arguments.values())}
         assert agent_required >= exposed_required, \
             f"{name} offers {sorted(exposed_required - agent_required)} as optional"
 
@@ -136,7 +139,7 @@ def test_every_offered_tool_routes_to_a_real_runtime_tool():
 def test_route_agent_tool_identity_routes_return_runtime_call_copy():
     args = {"command": "echo hi"}
 
-    runtime_tool, runtime_args = route_agent_tool("shell", args)
+    runtime_tool, runtime_args = _PANEL.route("shell", args)
 
     assert runtime_tool == "shell"
     assert runtime_args == args
@@ -145,7 +148,7 @@ def test_route_agent_tool_identity_routes_return_runtime_call_copy():
 
 def test_route_agent_tool_rejects_unknown_tool():
     try:
-        route_agent_tool("missing", {})
+        _PANEL.route("missing", {})
     except KeyError as exc:
         assert "unknown agent tool: missing" in str(exc)
     else:

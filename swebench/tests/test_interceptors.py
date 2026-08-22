@@ -484,16 +484,14 @@ def test_caller_supplied_pipeline_is_used_and_sees_agent_identity():
     assert seen == [("worker-3", "shared", "shell")]
 
 
-def test_interceptors_receive_the_runtime_tool_and_only_exposed_arguments():
-    """Interceptors are keyed on the runtime tool, so the loop routes first. A view
-    may rename the tool or narrow its arguments; what reaches an interceptor is what
-    will actually execute.
+def test_interceptors_receive_the_runtime_tool_not_the_view_name():
+    """Interceptors are keyed on the runtime tool, so the loop routes first. A view may
+    rename the tool; what reaches an interceptor is what will actually execute.
 
-    This used to assert the `bash` -> `shell` alias, which no longer exists: bash_only
-    mode now offers a view *named* shell with one parameter, so the renaming that
-    justified a route table is gone. What it was really protecting -- an interceptor
-    keyed on `shell` not going blind, and not seeing arguments the model was never
-    offered -- is what is checked here."""
+    This used to assert the `bash` -> `shell` alias, which no longer exists, and then
+    that an unoffered argument was silently dropped -- which was itself the defect the
+    panel compiler exists to stop. Now an unoffered argument is an error, so this
+    checks the part that is still true: routing happens before interception."""
     seen = []
 
     class Spy(TruncateInterceptor):
@@ -501,17 +499,11 @@ def test_interceptors_receive_the_runtime_tool_and_only_exposed_arguments():
             seen.append((ctx.tool_name, dict(ctx.args)))
             return super().before(ctx)
 
-    from swebench.agent.tools import use_panel
-    use_panel("bash_only")
-    try:
-        agent = _agent(lambda n, a: _ok(), pipeline=ToolPipeline([Spy()]))
-        agent._run_tool(_tool_call("shell", {"command": "ls", "max_output_bytes": 99}),
-                        _Conv(), "turn-1")
-    finally:
-        use_panel("default")
+    agent = _agent(lambda n, a: _ok(), pipeline=ToolPipeline([Spy()]))
+    agent.use_panel("bash_only")
+    agent._run_tool(_tool_call("shell", {"command": "ls"}), _Conv(), "turn-1")
 
-    assert seen == [("shell", {"command": "ls"})], \
-        "an argument the bash_only view does not expose reached the runtime"
+    assert seen == [("shell", {"command": "ls"})]
 
 
 def test_guardrail_state_does_not_leak_between_runs(monkeypatch):
