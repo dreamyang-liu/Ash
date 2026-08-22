@@ -56,4 +56,9 @@ agent_tools:
     description: |-
       Observe asynchronous sandbox facts. Delivery is opt-in: action=subscribe registers interest in event kinds (optionally narrowed to specific sources) so they arrive with later tool responses; action=wait (the default) blocks until a matching event occurs or the timeout elapses -- use it instead of polling in a loop when waiting on background work. Events expire automatically after their time-to-live.
     arguments: [action, kinds, sources, timeout]
-    # not offered: include_own
+    # not offered: include_own -- it asks to be notified of events your own tool calls
+    # caused, which the runtime filters out by default because the call's own result
+    # already reported them. It is for agents sharing a sandbox, where one wants to
+    # hear what another did; with one agent per sandbox, Origin always matches the
+    # caller, so turning it on only replays that agent's own actions back at it. Offer
+    # it again when a multi-agent topology returns.
