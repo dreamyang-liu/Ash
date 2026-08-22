@@ -4,11 +4,6 @@ import json
 import re
 import shlex
 
-try:
-    from datasets import load_dataset
-except ImportError:
-    raise ImportError("Install datasets: pip install datasets")
-
 
 _DATASET_MAP = {
     "lite": "princeton-nlp/SWE-bench_Lite",
@@ -35,6 +30,15 @@ def load_instances(
 
     if not split:
         split = "train" if subset.startswith("gym") else "test"
+
+    # Imported here, not at module scope. `datasets` is a heavy dependency needed
+    # only to fetch the benchmark, and requiring it at import time meant every module
+    # that touches this file -- and so every test in the package -- could not be
+    # imported without it.
+    try:
+        from datasets import load_dataset
+    except ImportError as exc:
+        raise ImportError("Install datasets: pip install datasets") from exc
 
     dataset = load_dataset(dataset_name, split=split)
     instances = list(dataset)
