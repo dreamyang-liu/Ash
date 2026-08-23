@@ -97,7 +97,7 @@ another.
 │      `execution.interceptors: my_file.py`.
 │
 │    the agent loop           __init__.py + llm, conversation, prompts, hooks,
-│                             trace, tools, custom_tools
+│                             trace, tools, custom_tools, checkpoints
 │      This repo's own agent. A consumer of the chain, not part of it —
 │      sandbox.py and mcp_server.py mount the chain without it.
 └───────────────────────┬──────────────────────────────────────────────────────
@@ -247,6 +247,20 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
   registering in `HARNESSES`. `manager-worker` and `best-of-n` were removed while the
   single-agent path settles, along with Waggle, the write-arbitration interceptor they
   used; the mount they relied on (several agents, one shared chain) still works.
+- **Per-step checkpoints** (`swebench/agent/checkpoints.py`, `swebench/replay.py`):
+  `checkpoints.enabled: true` snapshots the environment each step so a rollout can
+  be restarted from any of them. Only steps that could have mutated are captured
+  (a `MutationTracker` interceptor decides; `shell` counts as mutating because a
+  command's effect is not in its text) and the rest map to the previous snapshot,
+  so the step→snapshot map is complete either way — it lands in the trajectory's
+  `info.checkpoints` and, for the RL path, in each rollout reply. `mode: disk_only`
+  (default) skips the memory image; such snapshots **cold-boot**, so the microVM
+  template must declare a startup command that launches the runtime, or
+  `mode: full` (resume) must be used instead. When a capture shows the server
+  compacted the layer chain (the layer count drops), the session continues on a
+  sandbox started from that snapshot — the live layer stack is never compacted, so
+  without that every later capture would re-compact the chain. `MicroVMPool` gained
+  `snapshot`/`squash`/`get_snapshot`; other pools declare `supports_snapshot()` false.
 - Output lands in `results/<run>/`. Treat `results/` as generated data.
 
 ### Kubernetes stack

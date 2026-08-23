@@ -12,11 +12,37 @@ from ..submission import (DEFAULT_RESERVE_STEPS, SUBMISSION_KEY,
 from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent
+from ..agent.checkpoints import install as install_checkpoints
 from ..agent.trace import new_run_id
 from ..agent.tools import DEFAULT_PANEL, build_panel
 from ..agent.interceptors import default_pipeline
 from ..agent.pipeline import load_pipeline
 from .. import style as S
+
+
+def _checkpoint_tracer(agent):
+    """Report checkpoints on the agent's event stream, when one is open.
+
+    The writer is created by ``run()``, so it is resolved per call rather than
+    captured at wiring time. Unknown event types are additive in the trace
+    schema (docs/TRACE_SCHEMA.md), so a consumer that does not know
+    ``checkpoint.recorded`` simply skips it.
+    """
+    def report(record):
+        writer = getattr(agent, "_event_trace", None)
+        if writer is None:
+            return
+        writer.emit(
+            "checkpoint.recorded",
+            turn_id=f"turn-{record.turn}",
+            snapshot_id=record.snapshot_id,
+            captured=record.captured,
+            disk_only=record.disk_only,
+            rootfs_layers=record.rootfs_layers,
+            chain_size_mb=record.chain_size_mb,
+            reboarded=record.reboarded,
+        )
+    return report
 
 
 class LiteLLMHarness(BaseHarness):
@@ -106,6 +132,22 @@ class LiteLLMHarness(BaseHarness):
             if plugins:
                 agent.pipeline = default_pipeline(
                     extra=load_pipeline(plugins).interceptors)
+            # Per-step environment checkpoints. Mounted after the plugin
+            # block so the mutation tracker composes with a configured
+            # pipeline rather than replacing it. Off unless configured, and a
+            # no-op on backends that cannot snapshot (Docker, k8s).
+            checkpointer = None
+            checkpoint_cfg = c.get("checkpoints") or {}
+            if checkpoint_cfg.get("enabled") and session.supports_snapshot():
+                checkpointer = install_checkpoints(
+                    agent, session,
+                    always=checkpoint_cfg.get("trigger", "mutation") == "every_step",
+                    disk_only=checkpoint_cfg.get("mode", "disk_only") != "full",
+                    reboard=checkpoint_cfg.get("reboard", True),
+                    name_prefix=checkpoint_cfg.get("name_prefix", ""),
+                    on_checkpoint=_checkpoint_tracer(agent),
+                )
+
             # One call, because schema, routing and custom tools have to agree.
             # `tools:` names a shipped panel or points at a manifest of your own.
             agent.use_panel(build_panel(c.get("tools", DEFAULT_PANEL),
@@ -140,6 +182,14 @@ class LiteLLMHarness(BaseHarness):
                 SUBMISSION_KEY: patch,
                 "model": agent_config.model,
             }
+            if checkpointer is not None:
+                # What a replay needs: for each step, the snapshot holding the
+                # environment as it stood after that step.
+                agent.trajectory.info["checkpoints"] = {
+                    "step_snapshots": checkpointer.step_map(),
+                    "disk_only": checkpointer.disk_only,
+                    "records": [vars(r) for r in checkpointer.records],
+                }
             agent.trajectory.cost = agent.cost
             traj_path = output_dir / "trajectories" / f"{instance_id}.json"
             agent.trajectory.save(traj_path)

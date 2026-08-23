@@ -51,6 +51,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
 
 from .agent import AshAgent
+from .agent.checkpoints import install as install_checkpoints
 from .agent.tools import DEFAULT_PANEL, build_panel
 from .dataset import (
     build_test_command,
@@ -60,6 +61,7 @@ from .dataset import (
     parse_test_list,
     resolve_image,
 )
+from .backends import backend_config
 from .models import AgentConfig
 from .sandbox import AshSession
 
@@ -84,6 +86,9 @@ REWARD_BINARY = "binary"
 REWARD_MODE_ENV = "ASH_REWARD_MODE"
 RUNTIME_BIN_ENV = "ASH_RUNTIME_BIN"
 STEP_LIMIT_ENV = "ASH_STEP_LIMIT"
+BACKEND_ENV = "ASH_BACKEND"
+CHECKPOINTS_ENV = "ASH_CHECKPOINTS"
+CHECKPOINT_MODE_ENV = "ASH_CHECKPOINT_MODE"
 
 
 # --------------------------------------------------------------------------- #
@@ -176,7 +181,19 @@ def _run_and_grade(request: dict[str, Any], instance: dict, session: Any,
 
     turns = agent.cost.api_calls
     total_time = time.monotonic() - started_at
-    return {
+    # The map a training run needs to restart this episode from any step.
+    # Absent when checkpointing is off, so a consumer can tell "no snapshots"
+    # from "snapshots that happen to be identical".
+    checkpointer = getattr(agent, "checkpointer", None)
+    checkpoints = None
+    if checkpointer is not None and checkpointer.records:
+        checkpoints = {
+            "step_snapshots": checkpointer.step_map(),
+            "disk_only": checkpointer.disk_only,
+            "captures": sum(1 for r in checkpointer.records if r.captured),
+            "reboards": sum(1 for r in checkpointer.records if r.reboarded),
+        }
+    reply = {
         "reward": reward,
         "exit_status": exit_status,
         "eval_report": {
@@ -193,6 +210,9 @@ def _run_and_grade(request: dict[str, Any], instance: dict, session: Any,
             "time_per_turn": round(agent_run_time / turns, 3) if turns else 0.0,
         },
     }
+    if checkpoints is not None:
+        reply["checkpoints"] = checkpoints
+    return reply
 
 
 def _grade_patch(session: Any, instance: dict, patch: str,
@@ -378,11 +398,22 @@ def _log_episode(request: dict[str, Any], reply: dict[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 
 def build_default_deps(subset: str, runtime_bin: Optional[str], step_limit: int,
-                       reward_mode: str, store: InstanceStore) -> EpisodeDeps:
-    """Production dependencies: real dataset, docker sandboxes, agent loop."""
+                       reward_mode: str, store: InstanceStore,
+                       backend: Optional[dict] = None,
+                       checkpoints: str = "off",
+                       checkpoint_mode: str = "disk_only") -> EpisodeDeps:
+    """Production dependencies: real dataset, sandboxes, agent loop.
+
+    ``checkpoints`` selects per-step environment snapshots -- ``off``,
+    ``mutation`` (capture only steps that could have changed the environment),
+    or ``every_step``. They need a snapshot-capable backend (``microvm``); on
+    others the installer is skipped and episodes run as before. The resulting
+    step -> snapshot map rides back in each reply, which is what lets a
+    training run restart an episode from any step.
+    """
 
     def make_session() -> AshSession:
-        return AshSession(runtime_bin=runtime_bin, quiet=True)
+        return AshSession(runtime_bin=runtime_bin, quiet=True, backend=backend)
 
     def make_agent(config: AgentConfig,
                    executor: Callable[[str, dict], Any],
@@ -395,6 +426,10 @@ def build_default_deps(subset: str, runtime_bin: Optional[str], step_limit: int,
         agent.use_panel(build_panel(getattr(config, "tools", DEFAULT_PANEL),
                                     config.custom_tools_dir,
                                     registry=session.tools))
+        if checkpoints != "off" and session.supports_snapshot():
+            install_checkpoints(agent, session,
+                                always=checkpoints == "every_step",
+                                disk_only=checkpoint_mode != "full")
         return agent
 
     return EpisodeDeps(
@@ -424,6 +459,19 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                         default=int(os.environ.get(STEP_LIMIT_ENV, DEFAULT_STEP_LIMIT)),
                         help=f"agent steps per episode (default: ${STEP_LIMIT_ENV} "
                              f"or {DEFAULT_STEP_LIMIT})")
+    parser.add_argument("--backend", default=os.environ.get(BACKEND_ENV, "docker"),
+                        help=f"where sandboxes come from: docker, microvm, k8s "
+                             f"(default: ${BACKEND_ENV} or docker)")
+    parser.add_argument("--checkpoints", choices=("off", "mutation", "every_step"),
+                        default=os.environ.get(CHECKPOINTS_ENV, "off"),
+                        help="per-step environment snapshots for replay; needs a "
+                             "snapshot-capable backend (default: "
+                             f"${CHECKPOINTS_ENV} or off)")
+    parser.add_argument("--checkpoint-mode", choices=("disk_only", "full"),
+                        default=os.environ.get(CHECKPOINT_MODE_ENV, "disk_only"),
+                        help="disk_only checkpoints replay by restoring the disk; "
+                             "full also keeps memory and processes "
+                             f"(default: ${CHECKPOINT_MODE_ENV} or disk_only)")
     return parser.parse_args(argv)
 
 
@@ -439,11 +487,16 @@ def main(argv: Optional[list[str]] = None) -> None:
     store = InstanceStore()
     deps = build_default_deps(subset=args.subset, runtime_bin=args.runtime_bin,
                               step_limit=args.step_limit, reward_mode=reward_mode,
-                              store=store)
+                              store=store,
+                              backend=backend_config({"backend": args.backend}),
+                              checkpoints=args.checkpoints,
+                              checkpoint_mode=args.checkpoint_mode)
     server = RolloutHTTPServer((args.host, args.port), deps,
                                lambda: store.count(args.subset))
-    logger.info("Ash rollout server on %s:%d (subset=%s step_limit=%d reward_mode=%s)",
-                args.host, args.port, args.subset, args.step_limit, reward_mode)
+    logger.info("Ash rollout server on %s:%d (subset=%s step_limit=%d "
+                "reward_mode=%s backend=%s checkpoints=%s/%s)",
+                args.host, args.port, args.subset, args.step_limit, reward_mode,
+                args.backend, args.checkpoints, args.checkpoint_mode)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

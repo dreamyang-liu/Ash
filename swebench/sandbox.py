@@ -6,7 +6,7 @@ Provides synchronous interface for spawning containers and executing tools.
 import asyncio
 from typing import Callable, Optional
 
-from ash_sandbox import Pool, Sandbox
+from ash_sandbox import Pool, Sandbox, Snapshot
 from ash_sandbox.result import ToolResult as SdkToolResult
 
 from . import style as S
@@ -121,6 +121,129 @@ class AshSession:
                 print(S.kv("cleanup ", S.dim(f"destroyed {sid[:12]}")))
             self._sandbox = None
             self._pool = None
+
+    # --- Checkpoints ---
+    #
+    # A rollout that snapshots every step needs two operations beyond
+    # create/destroy, and both are pool capabilities rather than session
+    # logic: publish a checkpoint, and continue on a sandbox started from one.
+
+    def supports_snapshot(self) -> bool:
+        """Whether this session's backend can publish snapshots."""
+        return bool(self._pool) and self._pool.supports_snapshot()
+
+    def snapshot(self, name: str | None = None,
+                 disk_only: bool = True) -> Optional["Snapshot"]:
+        """Checkpoint the live sandbox; it keeps running.
+
+        Defaults to ``disk_only``: a rollout replays by restoring the disk and
+        re-feeding the transcript, so paying for a memory image every step
+        buys nothing. Returns ``None`` when the backend cannot snapshot or the
+        capture fails -- a checkpoint is an optimisation for later analysis,
+        never a reason to fail the episode in progress.
+        """
+        if not self._sandbox or not self.supports_snapshot():
+            return None
+        try:
+            return self._get_loop().run_until_complete(
+                self._pool.snapshot(self._sandbox, name=name,
+                                    disk_only=disk_only))
+        except Exception as e:
+            if not self.quiet:
+                print(f"  {S.bright_red('!')} snapshot failed: {e}")
+            return None
+
+    def squash_snapshot(self, snapshot, name: str | None = None):
+        """Flatten a snapshot's chain, returning an equivalent snapshot.
+
+        Returns the input unchanged if the backend cannot squash or the call
+        fails: a deep chain still works, it just makes its children's
+        checkpoints more expensive.
+        """
+        if not self.supports_snapshot():
+            return snapshot
+        try:
+            return self._get_loop().run_until_complete(
+                self._pool.squash(snapshot, name=name))
+        except Exception as e:
+            if not self.quiet:
+                print(f"  {S.bright_red('!')} squash failed: {e}")
+            return snapshot
+
+    async def _reachable(self, sandbox, attempts: int = 8,
+                         delay: float = 0.5) -> bool:
+        """Whether a sandbox's runtime answers a trivial call.
+
+        Retried briefly: a freshly booted sandbox may still be starting its
+        runtime when the API call that created it has already returned.
+        """
+        for attempt in range(attempts):
+            try:
+                result = await sandbox.call("shell", command="true", timeout=10)
+                if not result.is_error:
+                    return True
+            except Exception:
+                pass
+            if attempt + 1 < attempts:
+                await asyncio.sleep(delay)
+        return False
+
+    def swap_sandbox(self, snapshot) -> bool:
+        """Continue this session on a sandbox started from ``snapshot``.
+
+        Called when a checkpoint shows the server compacted the layer chain:
+        the running sandbox's own layer stack is never compacted, so without
+        replacing it every later capture would re-compact the whole chain.
+        The swap is invisible to an agent mid-run, because executors resolve
+        the active sandbox per call.
+
+        Deliberately does not re-probe the repository baseline: ``create``
+        recorded which files the image itself left untracked, and re-probing
+        now would file the agent's own new files under that baseline and drop
+        them from the patch.
+        """
+        if not self._sandbox or not self._pool:
+            return False
+        snapshot_id = getattr(snapshot, "id", snapshot)
+        previous = self._sandbox
+        try:
+            replacement = self._get_loop().run_until_complete(
+                self._pool.spawn(image=snapshot_id,
+                                 agent_id=previous.agent_id))
+        except Exception as e:
+            if not self.quiet:
+                print(f"  {S.bright_red('!')} re-board failed, keeping sandbox: {e}")
+            return False
+
+        # Probe before adopting. A sandbox created from a disk-only snapshot
+        # cold-boots, so its runtime is only there if the template declares a
+        # startup command that launches it; adopting an unreachable
+        # replacement would turn every later tool call into a transport error
+        # and kill the episode. Keeping the old sandbox instead costs only a
+        # deeper layer chain.
+        if not self._get_loop().run_until_complete(self._reachable(replacement)):
+            if not self.quiet:
+                print(f"  {S.bright_red('!')} re-board target has no runtime; "
+                      "keeping sandbox (does the template declare a startup "
+                      "command?)")
+            try:
+                self._get_loop().run_until_complete(
+                    self._pool.destroy(replacement))
+            except Exception:
+                pass
+            return False
+
+        self._sandbox = replacement
+        try:
+            self._get_loop().run_until_complete(self._pool.destroy(previous))
+        except Exception as e:
+            # The replacement is live and serving calls; a stranded old
+            # sandbox is a leak for the TTL to reap, not a run failure.
+            if not self.quiet:
+                print(f"  {S.dim(f'note: old sandbox not destroyed: {e}')}")
+        if not self.quiet:
+            print(S.kv("re-board ", S.cyan(self.sandbox_id[:12])))
+        return True
 
     def executor_for(self, agent_id: str,
                      pipeline=None) -> Callable[[str, dict], ToolResult]:

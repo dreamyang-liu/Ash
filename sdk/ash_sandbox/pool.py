@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 import shutil
 import subprocess
 from typing import Any
@@ -11,6 +12,45 @@ import httpx
 from .backends import GatewayBackend, HTTPBackend
 from .result import ToolResult
 from .sandbox import Sandbox, _find_free_port
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """A persistent snapshot, plus the facts needed to manage its chain.
+
+    A snapshot is a stack of layers: the base image, then one layer per
+    capture. `rootfs_layers` matters to callers because it is *inherited* --
+    a sandbox started from this snapshot can never compact those layers, only
+    add to them. Two decisions read it:
+
+    - the count dropping between consecutive snapshots of one sandbox means
+      the server compacted the chain, so that snapshot is a compact base and
+      the sandbox should be replaced by one started from it (`re-board`);
+    - a high count at branch time means children would inherit a deep prefix,
+      so the snapshot is worth squashing first.
+    """
+
+    id: str
+    names: tuple[str, ...] = ()
+    rootfs_layers: int | None = None
+    memory_layers: int | None = None
+    chain_size_mb: int | None = None
+    #: True when this snapshot carries no memory image, so sandboxes created
+    #: from it cold-boot instead of resuming.
+    disk_only: bool = False
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_api(cls, body: dict[str, Any], *, disk_only: bool = False) -> "Snapshot":
+        return cls(
+            id=body["snapshotID"],
+            names=tuple(body.get("names") or ()),
+            rootfs_layers=body.get("rootfsLayerCount"),
+            memory_layers=body.get("memoryLayerCount"),
+            chain_size_mb=body.get("chainSizeMB"),
+            disk_only=disk_only,
+            raw=body,
+        )
 
 
 class Pool(ABC):
@@ -76,6 +116,10 @@ class Pool(ABC):
         """Whether this pool can split a running sandbox into copies."""
         return False
 
+    def supports_snapshot(self) -> bool:
+        """Whether this pool can publish persistent snapshots."""
+        return False
+
     async def pause(self, sandbox: Sandbox) -> None:
         """Suspend a sandbox, releasing its compute until resumed."""
         raise NotImplementedError(
@@ -99,6 +143,33 @@ class Pool(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} cannot fork sandboxes; "
             "check supports_fork() first"
+        )
+
+    async def snapshot(self, sandbox: Sandbox, *, name: str | None = None,
+                       disk_only: bool = False) -> "Snapshot":
+        """Publish the sandbox's current state as a persistent snapshot.
+
+        Unlike `pause`, the sandbox keeps running: this is the checkpoint
+        primitive a rollout uses per step, and `spawn(image=<snapshot id>)`
+        later starts a fresh sandbox from it.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot snapshot sandboxes; "
+            "check supports_snapshot() first"
+        )
+
+    async def squash(self, snapshot: "Snapshot | str", *,
+                     name: str | None = None) -> "Snapshot":
+        """Flatten a snapshot's layer chain, returning an equivalent snapshot.
+
+        A sandbox started from a snapshot inherits its layers as a prefix it
+        can never compact, so branching repeatedly from deep snapshots pays a
+        growing cost. Squashing hands out a one-layer equivalent instead; the
+        original stays valid.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot squash snapshots; "
+            "check supports_snapshot() first"
         )
 
     async def close(self) -> None:
@@ -291,6 +362,9 @@ class MicroVMPool(Pool):
     def supports_fork(self) -> bool:
         return True
 
+    def supports_snapshot(self) -> bool:
+        return True
+
     # --- Lifecycle ---
 
     async def spawn(
@@ -401,6 +475,52 @@ class MicroVMPool(Pool):
             )
             for i, result in enumerate(results)
         ]
+
+    async def snapshot(self, sandbox: Sandbox, *, name: str | None = None,
+                       disk_only: bool = False) -> Snapshot:
+        """Publish the sandbox's current state; the sandbox keeps running.
+
+        `disk_only` skips the VM state and memory image, which is what makes a
+        per-step checkpoint cheap: the cost is roughly the bytes written since
+        the previous capture, and the guest filesystem is synced first so
+        recent writes are on the virtual disk. Sandboxes created from a
+        disk-only snapshot cold-boot (processes are gone, the template's
+        startup command is re-run) instead of resuming.
+        """
+        sid = _require_id(sandbox)
+        payload: dict = {}
+        if name:
+            payload["name"] = name
+        if disk_only:
+            payload["diskOnly"] = True
+        resp = await self._client.post(
+            f"{self.server_url}/sandboxes/{sid}/snapshots", json=payload)
+        resp.raise_for_status()
+        return Snapshot.from_api(resp.json(), disk_only=disk_only)
+
+    async def squash(self, snapshot: Snapshot | str, *,
+                     name: str | None = None) -> Snapshot:
+        """Flatten a snapshot's chain into an equivalent one-layer snapshot.
+
+        Returns a snapshot whose children start from a single inherited layer.
+        The source snapshot is untouched and stays usable. Already-flat chains
+        come back unchanged (the same id), so this is safe to call blindly.
+        """
+        snapshot_id = snapshot.id if isinstance(snapshot, Snapshot) else snapshot
+        disk_only = snapshot.disk_only if isinstance(snapshot, Snapshot) else False
+        payload: dict = {}
+        if name:
+            payload["name"] = name
+        resp = await self._client.post(
+            f"{self.server_url}/snapshots/{snapshot_id}/squash", json=payload)
+        resp.raise_for_status()
+        return Snapshot.from_api(resp.json(), disk_only=disk_only)
+
+    async def get_snapshot(self, snapshot_id: str) -> Snapshot:
+        """Look up a snapshot's current chain facts."""
+        resp = await self._client.get(f"{self.server_url}/snapshots/{snapshot_id}")
+        resp.raise_for_status()
+        return Snapshot.from_api(resp.json())
 
     # --- Internals ---
 

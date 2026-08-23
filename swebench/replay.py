@@ -1,0 +1,128 @@
+"""Restart an episode from any step it checkpointed.
+
+A rollout that checkpointed per step (``swebench/agent/checkpoints.py``) leaves
+two things behind: the transcript, and a map from step to the snapshot holding
+the environment as it stood after that step. Together they make a step
+addressable — restore that snapshot, re-feed the prefix of the transcript, and
+the agent is back where it was, free to continue with different sampling or to
+fan out into several branches.
+
+Restoring a ``disk_only`` checkpoint cold-boots the sandbox, so the microVM
+template must declare a startup command that launches the runtime -- otherwise
+the restored sandbox has no runtime to talk to. Checkpoints taken in ``full``
+mode resume instead, and bring their processes back with them.
+
+Two facts shape the branching path:
+
+**A branch inherits the snapshot's layers.** Layers a sandbox did not produce
+itself can never be compacted by it, so a child of a deep snapshot starts with
+a deep immutable prefix: its own checkpoint cycles get shorter, and across
+generations the chain approaches the format's stack limit. Squashing the branch
+point first hands children a one-layer prefix instead.
+
+**Squashing is worth memoising.** It costs one merge (chain size / store write
+bandwidth) and yields a snapshot any number of children can share, so a point
+that is branched more than once should be squashed once and reused. This module
+keeps that cache per process; a longer-lived cache belongs to whatever drives
+the search.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+#: Inherit more layers than this and a branch point is squashed before use even
+#: for a single child: below it the prefix costs little, above it the child's
+#: checkpoint cycles get noticeably shorter.
+DEFAULT_SQUASH_LAYER_THRESHOLD = 128
+
+
+def load_step_snapshots(trajectory_path: Path | str) -> dict[int, str]:
+    """Read the step -> snapshot map a checkpointed run saved.
+
+    Keys come back as ints: JSON object keys are strings, and callers index by
+    step number.
+    """
+    data = json.loads(Path(trajectory_path).read_text())
+    checkpoints = (data.get("info") or {}).get("checkpoints") or {}
+    return {int(step): snapshot_id
+            for step, snapshot_id in (checkpoints.get("step_snapshots") or {}).items()}
+
+
+def snapshot_for_step(step_snapshots: dict[int, str], step: int) -> Optional[str]:
+    """The snapshot holding the environment as of ``step``.
+
+    Steps that changed nothing are recorded pointing at the previous snapshot,
+    so an exact hit is the normal case; the fallback to the nearest earlier
+    step covers maps written by a run that only recorded captures.
+    """
+    if step in step_snapshots:
+        return step_snapshots[step]
+    earlier = [s for s in step_snapshots if s <= step]
+    return step_snapshots[max(earlier)] if earlier else None
+
+
+def messages_through_step(trajectory_path: Path | str, step: int) -> list[dict]:
+    """The transcript prefix belonging to the first ``step`` model calls.
+
+    Cuts after the tool results of the ``step``-th assistant message, which is
+    the transcript the agent held when the matching snapshot was taken.
+    """
+    data = json.loads(Path(trajectory_path).read_text())
+    messages = data.get("messages") or []
+    assistant_turns = 0
+    for index, message in enumerate(messages):
+        if message.get("role") == "assistant":
+            assistant_turns += 1
+            if assistant_turns > step:
+                return messages[:index]
+    return messages
+
+
+@dataclass
+class BranchPointCache:
+    """Memoises squashed equivalents of snapshots used as branch points."""
+
+    session: Any
+    layer_threshold: int = DEFAULT_SQUASH_LAYER_THRESHOLD
+    _squashed: dict[str, str] = field(default_factory=dict)
+
+    def prepare(self, snapshot_id: str, *, fan_out: int = 1,
+                layers: Optional[int] = None) -> str:
+        """The best snapshot id to branch from, squashing when it pays.
+
+        Squashes when several children will share the cost, or when the chain
+        is deep enough that even one child would inherit an awkward prefix.
+        Returns ``snapshot_id`` unchanged when squashing is unavailable or
+        fails: a deep chain still works.
+        """
+        if snapshot_id in self._squashed:
+            return self._squashed[snapshot_id]
+
+        if layers is None:
+            layers = self._layers_of(snapshot_id)
+        worth_it = fan_out >= 2 or (layers is not None
+                                    and layers > self.layer_threshold)
+        if not worth_it:
+            return snapshot_id
+
+        squashed = self.session.squash_snapshot(snapshot_id)
+        squashed_id = getattr(squashed, "id", squashed) or snapshot_id
+        self._squashed[snapshot_id] = squashed_id
+        return squashed_id
+
+    def _layers_of(self, snapshot_id: str) -> Optional[int]:
+        pool = getattr(self.session, "_pool", None)
+        get_snapshot = getattr(pool, "get_snapshot", None)
+        if get_snapshot is None:
+            return None
+        try:
+            loop = self.session._get_loop()
+            return loop.run_until_complete(get_snapshot(snapshot_id)).rootfs_layers
+        except Exception:
+            # Chain facts are an optimisation input; without them, branch
+            # from the snapshot as-is.
+            return None
