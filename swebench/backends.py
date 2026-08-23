@@ -53,7 +53,13 @@ _ALLOWED_KEYS = {
                 # names of snapshots already in the backend's catalog. Only the
                 # cold-start path accepts an image reference, so the answer is
                 # configuration, not something to guess from the string.
-                "from_image"},
+                "from_image",
+                # Path to a local ash-runtime binary. Set it and the harness
+                # builds a template per instance image on demand, uploading
+                # the binary through the backend's file service
+                # (swebench/templates.py); leave it unset and the harness
+                # expects templates to exist already.
+                "runtime_bin"},
     "k8s": {"control_plane_url", "gateway_url", "default_image"},
 }
 

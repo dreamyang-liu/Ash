@@ -12,6 +12,7 @@ from ash_sandbox.result import ToolResult as SdkToolResult
 from . import style as S
 from ash_sandbox.toolset import ToolRegistry
 from .backends import build_pool
+from .templates import builder_from_backend
 from .models import ToolResult
 from .patch import UNTRACKED_LIST, WORKDIR, extract_patch
 
@@ -82,16 +83,28 @@ class AshSession:
         try:
             self._pool = build_pool(self.backend, runtime_bin=self.runtime_bin)
             self._requested_image = image
+            # A benchmark names its environment with an image; the microVM
+            # backend starts from templates. Build one per image on demand
+            # (cached across instances) when the config says how to get the
+            # runtime into it.
+            builder = builder_from_backend(self.backend)
+            if builder is not None:
+                if not self.quiet:
+                    print(S.kv("template", S.dim(f"resolving for {image}")))
+                image = builder.template_for(image)
             # Two entries, and the config says which one this harness's image
             # names are for. A benchmark names its environment with an OCI
             # image reference, which only the cold-start path accepts; a
             # replay or a re-board hands over a snapshot id, which only the
             # snapshot path accepts. Guessing from the string would eventually
-            # mistake a template tag for an image tag.
+            # mistake a template tag for an image tag. A builder-resolved name
+            # is a template by construction, so it must never take the
+            # cold-start path even when `from_image` is set.
             backend_section = self.backend.get(
                 str(self.backend.get("backend") or ""), {}) or {}
-            from_image = bool(backend_section.get("from_image")
-                              or self.backend.get("from_image"))
+            from_image = (builder is None
+                          and bool(backend_section.get("from_image")
+                                   or self.backend.get("from_image")))
             if from_image and self._pool.supports_cold_start():
                 self._sandbox = await self._pool.spawn_from_image(image)
             else:

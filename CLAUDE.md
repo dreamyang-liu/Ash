@@ -283,8 +283,23 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
   cold-start. Note the requirement that follows: a cold-started image must already
   bring up the runtime, and AgentENV runs no startup command for a plain image --
   so a benchmark whose per-instance images are raw (SWE-bench's are) needs a
-  template built per instance (`fromImage` + `startCmd` in AgentENV's build API)
-  rather than a raw cold start.
+  template built per instance rather than a raw cold start.
+- **On-demand per-image templates** (`swebench/templates.py`): set
+  `microvm.runtime_bin` to a local ash-runtime binary and `AshSession.create`
+  turns each image into a template automatically -- cold-start the image, upload
+  the binary through the backend's file service (envd, port 49983 via the proxy;
+  the runtime cannot be used to install itself), snapshot (disk-only, unnamed so
+  a retry never collides with a half-failed attempt's leftover), then build a
+  template from that snapshot with a `RUN chmod` step, `startCmd`, and a
+  port-probing `readyCmd`. Template names are content-addressed over (image,
+  runtime-binary hash, port), so a batch builds each distinct image once and a
+  rebuilt runtime gets fresh templates. Two lookup endpoints matter:
+  `/snapshots/{name}` answers only for sandbox-sourced snapshots, so built
+  (template-sourced) templates are checked via `/templates/aliases/{name}` --
+  asking the wrong one makes every built template look missing and the rebuild
+  collides with it. Names that are grammatically impossible as snapshot aliases
+  (image references carry `/':'@`) skip the catalog lookup; a name the backend
+  already knows (a replay's checkpoint snapshot id) passes through untouched.
 - Output lands in `results/<run>/`. Treat `results/` as generated data.
 
 ### Kubernetes stack
