@@ -47,7 +47,13 @@ DEFAULT_BACKEND = "docker"
 _ALLOWED_KEYS = {
     "docker": {"runtime_bin", "port"},
     "microvm": {"server_url", "template", "runtime_port", "api_key",
-                "api_key_file", "request_timeout", "sandbox_ttl", "auto_resume"},
+                "api_key_file", "request_timeout", "sandbox_ttl", "auto_resume",
+                # Whether this harness's image names are OCI references to
+                # cold-start (a benchmark's per-instance images) rather than
+                # names of snapshots already in the backend's catalog. Only the
+                # cold-start path accepts an image reference, so the answer is
+                # configuration, not something to guess from the string.
+                "from_image"},
     "k8s": {"control_plane_url", "gateway_url", "default_image"},
 }
 

@@ -221,3 +221,35 @@ def test_missing_environment_loads_as_empty(tmp_path):
     path = tmp_path / "traj.json"
     path.write_text(json.dumps({"messages": [], "info": {}}))
     assert load_environment(path) == {}
+
+
+def test_base_image_is_the_origin_and_catches_tag_drift(tmp_path):
+    """The origin is what stays comparable across a replay.
+
+    A replay starts from a checkpoint, so its immediate source differs by
+    design; the base image it descends from does not, which is what makes
+    "the same tag now resolves to different bits" detectable.
+    """
+    from swebench.models import Trajectory
+    from swebench.replay import environment_mismatch, load_environment
+
+    traj = Trajectory(instance_id="inst")
+    traj.info = {"environment": {
+        "requested_image": "swebench/sweb.eval.x86_64.django:latest",
+        "base_image": "docker.io/swebench/sweb.eval.x86_64.django@sha256:abc",
+        "base_ref": "docker.io/swebench/sweb.eval.x86_64.django@sha256:abc",
+        "base_commit": "deadbeef",
+    }}
+    path = tmp_path / "traj.json"
+    traj.save(path)
+    recorded = load_environment(path)
+
+    # A replay: same origin, different immediate source. Not a mismatch.
+    replayed = dict(recorded, base_ref="01a0-checkpoint-snapshot",
+                    requested_image="01a0-checkpoint-snapshot")
+    assert environment_mismatch(recorded, replayed) == []
+
+    # The tag was re-pushed since: same name, different bits.
+    drifted = dict(replayed,
+                   base_image="docker.io/swebench/sweb.eval.x86_64.django@sha256:zzz")
+    assert environment_mismatch(recorded, drifted) == ["base_image"]

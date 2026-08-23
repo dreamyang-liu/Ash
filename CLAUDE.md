@@ -268,14 +268,23 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
   without that every later capture would re-compact the chain. `MicroVMPool` gained
   `snapshot`/`squash`/`get_snapshot`; other pools declare `supports_snapshot()` false.
   Each trajectory (and each rollout reply, success or failure) also carries an
-  `environment` block -- the image asked for, what the backend resolved it to
-  (`base_ref`: digest-pinned for a cold start, the snapshot id when launched from
-  one), the repository `base_commit`, and the sandbox id -- because a SWE-bench
-  image name is usually a mutable tag and cannot identify what a run ran against.
-  `replay.environment_mismatch` compares only `base_commit`: a replay's immediate
-  source is the checkpoint snapshot by design. Pinning "the tag now resolves
-  elsewhere" for snapshot launches needs AgentENV to report a snapshot's base
-  image, which it does not yet.
+  `environment` block, because a SWE-bench image name is usually a mutable tag and
+  cannot identify what a run ran against: `base_image` is the origin, pinned when
+  the task starts and unchanged by re-boarding (digest-pinned when the episode
+  cold-started from an image, e.g. `…@sha256:1e0a86…`); `base_ref` is what the
+  *current* sandbox started from, which becomes a snapshot id after a re-board;
+  plus the repository `base_commit` and the sandbox id.
+  `replay.environment_mismatch` compares `base_image` and `base_commit` -- not
+  `base_ref`, which differs on every replay by design.
+- **Two spawn entries on `MicroVMPool`**: `spawn(image=…)` starts from a snapshot
+  or template (what a replay or re-board needs); `spawn_from_image(…)` cold-starts
+  from an OCI image reference and is the only path that accepts one.
+  `microvm.from_image: true` says this harness's image names are references to
+  cold-start. Note the requirement that follows: a cold-started image must already
+  bring up the runtime, and AgentENV runs no startup command for a plain image --
+  so a benchmark whose per-instance images are raw (SWE-bench's are) needs a
+  template built per instance (`fromImage` + `startCmd` in AgentENV's build API)
+  rather than a raw cold start.
 - Output lands in `results/<run>/`. Treat `results/` as generated data.
 
 ### Kubernetes stack

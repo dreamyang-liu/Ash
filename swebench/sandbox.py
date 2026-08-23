@@ -56,6 +56,9 @@ class AshSession:
         self._base_commit: str = ""
         #: The image or template this session was asked to start from.
         self._requested_image: str = ""
+        #: The environment this episode descends from, as resolved when it
+        #: started (digest-pinned for a cold start). Unchanged by re-boarding.
+        self._base_image: str = ""
         #: Untracked paths present before the agent ran (see get_patch).
         self._baseline_untracked: set[str] = set()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -79,7 +82,25 @@ class AshSession:
         try:
             self._pool = build_pool(self.backend, runtime_bin=self.runtime_bin)
             self._requested_image = image
-            self._sandbox = await self._pool.spawn(image=image)
+            # Two entries, and the config says which one this harness's image
+            # names are for. A benchmark names its environment with an OCI
+            # image reference, which only the cold-start path accepts; a
+            # replay or a re-board hands over a snapshot id, which only the
+            # snapshot path accepts. Guessing from the string would eventually
+            # mistake a template tag for an image tag.
+            backend_section = self.backend.get(
+                str(self.backend.get("backend") or ""), {}) or {}
+            from_image = bool(backend_section.get("from_image")
+                              or self.backend.get("from_image"))
+            if from_image and self._pool.supports_cold_start():
+                self._sandbox = await self._pool.spawn_from_image(image)
+            else:
+                self._sandbox = await self._pool.spawn(image=image)
+            # The base image is known here, at the start of the task, and every
+            # later checkpoint descends from it. Pinned once so it survives
+            # re-boarding, where the sandbox's immediate source becomes a
+            # snapshot and no longer names the container the chain grew from.
+            self._base_image = getattr(self._sandbox, "base_ref", "") or image
             if not self.quiet:
                 print(S.kv("sandbox ", S.cyan(self.sandbox_id[:12])))
             r = await self._sandbox.call("shell", command=f"git -C {WORKDIR} rev-parse HEAD")
@@ -137,6 +158,11 @@ class AshSession:
         """
         return {
             "requested_image": self._requested_image,
+            #: The environment this episode descends from, pinned at the start
+            #: of the task: digest-pinned when it cold-started from an image.
+            "base_image": self._base_image,
+            #: What the *current* sandbox was started from. Becomes a snapshot
+            #: id after a re-board, which is why it is not the origin.
             "base_ref": getattr(self._sandbox, "base_ref", "") or "",
             "base_commit": self._base_commit,
             "sandbox_id": self.sandbox_id,

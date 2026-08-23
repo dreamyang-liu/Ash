@@ -63,11 +63,15 @@ def load_environment(trajectory_path: Path | str) -> dict:
 
 #: Environment fields that must agree between a run and its replay.
 #:
-#: Deliberately not ``base_ref`` (nor ``requested_image``): a replay starts
-#: from a checkpoint snapshot, so its immediate source *is* expected to differ
-#: from the original run's template or image. What must not differ is the
-#: repository state the run was reasoning about.
-COMPARABLE_ENVIRONMENT_FIELDS = ("base_commit",)
+#: ``base_image`` is the environment the episode descends from, pinned when the
+#: task started (digest-pinned for a cold start), so it stays comparable even
+#: though a replay starts from a checkpoint. ``base_commit`` is the repository
+#: state inside it.
+#:
+#: Deliberately not ``base_ref`` (nor ``requested_image``): a replay's
+#: immediate source *is* the checkpoint snapshot, so comparing it would flag
+#: every replay.
+COMPARABLE_ENVIRONMENT_FIELDS = ("base_image", "base_commit")
 
 
 def environment_mismatch(recorded: dict, current: dict) -> list[str]:
@@ -76,12 +80,10 @@ def environment_mismatch(recorded: dict, current: dict) -> list[str]:
     Compared only when both sides know the value, so a trajectory saved before
     environments were recorded does not look like a mismatch.
 
-    Note what this can and cannot catch. A differing ``base_commit`` means the
-    replay is looking at different code, which invalidates it. It cannot yet
-    catch "the same mutable image tag now resolves to different bits", because
-    a sandbox launched from a snapshot reports that snapshot as its source
-    rather than the container the chain grew from; pinning that needs the
-    backend to report a snapshot's base image.
+    A differing ``base_commit`` means the replay is looking at different code.
+    A differing ``base_image`` catches the case a name cannot: the same mutable
+    tag resolving to different bits, which produces results that look valid and
+    are not.
     """
     differences = []
     for field_name in COMPARABLE_ENVIRONMENT_FIELDS:

@@ -120,6 +120,14 @@ class Pool(ABC):
         """Whether this pool can publish persistent snapshots."""
         return False
 
+    def supports_cold_start(self) -> bool:
+        """Whether this pool can start from an OCI image reference.
+
+        Distinct from ``spawn``: pools whose ``spawn`` already takes an image
+        (Docker) report False -- there is no second path to choose.
+        """
+        return False
+
     async def pause(self, sandbox: Sandbox) -> None:
         """Suspend a sandbox, releasing its compute until resumed."""
         raise NotImplementedError(
@@ -365,6 +373,9 @@ class MicroVMPool(Pool):
     def supports_snapshot(self) -> bool:
         return True
 
+    def supports_cold_start(self) -> bool:
+        return True
+
     # --- Lifecycle ---
 
     async def spawn(
@@ -409,6 +420,39 @@ class MicroVMPool(Pool):
         # cannot silently stand in for two different images later.
         return self._attach(_sandbox_id(body), agent_id,
                             base_ref=body.get("templateID") or "")
+
+    async def spawn_from_image(self, image: str, agent_id: str = "",
+                               resources: dict | None = None) -> Sandbox:
+        """Cold-start a microVM from an OCI image reference.
+
+        :meth:`spawn` starts from a snapshot or template, which is what a
+        replay or a re-board needs. This is the other entry: a benchmark names
+        its environment with an image reference, and only this path accepts
+        one. The image must already contain the runtime, started by the
+        template's startup command -- the same requirement as any template.
+
+        A cold start on a cache miss pulls and converts image layers and can
+        take tens of seconds. It reports the reference it resolved to, which is
+        digest-pinned: that lands in ``sandbox.base_ref`` and is the only
+        durable identity of the environment, since a tag can be re-pushed.
+        """
+        payload: dict = {
+            "image": image,
+            "timeout": self.sandbox_ttl,
+            "autoPause": True,
+            "autoResume": {"enabled": self.auto_resume},
+        }
+        if resources:
+            if "cpu" in resources:
+                payload["cpuCount"] = int(resources["cpu"])
+            if "memory_mb" in resources:
+                payload["memoryMB"] = int(resources["memory_mb"])
+        resp = await self._client.post(f"{self.server_url}/sandboxes-cold",
+                                       json=payload)
+        resp.raise_for_status()
+        body = resp.json()
+        return self._attach(_sandbox_id(body), agent_id,
+                            base_ref=body.get("templateID") or image)
 
     async def destroy(self, *sandboxes: Sandbox) -> None:
         for sb in sandboxes:

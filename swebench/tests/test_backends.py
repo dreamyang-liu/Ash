@@ -206,3 +206,17 @@ def test_every_harness_passes_its_backend_config_through():
             continue                      # this harness does not open one
         assert "backend=backend_config(c)" in source, \
             f"{path.name} builds an AshSession without passing the backend config"
+
+
+def test_microvm_accepts_from_image():
+    """`from_image` selects the cold-start path for OCI image references.
+
+    Unknown keys are rejected rather than ignored, so this has to be declared
+    or a config that sets it would look like it worked.
+    """
+    from swebench.backends import build_pool
+
+    pool = build_pool({"backend": "microvm",
+                       "microvm": {"server_url": "http://127.0.0.1:8000",
+                                   "from_image": True}})
+    assert pool.supports_cold_start()
