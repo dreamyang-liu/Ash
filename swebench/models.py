@@ -204,15 +204,22 @@ class Trajectory:
         self.messages.append(msg)
 
     def save(self, path: Path):
+        # Whatever the harness attached to `info` is written out, with the
+        # three derived fields overlaid on top. It used to be only those
+        # three, which silently dropped anything else a harness recorded --
+        # the per-step checkpoint map among them, so a saved trajectory could
+        # not be replayed even though the run had captured every step.
+        info = dict(self.info)
+        info.update({
+            "model_stats": self.cost.to_dict(),
+            "exit_status": self.info.get("exit_status", ""),
+            "submission": self.info.get("submission", ""),
+        })
         data = {
             "trajectory_format": "ash-agent-2.0",
             "instance_id": self.instance_id,
             "messages": self.messages,
-            "info": {
-                "model_stats": self.cost.to_dict(),
-                "exit_status": self.info.get("exit_status", ""),
-                "submission": self.info.get("submission", ""),
-            },
+            "info": info,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2))

@@ -140,3 +140,35 @@ def test_unknown_layer_count_does_not_squash_a_single_branch():
     cache = BranchPointCache(session=session)
     assert cache.prepare("snap", fan_out=1, layers=None) == "snap"
     assert session.squash_calls == []
+
+
+# --- the map survives the trajectory round trip ---------------------------- #
+
+def test_saved_trajectory_keeps_the_checkpoint_map(tmp_path):
+    """The map is only useful if it reaches the file replay reads.
+
+    `Trajectory.save` derives model_stats/exit_status/submission; everything
+    else a harness attached has to survive alongside them.
+    """
+    from swebench.models import Trajectory
+
+    traj = Trajectory(instance_id="inst")
+    traj.add_message("assistant", "turn 1")
+    traj.info = {
+        "exit_status": "completed",
+        "submission": "diff --git a b",
+        "checkpoints": {"step_snapshots": {1: "snap-a", 2: "snap-a"},
+                        "disk_only": True},
+    }
+    path = tmp_path / "traj.json"
+    traj.save(path)
+
+    assert load_step_snapshots(path) == {1: "snap-a", 2: "snap-a"}
+    assert snapshot_for_step(load_step_snapshots(path), 2) == "snap-a"
+
+    import json
+    saved = json.loads(path.read_text())
+    # The derived fields still win, so nothing an harness sets can shadow them.
+    assert saved["info"]["exit_status"] == "completed"
+    assert saved["info"]["submission"] == "diff --git a b"
+    assert "model_stats" in saved["info"]
