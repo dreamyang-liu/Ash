@@ -150,11 +150,12 @@ def run_episode(request: dict[str, Any], deps: EpisodeDeps) -> dict[str, Any]:
         image = resolve_image(instance, registry=image_registry_for_subset(subset))
         session = deps.make_session()
         if not session.create(image):
-            return _failure_reply(f"error: sandbox creation failed for {image}", started_at)
+            return _failure_reply(f"error: sandbox creation failed for {image}",
+                                  started_at, session)
         return _run_and_grade(request, instance, session, deps, started_at)
     except Exception as exc:  # noqa: BLE001 — contract: reply, don't raise
         logger.exception("episode %s failed", instance_id)
-        return _failure_reply(f"error: {exc}", started_at)
+        return _failure_reply(f"error: {exc}", started_at, session)
     finally:
         if session is not None:
             _destroy_quietly(session)
@@ -210,6 +211,7 @@ def _run_and_grade(request: dict[str, Any], instance: dict, session: Any,
             "time_per_turn": round(agent_run_time / turns, 3) if turns else 0.0,
         },
     }
+    reply["environment"] = _describe_environment(session)
     if checkpoints is not None:
         reply["checkpoints"] = checkpoints
     return reply
@@ -254,14 +256,34 @@ def _agent_config(request: dict[str, Any], deps: EpisodeDeps) -> AgentConfig:
     )
 
 
-def _failure_reply(status: str, started_at: float) -> dict[str, Any]:
-    """Structured zero-reward reply — miles treats it as a graded failure."""
+def _failure_reply(status: str, started_at: float,
+                   session: Any = None) -> dict[str, Any]:
+    """Structured zero-reward reply — miles treats it as a graded failure.
+
+    Carries the same ``environment`` block as a successful reply, so every
+    key in the contract is always present and a failure can still be pinned
+    to the environment it happened in. Empty when there was no session yet
+    (or it cannot describe itself).
+    """
     return {
         "reward": 0.0,
         "exit_status": status,
         "eval_report": {},
         "agent_metrics": {"total_time": round(time.monotonic() - started_at, 3)},
+        "environment": _describe_environment(session),
     }
+
+
+def _describe_environment(session: Any) -> dict:
+    """What a session ran against, or ``{}`` when it cannot say."""
+    describe = getattr(session, "environment", None)
+    if not callable(describe):
+        return {}
+    try:
+        return describe()
+    except Exception:  # noqa: BLE001 — identity is metadata, never a failure
+        logger.warning("environment lookup failed", exc_info=True)
+        return {}
 
 
 def _destroy_quietly(session: Any) -> None:

@@ -47,7 +47,8 @@ PATCH = (
     "@@ -1 +1 @@\n-old\n+new\n"
 )
 
-REPLY_KEYS = {"reward", "exit_status", "eval_report", "agent_metrics"}
+REPLY_KEYS = {"reward", "exit_status", "eval_report", "agent_metrics",
+              "environment"}
 EVAL_KEYS = {"f2p_total", "f2p_passed", "patch_chars"}
 METRIC_KEYS = {"turns", "tool_calls", "agent_run_time", "eval_time",
                "total_time", "time_per_turn"}
@@ -73,6 +74,16 @@ class FakeSession:
     def create(self, image: str) -> bool:
         self.created_with = image
         return self.create_ok
+
+    def environment(self) -> dict:
+        """Mirrors AshSession: what the episode ran against. A mutable image
+        name is not identity, so the resolved reference is reported too."""
+        return {
+            "requested_image": self.created_with or "",
+            "base_ref": f"registry/{self.created_with}@sha256:feed" if self.created_with else "",
+            "base_commit": "abc123",
+            "sandbox_id": "fake-sandbox",
+        }
 
     def execute(self, tool_name: str, args: dict) -> ToolResult:
         return self._run(tool_name, args, "harness")

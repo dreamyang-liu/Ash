@@ -172,3 +172,52 @@ def test_saved_trajectory_keeps_the_checkpoint_map(tmp_path):
     assert saved["info"]["exit_status"] == "completed"
     assert saved["info"]["submission"] == "diff --git a b"
     assert "model_stats" in saved["info"]
+
+
+# --- environment identity -------------------------------------------------- #
+
+def test_environment_round_trips_through_a_saved_trajectory(tmp_path):
+    from swebench.models import Trajectory
+    from swebench.replay import environment_mismatch, load_environment
+
+    traj = Trajectory(instance_id="inst")
+    traj.info = {
+        "environment": {
+            "requested_image": "swebench/sweb.eval.x86_64.django:latest",
+            "base_ref": "docker.io/swebench/sweb.eval.x86_64.django@sha256:abc",
+            "base_commit": "deadbeef",
+            "sandbox_id": "sb-1",
+        },
+    }
+    path = tmp_path / "traj.json"
+    traj.save(path)
+
+    recorded = load_environment(path)
+    assert recorded["base_ref"].endswith("@sha256:abc")
+    assert recorded["base_commit"] == "deadbeef"
+
+    # Same environment: nothing to report.
+    assert environment_mismatch(recorded, dict(recorded)) == []
+
+    # A different repository state is what invalidates a replay.
+    other_commit = dict(recorded, base_commit="cafe1234")
+    assert environment_mismatch(recorded, other_commit) == ["base_commit"]
+
+    # A replay's immediate source is the checkpoint snapshot by design, so a
+    # differing base_ref is not a mismatch -- flagging it would fire on every
+    # single replay.
+    from_checkpoint = dict(recorded, base_ref="01a0-snapshot-id",
+                           requested_image="01a0-snapshot-id")
+    assert environment_mismatch(recorded, from_checkpoint) == []
+
+    # Unknown on either side is not a mismatch: older trajectories recorded
+    # nothing, and a backend may not report a resolved reference.
+    assert environment_mismatch(recorded, {}) == []
+    assert environment_mismatch({}, recorded) == []
+
+
+def test_missing_environment_loads_as_empty(tmp_path):
+    from swebench.replay import load_environment
+    path = tmp_path / "traj.json"
+    path.write_text(json.dumps({"messages": [], "info": {}}))
+    assert load_environment(path) == {}

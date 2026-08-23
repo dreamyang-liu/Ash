@@ -35,6 +35,12 @@ class Sandbox:
     # there would make one sandbox execute a path that exists only in another.
     _artifact_paths: dict[str, str] = field(default_factory=dict, repr=False)
     _container_id: str | None = field(default=None, repr=False)
+    #: What the sandbox's source resolved to, as the pool's server reported it:
+    #: a digest-pinned image reference for a cold start, or a snapshot id.
+    #: Recorded so a run can say which environment it ran against rather than
+    #: only which mutable tag it asked for.
+    base_ref: str = ""
+
     _process: asyncio.subprocess.Process | None = field(default=None, repr=False)
     _tools_cache: list[dict] | None = field(default=None, repr=False)
 
@@ -82,6 +88,7 @@ class Sandbox:
         clone._artifact_paths = self._artifact_paths
         clone._tools_cache = self._tools_cache
         clone._container_id = self._container_id
+        clone.base_ref = self.base_ref
         return clone
 
     def _whoami(self, agent_id: str = "") -> str:

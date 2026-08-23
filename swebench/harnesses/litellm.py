@@ -182,6 +182,12 @@ class LiteLLMHarness(BaseHarness):
                 SUBMISSION_KEY: patch,
                 "model": agent_config.model,
             }
+            # Which environment this trajectory belongs to. Recorded whether
+            # or not checkpoints are on: a replay needs it, and so does anyone
+            # asking later what a saved run was actually run against.
+            describe_environment = getattr(session, "environment", None)
+            if callable(describe_environment):
+                agent.trajectory.info["environment"] = describe_environment()
             if checkpointer is not None:
                 # What a replay needs: for each step, the snapshot holding the
                 # environment as it stood after that step.

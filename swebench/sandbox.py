@@ -54,6 +54,8 @@ class AshSession:
         # and the loop and the executor are looking at the same set.
         self.tools = ToolRegistry()
         self._base_commit: str = ""
+        #: The image or template this session was asked to start from.
+        self._requested_image: str = ""
         #: Untracked paths present before the agent ran (see get_patch).
         self._baseline_untracked: set[str] = set()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -76,6 +78,7 @@ class AshSession:
     async def _create_async(self, image: str) -> bool:
         try:
             self._pool = build_pool(self.backend, runtime_bin=self.runtime_bin)
+            self._requested_image = image
             self._sandbox = await self._pool.spawn(image=image)
             if not self.quiet:
                 print(S.kv("sandbox ", S.cyan(self.sandbox_id[:12])))
@@ -121,6 +124,23 @@ class AshSession:
                 print(S.kv("cleanup ", S.dim(f"destroyed {sid[:12]}")))
             self._sandbox = None
             self._pool = None
+
+    def environment(self) -> dict:
+        """What this session actually ran against.
+
+        A run is only reproducible if it can say which environment produced it,
+        and the image *name* is not enough: a SWE-bench image is usually a
+        mutable tag (``…:latest``), so the same name can mean different bits a
+        month later. ``base_ref`` is what the backend resolved that name to --
+        digest-pinned for a cold start -- and ``base_commit`` is the repository
+        state inside it, which is what a replay is ultimately about.
+        """
+        return {
+            "requested_image": self._requested_image,
+            "base_ref": getattr(self._sandbox, "base_ref", "") or "",
+            "base_commit": self._base_commit,
+            "sandbox_id": self.sandbox_id,
+        }
 
     # --- Checkpoints ---
     #

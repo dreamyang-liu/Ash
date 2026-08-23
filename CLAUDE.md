@@ -267,6 +267,15 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
   sandbox started from that snapshot — the live layer stack is never compacted, so
   without that every later capture would re-compact the chain. `MicroVMPool` gained
   `snapshot`/`squash`/`get_snapshot`; other pools declare `supports_snapshot()` false.
+  Each trajectory (and each rollout reply, success or failure) also carries an
+  `environment` block -- the image asked for, what the backend resolved it to
+  (`base_ref`: digest-pinned for a cold start, the snapshot id when launched from
+  one), the repository `base_commit`, and the sandbox id -- because a SWE-bench
+  image name is usually a mutable tag and cannot identify what a run ran against.
+  `replay.environment_mismatch` compares only `base_commit`: a replay's immediate
+  source is the checkpoint snapshot by design. Pinning "the tag now resolves
+  elsewhere" for snapshot launches needs AgentENV to report a snapshot's base
+  image, which it does not yet.
 - Output lands in `results/<run>/`. Treat `results/` as generated data.
 
 ### Kubernetes stack

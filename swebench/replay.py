@@ -52,6 +52,45 @@ def load_step_snapshots(trajectory_path: Path | str) -> dict[int, str]:
             for step, snapshot_id in (checkpoints.get("step_snapshots") or {}).items()}
 
 
+def load_environment(trajectory_path: Path | str) -> dict:
+    """What the saved run ran against: image asked for, resolved reference,
+    repository commit, sandbox id. Empty for trajectories saved before this
+    was recorded.
+    """
+    data = json.loads(Path(trajectory_path).read_text())
+    return (data.get("info") or {}).get("environment") or {}
+
+
+#: Environment fields that must agree between a run and its replay.
+#:
+#: Deliberately not ``base_ref`` (nor ``requested_image``): a replay starts
+#: from a checkpoint snapshot, so its immediate source *is* expected to differ
+#: from the original run's template or image. What must not differ is the
+#: repository state the run was reasoning about.
+COMPARABLE_ENVIRONMENT_FIELDS = ("base_commit",)
+
+
+def environment_mismatch(recorded: dict, current: dict) -> list[str]:
+    """Fields where a replay's environment disagrees with the recorded one.
+
+    Compared only when both sides know the value, so a trajectory saved before
+    environments were recorded does not look like a mismatch.
+
+    Note what this can and cannot catch. A differing ``base_commit`` means the
+    replay is looking at different code, which invalidates it. It cannot yet
+    catch "the same mutable image tag now resolves to different bits", because
+    a sandbox launched from a snapshot reports that snapshot as its source
+    rather than the container the chain grew from; pinning that needs the
+    backend to report a snapshot's base image.
+    """
+    differences = []
+    for field_name in COMPARABLE_ENVIRONMENT_FIELDS:
+        before, now = recorded.get(field_name), current.get(field_name)
+        if before and now and before != now:
+            differences.append(field_name)
+    return differences
+
+
 def snapshot_for_step(step_snapshots: dict[int, str], step: int) -> Optional[str]:
     """The snapshot holding the environment as of ``step``.
 

@@ -402,7 +402,13 @@ class MicroVMPool(Pool):
 
         resp = await self._client.post(f"{self.server_url}/sandboxes", json=payload)
         resp.raise_for_status()
-        return self._attach(_sandbox_id(resp.json()), agent_id)
+        body = resp.json()
+        # The server reports what the request resolved to, which is the only
+        # unambiguous identity of the environment: a cold start returns a
+        # digest-pinned image reference, so a mutable tag like `:latest`
+        # cannot silently stand in for two different images later.
+        return self._attach(_sandbox_id(body), agent_id,
+                            base_ref=body.get("templateID") or "")
 
     async def destroy(self, *sandboxes: Sandbox) -> None:
         for sb in sandboxes:
@@ -472,6 +478,8 @@ class MicroVMPool(Pool):
             self._attach(
                 _sandbox_id(result["sandbox"]),
                 agent_ids[i] if agent_ids and i < len(agent_ids) else sandbox.agent_id,
+                base_ref=result["sandbox"].get("templateID")
+                or getattr(sandbox, "base_ref", ""),
             )
             for i, result in enumerate(results)
         ]
@@ -524,7 +532,8 @@ class MicroVMPool(Pool):
 
     # --- Internals ---
 
-    def _attach(self, sandbox_id: str, agent_id: str = "") -> Sandbox:
+    def _attach(self, sandbox_id: str, agent_id: str = "",
+                base_ref: str = "") -> Sandbox:
         """Wrap an AgentENV sandbox id as a Sandbox reachable via the proxy."""
         sb = Sandbox(backend=GatewayBackend(
             self.server_url, sandbox_id,
@@ -533,6 +542,9 @@ class MicroVMPool(Pool):
             target_port_header=self.TARGET_PORT_HEADER,
         ), agent_id=agent_id)
         sb._container_id = sandbox_id
+        #: What the server resolved this sandbox's source to (digest-pinned
+        #: image reference, or snapshot id). Empty when unreported.
+        sb.base_ref = base_ref
         self._sandboxes[sandbox_id] = sb
         return sb
 
