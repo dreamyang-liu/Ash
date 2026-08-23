@@ -256,7 +256,13 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
   `info.checkpoints` and, for the RL path, in each rollout reply. `mode: disk_only`
   (default) skips the memory image; such snapshots **cold-boot**, so the microVM
   template must declare a startup command that launches the runtime, or
-  `mode: full` (resume) must be used instead. When a capture shows the server
+  `mode: full` (resume) must be used instead. A template made with `aenv snapshot
+  create` records no startup command -- build one through AgentENV's template API
+  (`POST /v3/templates`, then `POST /v2/templates/{id}/builds/{buildID}` with
+  `startCmd: /usr/local/bin/ash-runtime --port 3000` and a `readyCmd` that probes
+  the port) so cold-booted sandboxes get their runtime back. `swap_sandbox` probes
+  a replacement before adopting it, so a template without one costs a deeper chain
+  rather than a dead episode. When a capture shows the server
   compacted the layer chain (the layer count drops), the session continues on a
   sandbox started from that snapshot — the live layer stack is never compacted, so
   without that every later capture would re-compact the chain. `MicroVMPool` gained

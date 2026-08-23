@@ -26,7 +26,8 @@ snapshot **cold-boots**, so its runtime is only there if the microVM template
 declares a startup command that launches it (AgentENV re-runs a snapshot's
 startup command after a cold boot; a template captured from a hand-started
 process carries none). Without one, re-boarding and replaying land on
-sandboxes whose runtime is missing. Ash cannot repair that from outside --
+sandboxes whose runtime is missing; build the template through AgentENV's
+template API with ``startCmd`` set (``aenv snapshot create`` records none). Ash cannot repair that from outside --
 it reaches a sandbox only through its runtime -- so
 :meth:`~swebench.sandbox.AshSession.swap_sandbox` probes a replacement before
 adopting it and keeps the current sandbox when the probe fails, and
