@@ -138,7 +138,7 @@ def test_build_stages_the_runtime_then_declares_startup(monkeypatch, runtime_bin
     assert payload["startCmd"] == f"{RUNTIME_PATH} --port 3000"
     # Cold boots re-run startCmd, so readiness must mean the port answers.
     assert "/dev/tcp/127.0.0.1/3000" in payload["readyCmd"]
-    assert f"chmod +x {RUNTIME_PATH}" in payload["steps"][0]["args"]
+    assert f"chmod +x {RUNTIME_PATH}" in payload["steps"][0]["args"][0]
 
 
 def test_staging_sandbox_is_deleted_even_when_snapshotting_fails(
@@ -260,3 +260,38 @@ def test_create_collision_reported_as_400_already_points_is_reuse(
     b = builder(monkeypatch, client, runtime_bin)
     assert b.template_for(IMAGE) == template_name(IMAGE, b._fingerprint, 3000)
     assert client.build_payload is None
+
+
+def test_ripgrep_is_staged_and_part_of_the_identity(monkeypatch, runtime_bin,
+                                                    tmp_path):
+    """rg rides along with the runtime: without it, every sandbox's first
+    grep_files apt-gets ripgrep -- ~89 MiB of disk writes landing in the
+    episode's first checkpoint (measured). Baked-in content is identity, so a
+    template built without rg is not reused once rg is available."""
+    rg = tmp_path / "rg"
+    rg.write_bytes(b"\x7fELF fake rg")
+
+    client = FakeClient(exists=False)
+    b_with = builder(monkeypatch, client, runtime_bin)
+    b_with.ripgrep_bin = None  # rebuild fingerprints via a fresh instance
+    b_with = TemplateBuilder(server_url="http://server", api_key="k",
+                             runtime_bin=runtime_bin, ripgrep_bin=rg)
+    import swebench.templates as templates
+    monkeypatch.setattr(templates.httpx, "Client", lambda **kw: client)
+    b_with.template_for(IMAGE)
+
+    uploads = [p for m, p in client.calls if p == "/files"]
+    assert len(uploads) == 2, "runtime and rg both staged"
+    assert "chmod +x /usr/local/bin/rg" in client.build_payload["steps"][0]["args"][0]
+
+    b_without = TemplateBuilder(server_url="http://server", api_key="k",
+                                runtime_bin=runtime_bin, ripgrep_bin=None)
+    assert b_with._fingerprint != b_without._fingerprint, (
+        "with/without rg are different templates")
+
+
+def test_missing_ripgrep_binary_degrades_to_none(runtime_bin, tmp_path):
+    b = TemplateBuilder(server_url="http://server", api_key="k",
+                        runtime_bin=runtime_bin,
+                        ripgrep_bin=tmp_path / "no-such-rg")
+    assert b.ripgrep_bin is None, "a vanished cache entry must not fail builds"

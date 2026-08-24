@@ -43,6 +43,17 @@ import httpx
 RUNTIME_PATH = "/usr/local/bin/ash-runtime"
 DEFAULT_RUNTIME_PORT = 3000
 
+#: ripgrep is baked in alongside the runtime. The runtime's grep_files
+#: provisions rg on first use when it is missing -- an apt-get update whose
+#: package indexes alone are ~76 MiB of disk writes, paid by every sandbox of
+#: every instance, and landing in the episode's first checkpoint (measured:
+#: the first grep_files cost +89 MiB; with rg present, +0). Same release the
+#: runtime's own provisioning would fetch.
+RIPGREP_PATH = "/usr/local/bin/rg"
+RIPGREP_VERSION = "14.1.1"
+RIPGREP_URL = ("https://github.com/BurntSushi/ripgrep/releases/download/"
+               f"{RIPGREP_VERSION}/ripgrep-{RIPGREP_VERSION}-x86_64-unknown-linux-musl.tar.gz")
+
 #: The backend's file service listens on this port inside the guest; reaching
 #: it goes through the same proxy as the runtime, with a different target port.
 ENVD_PORT = "49983"
@@ -109,6 +120,9 @@ class TemplateBuilder:
     server_url: str
     api_key: str
     runtime_bin: Path
+    #: Optional ripgrep binary to bake in next to the runtime. None falls
+    #: back to the runtime provisioning rg on first use inside each sandbox.
+    ripgrep_bin: Optional[Path] = None
     runtime_port: int = DEFAULT_RUNTIME_PORT
     request_timeout: float = 120.0
     build_timeout: float = BUILD_TIMEOUT_SECONDS
@@ -123,6 +137,14 @@ class TemplateBuilder:
                 "build it (cd runtime && go build -o ash-runtime .) or point "
                 "microvm.runtime_bin at one")
         self._fingerprint = runtime_fingerprint(self.runtime_bin)
+        if self.ripgrep_bin is not None:
+            self.ripgrep_bin = Path(self.ripgrep_bin)
+            if not self.ripgrep_bin.is_file():
+                self.ripgrep_bin = None
+        # Baked-in content is part of the template's identity: a template
+        # without rg must not be reused once rg is available.
+        if self.ripgrep_bin is not None:
+            self._fingerprint += ":" + runtime_fingerprint(self.ripgrep_bin)
 
     def template_for(self, image: str) -> str:
         """The name of a template built from ``image``, building if needed.
@@ -197,7 +219,9 @@ class TemplateBuilder:
                 f"HTTP {created.status_code} {created.text[:200]}")
         sandbox_id = created.json()["sandboxID"]
         try:
-            self._upload_runtime(client, sandbox_id)
+            self._upload(client, sandbox_id, self.runtime_bin, RUNTIME_PATH)
+            if self.ripgrep_bin is not None:
+                self._upload(client, sandbox_id, self.ripgrep_bin, RIPGREP_PATH)
             # Deliberately unnamed: the build consumes it by id, and an alias
             # would make a retry after a half-failed build collide with the
             # previous attempt's leftover.
@@ -213,17 +237,18 @@ class TemplateBuilder:
             # running would hold a VM for the rest of the run.
             client.delete(f"/sandboxes/{sandbox_id}")
 
-    def _upload_runtime(self, client: httpx.Client, sandbox_id: str) -> None:
+    def _upload(self, client: httpx.Client, sandbox_id: str,
+                source: Path, dest: str) -> None:
         headers = {SANDBOX_ID_HEADER: sandbox_id, TARGET_PORT_HEADER: ENVD_PORT}
-        with open(self.runtime_bin, "rb") as handle:
+        with open(source, "rb") as handle:
             resp = client.post(
-                "/files", params={"path": RUNTIME_PATH}, headers=headers,
-                files={"file": (self.runtime_bin.name, handle,
+                "/files", params={"path": dest}, headers=headers,
+                files={"file": (source.name, handle,
                                 "application/octet-stream")},
                 timeout=max(self.request_timeout, 300.0))
         if resp.status_code not in (200, 201, 204):
             raise TemplateError(
-                f"could not upload the runtime to {sandbox_id}: "
+                f"could not upload {source.name} to {sandbox_id}: "
                 f"HTTP {resp.status_code} {resp.text[:200]}")
         # The executable bit does not survive the upload; the build below
         # restores it with a RUN step, which is also the reason the build has
@@ -250,7 +275,8 @@ class TemplateBuilder:
                 "fromTemplate": staged_snapshot,
                 # One step, to make the uploaded binary executable: uploads do
                 # not carry the mode bit.
-                "steps": [{"type": "RUN", "args": [f"chmod +x {RUNTIME_PATH}"]}],
+                "steps": [{"type": "RUN", "args": [
+                    f"chmod +x {RUNTIME_PATH}; chmod +x {RIPGREP_PATH} 2>/dev/null || true"]}],
                 "startCmd": f"{RUNTIME_PATH} --port {self.runtime_port}",
                 # Cold boots re-run startCmd, so readiness has to mean "the
                 # runtime is accepting connections", not "the process exists".
@@ -287,6 +313,40 @@ class TemplateBuilder:
             f"{self.build_timeout:.0f}s (last status: {last or 'unknown'})")
 
 
+def ensure_ripgrep(cache_dir: Optional[Path] = None) -> Optional[Path]:
+    """A ripgrep binary to bake into templates, downloaded once per host.
+
+    Returns ``None`` when it cannot be fetched -- templates still build, and
+    the runtime falls back to provisioning rg inside each sandbox (the
+    behaviour this exists to avoid, so a warning is printed).
+    """
+    cache_dir = cache_dir or Path.home() / ".cache" / "ash-swebench"
+    binary = cache_dir / f"rg-{RIPGREP_VERSION}"
+    if binary.is_file():
+        return binary
+    import io
+    import tarfile
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        with httpx.Client(follow_redirects=True, timeout=120.0) as client:
+            payload = client.get(RIPGREP_URL)
+            payload.raise_for_status()
+        with tarfile.open(fileobj=io.BytesIO(payload.content), mode="r:gz") as tar:
+            member = next(m for m in tar.getmembers()
+                          if m.name.endswith("/rg") and m.isfile())
+            extracted = tar.extractfile(member)
+            assert extracted is not None
+            tmp = binary.with_suffix(".tmp")
+            tmp.write_bytes(extracted.read())
+            tmp.chmod(0o755)
+            tmp.rename(binary)
+        return binary
+    except Exception as exc:  # noqa: BLE001 -- optional asset, never fatal
+        print(f"note: could not fetch ripgrep to bake into templates ({exc}); "
+              "each sandbox's first grep_files will provision it instead")
+        return None
+
+
 def builder_from_backend(backend: dict) -> Optional[TemplateBuilder]:
     """A builder for a microvm backend that asks for per-image templates.
 
@@ -308,6 +368,7 @@ def builder_from_backend(backend: dict) -> Optional[TemplateBuilder]:
         server_url=str(server_url).rstrip("/"),
         api_key=str(section.get("api_key") or ""),
         runtime_bin=Path(str(runtime_bin)),
+        ripgrep_bin=ensure_ripgrep(),
         runtime_port=int(section.get("runtime_port", DEFAULT_RUNTIME_PORT)),
         request_timeout=float(section.get("request_timeout", 120.0)),
     )

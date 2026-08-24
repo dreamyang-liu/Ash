@@ -300,6 +300,11 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
   collides with it. Names that are grammatically impossible as snapshot aliases
   (image references carry `/':'@`) skip the catalog lookup; a name the backend
   already knows (a replay's checkpoint snapshot id) passes through untouched.
+  ripgrep is baked in alongside the runtime (downloaded once per host into
+  `~/.cache/ash-swebench/`, part of the template's content-addressed identity):
+  without it, every sandbox's *first* `grep_files` apt-gets rg -- measured at
+  ~15s and +89 MiB of disk writes (the apt package indexes), all landing in the
+  episode's first checkpoint. With it: 0.5s, +2 MiB.
 - Output lands in `results/<run>/`. Treat `results/` as generated data.
 
 ### Kubernetes stack
