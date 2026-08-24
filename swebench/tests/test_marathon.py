@@ -215,3 +215,25 @@ def test_marathon_summarizes_context_while_benchmarks_elide():
 
     assert 'context_strategy", "summarize"' in inspect.getsource(long_horizon)
     assert 'context_strategy", "elide"' in inspect.getsource(benchmark)
+
+
+def test_cli_takes_tasks_from_disk():
+    """`--task-dir` is how marathon work enters: a single task directory or a
+    checkout holding several. Without it the CLI would try to look these
+    instance ids up in a dataset that does not contain them."""
+    import inspect
+    from swebench import __main__ as cli
+
+    source = inspect.getsource(cli)
+    assert '"--task-dir"' in source
+    assert "discover_tasks" in source and "load_task" in source
+    # Instances carry the directory through so the harness can find the task.
+    assert '"task_dir": str(t.directory)' in source
+
+
+def test_cli_offers_every_registered_harness():
+    """The choices list was hardcoded, so a registered harness was still
+    rejected at the command line -- enumerate the registry instead."""
+    import inspect
+    from swebench import __main__ as cli
+    assert "choices=sorted(HARNESSES)" in inspect.getsource(cli)

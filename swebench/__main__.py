@@ -19,7 +19,7 @@ from . import style as S
 from .backends import BackendError, backend_config, build_pool
 from .dataset import load_instances
 from .batch import run_batch
-from .harnesses import get_harness
+from .harnesses import HARNESSES, get_harness
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -89,6 +89,8 @@ def _flatten_config(config: dict) -> dict:
         ("dataset", "instance"): "instance",
         ("dataset", "slice"): "slice",
         ("dataset", "filter"): "filter",
+        # A task directory on disk (SWE-Marathon), instead of a dataset.
+        ("dataset", "task_dir"): "task_dir",
         # execution
         ("execution", "workers"): "workers",
         ("execution", "output"): "output",
@@ -149,8 +151,11 @@ def main():
 
     # Config
     parser.add_argument("--config", "-c", default=None, help="YAML config file")
+    # Choices come from the registry: a hardcoded list silently omits a
+    # harness the moment one is added, which is how `marathon` was rejected by
+    # the CLI while being importable and registered.
     parser.add_argument("--harness", default=None,
-                        choices=["litellm", "claude-code"],
+                        choices=sorted(HARNESSES),
                         help="Agent harness (default: litellm)")
 
     # Dataset
@@ -159,6 +164,11 @@ def main():
     parser.add_argument("--instance", "-i", default=None)
     parser.add_argument("--slice", default=None)
     parser.add_argument("--filter", default=None)
+    parser.add_argument("--task-dir", default=None,
+                        help="SWE-Marathon task directory, or a checkout whose "
+                             "tasks/ holds several (--harness marathon). Tasks "
+                             "come from disk rather than a dataset, so this "
+                             "replaces --subset/--instance for that harness.")
 
     # Model
     parser.add_argument("--model", "-m", default=None)
@@ -247,13 +257,32 @@ def main():
     # Banner
     print(S.banner())
 
-    # Load instances
-    instances = load_instances(
-        subset=subset,
-        split=split,
-        slice_spec=slice_spec,
-        filter_regex=filter_regex,
-    )
+    # Load instances. Marathon tasks live on disk, not in a dataset, so the
+    # task directory is the source; everything downstream (batch, resume,
+    # dashboard) then treats them like any other instance.
+    task_dir = get("task_dir")
+    if task_dir:
+        from .marathon import discover_tasks, load_task
+        directory = Path(task_dir)
+        tasks = ([load_task(directory)] if (directory / "task.toml").exists()
+                 else discover_tasks(directory))
+        if not tasks:
+            print(f"  {S.bright_red('!')} no SWE-Marathon tasks under {directory}")
+            sys.exit(1)
+        instances = [{"instance_id": t.instance_id,
+                      "task_dir": str(t.directory)} for t in tasks]
+        harness_config.setdefault("task_dir", str(directory))
+        if filter_regex:
+            import re
+            pattern = re.compile(filter_regex)
+            instances = [i for i in instances if pattern.search(i["instance_id"])]
+    else:
+        instances = load_instances(
+            subset=subset,
+            split=split,
+            slice_spec=slice_spec,
+            filter_regex=filter_regex,
+        )
 
     if instance:
         if instance.isdigit():
