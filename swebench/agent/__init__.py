@@ -158,10 +158,26 @@ class AshAgent:
     def _run_tool(self, tc, conv: Conversation, turn_id: str) -> None:
         """Execute one tool call, trace it, and record its result on the conversation."""
         name = tc.function.name
+        truncated = False
         try:
             args = json.loads(tc.function.arguments)
         except (json.JSONDecodeError, AttributeError):
-            args = {}
+            # Arguments that are not valid JSON mean the model ran into its
+            # output limit mid-call. Saying so is the difference between the
+            # model shrinking its next edit and it retrying the same oversized
+            # one against a message about a missing parameter.
+            args, truncated = {}, True
+        if truncated:
+            message = (
+                f"Error: your call to {name} was cut off by the output token "
+                "limit before its arguments were complete, so nothing ran. "
+                "Split the work into smaller calls -- for a large file, write "
+                "it in successive pieces rather than one call.")
+            self._trace(f"\n> {name} [truncated by output limit]\n")
+            conv.add_tool_result(tc.id, message, tool_name=name,
+                                 tool_args={}, success=False)
+            return
+
         summary = tool_summary(name, args)
         if self.on_step:
             self.on_step(self.cost.api_calls, name, summary)

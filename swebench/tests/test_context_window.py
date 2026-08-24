@@ -35,9 +35,14 @@ def conversation_with(results: int, chars_each: int,
     for i in range(results):
         calls = None
         if call_chars:
+            # Real arguments are a JSON string -- a `text_editor` write carries
+            # the file in one, which is what makes tool calls heavy.
+            import json as _json
             calls = [{"id": f"c{i}", "type": "function",
                       "function": {"name": "text_editor",
-                                   "arguments": "a" * call_chars}}]
+                                   "arguments": _json.dumps(
+                                       {"command": "write", "path": f"/f{i}.c",
+                                        "file_text": "a" * call_chars})}}]
         conv.add_assistant(FakeMessage(f"turn {i}", tool_calls=calls))
         conv.add_tool_result(f"id-{i}", "x" * chars_each)
     return conv
@@ -259,3 +264,35 @@ def test_both_strategies_are_selectable_from_config():
         "context_strategy"] == "summarize"
     from swebench.agent.context_window import STRATEGIES
     assert set(STRATEGIES) == {"elide", "summarize"}
+
+
+def test_truncated_tool_call_does_not_poison_the_conversation():
+    """A model that hits its output limit mid-call emits arguments that stop
+    partway through their own JSON. Kept verbatim, every later request fails
+    converting that message and the run dies unrecoverably -- seen on a real
+    marathon attempt 37 messages in. The call is repaired to something a
+    provider accepts, and the loop tells the model what happened."""
+    import json
+    from swebench.agent.conversation import plain_tool_calls
+
+    truncated = [{"id": "t1", "type": "function",
+                  "function": {"name": "text_editor",
+                               "arguments": '{"command": "write", "path": "/x.c"'}}]
+    repaired = plain_tool_calls(truncated)
+    assert json.loads(repaired[0]["function"]["arguments"]) == {}
+
+    conv = Conversation(Trajectory())
+    conv.add_assistant(FakeMessage("writing the file", tool_calls=truncated))
+    # Every tool call in the message must be convertible, or the next call dies.
+    for call in conv.messages[-1]["tool_calls"]:
+        json.loads(call["function"]["arguments"])
+
+
+def test_valid_large_tool_calls_are_left_alone():
+    import json
+    from swebench.agent.conversation import plain_tool_calls
+
+    big = json.dumps({"command": "write", "path": "/x.c", "file_text": "y" * 50_000})
+    kept = plain_tool_calls([{"id": "k", "type": "function",
+                             "function": {"name": "text_editor", "arguments": big}}])
+    assert kept[0]["function"]["arguments"] == big

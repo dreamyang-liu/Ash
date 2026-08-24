@@ -47,6 +47,20 @@ from ..prediction import failure, prediction
 from ..sandbox import AshSession
 
 
+def _default_max_tokens(model: str | None, fallback: int = 16384) -> int:
+    """The model's own output ceiling, or a generous fallback."""
+    if model:
+        try:
+            import litellm
+            info = litellm.get_model_info(model) or {}
+            allowed = info.get("max_output_tokens") or info.get("max_tokens")
+            if allowed:
+                return int(allowed)
+        except Exception:
+            pass
+    return fallback
+
+
 class MarathonHarness(BaseHarness):
     """One agent, one marathon task, graded by the task's own verifier."""
 
@@ -93,7 +107,13 @@ class MarathonHarness(BaseHarness):
             model=config.get("model", "bedrock/us.anthropic.claude-sonnet-4-6"),
             api_base=config.get("api_base"),
             api_key=config.get("api_key"),
-            max_tokens=config.get("max_tokens", 8192),
+            # The output limit, not a token budget: a marathon agent writes
+            # whole files in single tool calls, and a call truncated mid-JSON
+            # cost one real attempt its entire remaining budget. Default to
+            # what the model actually allows rather than the benchmark-shaped
+            # 8192 that produced that failure.
+            max_tokens=config.get("max_tokens") or _default_max_tokens(
+                config.get("model")),
             # Marathon tasks are hours long; a SWE-bench-shaped default would
             # stop the run a third of the way in and report it as finished.
             step_limit=config.get("step_limit", 1000),

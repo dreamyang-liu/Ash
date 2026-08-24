@@ -237,3 +237,16 @@ def test_cli_offers_every_registered_harness():
     import inspect
     from swebench import __main__ as cli
     assert "choices=sorted(HARNESSES)" in inspect.getsource(cli)
+
+
+def test_output_limit_comes_from_the_model():
+    """A marathon agent writes whole files in one tool call. With the
+    benchmark's 8192 default, one real attempt was cut off mid-JSON and the
+    malformed call ended the run -- so the ceiling is the model's own."""
+    from swebench.harnesses.marathon import _default_max_tokens
+
+    sonnet = _default_max_tokens("bedrock/us.anthropic.claude-sonnet-4-6")
+    assert sonnet > 8192, sonnet
+    # Unknown models still get room to write a file.
+    assert _default_max_tokens("no-such-model") == 16384
+    assert _default_max_tokens(None) == 16384

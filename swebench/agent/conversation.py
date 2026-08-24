@@ -5,11 +5,31 @@ Owns both the model-facing `messages` (OpenAI format) and the saved
 hand, and tracks how many trailing assistant turns made no tool call.
 """
 
+import json
+
 from ..models import Trajectory
 
 
+def _repaired_arguments(arguments) -> tuple[str, bool]:
+    """Arguments a provider will accept, and whether they had to be repaired.
+
+    A model that hits its output limit mid-tool-call emits arguments that stop
+    partway through their own JSON (`{"command": "write", "path": "x.c"` with
+    no brace, no body). Keeping that verbatim poisons the conversation
+    permanently: every later request fails converting the message, so the run
+    dies with its budget unspent and no way to continue -- observed on a real
+    marathon attempt, 37 messages in, while writing a large C file.
+    """
+    text = arguments if isinstance(arguments, str) else json.dumps(arguments or {})
+    try:
+        json.loads(text or "{}")
+        return text or "{}", False
+    except (json.JSONDecodeError, TypeError):
+        return "{}", True
+
+
 def plain_tool_calls(tool_calls) -> list[dict]:
-    """Tool calls as JSON-safe dicts.
+    """Tool calls as JSON-safe dicts, with truncated arguments repaired.
 
     The provider hands back model objects; the trajectory is written with
     `json.dumps`, so they have to be flattened before they can be saved. They
@@ -21,21 +41,27 @@ def plain_tool_calls(tool_calls) -> list[dict]:
     plain = []
     for call in tool_calls or ():
         if isinstance(call, dict):
-            plain.append(call)
+            flat = dict(call)
         elif hasattr(call, "model_dump"):
-            plain.append(call.model_dump())
+            flat = call.model_dump()
         elif hasattr(call, "dict"):
-            plain.append(call.dict())
+            flat = call.dict()
         else:
             function = getattr(call, "function", None)
-            plain.append({
+            flat = {
                 "id": getattr(call, "id", ""),
                 "type": "function",
                 "function": {
                     "name": getattr(function, "name", ""),
                     "arguments": getattr(function, "arguments", ""),
                 },
-            })
+            }
+        function = dict(flat.get("function") or {})
+        arguments, repaired = _repaired_arguments(function.get("arguments"))
+        if repaired:
+            function["arguments"] = arguments
+            flat["function"] = function
+        plain.append(flat)
     return plain
 
 
@@ -57,15 +83,16 @@ class Conversation:
         """Append the assistant turn and update the no-tool counter."""
         msg = {"role": "assistant", "content": message.content or ""}
         if message.tool_calls:
-            msg["tool_calls"] = message.tool_calls
+            # Repaired, and in wire format: what goes back to the provider has
+            # to be convertible, and a truncated tool call is not.
+            msg["tool_calls"] = plain_tool_calls(message.tool_calls)
         # Preserve thinking_blocks for Anthropic extended thinking + tool use
         if thinking := getattr(message, "thinking_blocks", None):
             msg["thinking_blocks"] = thinking
         self.messages.append(msg)
         self.trajectory.add_message(
             "assistant", message.content or "",
-            **({"tool_calls": plain_tool_calls(message.tool_calls)}
-               if message.tool_calls else {}))
+            **({"tool_calls": msg["tool_calls"]} if message.tool_calls else {}))
         self.consecutive_no_tool = 0 if message.tool_calls else self.consecutive_no_tool + 1
 
     def add_tool_result(self, tool_call_id: str, content: str, **meta) -> None:
