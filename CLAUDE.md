@@ -318,13 +318,20 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
   passes budget. Flow vs stock. Elision, not summarization: assistant turns (what
   the agent did) stay verbatim, old tool outputs (what it saw, mostly re-obtainable)
   become one-line stubs; it cuts in bulk to a low target rather than one message
-  per step, because rewriting old messages invalidates the prompt cache. Budget is
-  measured from the provider's reported input tokens for the last call, turned into
-  a chars/token ratio -- a character estimate measured **3x low** on a code-heavy
-  transcript, and tool_calls (a `text_editor` write carries the whole file) are the
-  reason: they are in what the model sees but not in the saved trajectory. The
-  protected recent tail is a floor: a cut target below it is unreachable, and the
-  guard traces that instead of appearing to succeed.
+  per step, because rewriting old messages invalidates the prompt cache.
+  Both the budget and the measurement come from the provider, never from a guess:
+  the budget is a fraction of the model's own `max_input_tokens` (litellm model
+  metadata — a real 133-step run measured ~139K input tokens, fatal against a 200K
+  window and 14% of a 1M one), and the count is `litellm.token_counter`, exact to a
+  token and inclusive of tool calls. Character estimates were 2-3x off in both
+  directions; a cheap char pre-gate only decides whether the tokenizer pass is
+  needed. The protected recent tail is a floor: a target below it is unreachable,
+  and the guard traces that instead of appearing to succeed.
+- **Trajectories record `tool_calls`** on assistant messages (JSON-flattened by
+  `conversation.plain_tool_calls`). They used to be dropped, which cost the record
+  the agent's actual actions — a replay could see that it said it would edit a file
+  but not what edit — and made any accounting of what the model saw understate it,
+  since one `text_editor` write carries a whole file in its arguments.
 - Output lands in `results/<run>/`. Treat `results/` as generated data.
 
 ### Kubernetes stack

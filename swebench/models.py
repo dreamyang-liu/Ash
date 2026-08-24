@@ -118,11 +118,12 @@ class CostTracker:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     api_calls: int = 0
-    #: Input tokens of the MOST RECENT call -- what that call actually put in
-    #: the context window, as the provider counted it. The totals above
-    #: accumulate the transcript once per call, so they say nothing about how
-    #: full the window is; anything managing the window needs this instead of
-    #: estimating from characters (measured 3x off on code-heavy transcripts).
+    #: Input tokens of the MOST RECENT call, as the provider counted them --
+    #: what that one call actually put in the context window. The totals above
+    #: accumulate the transcript once per call and so say nothing about how
+    #: full the window is, which is what makes this worth recording
+    #: separately (window management itself counts with the model's tokenizer;
+    #: see agent/context_window.py).
     last_input_tokens: int = 0
 
     def update(self, response: Any):
@@ -236,4 +237,7 @@ class Trajectory:
             "info": info,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2))
+        # `default=str` because messages now carry provider-shaped tool calls:
+        # a trajectory is a record, and losing the whole run to one
+        # unserializable field would be the worst possible trade.
+        path.write_text(json.dumps(data, indent=2, default=str))

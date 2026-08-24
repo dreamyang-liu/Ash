@@ -132,6 +132,10 @@ def messages_through_step(trajectory_path: Path | str, step: int) -> list[dict]:
 
     Cuts after the tool results of the ``step``-th assistant message, which is
     the transcript the agent held when the matching snapshot was taken.
+    Assistant messages carry their ``tool_calls``, so the prefix records the
+    actions taken and not merely the prose around them -- without those, a
+    resumed run could see that the agent said it would edit a file but not
+    what edit it made.
     """
     data = json.loads(Path(trajectory_path).read_text())
     messages = data.get("messages") or []

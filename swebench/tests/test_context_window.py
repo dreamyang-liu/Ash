@@ -1,9 +1,11 @@
 """Elision keeps marathon transcripts inside the model's window."""
 
-from swebench.agent.context_window import (make_context_window_guard,
-                                           transcript_tokens)
+from swebench.agent.context_window import (FALLBACK_WINDOW_TOKENS, count_tokens,
+                                           make_context_window_guard,
+                                           model_window_tokens,
+                                           transcript_chars)
 from swebench.agent.conversation import Conversation
-from swebench.models import Trajectory
+from swebench.models import AgentConfig, Trajectory
 
 
 class FakeMessage:
@@ -14,53 +16,102 @@ class FakeMessage:
 
 
 class FakeAgent:
-    _trace = None
+    """Stands in for AshAgent: a model name and a trace sink."""
+
+    def __init__(self, model="gpt-4o-mini", window=None):
+        self.config = AgentConfig(model=model)
+        self.tools_schema = None
+        self.notes: list[str] = []
+
+    def _trace(self, text):
+        self.notes.append(text)
 
 
-def conversation_with(results: int, chars_each: int) -> Conversation:
+def conversation_with(results: int, chars_each: int,
+                      call_chars: int = 0) -> Conversation:
     conv = Conversation(Trajectory())
     conv.add_system("sys")
     conv.add_user("task")
     for i in range(results):
-        conv.add_assistant(FakeMessage(f"turn {i}", tool_calls=None))
+        calls = None
+        if call_chars:
+            calls = [{"id": f"c{i}", "type": "function",
+                      "function": {"name": "text_editor",
+                                   "arguments": "a" * call_chars}}]
+        conv.add_assistant(FakeMessage(f"turn {i}", tool_calls=calls))
         conv.add_tool_result(f"id-{i}", "x" * chars_each)
     return conv
 
 
+# --- measurement ----------------------------------------------------------- #
+
+def test_tool_calls_count_toward_the_transcript():
+    """They carry the bulk on code-heavy runs: one text_editor write holds a
+    whole file. Ignoring them is what made character estimates look plausible
+    while being 3x low."""
+    without = transcript_chars(conversation_with(3, 100).messages)
+    with_calls = transcript_chars(
+        conversation_with(3, 100, call_chars=5_000).messages)
+    assert with_calls > without + 3 * 5_000 * 0.9
+
+
+def test_window_comes_from_the_model_not_a_constant():
+    """A 133-step run measured ~139K tokens: fatal against 200K, fine against
+    1M. The budget therefore cannot be hardcoded."""
+    small = model_window_tokens("gpt-4o-mini")
+    big = model_window_tokens("bedrock/us.anthropic.claude-sonnet-4-6")
+    assert big > small, (small, big)
+    # Unknown models assume small -- earlier elision, never a dead run.
+    assert model_window_tokens("no-such-model-xyz") == FALLBACK_WINDOW_TOKENS
+    assert model_window_tokens(None) == FALLBACK_WINDOW_TOKENS
+
+
+def test_exact_counting_is_used_when_available():
+    conv = conversation_with(5, 400)
+    exact = count_tokens(conv.messages, "gpt-4o-mini")
+    estimate = transcript_chars(conv.messages) // 3
+    assert exact > 0
+    # The estimate is in the same ballpark but not the same number; the point
+    # is that the exact path is what runs.
+    assert exact != estimate
+
+
+def test_counting_falls_back_without_a_model():
+    conv = conversation_with(5, 400)
+    assert count_tokens(conv.messages, None) == transcript_chars(
+        conv.messages) // 3
+
+
+# --- elision policy -------------------------------------------------------- #
+
 def test_under_budget_is_untouched():
-    conv = conversation_with(results=10, chars_each=1000)
+    conv = conversation_with(results=10, chars_each=1_000)
     before = [m.get("content") for m in conv.messages]
-    make_context_window_guard(budget_tokens=140_000)(FakeAgent(), conv)
+    make_context_window_guard(window_tokens=200_000)(FakeAgent(), conv)
     assert [m.get("content") for m in conv.messages] == before
 
 
 def test_over_budget_elides_oldest_tool_outputs_only():
-    # 60 results x 12K chars: well past a 140K budget at 3 chars/token.
     conv = conversation_with(results=60, chars_each=12_000)
-    before = transcript_tokens(conv.messages)
-    # keep_recent=5 so the protected tail (5 x 12K chars = ~20K tokens) leaves
-    # the target reachable; the floor itself is covered separately below.
-    guard = make_context_window_guard(budget_tokens=140_000,
-                                      cut_to_tokens=60_000, keep_recent=5)
-    guard(FakeAgent(), conv)
+    agent = FakeAgent()
+    # keep_recent=5 leaves the target reachable; the floor is covered below.
+    make_context_window_guard(window_tokens=20_000, keep_recent=5)(agent, conv)
 
-    assert transcript_tokens(conv.messages) <= 60_000, (
-        f"{before} -> {transcript_tokens(conv.messages)}")
     tool_messages = [m for m in conv.messages if m["role"] == "tool"]
+    assert tool_messages[0]["content"].startswith("[tool output elided")
+    assert "12000 chars" in tool_messages[0]["content"]
     # The newest results are intact -- the model is acting on them.
     assert all(not m["content"].startswith("[tool output elided")
                for m in tool_messages[-5:])
-    # The oldest were stubbed, and the stub says how much went missing.
-    assert tool_messages[0]["content"].startswith("[tool output elided")
-    assert "12000 chars" in tool_messages[0]["content"]
     # Assistant turns -- what the agent did -- are all verbatim.
     assert all(m["content"].startswith("turn ")
                for m in conv.messages if m["role"] == "assistant")
+    assert count_tokens(conv.messages, "gpt-4o-mini") < 20_000
 
 
 def test_trajectory_keeps_the_full_text():
     conv = conversation_with(results=60, chars_each=12_000)
-    make_context_window_guard(budget_tokens=140_000, cut_to_tokens=60_000,
+    make_context_window_guard(window_tokens=20_000,
                               keep_recent=5)(FakeAgent(), conv)
     saved = [m for m in conv.trajectory.messages if m["role"] == "tool_result"]
     assert all(len(m["content"]) == 12_000 for m in saved), (
@@ -68,55 +119,31 @@ def test_trajectory_keeps_the_full_text():
 
 
 def test_elision_is_idempotent_and_bulk():
-    """Cutting to well under budget leaves a cache-friendly plateau: calling
-    the guard again right away must not rewrite anything further."""
+    """Cutting deep leaves a cache-friendly plateau: calling the guard again
+    right away must not rewrite anything further."""
     conv = conversation_with(results=60, chars_each=12_000)
-    guard = make_context_window_guard(budget_tokens=140_000,
-                                      cut_to_tokens=60_000, keep_recent=5)
-    guard(FakeAgent(), conv)
+    guard = make_context_window_guard(window_tokens=20_000, keep_recent=5)
+    agent = FakeAgent()
+    guard(agent, conv)
     after_first = [m.get("content") for m in conv.messages]
-    guard(FakeAgent(), conv)
+    guard(agent, conv)
     assert [m.get("content") for m in conv.messages] == after_first
-
-
-def test_real_reported_tokens_beat_the_character_estimate():
-    """The provider's count for the last call is the only honest measure of
-    window pressure: a code-heavy transcript measured 3x denser than the
-    character estimate assumed, which would have let the window overflow
-    before the guard ever fired."""
-    class Cost:
-        last_input_tokens = 120_000
-
-    class CalibratedAgent:
-        _trace = None
-        cost = Cost()
-
-    conv = conversation_with(results=30, chars_each=4_000)   # 120K chars
-    # Uncalibrated: 120K chars / 3 = ~40K tokens, comfortably "under budget".
-    assert transcript_tokens(conv.messages) < 60_000
-    # Calibrated by what was actually charged, the same transcript is 120K.
-    agent = CalibratedAgent()
-    assert transcript_tokens(conv.messages, agent) >= 110_000
-
-    # And the guard therefore fires on it, where the estimate would not have.
-    make_context_window_guard(budget_tokens=100_000,
-                              cut_to_tokens=60_000, keep_recent=5)(agent, conv)
-    stubbed = sum(1 for m in conv.messages
-                  if m["role"] == "tool" and m["content"].startswith("[tool output elided"))
-    assert stubbed > 0
 
 
 def test_unreachable_target_is_reported_not_hidden():
     """The protected tail is a floor: a target below it cannot be reached, and
     the guard must say so instead of looking like it succeeded."""
-    notes = []
-
-    class NoisyAgent:
-        cost = None
-        def _trace(self, text):
-            notes.append(text)
-
     conv = conversation_with(results=30, chars_each=12_000)
-    make_context_window_guard(budget_tokens=50_000, cut_to_tokens=1_000,
-                              keep_recent=20)(NoisyAgent(), conv)
-    assert any("protected recent" in n for n in notes)
+    agent = FakeAgent()
+    make_context_window_guard(window_tokens=2_000, keep_recent=20)(agent, conv)
+    assert any("protected recent" in note for note in agent.notes)
+
+
+def test_large_window_leaves_a_long_transcript_alone():
+    """The same transcript that would be eliminated against a small window is
+    untouched against a large one -- the 133-step run's 139K tokens were 14%
+    of a 1M window, and eliding there would only throw away context."""
+    conv = conversation_with(results=40, chars_each=12_000)
+    before = [m.get("content") for m in conv.messages]
+    make_context_window_guard(window_tokens=1_000_000)(FakeAgent(), conv)
+    assert [m.get("content") for m in conv.messages] == before
