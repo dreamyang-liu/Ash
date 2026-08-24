@@ -1,0 +1,26 @@
+# SWE-Marathon on microVMs, with per-step checkpoints.
+#   python -m swebench --harness marathon -c swebench/configs/marathon-sonnet46.yaml \
+#       --task-dir /path/to/swe-marathon/tasks/zstd-decoder
+extends: default
+
+model:
+  name: bedrock/us.anthropic.claude-sonnet-4-6
+
+limits:
+  # A marathon task allots hours and expects ~27M tokens; these are the
+  # ceilings for one attempt, not for the task.
+  step_limit: 1000
+  cost_limit: 50.0
+
+execution:
+  workers: 1
+  output: results/marathon-sonnet46
+  backend: microvm
+  microvm:
+    server_url: http://127.0.0.1:18000
+    runtime_bin: /tmp/ash-runtime
+    sandbox_ttl: 21600
+  checkpoints:
+    enabled: true
+    mode: disk_only
+    trigger: mutation

@@ -159,6 +159,28 @@ class AshSession:
             self._sandbox = None
             self._pool = None
 
+    def supports_upload(self) -> bool:
+        """Whether this session's backend can place host files in the sandbox."""
+        return bool(self._pool) and self._pool.supports_upload()
+
+    def upload_file(self, source, destination: str) -> bool:
+        """Copy a host file into the sandbox. False when unavailable/failed.
+
+        Distinct from writing through `text_editor`, which is text-only and
+        goes through the runtime: this is for binary and bulk (grading
+        fixtures, datasets).
+        """
+        if not self._sandbox or not self.supports_upload():
+            return False
+        try:
+            self._get_loop().run_until_complete(
+                self._pool.upload_file(self._sandbox, source, destination))
+            return True
+        except Exception as e:
+            if not self.quiet:
+                print(f"  {S.bright_red('!')} upload failed: {e}")
+            return False
+
     def environment(self) -> dict:
         """What this session actually ran against.
 

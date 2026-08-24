@@ -242,9 +242,20 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
 - **Interceptors** are config too: `execution.interceptors: my_file.py`, where the file
   exports `PIPELINE = [MyInterceptor()]`. They mount outside the defaults, so they see a
   call before truncation spends anything on it and still see calls the inner ones reject.
-- Two harnesses today (`swebench/harnesses/__init__.py`): `litellm` (custom agent loop,
-  any model) and `claude-code` (Claude Code CLI via MCP, which reaches L2 as an external
-  agent and shares none of this layer). Add new ones by subclassing `BaseHarness` and
+- Three harnesses today (`swebench/harnesses/__init__.py`): `litellm` (custom agent
+  loop, any model), `claude-code` (Claude Code CLI via MCP, which reaches L2 as an
+  external agent and shares none of this layer), and `marathon` (SWE-Marathon's
+  ultra-long-horizon tasks). The marathon path differs in where work comes from and
+  how it is graded, not in the loop: a task is a **directory** (`swebench/marathon.py`
+  reads `task.toml` / `instruction.md` / `environment/` / `tests/`), its image is
+  **built locally** because several tasks bake encrypted verification assets in and no
+  published image exists, and the grade is the task's **own `tests/test.sh`** run
+  verbatim -- its anti-cheat (PATH sanitization, encrypted expected outputs, library
+  fingerprinting) is part of the specification. Both the binary reward and
+  `partial_score` are recorded, because on tasks this long nearly every attempt scores
+  zero and 7-of-43 must be distinguishable from none. Grading needs the fixtures
+  inside the sandbox, which is why pools gained `upload_file` (binary, multi-megabyte:
+  the tool surface cannot carry it). Add new ones by subclassing `BaseHarness` and
   registering in `HARNESSES`. `manager-worker` and `best-of-n` were removed while the
   single-agent path settles, along with Waggle, the write-arbitration interceptor they
   used; the mount they relied on (several agents, one shared chain) still works.

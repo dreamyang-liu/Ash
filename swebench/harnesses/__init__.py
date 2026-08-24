@@ -5,6 +5,9 @@ answer. Two today:
 
 - litellm: one agent, one sandbox — the custom loop, any litellm model
 - claude_code: the Claude Code CLI over MCP
+- marathon: SWE-Marathon's ultra-long-horizon tasks; the same loop, but the
+  work comes from a task directory it builds locally and the grade comes from
+  the task's own verifier
 
 ``manager-worker`` (a manager decomposing work across workers sharing one sandbox)
 and ``best-of-n`` (N isolated candidates, one patch selected) lived here too, and
@@ -17,10 +20,14 @@ bringing them back is a revert rather than a rewrite.
 from .base import BaseHarness
 from .litellm import LiteLLMHarness
 from .claude_code import ClaudeCodeHarness
+from .marathon import MarathonHarness
 
 HARNESSES = {
     "litellm": LiteLLMHarness,
     "claude-code": ClaudeCodeHarness,
+    # SWE-Marathon: tasks come from a directory rather than a dataset, and
+    # grading is the task's own verifier script.
+    "marathon": MarathonHarness,
     # "codex": CodexHarness,
 }
 

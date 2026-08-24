@@ -128,6 +128,21 @@ class Pool(ABC):
         """
         return False
 
+    def supports_upload(self) -> bool:
+        """Whether this pool can put a host file into a sandbox directly."""
+        return False
+
+    async def upload_file(self, sandbox: Sandbox, source, destination: str,
+                          timeout: float | None = None) -> None:
+        """Copy a host file into a sandbox without going through its runtime.
+
+        Needed for what the tool surface cannot express: binary fixtures,
+        multi-megabyte assets, or installing the runtime itself.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot upload files; "
+            "check supports_upload() first")
+
     async def pause(self, sandbox: Sandbox) -> None:
         """Suspend a sandbox, releasing its compute until resumed."""
         raise NotImplementedError(
@@ -330,6 +345,12 @@ class MicroVMPool(Pool):
     #: AgentENV's proxy routing headers (it also accepts E2B-compatible aliases).
     SANDBOX_ID_HEADER = "x-agentenv-sandbox-id"
     TARGET_PORT_HEADER = "x-agentenv-target-port"
+    #: The backend's own file service inside the guest. Reached through the
+    #: same proxy as the runtime, with a different target port -- which is the
+    #: point: it does not involve the runtime, so it can put files in a
+    #: sandbox whose runtime is not the thing being talked to (installing the
+    #: runtime itself, staging binary fixtures a tool call cannot carry).
+    ENVD_PORT = "49983"
 
     def __init__(self, server_url: str, default_template: str = "ubuntu",
                  runtime_port: int = 3000, api_key: str = "",
@@ -375,6 +396,33 @@ class MicroVMPool(Pool):
 
     def supports_cold_start(self) -> bool:
         return True
+
+    def supports_upload(self) -> bool:
+        return True
+
+    async def upload_file(self, sandbox: Sandbox, source, destination: str,
+                          timeout: float | None = None) -> None:
+        """Copy a host file into the sandbox, bypassing the runtime.
+
+        The tool surface cannot carry this: `text_editor` writes text, and
+        fixtures are routinely binary and multi-megabyte. The backend's file
+        service takes the bytes directly.
+        """
+        from pathlib import Path
+        source = Path(source)
+        sid = _require_id(sandbox)
+        headers = {self.SANDBOX_ID_HEADER: sid,
+                   self.TARGET_PORT_HEADER: self.ENVD_PORT}
+        with open(source, "rb") as handle:
+            resp = await self._client.post(
+                f"{self.server_url}/files", params={"path": destination},
+                headers=headers,
+                files={"file": (source.name, handle,
+                                "application/octet-stream")},
+                # Not the client's default: these are megabytes over a
+                # proxy, and the client is tuned for short control calls.
+                timeout=timeout or 300.0)
+        resp.raise_for_status()
 
     # --- Lifecycle ---
 
