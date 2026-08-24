@@ -344,3 +344,20 @@ def test_reboard_that_lands_on_an_unreachable_sandbox_is_not_adopted():
             # useless replacement is cleaned up rather than leaked.
             assert session._sandbox is original
             assert session._pool.destroyed == [replacement]
+
+
+def test_every_capture_compacting_warns_once(caplog):
+    """A compaction budget below a single step's writes degrades silently
+    into a compact+swap every other step; the guard turns that into one
+    visible log line pointing at the config value."""
+    import logging
+    # Alternating pattern of the degraded mode: fresh chain (+1), then a
+    # compaction that holds the count (13 -> 13 after re-board resets).
+    session = FakeSession(layers=[13, 13, 13, 13, 13])
+    session.swap_result = False          # keep the baseline comparable
+    cp = Checkpointer(session=session, always=True)
+    with caplog.at_level(logging.WARNING):
+        for turn in range(1, 6):
+            cp.after_step(turn)
+    warnings = [r for r in caplog.records if "compaction budget" in r.message]
+    assert len(warnings) == 1, "warn once, not per step"

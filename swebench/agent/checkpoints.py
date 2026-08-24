@@ -159,6 +159,8 @@ class Checkpointer:
     records: list[CheckpointRecord] = field(default_factory=list)
     latest_snapshot_id: Optional[str] = None
     _previous_layers: Optional[int] = None
+    _consecutive_compactions: int = 0
+    _warned_budget: bool = False
 
     def enabled(self) -> bool:
         return bool(getattr(self.session, "supports_snapshot", lambda: False)())
@@ -223,6 +225,22 @@ class Checkpointer:
             if compacted and self.reboard:
                 record.reboarded = bool(self.session.swap_sandbox(snapshot))
             self._previous_layers = None if record.reboarded else layers
+
+            # A budget smaller than a single step's writes degrades silently:
+            # every capture compacts, and with re-boarding that means a swap
+            # every other step. It still works -- say so once, loudly, because
+            # the fix is a config value, not code.
+            self._consecutive_compactions = (
+                self._consecutive_compactions + 1 if compacted else 0)
+            if self._consecutive_compactions >= 3 and not self._warned_budget:
+                self._warned_budget = True
+                import logging
+                logging.getLogger(__name__).warning(
+                    "every recent capture compacted the layer chain: the "
+                    "server's compaction budget (max_chain_size_mib) is "
+                    "likely smaller than a single step's writes for this "
+                    "workload; raise it to amortize compaction over more "
+                    "steps")
 
         return self._record(record)
 
