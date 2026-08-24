@@ -103,6 +103,9 @@ def _flatten_config(config: dict) -> dict:
         ("execution", "harness"): "harness",
         # A Python file of your own interceptors; see agent/interceptors/.
         ("execution", "interceptors"): "interceptors",
+        # Per-step environment checkpoints; kept whole like the backend
+        # sections (enabled / mode / trigger / reboard are its keys).
+        ("execution", "checkpoints"): "checkpoints",
     }
 
     flat = {}

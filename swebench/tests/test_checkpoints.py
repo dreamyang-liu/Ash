@@ -132,6 +132,35 @@ def test_layer_count_drop_triggers_reboard():
     assert [r.reboarded for r in records] == [False, False, False, True]
 
 
+def test_layer_count_that_fails_to_grow_also_triggers_reboard():
+    """A deep inherited prefix whose per-cycle suffix merges into one layer
+    compacts at a CONSTANT count (13 -> 13): no drop ever comes, and waiting
+    for one leaves the sandbox re-compacting on every single step. Growth is
+    the only uncompacted behaviour, so anything else is the signal."""
+    session = FakeSession(layers=[13, 13])
+    cp = Checkpointer(session=session, always=True)
+    cp.after_step(1)
+    record = cp.after_step(2)
+    assert session.swaps == ["snap-1"]
+    assert record.reboarded
+
+
+def test_capture_duration_is_recorded():
+    session = FakeSession()
+    record = Checkpointer(session=session, always=True).after_step(1)
+    assert record.capture_seconds >= 0.0
+    tracker = MutationTracker()
+    cp = Checkpointer(session=FakeSession(), tracker=tracker)
+    cp.after_step(1)                     # captures (tracker starts clean? no --
+    # tracker is clean, so this step reuses nothing (no previous) and returns
+    # None; make one dirty capture then a clean reuse to check the zero.
+    tracker.before(ctx("shell", {"command": "touch f"}))
+    first = cp.after_step(2)
+    reused = cp.after_step(3)
+    assert first.capture_seconds >= 0.0
+    assert reused.capture_seconds == 0.0
+
+
 def test_first_capture_never_reboards():
     # A fresh chain starts small; with no previous count there is no drop.
     session = FakeSession(layers=[2, 3])

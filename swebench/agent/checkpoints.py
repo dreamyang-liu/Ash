@@ -48,6 +48,7 @@ keep in sync.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -126,6 +127,8 @@ class CheckpointRecord:
     #: nothing could have changed.
     captured: bool
     disk_only: bool
+    #: Wall time of the capture call; 0.0 for reused steps.
+    capture_seconds: float = 0.0
     rootfs_layers: Optional[int] = None
     chain_size_mb: Optional[int] = None
     #: Set when this checkpoint triggered continuing on a new sandbox.
@@ -182,7 +185,9 @@ class Checkpointer:
                 captured=False, disk_only=self.disk_only))
 
         name = f"{self.name_prefix}step-{turn}" if self.name_prefix else None
+        capture_started = time.monotonic()
         snapshot = self.session.snapshot(name=name, disk_only=self.disk_only)
+        capture_seconds = time.monotonic() - capture_started
         if snapshot is None:
             # Capture failed (or the backend declined). Fall back to the last
             # good snapshot so the map stays complete and monotonic.
@@ -198,17 +203,23 @@ class Checkpointer:
         record = CheckpointRecord(
             turn=turn, snapshot_id=snapshot.id, captured=True,
             disk_only=self.disk_only,
+            capture_seconds=capture_seconds,
             rootfs_layers=snapshot.rootfs_layers,
             chain_size_mb=snapshot.chain_size_mb,
         )
 
         layers = snapshot.rootfs_layers
         if layers is not None:
-            # A drop means the server compacted this chain, so this snapshot
-            # is a compact base: continue from it, or every later capture
-            # re-compacts the whole chain.
+            # Every uncompacted capture adds exactly one layer, so a count
+            # that FAILED TO GROW means the server compacted this chain and
+            # this snapshot is a compact base: continue from it, or every
+            # later capture re-compacts. `<=` rather than `<`: a chain whose
+            # per-cycle suffix merges into a single layer (a deep inherited
+            # prefix plus one big delta) compacts at the same count it had
+            # before -- seen live as a constant 13 with a re-compaction every
+            # step and a drop that never came.
             compacted = (self._previous_layers is not None
-                         and layers < self._previous_layers)
+                         and layers <= self._previous_layers)
             if compacted and self.reboard:
                 record.reboarded = bool(self.session.swap_sandbox(snapshot))
             self._previous_layers = None if record.reboarded else layers
