@@ -54,6 +54,7 @@ from .agent import AshAgent
 from .agent.checkpoints import install as install_checkpoints
 from .agent.tools import DEFAULT_PANEL, build_panel
 from .dataset import (
+    build_batch_test_command,
     build_test_command,
     format_task_prompt,
     image_registry_for_subset,
@@ -253,9 +254,39 @@ def _grade_patch(session: Any, instance: dict, patch: str,
         if session.execute("shell", {"command": build_test_command(repo, test_id),
                                      "working_dir": "/testbed"}).success
     )
+
+    # PASS_TO_PASS is the anti-reward-hack gate: FAIL_TO_PASS alone pays an
+    # agent that makes the graded tests pass by deleting the functionality
+    # everything else relies on. Official resolution requires both, so any
+    # regression zeroes the reward rather than discounting it -- a shaped
+    # reward for "fixed the bug but broke the project" would teach exactly
+    # that. One batched invocation (the lists run to hundreds of ids;
+    # per-test runner startup would take an hour), and only when the agent
+    # scored at all -- a zero is a zero without running anything.
+    if passed > 0 and not _passes_regression_gate(session, instance, repo):
+        return 0.0, passed, len(tests)
+
     if reward_mode == REWARD_BINARY:
         return (1.0 if passed == len(tests) else 0.0), passed, len(tests)
     return passed / len(tests), passed, len(tests)
+
+
+def _passes_regression_gate(session: Any, instance: dict, repo: str) -> bool:
+    """Whether every PASS_TO_PASS test still passes.
+
+    An instance without a parseable list gates nothing (nothing was promised),
+    and the batch runs with a generous timeout: hundreds of tests in one
+    runner invocation is minutes, not the hours of per-test startup.
+    """
+    keep_passing = parse_test_list(instance.get("PASS_TO_PASS"))
+    if not keep_passing:
+        return True
+    result = session.execute("shell", {
+        "command": build_batch_test_command(repo, keep_passing),
+        "working_dir": "/testbed",
+        "timeout": 1800,
+    })
+    return bool(result.success)
 
 
 def _agent_config(request: dict[str, Any], deps: EpisodeDeps) -> AgentConfig:

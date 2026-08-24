@@ -144,6 +144,8 @@ class LiteLLMHarness(BaseHarness):
                     always=checkpoint_cfg.get("trigger", "mutation") == "every_step",
                     disk_only=checkpoint_cfg.get("mode", "disk_only") != "full",
                     reboard=checkpoint_cfg.get("reboard", True),
+                    squash_lineage_at=int(checkpoint_cfg.get(
+                        "squash_lineage_at", 128)),
                     name_prefix=checkpoint_cfg.get("name_prefix", ""),
                     on_checkpoint=_checkpoint_tracer(agent),
                 )

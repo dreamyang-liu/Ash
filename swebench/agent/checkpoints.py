@@ -159,6 +159,9 @@ class CheckpointRecord:
     chain_size_mb: Optional[int] = None
     #: Set when this checkpoint triggered continuing on a new sandbox.
     reboarded: bool = False
+    #: Set when the re-board first squashed the whole chain to reset the
+    #: lineage's inherited-prefix ratchet.
+    lineage_squashed: bool = False
     #: True when background processes may have been alive at this step. A
     #: disk-only replay of such a step will not have them.
     live_background: bool = False
@@ -181,6 +184,17 @@ class Checkpointer:
     disk_only: bool = True
     #: Continue on a new sandbox when a capture shows the chain was compacted.
     reboard: bool = True
+    #: Re-boarding resets the *suffix* but ratchets the inherited prefix up by
+    #: one layer per cycle -- captures can never compact layers the sandbox
+    #: did not produce, so the prefix only grows, and at the format's
+    #: 255-layer stack cap the lineage dies (~20k captures from a fresh
+    #: start). Squashing is the repository-side merge that CAN fold the
+    #: prefix; doing it at a re-board whose target is already this deep
+    #: resets the ratchet and removes the ceiling on trajectory length.
+    #: Costs one repo-side merge of the whole chain (chain bytes / store
+    #: write bandwidth) plus a duplicate of that data until the old layers
+    #: are reclaimed. 0 disables.
+    squash_lineage_at: int = 128
     name_prefix: str = ""
     #: Reports each checkpoint (e.g. to a trace stream).
     on_checkpoint: Optional[Callable[[CheckpointRecord], None]] = None
@@ -269,7 +283,16 @@ class Checkpointer:
                 self._previous_memory_layers, snapshot.memory_layers)
         if snapshot.rootfs_layers is not None or snapshot.memory_layers:
             if compacted and self.reboard:
-                record.reboarded = bool(self.session.swap_sandbox(snapshot))
+                target = snapshot
+                if self._lineage_needs_squash(snapshot):
+                    squashed = self.session.squash_snapshot(snapshot)
+                    squashed_id = getattr(squashed, "id", None)
+                    if squashed_id and squashed_id != snapshot.id:
+                        target = squashed
+                        record.lineage_squashed = True
+                    # A failed squash falls back to the plain re-board: the
+                    # ratchet keeps walking and the next re-board retries.
+                record.reboarded = bool(self.session.swap_sandbox(target))
             if record.reboarded:
                 self._previous_layers = None
                 self._previous_memory_layers = None
@@ -297,6 +320,20 @@ class Checkpointer:
 
         return self._record(record)
 
+    def _lineage_needs_squash(self, snapshot) -> bool:
+        """Whether a re-board target's inherited prefix has grown deep.
+
+        A just-compacted snapshot is prefix + one merged layer, so its layer
+        count IS the lineage depth. Either chain qualifying is enough: full
+        mode's memory prefix ratchets exactly like the rootfs one.
+        """
+        if self.squash_lineage_at <= 0:
+            return False
+        if not callable(getattr(self.session, "squash_snapshot", None)):
+            return False
+        return ((snapshot.rootfs_layers or 0) > self.squash_lineage_at
+                or (snapshot.memory_layers or 0) > self.squash_lineage_at)
+
     def _record(self, record: CheckpointRecord) -> CheckpointRecord:
         self.records.append(record)
         if self.on_checkpoint:
@@ -305,7 +342,8 @@ class Checkpointer:
 
 
 def install(agent, session, *, always: bool = False, disk_only: bool = True,
-            reboard: bool = True, name_prefix: str = "",
+            reboard: bool = True, squash_lineage_at: int = 128,
+            name_prefix: str = "",
             on_checkpoint: Optional[Callable[[CheckpointRecord], None]] = None,
             ) -> Checkpointer:
     """Wire per-step checkpoints into an agent's loop.
@@ -330,7 +368,8 @@ def install(agent, session, *, always: bool = False, disk_only: bool = True,
 
     checkpointer = Checkpointer(
         session=session, tracker=tracker, always=always, disk_only=disk_only,
-        reboard=reboard, name_prefix=name_prefix, on_checkpoint=on_checkpoint,
+        reboard=reboard, squash_lineage_at=squash_lineage_at,
+        name_prefix=name_prefix, on_checkpoint=on_checkpoint,
     )
 
     def checkpoint_before_query(agent_ref, _conv) -> None:

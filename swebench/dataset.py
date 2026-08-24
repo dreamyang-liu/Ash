@@ -123,9 +123,25 @@ def build_test_command(repo: str, test_id: str) -> str:
     why deleting that harness would have taken the rollout server's grading with
     it.
     """
+    return build_batch_test_command(repo, [test_id])
+
+
+def build_batch_test_command(repo: str, test_ids: list[str]) -> str:
+    """Shell command whose exit code says whether ALL of ``test_ids`` pass.
+
+    One invocation, not one per test: PASS_TO_PASS lists run to hundreds of
+    ids, and per-test runner startup (5-20s each) would turn a regression
+    check into an hour. Both runners accept multiple test specs and exit
+    non-zero if any fails, which is exactly the all-or-nothing answer a
+    regression gate needs.
+    """
     if repo == "django/django":
-        m = _DJANGO_TEST_ID.match(test_id.strip())
-        spec = f"{m.group(2)}.{m.group(1)}" if m else test_id
+        specs = []
+        for test_id in test_ids:
+            m = _DJANGO_TEST_ID.match(test_id.strip())
+            specs.append(f"{m.group(2)}.{m.group(1)}" if m else test_id)
+        joined = " ".join(shlex.quote(spec) for spec in specs)
         return ("./tests/runtests.py --verbosity 0 --settings=test_sqlite "
-                f"--parallel 1 {shlex.quote(spec)}")
-    return f"python -m pytest -x -q {shlex.quote(test_id)}"
+                f"--parallel 1 {joined}")
+    joined = " ".join(shlex.quote(test_id) for test_id in test_ids)
+    return f"python -m pytest -x -q {joined}"

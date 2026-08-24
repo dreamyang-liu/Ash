@@ -465,3 +465,62 @@ def test_unappliable_test_patch_grades_zero():
     reward, passed, total = _grade_patch(session, instance, "some diff",
                                          reward_mode="fraction")
     assert (reward, passed, total) == (0.0, 0, 1)
+
+
+def test_pass_to_pass_regression_zeroes_the_reward():
+    """FAIL_TO_PASS alone pays an agent that deletes the functionality the
+    rest of the project relies on (reward hacking); official resolution
+    requires PASS_TO_PASS to still pass, so a regression zeroes the reward."""
+    from swebench.rollout_server import _grade_patch
+
+    instance = {"repo": "django/django",
+                "FAIL_TO_PASS": '["test_a (m.T)"]',
+                "PASS_TO_PASS": '["test_keep1 (m.T)", "test_keep2 (m.T)"]',
+                "test_patch": "diff --git a/tests/x b/tests/x\n"}
+
+    class Regressing(FakeSession):
+        def _run(self, tool_name, args, agent_id):
+            command = args.get("command", "")
+            # The regression gate is one batched invocation carrying every
+            # PASS_TO_PASS id; it fails as a whole when any test broke.
+            if "test_keep1" in command:
+                assert "test_keep2" in command, "P2P must run as one batch"
+                self.commands.append(command)
+                return ToolResult(success=False, output="1 failed")
+            return super()._run(tool_name, args, agent_id)
+
+    session = Regressing(passing=("test_a",))
+    reward, passed, total = _grade_patch(session, instance, "diff",
+                                         reward_mode="fraction")
+    assert (passed, total) == (1, 1), "the fix itself worked"
+    assert reward == 0.0, "but the regression gates it to zero"
+
+
+def test_pass_to_pass_intact_keeps_the_reward():
+    from swebench.rollout_server import _grade_patch
+
+    instance = {"repo": "django/django",
+                "FAIL_TO_PASS": '["test_a (m.T)"]',
+                "PASS_TO_PASS": '["test_keep1 (m.T)"]',
+                "test_patch": "diff --git a/tests/x b/tests/x\n"}
+    session = FakeSession(passing=("test_a", "test_keep1"))
+    reward, passed, total = _grade_patch(session, instance, "diff",
+                                         reward_mode="fraction")
+    assert reward == 1.0
+
+
+def test_zero_score_skips_the_regression_gate():
+    """A reward of zero cannot be gated lower; running hundreds of P2P tests
+    to confirm it would only burn grading time."""
+    from swebench.rollout_server import _grade_patch
+
+    instance = {"repo": "django/django",
+                "FAIL_TO_PASS": '["test_a (m.T)"]',
+                "PASS_TO_PASS": '["test_keep1 (m.T)"]',
+                "test_patch": "diff --git a/tests/x b/tests/x\n"}
+    session = FakeSession(passing=())
+    reward, passed, total = _grade_patch(session, instance, "diff",
+                                         reward_mode="fraction")
+    assert reward == 0.0
+    assert not any("test_keep1" in c for c in session.commands), (
+        "no P2P batch for an already-zero reward")

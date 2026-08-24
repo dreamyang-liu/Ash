@@ -434,3 +434,64 @@ def test_replay_caveats_surface_background_steps(tmp_path):
     assert replay_caveats(path, 1) == []
     assert len(replay_caveats(path, 2)) == 1
     assert "background" in replay_caveats(path, 2)[0]
+
+
+# --- lineage squash ---------------------------------------------------------- #
+
+class SquashingSession(FakeSession):
+    def __init__(self, squash_to="flat-1", **kw):
+        super().__init__(**kw)
+        self.squash_calls: list[str] = []
+        self._squash_to = squash_to
+
+    def squash_snapshot(self, snapshot, name=None):
+        self.squash_calls.append(snapshot.id)
+        if self._squash_to is None:
+            return snapshot          # squash failed; session returns input
+        return FakeSnapshot(id=self._squash_to, rootfs_layers=1)
+
+
+def test_deep_lineage_reboard_squashes_first():
+    """Each re-board adds one permanent prefix layer; at the stack cap the
+    lineage dies. When the re-board target is already deep, squash it first
+    and board the flattened twin -- the ratchet resets and trajectory length
+    loses its ceiling."""
+    session = SquashingSession(layers=[150, 150])
+    cp = Checkpointer(session=session, always=True, squash_lineage_at=128)
+    cp.after_step(1)
+    record = cp.after_step(2)          # 150 -> 150: compacted, deep
+
+    assert session.squash_calls == ["snap-1"]
+    assert session.swaps == ["flat-1"], "board the squashed twin"
+    assert record.lineage_squashed and record.reboarded
+    # The step still maps to the original snapshot: the squashed twin is an
+    # equivalent, but the canonical checkpoint is what was captured.
+    assert record.snapshot_id == "snap-1"
+
+
+def test_shallow_lineage_reboards_plainly():
+    session = SquashingSession(layers=[5, 5])
+    cp = Checkpointer(session=session, always=True, squash_lineage_at=128)
+    cp.after_step(1)
+    record = cp.after_step(2)
+    assert session.squash_calls == []
+    assert session.swaps == ["snap-1"]
+    assert not record.lineage_squashed
+
+
+def test_failed_squash_falls_back_to_plain_reboard():
+    session = SquashingSession(layers=[150, 150], squash_to=None)
+    cp = Checkpointer(session=session, always=True, squash_lineage_at=128)
+    cp.after_step(1)
+    record = cp.after_step(2)
+    assert session.squash_calls == ["snap-1"], "squash was attempted"
+    assert session.swaps == ["snap-1"], "boarded the original anyway"
+    assert record.reboarded and not record.lineage_squashed
+
+
+def test_lineage_squash_can_be_disabled():
+    session = SquashingSession(layers=[150, 150])
+    cp = Checkpointer(session=session, always=True, squash_lineage_at=0)
+    cp.after_step(1)
+    cp.after_step(2)
+    assert session.squash_calls == []
