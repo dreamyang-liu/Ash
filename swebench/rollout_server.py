@@ -52,6 +52,7 @@ from typing import Any, Callable, Optional
 
 from .agent import AshAgent
 from .agent.checkpoints import install as install_checkpoints
+from .agent.context_window import make_context_window_guard
 from .agent.tools import DEFAULT_PANEL, build_panel
 from .dataset import (
     build_batch_test_command,
@@ -498,6 +499,9 @@ def build_default_deps(subset: str, runtime_bin: Optional[str], step_limit: int,
         agent.use_panel(build_panel(getattr(config, "tools", DEFAULT_PANEL),
                                     config.custom_tools_dir,
                                     registry=session.tools))
+        # Same safety net as the benchmark harness: an RL episode that dies of
+        # a context overflow burns its rollout and returns nothing.
+        agent.before_query_hooks.append(make_context_window_guard())
         if checkpoints != "off" and session.supports_snapshot():
             install_checkpoints(agent, session,
                                 always=checkpoints == "every_step",

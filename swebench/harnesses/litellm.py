@@ -13,6 +13,7 @@ from ..sandbox import AshSession
 from ..models import AgentConfig
 from ..agent import AshAgent
 from ..agent.checkpoints import install as install_checkpoints
+from ..agent.context_window import make_context_window_guard
 from ..agent.trace import new_run_id
 from ..agent.tools import DEFAULT_PANEL, build_panel
 from ..agent.interceptors import default_pipeline
@@ -128,6 +129,18 @@ class LiteLLMHarness(BaseHarness):
             # a YAML dialect for "reject writes under src/ unless ..." becomes a
             # crippled programming language. Absent, the agent mounts the
             # defaults exactly as before.
+            # The context-window guard is a safety net rather than a policy
+            # choice: it no-ops while the transcript is under the model's own
+            # budget, and without it a long run dies of an API error with its
+            # budget unspent. Wired unconditionally; `context_budget_fraction:
+            # 0` opts out for anyone who wants the raw failure.
+            budget_fraction = float(c.get("context_budget_fraction", 0.70))
+            if budget_fraction > 0:
+                agent.before_query_hooks.append(make_context_window_guard(
+                    budget_fraction=budget_fraction,
+                    target_fraction=float(
+                        c.get("context_target_fraction", 0.45))))
+
             plugins = c.get("interceptors")
             if plugins:
                 agent.pipeline = default_pipeline(

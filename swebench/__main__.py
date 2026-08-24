@@ -106,6 +106,10 @@ def _flatten_config(config: dict) -> dict:
         # Per-step environment checkpoints; kept whole like the backend
         # sections (enabled / mode / trigger / reboard are its keys).
         ("execution", "checkpoints"): "checkpoints",
+        # Fractions of the model's own context window: elide above the first,
+        # down to the second. 0 disables the guard.
+        ("execution", "context_budget_fraction"): "context_budget_fraction",
+        ("execution", "context_target_fraction"): "context_target_fraction",
     }
 
     flat = {}

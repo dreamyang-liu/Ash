@@ -147,3 +147,28 @@ def test_large_window_leaves_a_long_transcript_alone():
     before = [m.get("content") for m in conv.messages]
     make_context_window_guard(window_tokens=1_000_000)(FakeAgent(), conv)
     assert [m.get("content") for m in conv.messages] == before
+
+
+# --- wiring ---------------------------------------------------------------- #
+
+def test_harnesses_install_the_guard():
+    """A guard nobody mounts protects nothing. This exists because the first
+    version of this module was written, tested, and left unwired -- only a
+    hand-rolled driver ever installed it, so `python -m swebench` runs had no
+    protection at all."""
+    import inspect
+    from swebench.harnesses import litellm as harness
+    from swebench import rollout_server
+
+    for module in (harness, rollout_server):
+        source = inspect.getsource(module)
+        assert "make_context_window_guard(" in source, module.__name__
+        assert "before_query_hooks.append" in source, module.__name__
+
+
+def test_guard_is_configurable_and_can_be_disabled():
+    from swebench.__main__ import _flatten_config
+    flat = _flatten_config({"execution": {"context_budget_fraction": 0.0,
+                                          "context_target_fraction": 0.3}})
+    assert flat["context_budget_fraction"] == 0.0
+    assert flat["context_target_fraction"] == 0.3
