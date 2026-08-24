@@ -7,7 +7,7 @@ limits:
 
 execution:
   workers: 1
-  output: /tmp/swb-microvm-run
+  output: /tmp/swb-microvm-run2
   backend: microvm
   microvm:
     server_url: http://127.0.0.1:18000

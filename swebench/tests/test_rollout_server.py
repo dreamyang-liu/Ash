@@ -98,6 +98,10 @@ class FakeSession:
         command = args.get("command", "")
         self.commands.append(command)
         self.callers.append(agent_id)
+        if tool_name == "text_editor" or command.startswith("git apply"):
+            # Grading first applies the dataset's test_patch (official
+            # protocol); the double stands in for a clean apply.
+            return ToolResult(success=True, output="")
         passed = any(test_id in command for test_id in self.passing)
         return ToolResult(success=passed, output="")
 
@@ -419,3 +423,45 @@ def test_unknown_paths_return_404(http_server):
     assert status == 404
     status, _ = _post(f"{http_server}/nope", b"{}")
     assert status == 404
+
+
+def test_grading_applies_the_dataset_test_patch_first():
+    """FAIL_TO_PASS is defined against the dataset's test_patch; the image
+    ships pre-fix copies whose old assertions can pass on unfixed code, so
+    grading against them inflates rewards. Found live: a fresh unfixed django
+    environment 'passed' both graded tests until the test patch was applied."""
+    from swebench.rollout_server import _grade_patch
+
+    instance = {"repo": "django/django",
+                "FAIL_TO_PASS": '["test_a (m.T)", "test_b (m.T)"]',
+                "test_patch": "diff --git a/tests/x b/tests/x\n"}
+    session = FakeSession(passing=("test_a", "test_b"))
+    reward, passed, total = _grade_patch(session, instance, "some diff",
+                                         reward_mode="fraction")
+    assert (reward, passed, total) == (1.0, 2, 2)
+    assert any(c.startswith("git apply") for c in session.commands), (
+        "the dataset test patch must be applied before any test runs")
+    apply_index = next(i for i, c in enumerate(session.commands)
+                       if c.startswith("git apply"))
+    first_test = next(i for i, c in enumerate(session.commands) if "test_a" in c)
+    assert apply_index < first_test
+
+
+def test_unappliable_test_patch_grades_zero():
+    from swebench.rollout_server import _grade_patch
+
+    class RefusesApply(FakeSession):
+        def _run(self, tool_name, args, agent_id):
+            command = args.get("command", "")
+            self.commands.append(command)
+            if command.startswith("git apply"):
+                return ToolResult(success=False, output="", error="conflict")
+            return super()._run(tool_name, args, agent_id)
+
+    instance = {"repo": "django/django",
+                "FAIL_TO_PASS": '["test_a (m.T)"]',
+                "test_patch": "diff --git a/tests/x b/tests/x\n"}
+    session = RefusesApply(passing=("test_a",))
+    reward, passed, total = _grade_patch(session, instance, "some diff",
+                                         reward_mode="fraction")
+    assert (reward, passed, total) == (0.0, 0, 1)

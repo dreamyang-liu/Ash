@@ -228,6 +228,25 @@ def _grade_patch(session: Any, instance: dict, patch: str,
     if not patch.strip() or not tests:
         return 0.0, 0, len(tests)
 
+    # Official protocol: FAIL_TO_PASS tests are defined against the dataset's
+    # test_patch, not the tests the image ships. The image's copies predate
+    # the fix (an old assertion of the old behaviour can pass on unfixed
+    # code), so grading without applying the test patch inflates rewards with
+    # exactly the wrong signal. A test patch that will not apply means the
+    # agent's edits collided with the graded tests themselves; that grades 0
+    # rather than silently falling back to the stale copies.
+    test_patch = str(instance.get("test_patch") or "")
+    if test_patch.strip():
+        session.execute("text_editor", {
+            "command": "write", "path": "/tmp/.swebench_test.patch",
+            "file_text": test_patch})
+        applied = session.execute("shell", {
+            "command": "git apply /tmp/.swebench_test.patch",
+            "working_dir": "/testbed"})
+        if not applied.success:
+            logger.warning("test_patch failed to apply; grading 0")
+            return 0.0, 0, len(tests)
+
     repo = str(instance.get("repo", ""))
     passed = sum(
         1 for test_id in tests
