@@ -37,8 +37,10 @@ from ..agent.checkpoints import install as install_checkpoints
 from ..agent.context_window import make_context_window_guard
 from ..agent.tools import DEFAULT_PANEL, build_panel
 from ..agent.trace import new_run_id
+from ..backends import backend_config
 from ..marathon import MarathonError, build_image, grade, load_task
 from ..models import AgentConfig
+from ..prediction import failure, prediction
 from ..sandbox import AshSession
 
 
@@ -47,8 +49,8 @@ class MarathonHarness(BaseHarness):
 
     def run_instance(self, instance: dict, output_dir: Path,
                      quiet: bool = False) -> dict:
-        config = self.config
-        task_dir = instance.get("task_dir") or config.get("task_dir")
+        c = self.config
+        task_dir = instance.get("task_dir") or c.get("task_dir")
         if not task_dir:
             return self._failure(instance, "no task_dir given")
 
@@ -65,13 +67,12 @@ class MarathonHarness(BaseHarness):
 
         try:
             image = build_image(
-                task, registry=config.get("registry", "localhost:5000"))
+                task, registry=c.get("registry", "localhost:5000"))
         except MarathonError as exc:
             return self._failure(instance, f"error: {exc}")
 
-        session = AshSession(runtime_bin=config.get("runtime_bin"),
-                             quiet=quiet,
-                             backend=self.backend_config())
+        session = AshSession(runtime_bin=c.get("runtime_bin"), quiet=quiet,
+                             backend=backend_config(c))
         try:
             if not session.create(image):
                 return self._failure(instance,
@@ -161,22 +162,27 @@ class MarathonHarness(BaseHarness):
         agent.trajectory.save(output_dir / "trajectories" /
                               f"{task.instance_id}.json")
 
-        return {
-            "instance_id": task.instance_id,
+        # The prediction shape, so this harness composes with the batch
+        # runner and the resume logic like any other. Marathon has no patch to
+        # submit -- the graded artifact is the environment itself -- so the
+        # report is a `failure` in the builder's vocabulary (nothing to
+        # submit) carrying the grade alongside it. Pretending otherwise would
+        # mean inventing a tenth hand-built dict, which is what
+        # `prediction.py` exists to prevent.
+        report = failure(task.instance_id, agent_config.model, exit_status)
+        report.update({
             "reward": result.reward,
             "partial_score": result.partial_score,
-            "exit_status": exit_status,
             "cost": agent.cost.total_cost,
             "turns": agent.cost.api_calls,
             "metrics": result.metrics,
             "grading_error": result.error,
-        }
+        })
+        return report
 
     def _failure(self, instance: dict, status: str) -> dict:
-        return {"instance_id": instance.get("instance_id", "unknown"),
-                "reward": 0.0, "partial_score": 0.0, "exit_status": status,
-                "cost": 0.0, "turns": 0, "metrics": {}, "grading_error": status}
-
-    def backend_config(self) -> dict:
-        from ..backends import backend_config
-        return backend_config(self.config)
+        report = failure(instance.get("instance_id") or "unknown",
+                         self.config.get("model"), status)
+        report.update({"reward": 0.0, "partial_score": 0.0, "cost": 0.0,
+                       "turns": 0, "metrics": {}, "grading_error": status})
+        return report
