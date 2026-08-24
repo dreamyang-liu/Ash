@@ -400,3 +400,37 @@ def test_disk_only_zero_memory_layers_never_reads_as_compaction():
     for t in (1, 2, 3):
         cp.after_step(t)
     assert session.swaps == []
+
+
+def test_background_processes_are_flagged_on_records():
+    """Disk-only replays lose live processes; the records must say which
+    steps carried that risk so replay tooling can warn instead of diverging
+    silently. The flag latches on background starts and over-reports (a kill
+    clears one start without knowing which process died)."""
+    session = FakeSession()
+    tracker = MutationTracker()
+    cp = Checkpointer(session=session, tracker=tracker, always=True)
+
+    tracker.before(ctx("shell", {"command": "ls"}))
+    r1 = cp.after_step(1)
+    tracker.before(ctx("shell", {"command": "npm run dev", "background": True}))
+    r2 = cp.after_step(2)
+    r3 = cp.after_step(3)                       # still running
+    tracker.before(ctx("process", {"command": "kill", "pid": 42}))
+    r4 = cp.after_step(4)
+
+    assert [r.live_background for r in (r1, r2, r3, r4)] == [
+        False, True, True, False]
+
+
+def test_replay_caveats_surface_background_steps(tmp_path):
+    import json as _json
+    from swebench.replay import replay_caveats
+    path = tmp_path / "t.json"
+    path.write_text(_json.dumps({"info": {"checkpoints": {"records": [
+        {"turn": 1, "live_background": False, "disk_only": True},
+        {"turn": 2, "live_background": True, "disk_only": True},
+    ]}}}))
+    assert replay_caveats(path, 1) == []
+    assert len(replay_caveats(path, 2)) == 1
+    assert "background" in replay_caveats(path, 2)[0]

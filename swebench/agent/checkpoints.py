@@ -101,16 +101,31 @@ class MutationTracker(ToolInterceptor):
     Mounted outermost so it also sees calls the inner guardrails reject: a
     rejected call changes nothing, but it is cheaper to over-count than to
     reason about which rejections are total.
+
+    Also tracks whether the episode may have live background processes: a
+    disk-only checkpoint captures the filesystem but not processes, so a
+    replay of a step taken while a background process ran diverges -- the
+    process is gone, its pids answer errors, its unflushed output never made
+    it to disk. `may_have_background` turns from best-effort bookkeeping into
+    a per-record flag the replay tooling can warn about. It latches on
+    `shell(background=true)` and clears only on `process(kill)` with no way
+    to know *which* process died, so it over-reports -- the flag means
+    "replay may diverge", not "will".
     """
 
     fail_mode = "open"
 
     def __init__(self) -> None:
         self._dirty = False
+        self._background_starts = 0
 
     @property
     def dirty(self) -> bool:
         return self._dirty
+
+    @property
+    def may_have_background(self) -> bool:
+        return self._background_starts > 0
 
     def clear(self) -> None:
         self._dirty = False
@@ -118,6 +133,12 @@ class MutationTracker(ToolInterceptor):
     def before(self, ctx: CallContext) -> Verdict:
         if call_mutates(ctx.tool_name, ctx.args):
             self._dirty = True
+        if ctx.tool_name == "shell" and bool(ctx.args.get("background")):
+            self._background_starts += 1
+        elif (ctx.tool_name == "process"
+              and str(ctx.args.get("command", "")) == "kill"
+              and self._background_starts > 0):
+            self._background_starts -= 1
         return Continue()
 
 
@@ -138,6 +159,9 @@ class CheckpointRecord:
     chain_size_mb: Optional[int] = None
     #: Set when this checkpoint triggered continuing on a new sandbox.
     reboarded: bool = False
+    #: True when background processes may have been alive at this step. A
+    #: disk-only replay of such a step will not have them.
+    live_background: bool = False
 
 
 @dataclass
@@ -184,13 +208,16 @@ class Checkpointer:
         if not self.enabled():
             return None
 
+        live_background = bool(self.tracker
+                               and self.tracker.may_have_background)
         mutated = self.always or self.tracker is None or self.tracker.dirty
         if not mutated and self.latest_snapshot_id:
             # Nothing could have changed: the previous snapshot is this step's
             # state, so record the mapping without paying for a capture.
             return self._record(CheckpointRecord(
                 turn=turn, snapshot_id=self.latest_snapshot_id,
-                captured=False, disk_only=self.disk_only))
+                captured=False, disk_only=self.disk_only,
+                live_background=live_background))
 
         name = f"{self.name_prefix}step-{turn}" if self.name_prefix else None
         capture_started = time.monotonic()
@@ -215,6 +242,7 @@ class Checkpointer:
             rootfs_layers=snapshot.rootfs_layers,
             memory_layers=snapshot.memory_layers,
             chain_size_mb=snapshot.chain_size_mb,
+            live_background=live_background,
         )
 
         # Every uncompacted capture adds exactly one layer to each chain it

@@ -93,6 +93,27 @@ def environment_mismatch(recorded: dict, current: dict) -> list[str]:
     return differences
 
 
+def replay_caveats(trajectory_path: Path | str, step: int) -> list[str]:
+    """Reasons a replay of ``step`` may diverge from the recorded run.
+
+    A disk-only checkpoint captures the filesystem, not processes: a step
+    taken while a background process ran replays without it -- its pids
+    answer errors, tmpfs scratch and unflushed output are gone. Empty for
+    the common all-synchronous episode.
+    """
+    data = json.loads(Path(trajectory_path).read_text())
+    checkpoints = (data.get("info") or {}).get("checkpoints") or {}
+    caveats = []
+    for record in checkpoints.get("records") or []:
+        if record.get("turn") == step and record.get("live_background") \
+                and record.get("disk_only", True):
+            caveats.append(
+                "background processes may have been alive at this step; a "
+                "disk-only replay will not have them (their pids will answer "
+                "errors, and anything they had not flushed to disk is gone)")
+    return caveats
+
+
 def snapshot_for_step(step_snapshots: dict[int, str], step: int) -> Optional[str]:
     """The snapshot holding the environment as of ``step``.
 
