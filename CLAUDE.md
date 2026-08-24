@@ -97,7 +97,8 @@ another.
 │      `execution.interceptors: my_file.py`.
 │
 │    the agent loop           __init__.py + llm, conversation, prompts, hooks,
-│                             trace, tools, custom_tools, checkpoints
+│                             trace, tools, custom_tools, checkpoints,
+│                             context_window
 │      This repo's own agent. A consumer of the chain, not part of it —
 │      sandbox.py and mcp_server.py mount the chain without it.
 └───────────────────────┬──────────────────────────────────────────────────────
@@ -310,6 +311,20 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
   accepted a wrong-arch binary), package managers as fallbacks that clean
   their indexes after installing. Measured: 0.5s/+7 MiB with a fetcher in the
   image, 4s/+33 MiB via slimmed apt on a bare image (was 15s/+89 MiB).
+- **Context window** is managed at two seams, and they are not redundant:
+  `TruncateInterceptor` (L2, tool path) bounds what each single result costs and
+  also protects external agents through the MCP proxy; `context_window.py`'s
+  `before_query` guard folds *accumulated* old tool outputs once the transcript
+  passes budget. Flow vs stock. Elision, not summarization: assistant turns (what
+  the agent did) stay verbatim, old tool outputs (what it saw, mostly re-obtainable)
+  become one-line stubs; it cuts in bulk to a low target rather than one message
+  per step, because rewriting old messages invalidates the prompt cache. Budget is
+  measured from the provider's reported input tokens for the last call, turned into
+  a chars/token ratio -- a character estimate measured **3x low** on a code-heavy
+  transcript, and tool_calls (a `text_editor` write carries the whole file) are the
+  reason: they are in what the model sees but not in the saved trajectory. The
+  protected recent tail is a floor: a cut target below it is unreachable, and the
+  guard traces that instead of appearing to succeed.
 - Output lands in `results/<run>/`. Treat `results/` as generated data.
 
 ### Kubernetes stack

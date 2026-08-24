@@ -118,6 +118,12 @@ class CostTracker:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     api_calls: int = 0
+    #: Input tokens of the MOST RECENT call -- what that call actually put in
+    #: the context window, as the provider counted it. The totals above
+    #: accumulate the transcript once per call, so they say nothing about how
+    #: full the window is; anything managing the window needs this instead of
+    #: estimating from characters (measured 3x off on code-heavy transcripts).
+    last_input_tokens: int = 0
 
     def update(self, response: Any):
         self.api_calls += 1
@@ -128,6 +134,14 @@ class CostTracker:
             usage = response.usage
             self.cache_read_tokens += getattr(usage, "cache_read_input_tokens", 0) or 0
             self.cache_write_tokens += getattr(usage, "cache_creation_input_tokens", 0) or 0
+            # Cached input still occupies the window. Providers differ on
+            # whether prompt_tokens already includes it, so this sum can
+            # over-count by the cached fraction -- deliberately the safe
+            # direction for a guard: eliding slightly early costs a little
+            # context, overflowing the window kills the run.
+            self.last_input_tokens = ((usage.prompt_tokens or 0)
+                                      + (getattr(usage, "cache_read_input_tokens", 0) or 0)
+                                      + (getattr(usage, "cache_creation_input_tokens", 0) or 0))
         try:
             from litellm import completion_cost
             self.total_cost += completion_cost(completion_response=response)
