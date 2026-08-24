@@ -74,6 +74,10 @@ READ_ONLY_EDITOR_COMMANDS = frozenset({"view"})
 READ_ONLY_PROCESS_COMMANDS = frozenset({"read", "peek", "list", "status"})
 
 
+def _failed_to_grow(previous: Optional[int], current: Optional[int]) -> bool:
+    return previous is not None and current is not None and current <= previous
+
+
 def call_mutates(tool_name: str, args: dict) -> bool:
     """Whether a tool call could have changed the environment.
 
@@ -130,6 +134,7 @@ class CheckpointRecord:
     #: Wall time of the capture call; 0.0 for reused steps.
     capture_seconds: float = 0.0
     rootfs_layers: Optional[int] = None
+    memory_layers: Optional[int] = None
     chain_size_mb: Optional[int] = None
     #: Set when this checkpoint triggered continuing on a new sandbox.
     reboarded: bool = False
@@ -159,6 +164,7 @@ class Checkpointer:
     records: list[CheckpointRecord] = field(default_factory=list)
     latest_snapshot_id: Optional[str] = None
     _previous_layers: Optional[int] = None
+    _previous_memory_layers: Optional[int] = None
     _consecutive_compactions: int = 0
     _warned_budget: bool = False
 
@@ -207,24 +213,43 @@ class Checkpointer:
             disk_only=self.disk_only,
             capture_seconds=capture_seconds,
             rootfs_layers=snapshot.rootfs_layers,
+            memory_layers=snapshot.memory_layers,
             chain_size_mb=snapshot.chain_size_mb,
         )
 
-        layers = snapshot.rootfs_layers
-        if layers is not None:
-            # Every uncompacted capture adds exactly one layer, so a count
-            # that FAILED TO GROW means the server compacted this chain and
-            # this snapshot is a compact base: continue from it, or every
-            # later capture re-compacts. `<=` rather than `<`: a chain whose
-            # per-cycle suffix merges into a single layer (a deep inherited
-            # prefix plus one big delta) compacts at the same count it had
-            # before -- seen live as a constant 13 with a re-compaction every
-            # step and a drop that never came.
-            compacted = (self._previous_layers is not None
-                         and layers <= self._previous_layers)
+        # Every uncompacted capture adds exactly one layer to each chain it
+        # writes, so a count that FAILED TO GROW means the server compacted
+        # that chain and this snapshot is its compact base: continue from it,
+        # or every later capture re-compacts. `<=` rather than `<`: a chain
+        # whose per-cycle suffix merges into a single layer compacts at the
+        # same count it had before -- seen live as a constant 13 with a
+        # re-compaction every step and a drop that never came.
+        #
+        # BOTH chains are watched. Full snapshots carry a memory chain that
+        # compacts on its own schedule (memory intervals are much larger than
+        # disk deltas, so it hits a shared size budget far sooner), and each
+        # of its compactions writes a merged layer close to the whole VM's
+        # memory. Watching only rootfs sat through a live episode where the
+        # memory chain compacted on 10 of 32 captures -- ~8 GB of merged
+        # layers -- while the rootfs count grew +1 every time.
+        compacted = _failed_to_grow(self._previous_layers,
+                                    snapshot.rootfs_layers)
+        # Only a real memory chain participates: disk-only snapshots report
+        # zero memory layers, and 0 <= 0 must not read as compaction.
+        if (snapshot.memory_layers or 0) >= 1:
+            compacted = compacted or _failed_to_grow(
+                self._previous_memory_layers, snapshot.memory_layers)
+        if snapshot.rootfs_layers is not None or snapshot.memory_layers:
             if compacted and self.reboard:
                 record.reboarded = bool(self.session.swap_sandbox(snapshot))
-            self._previous_layers = None if record.reboarded else layers
+            if record.reboarded:
+                self._previous_layers = None
+                self._previous_memory_layers = None
+            else:
+                self._previous_layers = snapshot.rootfs_layers
+                self._previous_memory_layers = (
+                    snapshot.memory_layers
+                    if (snapshot.memory_layers or 0) >= 1 else None)
 
             # A budget smaller than a single step's writes degrades silently:
             # every capture compacts, and with re-boarding that means a swap

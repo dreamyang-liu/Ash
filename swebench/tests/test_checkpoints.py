@@ -11,6 +11,7 @@ from swebench.agent.pipeline import CallContext
 class FakeSnapshot:
     id: str
     rootfs_layers: int | None = None
+    memory_layers: int | None = None
     chain_size_mb: int | None = None
 
 
@@ -361,3 +362,41 @@ def test_every_capture_compacting_warns_once(caplog):
             cp.after_step(turn)
     warnings = [r for r in caplog.records if "compaction budget" in r.message]
     assert len(warnings) == 1, "warn once, not per step"
+
+
+def test_memory_chain_compaction_also_triggers_reboard():
+    """Full snapshots carry a memory chain that compacts on its own schedule
+    (memory intervals dwarf disk deltas). Watching only rootfs sat through a
+    live episode where the memory chain compacted on 10 of 32 captures --
+    each writing a near-VM-sized merged layer -- while rootfs grew +1 every
+    time and the detector saw nothing."""
+    session = FakeSession(layers=[13, 14, 15, 16])
+    # rootfs grows normally; memory chain: grows, then compacts (15 -> 2).
+    mem = [2, 15, 2, 3]
+    orig = session.snapshot
+    def snapshot(name=None, disk_only=True):
+        snap = orig(name=name, disk_only=disk_only)
+        snap.memory_layers = mem[len(session.captures) - 1]
+        return snap
+    session.snapshot = snapshot
+
+    cp = Checkpointer(session=session, always=True, disk_only=False)
+    records = [cp.after_step(t) for t in (1, 2, 3, 4)]
+    assert [r.reboarded for r in records] == [False, False, True, False]
+    assert session.swaps == ["snap-2"], "re-board on the memory-chain collapse"
+
+
+def test_disk_only_zero_memory_layers_never_reads_as_compaction():
+    # Disk-only snapshots report 0 memory layers every time; 0 <= 0 must not
+    # trigger a re-board on every step.
+    session = FakeSession(layers=[2, 3, 4])
+    orig = session.snapshot
+    def snapshot(name=None, disk_only=True):
+        snap = orig(name=name, disk_only=disk_only)
+        snap.memory_layers = 0
+        return snap
+    session.snapshot = snapshot
+    cp = Checkpointer(session=session, always=True)
+    for t in (1, 2, 3):
+        cp.after_step(t)
+    assert session.swaps == []
