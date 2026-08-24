@@ -172,3 +172,90 @@ def test_guard_is_configurable_and_can_be_disabled():
                                           "context_target_fraction": 0.3}})
     assert flat["context_budget_fraction"] == 0.0
     assert flat["context_target_fraction"] == 0.3
+
+
+# --- strategies ------------------------------------------------------------ #
+
+def test_unknown_strategy_is_refused_at_construction():
+    """A typo in config must fail loudly, not silently leave the transcript
+    unmanaged until the window overflows."""
+    import pytest
+    with pytest.raises(ValueError, match="unknown context strategy"):
+        make_context_window_guard(strategy="compress")
+
+
+def test_summarize_replaces_the_span_with_one_summary(monkeypatch):
+    """The findings survive in prose where elision would have kept only the
+    commands. Every folded message is still replaced, because a provider
+    requires one tool message per tool call in the preceding turn."""
+    import swebench.agent.context_window as cw
+    monkeypatch.setattr(cw, "_ask_for_summary",
+                        lambda agent, model, excerpts:
+                        f"Three tests failed in fse.c (saw {len(excerpts)} outputs).")
+
+    conv = conversation_with(results=30, chars_each=12_000)
+    agent = FakeAgent()
+    make_context_window_guard(strategy="summarize", window_tokens=20_000,
+                              keep_recent=5)(agent, conv)
+
+    tools = [m for m in conv.messages if m["role"] == "tool"]
+    assert tools[0]["content"].startswith("[tool output summarized")
+    assert "Three tests failed in fse.c" in tools[0]["content"]
+    # The rest of the span is stubbed, not deleted.
+    assert all(m["content"].startswith("[tool output") for m in tools[:-5])
+    assert all(not m["content"].startswith("[tool output") for m in tools[-5:])
+
+
+def test_summarize_falls_back_to_elision_when_the_model_cannot(monkeypatch):
+    """Being unable to summarize must not become being unable to stay inside
+    the window."""
+    import swebench.agent.context_window as cw
+    monkeypatch.setattr(cw, "_ask_for_summary",
+                        lambda agent, model, excerpts: "")
+
+    conv = conversation_with(results=30, chars_each=12_000)
+    make_context_window_guard(strategy="summarize", window_tokens=20_000,
+                              keep_recent=5)(FakeAgent(), conv)
+    tools = [m for m in conv.messages if m["role"] == "tool"]
+    assert tools[0]["content"].startswith("[tool output elided")
+    assert count_tokens(conv.messages, "gpt-4o-mini") < 20_000
+
+
+def test_summary_cost_is_charged_to_the_run(monkeypatch):
+    """A hidden model call would make a run's reported cost wrong."""
+    import swebench.agent.context_window as cw
+
+    class Response:
+        class Choice:
+            class Message:
+                content = "findings"
+            message = Message()
+        choices = [Choice()]
+        usage = None
+
+    class FakeLitellm:
+        @staticmethod
+        def completion(**kwargs):
+            return Response()
+
+    monkeypatch.setitem(__import__("sys").modules, "litellm", FakeLitellm)
+
+    charged = []
+
+    class CountingAgent(FakeAgent):
+        class cost:
+            @staticmethod
+            def update(response):
+                charged.append(response)
+
+    text = cw._ask_for_summary(CountingAgent(), "gpt-4o-mini", ["some output"])
+    assert text == "findings"
+    assert len(charged) == 1, "the summary call is spent from the run's budget"
+
+
+def test_both_strategies_are_selectable_from_config():
+    from swebench.__main__ import _flatten_config
+    assert _flatten_config({"execution": {"context_strategy": "summarize"}})[
+        "context_strategy"] == "summarize"
+    from swebench.agent.context_window import STRATEGIES
+    assert set(STRATEGIES) == {"elide", "summarize"}

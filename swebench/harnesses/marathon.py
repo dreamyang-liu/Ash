@@ -116,7 +116,8 @@ class MarathonHarness(BaseHarness):
         agent.use_panel(build_panel(config.get("tools", DEFAULT_PANEL),
                                     agent_config.custom_tools_dir,
                                     registry=session.tools))
-        agent.before_query_hooks.append(make_context_window_guard())
+        agent.before_query_hooks.append(make_context_window_guard(
+            strategy=config.get("context_strategy", "elide")))
 
         checkpointer = None
         checkpoint_cfg = config.get("checkpoints") or {}

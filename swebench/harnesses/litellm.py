@@ -137,6 +137,7 @@ class LiteLLMHarness(BaseHarness):
             budget_fraction = float(c.get("context_budget_fraction", 0.70))
             if budget_fraction > 0:
                 agent.before_query_hooks.append(make_context_window_guard(
+                    strategy=c.get("context_strategy", "elide"),
                     budget_fraction=budget_fraction,
                     target_fraction=float(
                         c.get("context_target_fraction", 0.45))))

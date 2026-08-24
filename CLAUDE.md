@@ -329,7 +329,15 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
   passes budget. Flow vs stock. Elision, not summarization: assistant turns (what
   the agent did) stay verbatim, old tool outputs (what it saw, mostly re-obtainable)
   become one-line stubs; it cuts in bulk to a low target rather than one message
-  per step, because rewriting old messages invalidates the prompt cache.
+  per step, because rewriting old messages invalidates the prompt cache. Two
+  strategies, selected by `execution.context_strategy`: `elide` (default; free,
+  cannot invent) or `summarize` (one model call per firing writes the span's
+  findings into the stub). Measured on a real 133-step transcript, both hit the
+  same 23%-of-original target; elision cost 0.2s and nothing, the summary cost
+  17.7s and $0.09 and kept facts the agent would otherwise re-derive (the exact
+  build command, that `xxd`/`python3` are absent, the expected-hash table). A
+  summary that fails or comes back empty falls back to elision, and its cost is
+  charged to the run's own budget rather than hidden.
   Both the budget and the measurement come from the provider, never from a guess:
   the budget is a fraction of the model's own `max_input_tokens` (litellm model
   metadata — a real 133-step run measured ~139K input tokens, fatal against a 200K

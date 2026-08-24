@@ -108,6 +108,8 @@ def _flatten_config(config: dict) -> dict:
         ("execution", "checkpoints"): "checkpoints",
         # Fractions of the model's own context window: elide above the first,
         # down to the second. 0 disables the guard.
+        # elide (free) or summarize (one model call, keeps conclusions).
+        ("execution", "context_strategy"): "context_strategy",
         ("execution", "context_budget_fraction"): "context_budget_fraction",
         ("execution", "context_target_fraction"): "context_target_fraction",
     }

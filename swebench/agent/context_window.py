@@ -19,11 +19,29 @@ from the provider.
   Character estimates came out 2-3x off in *both* directions depending on
   content, which is precisely the error a window guard cannot afford.
 
-What it does when over budget is elide, not summarize: old *tool outputs*
-become one-line stubs while every assistant turn -- the reasoning and the
-commands it ran -- stays verbatim. What the agent did is cheap and
-irreplaceable; what it saw is bulky and mostly re-obtainable. No extra model
-call, no summary that can lie.
+What it does when over budget is a choice of two strategies, and which one is
+right depends on the workload rather than on taste:
+
+- ``elide`` (default) replaces old *tool outputs* with a one-line stub while
+  every assistant turn -- the reasoning and the commands it ran -- stays
+  verbatim. What the agent did is cheap and irreplaceable; what it saw is
+  bulky and mostly re-obtainable. Costs nothing and cannot invent anything.
+- ``summarize`` asks the model to compress the folded span into a paragraph of
+  findings first, keeping conclusions that would otherwise be lost when only
+  the commands survive. It costs one extra model call per firing and can
+  compress wrongly -- a summary saying "tests pass" over output that showed
+  three failures is not detectable downstream, which is why it is opt-in.
+
+Measured against one real 133-step transcript (48.5K tokens, folding 125-128
+old outputs down to 23%): elision took 0.2s and nothing, the summary took
+17.7s and $0.09, and what the money bought was the kind of fact the agent
+would otherwise re-derive -- the exact build command, that `xxd` and `python3`
+are absent from the image, the table of expected test hashes. Both reached the
+same token target, so the choice is about what the next hour of the run needs,
+not about size.
+
+Both keep assistant turns intact; they differ only in what replaces the old
+outputs.
 
 Elision runs in bulk and rarely rather than as a sliding window: prompt
 caching prices the transcript by its stable prefix, so rewriting one old
@@ -58,9 +76,18 @@ _KEEP_RECENT_RESULTS = 20
 #: gate is deliberately pessimistic.
 _DENSEST_CHARS_PER_TOKEN = 1.5
 
+#: Prefix shared by every replacement, so a second pass can tell what it has
+#: already folded and leave the prompt cache alone.
+_FOLD_MARKER = "[tool output"
+
 _STUB = ("[tool output elided to fit the context window -- {chars} chars. "
          "The state it described may be stale; re-run the command if it "
          "matters now.]")
+
+_SUMMARY_STUB = (
+    "[tool output summarized to fit the context window -- {count} earlier "
+    "outputs. What they established:\n{summary}\n"
+    "Details are gone; re-run a command if you need its exact output.]")
 
 
 def transcript_chars(messages: list[dict]) -> int:
@@ -106,18 +133,108 @@ def count_tokens(messages: list[dict], model: str | None,
     return int(transcript_chars(messages) / 3)
 
 
-def make_context_window_guard(budget_fraction: float = DEFAULT_BUDGET_FRACTION,
+def _elide(agent, conv, indexes: list[int], model, tools, target: int) -> int:
+    """Replace each old tool output with a stub. Returns how many were folded."""
+    folded = 0
+    for index in indexes:
+        message = conv.messages[index]
+        content = str(message.get("content") or "")
+        if content.startswith(_FOLD_MARKER):
+            continue
+        message["content"] = _STUB.format(chars=len(content))
+        folded += 1
+        # Re-count every few rather than every one: counting is a tokenizer
+        # pass, and the point is to cut in bulk anyway.
+        if folded % 5 == 0 and count_tokens(conv.messages, model, tools) <= target:
+            break
+    return folded
+
+
+def _summarize(agent, conv, indexes: list[int], model, tools, target: int) -> int:
+    """Replace a span of old tool outputs with one model-written summary.
+
+    Every folded message is replaced: the first carries the summary and the
+    rest carry the plain stub, because a tool message may not simply vanish --
+    the provider requires one per tool call in the preceding assistant turn.
+
+    A failed or empty summary falls back to plain elision. Being unable to
+    summarize must not become being unable to stay inside the window.
+    """
+    spans = [i for i in indexes
+             if not str(conv.messages[i].get("content") or "").startswith(_FOLD_MARKER)]
+    if not spans:
+        return 0
+
+    excerpts = []
+    for index in spans:
+        content = str(conv.messages[index].get("content") or "")
+        # Head and tail: a command's verdict tends to sit at one end or the
+        # other, and the middle of a 12K dump is rarely where the answer is.
+        excerpts.append(content[:1500] + ("\n...\n" + content[-1500:]
+                                          if len(content) > 3000 else ""))
+    summary = _ask_for_summary(agent, model, excerpts)
+    if not summary:
+        return _elide(agent, conv, indexes, model, tools, target)
+
+    conv.messages[spans[0]]["content"] = _SUMMARY_STUB.format(
+        count=len(spans), summary=summary.strip())
+    for index in spans[1:]:
+        content = str(conv.messages[index].get("content") or "")
+        conv.messages[index]["content"] = _STUB.format(chars=len(content))
+    return len(spans)
+
+
+def _ask_for_summary(agent, model, excerpts: list[str]) -> str:
+    """One model call that compresses tool output into findings."""
+    if not model:
+        return ""
+    prompt = ("Below are outputs from tool calls an agent made earlier, in "
+              "order. They are about to be dropped from its context to make "
+              "room. Write a compact factual summary of what they established "
+              "-- results, errors, file and symbol names, numbers -- that the "
+              "agent would otherwise have to re-discover. No advice, no "
+              "restating the commands, under 300 words.\n\n"
+              + "\n\n--- output ---\n".join(excerpts))
+    try:
+        import litellm
+        response = litellm.completion(
+            model=model, messages=[{"role": "user", "content": prompt}],
+            max_tokens=600)
+        text = response.choices[0].message.content or ""
+        cost = getattr(agent, "cost", None)
+        if cost is not None and hasattr(cost, "update"):
+            # The summary is spent from the run's budget like any other call;
+            # hiding it would make a run's cost unaccountable.
+            cost.update(response)
+        return text
+    except Exception:
+        return ""
+
+
+#: Strategies by name, for configuration to select between.
+STRATEGIES = {"elide": _elide, "summarize": _summarize}
+
+
+def make_context_window_guard(strategy: str = "elide",
+                              budget_fraction: float = DEFAULT_BUDGET_FRACTION,
                               target_fraction: float = DEFAULT_TARGET_FRACTION,
                               keep_recent: int = _KEEP_RECENT_RESULTS,
                               window_tokens: int | None = None):
     """A ``before_query`` hook that keeps the transcript inside the window.
 
+    ``strategy`` is ``elide`` (free, cannot invent) or ``summarize`` (one extra
+    model call per firing, keeps conclusions, can compress wrongly).
     ``window_tokens`` overrides the model's declared window; leave it unset to
     read the model's own metadata. ``target_fraction`` is a target rather than
-    a guarantee -- the ``keep_recent`` newest tool outputs are never elided,
-    so a target below what that tail costs cannot be reached, and the guard
-    says so instead of appearing to succeed.
+    a guarantee -- the ``keep_recent`` newest tool outputs are never folded, so
+    a target below what that tail costs cannot be reached, and the guard says
+    so instead of appearing to succeed.
     """
+    fold = STRATEGIES.get(strategy)
+    if fold is None:
+        raise ValueError(
+            f"unknown context strategy {strategy!r}; "
+            f"choose from {sorted(STRATEGIES)}")
     def context_window_guard(agent, conv) -> None:
         model = getattr(getattr(agent, "config", None), "model", None)
         window = window_tokens or model_window_tokens(model)
@@ -134,30 +251,18 @@ def make_context_window_guard(budget_fraction: float = DEFAULT_BUDGET_FRACTION,
 
         tool_indexes = [i for i, m in enumerate(conv.messages)
                         if m.get("role") == "tool"]
-        elidable = (tool_indexes[:-keep_recent]
+        foldable = (tool_indexes[:-keep_recent]
                     if keep_recent and len(tool_indexes) > keep_recent
                     else tool_indexes if not keep_recent else [])
 
-        elided = 0
-        for index in elidable:
-            message = conv.messages[index]
-            content = str(message.get("content") or "")
-            if content.startswith("[tool output elided"):
-                continue
-            message["content"] = _STUB.format(chars=len(content))
-            elided += 1
-            # Re-count every few elisions rather than every one: counting is a
-            # tokenizer pass, and the point is to cut in bulk anyway.
-            if elided % 5 == 0 and count_tokens(
-                    conv.messages, model, tools) <= target:
-                break
+        folded = fold(agent, conv, foldable, model, tools, target)
 
         trace = getattr(agent, "_trace", None)
         if not trace:
             return
         remaining = count_tokens(conv.messages, model, tools)
-        if elided:
-            trace(f"\n[context window: elided {elided} old tool outputs; "
+        if folded:
+            trace(f"\n[context window: {strategy}d {folded} old tool outputs; "
                   f"~{remaining} of {window} tokens used]\n")
         if remaining > target:
             # Everything eligible is already gone: what is left is the
