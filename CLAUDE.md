@@ -337,7 +337,11 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
   17.7s and $0.09 and kept facts the agent would otherwise re-derive (the exact
   build command, that `xxd`/`python3` are absent, the expected-hash table). A
   summary that fails or comes back empty falls back to elision, and its cost is
-  charged to the run's own budget rather than hidden.
+  charged to the run's own budget rather than hidden. Defaults differ by horizon
+  on purpose: the `marathon` harness summarizes (measured: 7 of 8 sampled facts
+  vanish under elision, tool calls included, because on that horizon the facts
+  live only in tool output), while benchmark runs elide (at 30 steps nothing
+  folds anyway).
   Both the budget and the measurement come from the provider, never from a guess:
   the budget is a fraction of the model's own `max_input_tokens` (litellm model
   metadata — a real 133-step run measured ~139K input tokens, fatal against a 200K

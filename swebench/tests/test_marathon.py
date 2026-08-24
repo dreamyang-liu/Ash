@@ -200,3 +200,18 @@ def test_harness_budgets_are_not_swebench_shaped():
     source = inspect.getsource(MarathonHarness._attempt)
     assert 'step_limit", 1000' in source
     assert 'cost_limit", 50.0' in source
+
+
+def test_marathon_summarizes_context_while_benchmarks_elide():
+    """Different horizons want different folding. On marathon tasks the facts
+    worth keeping live only in tool output -- measured on a real 133-step
+    attempt, 7 of 8 sampled facts (build flags, expected hashes, which
+    interpreters the image lacks) were gone after elision, tool calls
+    included -- and rediscovering one costs more steps than the summary costs
+    to write. Benchmark-length runs never fold at all, so they stay free."""
+    import inspect
+    from swebench.harnesses import litellm as benchmark
+    from swebench.harnesses import marathon as long_horizon
+
+    assert 'context_strategy", "summarize"' in inspect.getsource(long_horizon)
+    assert 'context_strategy", "elide"' in inspect.getsource(benchmark)

@@ -25,6 +25,9 @@ What this path must do differently:
 - **A partial score is recorded next to the binary reward.** Marathon's reward
   is all-or-nothing, and on tasks this long nearly every attempt scores zero;
   `partial_score` is what distinguishes 37 of 43 tests from none.
+- **Context folding summarizes instead of eliding.** See `_attempt`: on this
+  horizon the facts worth keeping exist only in tool output, so dropping them
+  makes the agent rediscover what it knew.
 """
 
 from pathlib import Path
@@ -116,8 +119,17 @@ class MarathonHarness(BaseHarness):
         agent.use_panel(build_panel(config.get("tools", DEFAULT_PANEL),
                                     agent_config.custom_tools_dir,
                                     registry=session.tools))
+        # Summarize rather than elide, by default and only here. On this
+        # horizon the facts worth keeping live in tool output and nowhere
+        # else: measured on a real 133-step attempt, 7 of 8 sampled facts --
+        # the build flags, the expected hashes, that python3 and xxd are
+        # absent from the image -- were gone after elision, tool calls
+        # included. Rediscovering one of those costs more steps (~$0.23 each)
+        # than the summary costs to write (~$0.09), and the same run's log
+        # shows the agent re-litigating conclusions it had already reached.
+        # Benchmark-length runs keep eliding: at 30 steps nothing folds at all.
         agent.before_query_hooks.append(make_context_window_guard(
-            strategy=config.get("context_strategy", "elide")))
+            strategy=config.get("context_strategy", "summarize")))
 
         checkpointer = None
         checkpoint_cfg = config.get("checkpoints") or {}
