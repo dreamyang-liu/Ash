@@ -304,7 +304,12 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
   `~/.cache/ash-swebench/`, part of the template's content-addressed identity):
   without it, every sandbox's *first* `grep_files` apt-gets rg -- measured at
   ~15s and +89 MiB of disk writes (the apt package indexes), all landing in the
-  episode's first checkpoint. With it: 0.5s, +2 MiB.
+  episode's first checkpoint. With it: 0.5s, +2 MiB. The runtime's own
+  provisioning (for sandboxes without a baked template) was also reordered:
+  static tarball first (arch-aware, verified by *running* rg -- LookPath
+  accepted a wrong-arch binary), package managers as fallbacks that clean
+  their indexes after installing. Measured: 0.5s/+7 MiB with a fetcher in the
+  image, 4s/+33 MiB via slimmed apt on a bare image (was 15s/+89 MiB).
 - Output lands in `results/<run>/`. Treat `results/` as generated data.
 
 ### Kubernetes stack

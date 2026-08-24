@@ -5,14 +5,28 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	goruntime "runtime"
 	"strings"
 	"sync"
 )
 
-const (
-	rgDir     = "ripgrep-14.1.1-x86_64-unknown-linux-musl"
-	rgTarball = "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/" + rgDir + ".tar.gz"
-)
+const rgVersion = "14.1.1"
+
+// rgReleaseDir is the tarball's top-level directory for this machine, or ""
+// when no static release exists for it. Arch matters: a wrong-arch binary
+// downloads, unpacks and lands on PATH without complaint, and only fails at
+// exec time -- which is also why verification below runs rg instead of
+// looking it up.
+func rgReleaseDir() string {
+	switch goruntime.GOARCH {
+	case "amd64":
+		return "ripgrep-" + rgVersion + "-x86_64-unknown-linux-musl"
+	case "arm64":
+		return "ripgrep-" + rgVersion + "-aarch64-unknown-linux-gnu"
+	default:
+		return ""
+	}
+}
 
 // Provisioning ripgrep is retried until it succeeds, and only success is
 // remembered. A sync.Once here cached the *failure*: one attempt in a bare
@@ -24,16 +38,45 @@ var (
 	rgReady bool
 )
 
-// rgInstallAttempts are tried in order. Each is a full shell command because
-// the apt route needs its index refreshed first -- without `apt-get update` a
-// slim image reports "Unable to locate package ripgrep" and the tool looked
-// broken -- and because the static fallback needs whichever fetcher exists.
-var rgInstallAttempts = []string{
-	"apt-get update -qq && apt-get install -y -qq ripgrep",
-	"apk add --no-cache ripgrep",
-	"yum install -y -q ripgrep",
-	"curl -fsSL " + rgTarball + " | tar xz -C /tmp && cp /tmp/" + rgDir + "/rg /usr/local/bin/rg",
-	"wget -qO- " + rgTarball + " | tar xz -C /tmp && cp /tmp/" + rgDir + "/rg /usr/local/bin/rg",
+// rgInstallAttempts are tried in order: the static tarball first, package
+// managers as fallbacks. It used to be the other way around, and the cost
+// hid in plain sight: on apt images the first grep_files ran `apt-get
+// update`, whose package indexes alone are ~76 MiB of disk writes (measured
+// ~89 MiB total and ~15s), charged to whatever was watching the disk -- for
+// a checkpointed rollout, the episode's first snapshot. The tarball is a
+// ~5 MiB static binary. Package managers remain for machines the release
+// does not cover and for images without a fetcher; the apt route still
+// refreshes its index first, because without `apt-get update` a slim image
+// reports "Unable to locate package ripgrep" and the tool looked broken.
+func rgInstallAttempts() []string {
+	var attempts []string
+	if dir := rgReleaseDir(); dir != "" {
+		tarball := "https://github.com/BurntSushi/ripgrep/releases/download/" +
+			rgVersion + "/" + dir + ".tar.gz"
+		fetch := " | tar xz -C /tmp && cp /tmp/" + dir + "/rg /usr/local/bin/rg" +
+			"; rm -rf /tmp/" + dir
+		attempts = append(attempts,
+			"curl -fsSL "+tarball+fetch,
+			"wget -qO- "+tarball+fetch,
+		)
+	}
+	// Package indexes are fetched only to find one package; dropping them
+	// afterwards keeps the ~50-80 MiB of lists out of the sandbox's disk
+	// state (and out of a checkpointed rollout's first snapshot). The
+	// install itself stays, so a failure still reports through `err`.
+	return append(attempts,
+		"apt-get update -qq && apt-get install -y -qq ripgrep && rm -rf /var/lib/apt/lists/*",
+		"apk add --no-cache ripgrep",
+		"yum install -y -q ripgrep && yum clean all -q",
+	)
+}
+
+// rgWorks reports whether an rg on PATH actually executes. LookPath alone
+// accepted a wrong-arch binary (present, executable bit set, exec format
+// error at run time), which would have disabled grep_files while looking
+// provisioned.
+func rgWorks() bool {
+	return exec.Command("rg", "--version").Run() == nil
 }
 
 func ensureRipgrep() error {
@@ -45,20 +88,21 @@ func ensureRipgrep() error {
 	}
 	// Re-checked on every attempt, so an rg that appeared since the last
 	// failure is picked up instead of being ignored for good.
-	if _, err := exec.LookPath("rg"); err == nil {
+	if rgWorks() {
 		rgReady = true
 		return nil
 	}
 
+	attempts := rgInstallAttempts()
 	var failures []string
-	for _, attempt := range rgInstallAttempts {
+	for _, attempt := range attempts {
 		out, err := exec.Command("sh", "-c", attempt).CombinedOutput()
 		if err == nil {
-			if _, lookErr := exec.LookPath("rg"); lookErr == nil {
+			if rgWorks() {
 				rgReady = true
 				return nil
 			}
-			err = fmt.Errorf("completed but rg still not on PATH")
+			err = fmt.Errorf("completed but rg still not runnable")
 		}
 		failures = append(failures, fmt.Sprintf("%s: %v (%s)",
 			strings.Fields(attempt)[0], err, lastLine(out)))
@@ -66,7 +110,7 @@ func ensureRipgrep() error {
 	// Say what was tried: "failed to install ripgrep" alone gives an operator
 	// nothing to act on.
 	return fmt.Errorf("failed to install ripgrep; tried %d methods: %s",
-		len(rgInstallAttempts), strings.Join(failures, "; "))
+		len(attempts), strings.Join(failures, "; "))
 }
 
 // lastLine is the most informative part of a package manager's noise.
