@@ -165,7 +165,13 @@ def _wire_message(message: dict) -> Optional[dict]:
     role = message.get("role")
     if role == "error":
         return None
-    if role == "tool_result":
+    if role in ("tool_result", "tool"):
+        # Both spellings occur: a run records "tool_result", and a run that was
+        # itself resumed saves the wire-format "tool" rows it was seeded with.
+        # Missing this second case cost a chained resume its whole run -- the
+        # id was stripped by the fallback below, litellm invented UUIDs for the
+        # results, and Bedrock rejected the conversation ("Expected toolResult
+        # blocks ... for the following Ids").
         return {"role": "tool",
                 "tool_call_id": message.get("tool_call_id"),
                 "content": message.get("content") or ""}
@@ -174,7 +180,12 @@ def _wire_message(message: dict) -> Optional[dict]:
         if message.get("tool_calls"):
             wire["tool_calls"] = message["tool_calls"]
         return wire
-    return {"role": role, "content": message.get("content") or ""}
+    if role in ("system", "user"):
+        return {"role": role, "content": message.get("content") or ""}
+    # An unknown role is not silently reshaped into a message that looks
+    # plausible and is not: dropping it is the honest failure, and the roles
+    # this stack writes are all handled above.
+    return None
 
 
 @dataclass

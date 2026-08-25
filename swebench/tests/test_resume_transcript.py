@@ -173,3 +173,45 @@ def test_prefix_cut_matches_the_map_on_a_resumed_trajectory(tmp_path):
     assert len(prefix) == 6, "through assistant #2 and its tool result"
     assert prefix[-1]["role"] == "tool", "translated on the way out"
     assert prefix[-1]["tool_call_id"] == "c2"
+
+
+def test_a_resumed_run_can_itself_be_resumed(tmp_path):
+    """Chained resume: a run that was seeded saves its history in wire format,
+    so its tool rows read `tool`, not `tool_result`. Handling only the latter
+    stripped the id through the fallback, litellm invented UUIDs for the
+    results, and Bedrock rejected the whole conversation -- "Expected
+    toolResult blocks at messages.2.content for the following Ids". Zero model
+    calls, on a 1473-step transcript."""
+    from swebench.replay import messages_through_step
+
+    path = tmp_path / "seg2.json"
+    path.write_text(json.dumps({"messages": [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "go"},
+        # Parallel calls, which is where the provider is strictest.
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_a", "type": "function",
+             "function": {"name": "shell", "arguments": "{}"}},
+            {"id": "call_b", "type": "function",
+             "function": {"name": "shell", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call_a", "content": "out-a"},
+        {"role": "tool", "tool_call_id": "call_b", "content": "out-b"},
+        {"role": "assistant", "content": "done"},
+    ]}))
+    prefix = messages_through_step(path, 2)
+    tools = [m for m in prefix if m["role"] == "tool"]
+    assert [m["tool_call_id"] for m in tools] == ["call_a", "call_b"], (
+        "every tool result must still name the call it answers")
+    assert all(set(m) == {"role", "tool_call_id", "content"} for m in tools)
+
+
+def test_unknown_roles_are_dropped_rather_than_reshaped(tmp_path):
+    from swebench.replay import messages_through_step
+    path = tmp_path / "t.json"
+    path.write_text(json.dumps({"messages": [
+        {"role": "user", "content": "go"},
+        {"role": "some_future_bookkeeping_row", "content": "internal"},
+        {"role": "assistant", "content": "ok"},
+    ]}))
+    assert [m["role"] for m in messages_through_step(path, 1)] == \
+        ["user", "assistant"]
