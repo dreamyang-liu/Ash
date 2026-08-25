@@ -555,3 +555,46 @@ def test_no_path_means_no_writing(tmp_path):
     cp = install(agent, FakeSession(), always=True)
     assert cp.persist is None
     assert cp.after_step(1).captured
+
+
+def test_a_failed_capture_is_distinguishable_from_a_clean_step(caplog):
+    """Both leave the step pointing at an older snapshot, but one is free and
+    expected while the other means checkpointing has stopped working. Recording
+    only `captured` conflated them, and a real run whose every capture was
+    failing (an alias collision) looked exactly like a very clean workload --
+    which is how the investigation started by blaming the mutation gate."""
+    import logging
+
+    tracker = MutationTracker()
+    session = FakeSession(fail_after=1)      # first capture works, rest fail
+    cp = Checkpointer(session=session, tracker=tracker)
+
+    tracker.before(ctx("shell", {"command": "touch f"}))
+    first = cp.after_step(1)
+    assert first.captured and first.reason == "captured"
+
+    # A clean step: nothing ran, so the previous snapshot IS this step's state.
+    clean = cp.after_step(2)
+    assert not clean.captured and clean.reason == "clean"
+
+    # A dirty step whose capture fails: same snapshot id, different meaning.
+    tracker.before(ctx("shell", {"command": "touch g"}))
+    with caplog.at_level(logging.WARNING):
+        failed = cp.after_step(3)
+    assert not failed.captured and failed.reason == "failed"
+    assert any("capture has failed" in r.message for r in caplog.records)
+
+    info = cp.as_info()
+    assert info["captured"] == 1 and info["failed_captures"] == 1
+
+
+def test_repeated_failures_do_not_flood_the_log(caplog):
+    import logging
+    session = FakeSession(fail_after=1)
+    cp = Checkpointer(session=session, always=True)
+    cp.after_step(0)
+    with caplog.at_level(logging.WARNING):
+        for turn in range(1, 40):
+            cp.after_step(turn)
+    warnings = [r for r in caplog.records if "capture has failed" in r.message]
+    assert len(warnings) == 2, "first and tenth, not one per step"
