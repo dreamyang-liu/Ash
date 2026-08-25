@@ -119,6 +119,7 @@ class MarathonHarness(BaseHarness):
                 resume_from = step_map[step]
             history = messages_through_step(resume_transcript, step)
             image = resume_from
+            c["resume_from"] = resume_from    # derived; recorded in info
             if not quiet:
                 print(S.kv("resume  ", S.cyan(
                     f"{str(resume_from)[:13]}… with memory: step {step}, "

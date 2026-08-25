@@ -139,13 +139,42 @@ def messages_through_step(trajectory_path: Path | str, step: int) -> list[dict]:
     """
     data = json.loads(Path(trajectory_path).read_text())
     messages = data.get("messages") or []
+    prefix = []
     assistant_turns = 0
-    for index, message in enumerate(messages):
+    for message in messages:
         if message.get("role") == "assistant":
             assistant_turns += 1
             if assistant_turns > step:
-                return messages[:index]
-    return messages
+                break
+        wire = _wire_message(message)
+        if wire is not None:
+            prefix.append(wire)
+    return prefix
+
+
+def _wire_message(message: dict) -> Optional[dict]:
+    """A trajectory row as the model-facing message it recorded, or None.
+
+    The trajectory is a record, not a transcript: tool results are stored as
+    ``tool_result`` rows carrying evaluation metadata (tool_name, tool_args,
+    success), and ``error`` rows exist only in the record -- add_error never
+    put them in front of the model. Re-feeding rows verbatim was rejected by
+    the first provider to see one ("Invalid Message ... role 'tool_result'"),
+    so the translation back to wire format lives here, next to the reader.
+    """
+    role = message.get("role")
+    if role == "error":
+        return None
+    if role == "tool_result":
+        return {"role": "tool",
+                "tool_call_id": message.get("tool_call_id"),
+                "content": message.get("content") or ""}
+    if role == "assistant":
+        wire = {"role": "assistant", "content": message.get("content") or ""}
+        if message.get("tool_calls"):
+            wire["tool_calls"] = message["tool_calls"]
+        return wire
+    return {"role": role, "content": message.get("content") or ""}
 
 
 @dataclass
