@@ -216,16 +216,21 @@ STRATEGIES = {"elide": _elide, "summarize": _summarize}
 
 
 def make_context_window_guard(strategy: str = "elide",
+                              window_tokens: int | None = None,
                               budget_fraction: float = DEFAULT_BUDGET_FRACTION,
                               target_fraction: float = DEFAULT_TARGET_FRACTION,
-                              keep_recent: int = _KEEP_RECENT_RESULTS,
-                              window_tokens: int | None = None):
+                              keep_recent: int = _KEEP_RECENT_RESULTS):
     """A ``before_query`` hook that keeps the transcript inside the window.
 
     ``strategy`` is ``elide`` (free, cannot invent) or ``summarize`` (one extra
     model call per firing, keeps conclusions, can compress wrongly).
-    ``window_tokens`` overrides the model's declared window; leave it unset to
-    read the model's own metadata. ``target_fraction`` is a target rather than
+    ``window_tokens`` overrides the model's declared window, which is required
+    for a model litellm has no metadata for -- a proxy-served model falls back
+    to the conservative default and would be folded far earlier than it needs.
+    Note that a large window is what a model *accepts*, not what it should be
+    filled with: measured on one 1M-context proxy, latency grew ~13s per 100K
+    tokens of input (29s at 200K, 137s at 1M), so the budget fraction is a
+    speed and cost decision as much as a capacity one. ``target_fraction`` is a target rather than
     a guarantee -- the ``keep_recent`` newest tool outputs are never folded, so
     a target below what that tail costs cannot be reached, and the guard says
     so instead of appearing to succeed.

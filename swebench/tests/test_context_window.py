@@ -313,3 +313,36 @@ def test_trajectory_pairs_every_tool_result_with_its_call():
     result_ids = {m.get("tool_call_id") for m in saved
                   if m["role"] == "tool_result"}
     assert call_ids == result_ids == {"call-1"}
+
+
+def test_window_can_be_stated_for_models_litellm_does_not_know():
+    """A proxy-served model has no metadata, so the guard would fall back to a
+    conservative 200K and fold a 1M-context model far too early."""
+    # ~1.2M chars, comfortably over a 200K-window budget and comfortably
+    # under a 1M-window one -- the point is that the same transcript gets
+    # opposite treatment depending on which window is assumed.
+    agent = FakeAgent(model="anthropic/some-proxy-model")
+
+    conv = conversation_with(results=100, chars_each=12_000)
+    before = [m.get("content") for m in conv.messages]
+    make_context_window_guard(window_tokens=None, keep_recent=5)(agent, conv)
+    assert [m.get("content") for m in conv.messages] != before, (
+        "an unknown model assumes a small window and folds")
+
+    conv2 = conversation_with(results=100, chars_each=12_000)
+    untouched = [m.get("content") for m in conv2.messages]
+    make_context_window_guard(window_tokens=1_000_000,
+                              keep_recent=5)(agent, conv2)
+    assert [m.get("content") for m in conv2.messages] == untouched, (
+        "stating the real window leaves it alone")
+
+
+def test_marathon_folds_at_sixty_percent_by_default():
+    """A large window is what the model accepts, not what to fill: latency on
+    the measured proxy grew ~13s per 100K input tokens, so tokens kept are
+    paid for on every later step."""
+    import inspect
+    from swebench.harnesses import marathon
+    source = inspect.getsource(marathon)
+    assert 'context_budget_fraction", 0.60' in source
+    assert "context_window_tokens" in source

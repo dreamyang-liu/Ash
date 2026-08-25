@@ -158,8 +158,12 @@ class MarathonHarness(BaseHarness):
         # than the summary costs to write (~$0.09), and the same run's log
         # shows the agent re-litigating conclusions it had already reached.
         # Benchmark-length runs keep eliding: at 30 steps nothing folds at all.
+        window_tokens = config.get("context_window_tokens")
         agent.before_query_hooks.append(make_context_window_guard(
-            strategy=config.get("context_strategy", "summarize")))
+            strategy=config.get("context_strategy", "summarize"),
+            window_tokens=int(window_tokens) if window_tokens else None,
+            budget_fraction=float(config.get("context_budget_fraction", 0.60)),
+            target_fraction=float(config.get("context_target_fraction", 0.35))))
 
         trajectory_path = (output_dir / "trajectories" /
                            f"{task.instance_id}.json")

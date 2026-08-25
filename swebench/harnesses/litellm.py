@@ -136,8 +136,10 @@ class LiteLLMHarness(BaseHarness):
             # 0` opts out for anyone who wants the raw failure.
             budget_fraction = float(c.get("context_budget_fraction", 0.70))
             if budget_fraction > 0:
+                window_tokens = c.get("context_window_tokens")
                 agent.before_query_hooks.append(make_context_window_guard(
                     strategy=c.get("context_strategy", "elide"),
+                    window_tokens=int(window_tokens) if window_tokens else None,
                     budget_fraction=budget_fraction,
                     target_fraction=float(
                         c.get("context_target_fraction", 0.45))))
