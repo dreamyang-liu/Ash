@@ -122,3 +122,33 @@ def test_cache_markers_only_go_to_models_that_take_them(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "litellm", NoInfo)
     assert client_for("anthropic/deepseek-v4-flash")._model_takes_cache_markers()
     assert not client_for("openai/some-proxy-model")._model_takes_cache_markers()
+
+
+def test_unknown_failures_retry_and_permanent_ones_do_not():
+    """The classifier was an allowlist of retryable names, and a 103-step run
+    died because a Bedrock 5xx arrived wrapped as MidStreamFallbackError --
+    a name no allowlist had heard of. Eight wasted backoffs on a permanent
+    error cost ~4 minutes; one unretried transient costs the run."""
+    class MidStreamFallbackError(Exception): ...
+    class ServiceUnavailableError(Exception): ...
+    class APIConnectionError(Exception): ...
+    class BadRequestError(Exception): ...
+    class AuthenticationError(Exception): ...
+    class ContextWindowExceededError(Exception): ...
+
+    retry = LLMClient._retryable
+    # Transients -- including wrapper types invented after this code was written.
+    assert retry(MidStreamFallbackError(
+        "litellm.ServiceUnavailableError: BedrockException - internalServerException"))
+    assert retry(ServiceUnavailableError("503"))
+    assert retry(APIConnectionError("connection reset by peer"))
+    assert retry(TimeoutError("model stream stalled for 180s"))
+    # Permanent -- retrying these eight times would just delay the diagnosis.
+    assert not retry(BadRequestError("max_tokens out of range"))
+    assert not retry(AuthenticationError("bad key"))
+    assert not retry(ContextWindowExceededError("prompt too long"))
+    # Permanent-by-message even when the wrapper type looks transient: the
+    # cache-marker misconfiguration arrived as an APIConnectionError.
+    assert not retry(APIConnectionError(
+        "BedrockException - You invoked an unsupported model or your request "
+        "did not allow prompt caching."))
