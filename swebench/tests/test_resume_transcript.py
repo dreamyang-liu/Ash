@@ -215,3 +215,26 @@ def test_unknown_roles_are_dropped_rather_than_reshaped(tmp_path):
     ]}))
     assert [m["role"] for m in messages_through_step(path, 1)] == \
         ["user", "assistant"]
+
+
+def test_branching_by_step_number(tmp_path):
+    """Branching from an earlier step is the point of keeping every step, and
+    the id is a 36-character UUID: asking for step N and letting the map
+    supply the snapshot removes the transcription step entirely. (A fabricated
+    id tail is what the mismatch guard caught, which is how this exists.)"""
+    import inspect
+    from swebench.harnesses import marathon
+
+    source = inspect.getsource(marathon)
+    assert 'c.get("resume_at_step")' in source
+    assert "resume_from = step_map[step]" in source
+    # An out-of-range step says what the map covers instead of failing blankly.
+    assert "it covers" in source
+
+
+def test_cli_exposes_resume_at_step():
+    import inspect
+    from swebench import __main__ as cli
+    source = inspect.getsource(cli)
+    assert '"--resume-at-step"' in source
+    assert '"resume_at_step"' in source

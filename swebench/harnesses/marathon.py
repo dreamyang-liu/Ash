@@ -104,7 +104,22 @@ class MarathonHarness(BaseHarness):
             if not step_map:
                 return self._failure(
                     instance, "error: transcript has no step->snapshot map")
-            if resume_from:
+            at_step = c.get("resume_at_step")
+            if at_step is not None:
+                # Branching by step number rather than by snapshot id: the id
+                # is a 36-character UUID that has to be copied by hand
+                # otherwise, and a mistyped one is indistinguishable from a
+                # deliberate mismatch (the guard below caught a fabricated
+                # tail, which is how this flag came to exist).
+                step = int(at_step)
+                if step not in step_map:
+                    nearby = sorted(step_map)
+                    return self._failure(
+                        instance,
+                        f"error: step {step} is not in the transcript's map "
+                        f"(it covers {nearby[0]}..{nearby[-1]})")
+                resume_from = step_map[step]
+            elif resume_from:
                 steps = [s_ for s_, snap in step_map.items()
                          if snap == resume_from]
                 if not steps:
