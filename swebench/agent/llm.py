@@ -30,6 +30,12 @@ def _is_repeating(buf: str, window: int = 200, min_repeats: int = 3) -> bool:
     return tail.count(pattern) >= min_repeats
 
 
+#: Ceiling on a single completion. Long enough for a model writing a whole
+#: file with extended thinking, short enough that a silently dead connection
+#: costs one retry instead of the rest of the run.
+REQUEST_TIMEOUT_SECONDS = 900
+
+
 class LLMClient:
     """Wraps litellm.completion with the project's call-time behavior."""
 
@@ -47,6 +53,9 @@ class LLMClient:
         self._trace = trace or (lambda _: None)
         self.on_step = on_step
         self.stream = True
+        #: Seconds one completion may take before it is treated as failed and
+        #: retried. A ceiling, not a target: the point is that there IS one.
+        self.request_timeout = REQUEST_TIMEOUT_SECONDS
 
     # -- prompt caching -----------------------------------------------------
 
@@ -96,6 +105,14 @@ class LLMClient:
             tool_choice="auto" if self.tools_schema else None,
             max_tokens=c.max_tokens,
             stream=self.stream,
+            # Without this the retry loop below is unreachable for the failure
+            # that matters most: a provider that stops answering without
+            # closing cleanly leaves the socket in CLOSE-WAIT and the process
+            # in epoll forever. Measured on a 5-hour marathon run -- 2h48m of
+            # silence at step 304, zero CPU, no retry, no error, and the
+            # remaining budget lost. Generous rather than tight, because a
+            # legitimate call on this path writes whole files.
+            timeout=self.request_timeout,
         )
         if c.temperature is not None:
             kwargs["temperature"] = c.temperature
