@@ -82,11 +82,21 @@ class MarathonHarness(BaseHarness):
                        S.dim(f"{task.metadata.get('expert_time_estimate_hours', '?')}h estimate, "
                              f"difficulty {task.metadata.get('difficulty', '?')}")))
 
-        try:
-            image = build_image(
-                task, registry=c.get("registry", "localhost:5000"))
-        except MarathonError as exc:
-            return self._failure(instance, f"error: {exc}")
+        # Resuming starts from a checkpoint instead of the task's image: the
+        # environment already holds hours of work, and rebuilding would throw
+        # it away. Hours are exactly what these tasks cost, so continuing is
+        # the difference between finishing one and restarting it.
+        resume_from = c.get("resume_from")
+        if resume_from:
+            image = resume_from
+            if not quiet:
+                print(S.kv("resume  ", S.cyan(str(resume_from)[:13] + "…")))
+        else:
+            try:
+                image = build_image(
+                    task, registry=c.get("registry", "localhost:5000"))
+            except MarathonError as exc:
+                return self._failure(instance, f"error: {exc}")
 
         session = AshSession(runtime_bin=c.get("runtime_bin"), quiet=quiet,
                              backend=backend_config(c))
@@ -151,6 +161,24 @@ class MarathonHarness(BaseHarness):
         agent.before_query_hooks.append(make_context_window_guard(
             strategy=config.get("context_strategy", "summarize")))
 
+        # Save as it goes, not only at the end. A run this long is going to be
+        # interrupted -- a killed process, a provider that stops answering --
+        # and a trajectory that only exists after a clean finish is exactly
+        # the one that is missing when it matters. Observed: a 5-hour run
+        # stalled and was killed, leaving the checkpoints but no transcript to
+        # resume alongside them.
+        trajectory_path = (output_dir / "trajectories" /
+                           f"{task.instance_id}.json")
+        save_every = int(config.get("trajectory_save_every", 20))
+
+        def save_progress(agent_ref, _conv) -> None:
+            if save_every and agent_ref.cost.api_calls % save_every == 0:
+                agent_ref.trajectory.info.setdefault("exit_status", "in_progress")
+                agent_ref.trajectory.cost = agent_ref.cost
+                agent_ref.trajectory.save(trajectory_path)
+
+        agent.before_query_hooks.append(save_progress)
+
         checkpointer = None
         checkpoint_cfg = config.get("checkpoints") or {}
         if checkpoint_cfg.get("enabled") and session.supports_snapshot():
@@ -161,7 +189,21 @@ class MarathonHarness(BaseHarness):
                 reboard=checkpoint_cfg.get("reboard", True),
                 name_prefix=f"marathon-{task.instance_id}-")
 
-        exit_status = agent.run(task.instruction, instance_id=task.instance_id)
+        prompt = task.instruction
+        if config.get("resume_from"):
+            # A resumed run has the artifacts but not the transcript, so the
+            # environment has to be described rather than assumed. Stating it
+            # plainly beats letting the agent rediscover it: the first thing it
+            # would otherwise do is read files it has already written.
+            prompt += (
+                "\n\n---\n\nNOTE: this environment is resumed from an earlier "
+                "session of this same task. Work already exists on disk -- "
+                "inspect the current state first (the source files, whether it "
+                "builds, what the visible tests say) and continue from there "
+                "rather than starting over. You do not have the earlier "
+                "conversation, only what is on disk.")
+
+        exit_status = agent.run(prompt, instance_id=task.instance_id)
 
         result = grade(session, task)
         if not quiet:
@@ -192,8 +234,7 @@ class MarathonHarness(BaseHarness):
                 "records": [vars(record) for record in checkpointer.records],
             }
         agent.trajectory.cost = agent.cost
-        agent.trajectory.save(output_dir / "trajectories" /
-                              f"{task.instance_id}.json")
+        agent.trajectory.save(trajectory_path)
 
         # The prediction shape, so this harness composes with the batch
         # runner and the resume logic like any other. Marathon has no patch to

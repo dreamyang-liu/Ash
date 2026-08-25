@@ -164,6 +164,11 @@ def main():
     parser.add_argument("--instance", "-i", default=None)
     parser.add_argument("--slice", default=None)
     parser.add_argument("--filter", default=None)
+    parser.add_argument("--resume-from", default=None,
+                        help="Snapshot id to continue a marathon task from, "
+                             "instead of building its image fresh. The "
+                             "environment keeps the work; the transcript does "
+                             "not carry over.")
     parser.add_argument("--task-dir", default=None,
                         help="SWE-Marathon task directory, or a checkout whose "
                              "tasks/ holds several (--harness marathon). Tasks "
@@ -236,7 +241,7 @@ def main():
                 "step_limit", "cost_limit", "temperature", "reasoning_effort",
                 "prompt_cache", "max_budget", "timeout", "runtime_bin",
                 "image_template", "subset", "workers", "custom_tools_dir",
-                "backend"]:
+                "backend", "resume_from", "task_dir"]:
         cli_val = getattr(args, key.replace("-", "_"), None)
         if cli_val is not None:
             harness_config[key] = cli_val

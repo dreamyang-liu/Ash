@@ -250,3 +250,39 @@ def test_output_limit_comes_from_the_model():
     # Unknown models still get room to write a file.
     assert _default_max_tokens("no-such-model") == 16384
     assert _default_max_tokens(None) == 16384
+
+
+def test_resume_skips_the_build_and_says_so_in_the_prompt():
+    """Resuming continues from a checkpoint: the environment holds hours of
+    work, so rebuilding the image would throw it away. The prompt has to
+    describe that, because a resumed run has the artifacts but not the
+    transcript -- otherwise the agent's first move is to rediscover files it
+    already wrote."""
+    import inspect
+    from swebench.harnesses import marathon as harness
+
+    source = inspect.getsource(harness)
+    assert 'c.get("resume_from")' in source
+    assert "image = resume_from" in source
+    assert "resumed from an earlier" in source
+
+
+def test_trajectory_is_saved_as_the_run_goes():
+    """A run this long gets interrupted, and a trajectory that only exists
+    after a clean finish is the one that is missing when it matters: a 5-hour
+    run stalled and was killed, leaving checkpoints but no transcript."""
+    import inspect
+    from swebench.harnesses.marathon import MarathonHarness
+
+    source = inspect.getsource(MarathonHarness._attempt)
+    assert "trajectory_save_every" in source
+    assert "save_progress" in source
+    assert "before_query_hooks.append(save_progress)" in source
+
+
+def test_cli_exposes_resume_from():
+    import inspect
+    from swebench import __main__ as cli
+    source = inspect.getsource(cli)
+    assert '"--resume-from"' in source
+    assert '"resume_from"' in source
