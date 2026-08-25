@@ -317,9 +317,16 @@ class AshAgent:
             self._trace("\n[NUDGE] text-only response, prompting continuation\n")
         return None
 
-    def run(self, task: str, instance_id: str = "") -> str:
+    def run(self, task: str, instance_id: str = "",
+            history: "Optional[list[dict]]" = None) -> str:
         """Run the agent loop. Returns exit status: completed | step_limit |
-        cost_limit | error."""
+        cost_limit | error.
+
+        ``history`` seeds the conversation with a prior transcript, verbatim,
+        instead of building a fresh system prompt and task message -- the
+        resume-with-memory path. ``task`` is ignored then: the seeded history
+        already contains the task as the model originally saw it.
+        """
         self.trajectory = Trajectory()
         self.trajectory.instance_id = instance_id
         self.cost = CostTracker()
@@ -342,8 +349,17 @@ class AshAgent:
         self._pipeline = None             # re-resolved per run (see __init__)
 
         conv = Conversation(self.trajectory)
-        conv.add_system(build_system_prompt(task, self.config))
-        conv.add_user(build_instance_message(task, self.config))
+        if history:
+            conv.seed(history)
+            # Later steps must number from where the seeded transcript ends,
+            # or this run's step->snapshot map disagrees with the transcript
+            # it saves and a second resume replays the wrong prefix.
+            self.turn_base = sum(
+                1 for m in history if m.get("role") == "assistant")
+        else:
+            self.turn_base = 0
+            conv.add_system(build_system_prompt(task, self.config))
+            conv.add_user(build_instance_message(task, self.config))
 
         try:
             while True:
