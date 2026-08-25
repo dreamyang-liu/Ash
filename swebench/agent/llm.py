@@ -109,6 +109,7 @@ class LLMClient:
         #: Seconds one completion may take before it is treated as failed and
         #: retried. A ceiling, not a target: the point is that there IS one.
         self.request_timeout = REQUEST_TIMEOUT_SECONDS
+        self._takes_cache_markers: "bool | None" = None
         #: How long a streaming response may produce nothing before it is
         #: treated as failed. Much shorter than the request timeout: this is
         #: the gap *between* chunks, and a model that is working sends
@@ -116,6 +117,34 @@ class LLMClient:
         self.stream_stall_timeout = STREAM_STALL_TIMEOUT_SECONDS
 
     # -- prompt caching -----------------------------------------------------
+
+    def _model_takes_cache_markers(self) -> bool:
+        """Whether this model accepts explicit cache_control markers.
+
+        The markers are an Anthropic Messages API concept. Bedrock translates
+        them to cachePoint blocks, which its non-Anthropic models reject as a
+        hard error -- "your request did not allow prompt caching" killed a run
+        on its first call. So: models whose metadata says they cache, yes;
+        models litellm does not know, only if they are addressed over the
+        Anthropic protocol (an `anthropic/` route), where the marker is legal
+        for the server to ignore. Everything else caches implicitly or not at
+        all, and gets no markers.
+
+        Cached per client: the answer cannot change mid-run, and metadata
+        lookups are not free at one per step.
+        """
+        if self._takes_cache_markers is None:
+            supports = None
+            try:
+                import litellm
+                info = litellm.get_model_info(self.config.model) or {}
+                supports = info.get("supports_prompt_caching")
+            except Exception:
+                supports = None
+            if supports is None:
+                supports = self.config.model.startswith("anthropic/")
+            self._takes_cache_markers = bool(supports)
+        return self._takes_cache_markers
 
     def _add_cache_breakpoints(self, messages: list[dict]) -> list[dict]:
         """Add cache_control breakpoints for Anthropic/Bedrock prompt caching.
@@ -155,7 +184,9 @@ class LLMClient:
 
     def _build_kwargs(self, messages: list[dict]) -> dict:
         c = self.config
-        cached = self._add_cache_breakpoints(messages) if c.prompt_cache else messages
+        cached = (self._add_cache_breakpoints(messages)
+                  if c.prompt_cache and self._model_takes_cache_markers()
+                  else messages)
         kwargs: dict[str, Any] = dict(
             model=c.model,
             messages=cached,
