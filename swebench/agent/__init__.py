@@ -39,6 +39,28 @@ __all__ = ["AshAgent", "build_system_prompt", "build_instance_message"]
 #: like a text-only answer and tripped the two-strikes finish rule.
 _PROVIDER_PLACEHOLDERS = ("[system:",)
 
+#: How many consecutive failed tool calls mean the environment is gone rather
+#: than the agent making mistakes. Tool errors are normal -- a bad path, a
+#: failing build -- so this counts only calls that failed to *execute*.
+BROKEN_ENVIRONMENT_STRIKES = 6
+
+#: What the transport says when the sandbox itself is gone, as opposed to a
+#: command that ran and failed. Deleting a live run's sandbox produced
+#: "Client error '404 Not Found' for url http://127.0.0.1:18000" on every call.
+_UNREACHABLE_MARKERS = (
+    "404 not found", "connection refused", "connect call failed",
+    "cannot connect", "no route to host", "sandbox not found",
+    "connection reset", "server disconnected",
+)
+
+
+def _looks_unreachable(result) -> bool:
+    """Whether a tool call failed to execute at all."""
+    if getattr(result, "success", False):
+        return False
+    blob = f"{getattr(result, 'error', '') or ''} {getattr(result, 'output', '') or ''}".lower()
+    return any(marker in blob for marker in _UNREACHABLE_MARKERS)
+
 
 def _is_vacuous(content: "str | None") -> bool:
     """Whether a completion carries nothing the model actually said."""
@@ -93,6 +115,8 @@ class AshAgent:
         #: that fires "once" needs somewhere to remember that, and an agent
         #: reused for a second run must not inherit the first run's memory.
         self.hook_state: dict = {}
+        #: Consecutive tool calls that failed to execute (see _looks_unreachable).
+        self.consecutive_tool_failures: int = 0
         self.before_query_hooks = list(hooks.DEFAULT_BEFORE_QUERY)
         self.before_finish_hooks = list(hooks.DEFAULT_BEFORE_FINISH)
         self.result_processors = list(hooks.DEFAULT_RESULT_PROCESSORS)
@@ -252,6 +276,14 @@ class AshAgent:
         # interceptors produced.
         runtime_output = metadata.get(RAW_OUTPUT, result.output)
         runtime_error = metadata.get(RAW_ERROR, result.error)
+        # A tool that ran and failed is normal work (bad path, failing build).
+        # A tool that could not be *executed* means the environment is gone,
+        # and that must not be mistaken for the agent being finished.
+        if _looks_unreachable(result):
+            self.consecutive_tool_failures += 1
+        else:
+            self.consecutive_tool_failures = 0
+
         content = _observation(result.success, result.output, result.error)
         for proc in self.result_processors:
             content = proc(content, name, args, result)
@@ -307,6 +339,19 @@ class AshAgent:
             # Empty response — always reprompt
             conv.add_user("You must call a tool to proceed.")
             self._trace("\n[NUDGE] empty response, prompting retry\n")
+        elif self.consecutive_tool_failures >= BROKEN_ENVIRONMENT_STRIKES:
+            # An agent with no working tools can only produce prose, and prose
+            # with no tool call is what "I am finished" looks like. A 1473-turn
+            # run reported `completed` this way after its sandbox was deleted
+            # from under it -- every call answered 404, so it said what it
+            # could and the two-strikes rule read that as done. Environment
+            # failure is not a verdict on the work.
+            self._trace(f"\n[ERROR] {self.consecutive_tool_failures} consecutive "
+                        f"tool failures; the environment is unusable\n")
+            conv.add_error(
+                f"environment unusable: {self.consecutive_tool_failures} "
+                "consecutive tool calls failed")
+            return "environment_error"
         elif conv.consecutive_no_tool >= 2:
             return "completed"
         else:
@@ -332,6 +377,7 @@ class AshAgent:
         self.cost = CostTracker()
         self._warned = False
         self.hook_state = {}
+        self.consecutive_tool_failures = 0
         active_run_id = self.run_id or new_run_id()
         if self.trace_dir:
             self.trace_dir.mkdir(parents=True, exist_ok=True)
@@ -379,10 +425,18 @@ class AshAgent:
                     turn_id = f"turn-{self.cost.api_calls}"
                     for tc in message.tool_calls:
                         self._run_tool(tc, conv, turn_id)
-                elif self._nudge(conv, message) == "completed":
-                    # A hook may want one more turn before we call it a day.
-                    if not any(h(self, conv) for h in self.before_finish_hooks):
-                        return "completed"
+                else:
+                    verdict = self._nudge(conv, message)
+                    if verdict == "completed":
+                        # A hook may want one more turn before we call it a day.
+                        if not any(h(self, conv)
+                                   for h in self.before_finish_hooks):
+                            return "completed"
+                    elif verdict is not None:
+                        # Any other verdict ends the run as-is: the finish
+                        # hooks exist to extend a *successful* stop, and an
+                        # unusable environment is not one.
+                        return verdict
         finally:
             if self._trace_file:
                 self._trace_file.close()

@@ -419,9 +419,21 @@ def install(agent, session, *, always: bool = False, disk_only: bool = True,
     # new harness cannot forget to add it.
     persist = None
     if trajectory_path is not None:
-        def persist(checkpointer_ref, path=trajectory_path, agent_ref=agent):
+        def persist(checkpointer_ref, path=trajectory_path, agent_ref=agent,
+                    session_ref=session):
             agent_ref.trajectory.info.setdefault("exit_status", "in_progress")
             agent_ref.trajectory.info["checkpoints"] = checkpointer_ref.as_info()
+            # The environment block, every time -- not only at a clean finish.
+            # It names the sandbox the run is on *now*, and re-boarding changes
+            # that: a cleanup that trusted a launch-time id deleted a live
+            # 1473-turn run's sandbox, after which every tool call answered
+            # 404. Whoever needs to know which sandboxes are in use can only
+            # learn it from the runs themselves, so the runs have to say.
+            try:
+                agent_ref.trajectory.info["environment"] = (
+                    session_ref.environment())
+            except Exception:
+                pass
             agent_ref.trajectory.cost = agent_ref.cost
             agent_ref.trajectory.save(path)
 

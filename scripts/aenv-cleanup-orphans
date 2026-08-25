@@ -1,0 +1,66 @@
+#!/usr/bin/env python3.12
+"""Delete sandboxes no live run owns.
+
+Ownership cannot be a hardcoded id: a run's sandbox id CHANGES when the layer
+chain compacts and Ash re-boards onto a fresh sandbox. A cleanup that
+remembered the id it saw at launch deleted a 1473-turn run's live sandbox,
+whose every later tool call then answered 404. So ask the runs, not memory:
+each live run's trajectory records the sandbox it is on right now, and
+`environment.sandbox_id` is rewritten on every re-board.
+"""
+import json
+import pathlib
+import sys
+import urllib.request
+
+API = "http://127.0.0.1:18000"
+KEY = "bench-key-0123456789abcdef0123456789abcdef"
+SEARCH = ["/tmp/marathon-*/trajectories/*.json", "/tmp/*/trajectories/*.json"]
+
+
+def live_sandbox_ids() -> set:
+    """Sandbox ids claimed by trajectories written in the last 10 minutes."""
+    import time
+    fresh, ids = time.time() - 600, set()
+    for pattern in SEARCH:
+        root = pathlib.Path(pattern.split("*")[0])
+        for path in root.parent.glob(pattern[len(str(root.parent)) + 1:]):
+            try:
+                if path.stat().st_mtime < fresh:
+                    continue
+                info = json.loads(path.read_text()).get("info") or {}
+            except (OSError, ValueError):
+                continue
+            env = info.get("environment") or {}
+            if env.get("sandbox_id"):
+                ids.add(env["sandbox_id"])
+    return ids
+
+
+def request(path, method="GET"):
+    req = urllib.request.Request(f"{API}{path}", method=method,
+                                headers={"X-API-Key": KEY})
+    with urllib.request.urlopen(req) as response:
+        body = response.read()
+    return json.loads(body) if body else None
+
+
+def main() -> int:
+    keep = live_sandbox_ids()
+    boxes = request("/sandboxes") or []
+    print(f"{len(boxes)} sandbox(es); {len(keep)} claimed by a live run")
+    for box in boxes:
+        sid = box["sandboxID"]
+        if sid in keep:
+            print(f"  keep    {sid[:13]}  (claimed)")
+            continue
+        if "--dry-run" in sys.argv:
+            print(f"  WOULD DELETE {sid[:13]}")
+            continue
+        request(f"/sandboxes/{sid}", method="DELETE")
+        print(f"  deleted {sid[:13]}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
