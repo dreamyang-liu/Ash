@@ -298,3 +298,16 @@ def test_snapshot_names_are_unique_per_run():
     source = inspect.getsource(marathon)
     assert "agent.run_id or new_run_id()" in source, (
         "the run id must be in the name, and must not assume one was passed")
+
+
+def test_task_resources_reach_the_sandbox():
+    """task.toml declares cpus/memory_mb, and every marathon task needs more
+    than the backend default (2 CPUs, 1 GB): a build-heavy task OOMs in the
+    default rather than failing loudly. zstd merely happened to fit, which is
+    how the gap survived the first four runs."""
+    import inspect
+    from swebench.harnesses import marathon
+    source = inspect.getsource(marathon)
+    assert '"cpu": task.cpus' in source
+    assert '"memory_mb": task.memory_mb' in source
+    assert "session.create(image, resources=resources)" in source

@@ -76,10 +76,16 @@ class AshSession:
             return "unknown"
         return self._sandbox.sandbox_id or "unknown"
 
-    def create(self, image: str) -> bool:
-        return self._get_loop().run_until_complete(self._create_async(image))
+    def create(self, image: str, resources: "Optional[dict]" = None) -> bool:
+        """``resources``: e.g. ``{"cpu": 4, "memory_mb": 16384}``. Marathon
+        tasks declare their needs in task.toml, and running a build-heavy task
+        in the backend's default (2 CPUs, 1 GB) OOMs it rather than failing
+        loudly -- zstd merely happened to fit."""
+        return self._get_loop().run_until_complete(
+            self._create_async(image, resources))
 
-    async def _create_async(self, image: str) -> bool:
+    async def _create_async(self, image: str,
+                            resources: "Optional[dict]" = None) -> bool:
         try:
             self._pool = build_pool(self.backend, runtime_bin=self.runtime_bin)
             self._requested_image = image
@@ -106,9 +112,11 @@ class AshSession:
                           and bool(backend_section.get("from_image")
                                    or self.backend.get("from_image")))
             if from_image and self._pool.supports_cold_start():
-                self._sandbox = await self._pool.spawn_from_image(image)
+                self._sandbox = await self._pool.spawn_from_image(
+                    image, resources=resources)
             else:
-                self._sandbox = await self._pool.spawn(image=image)
+                self._sandbox = await self._pool.spawn(image=image,
+                                                        resources=resources)
             # The base image is known here, at the start of the task, and every
             # later checkpoint descends from it. Pinned once so it survives
             # re-boarding, where the sandbox's immediate source becomes a
