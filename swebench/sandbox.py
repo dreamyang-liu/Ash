@@ -97,7 +97,7 @@ class AshSession:
             if builder is not None:
                 if not self.quiet:
                     print(S.kv("template", S.dim(f"resolving for {image}")))
-                image = builder.template_for(image)
+                image = builder.template_for(image, resources)
             # Two entries, and the config says which one this harness's image
             # names are for. A benchmark names its environment with an OCI
             # image reference, which only the cold-start path accepts; a
@@ -115,8 +115,12 @@ class AshSession:
                 self._sandbox = await self._pool.spawn_from_image(
                     image, resources=resources)
             else:
-                self._sandbox = await self._pool.spawn(image=image,
-                                                        resources=resources)
+                # No resources here on purpose: a template or snapshot has
+                # its shape baked in (only a cold start can choose one), and
+                # the pool rejects the argument rather than ignoring it. The
+                # task's shape reached the template above; a resumed run
+                # continues in the machine it was running on.
+                self._sandbox = await self._pool.spawn(image=image)
             # The base image is known here, at the start of the task, and every
             # later checkpoint descends from it. Pinned once so it survives
             # re-boarding, where the sandbox's immediate source becomes a
