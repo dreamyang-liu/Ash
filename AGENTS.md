@@ -298,6 +298,14 @@ and cannot become one.
   disk-only chain is ~1.4 GB; the store on this machine grew to 85 GB across a
   few days of experiments. Reclaiming means stopping the server and removing
   `$AENV_HOME/snapshot-store` (task images then reconvert, minutes each).
+- **A streaming response can go silent, and the request timeout will not save
+  you.** `timeout=` bounds getting a response started; once the stream is open,
+  iterating it blocks indefinitely if the provider stops sending — seen as a
+  socket in `CLOSE-WAIT` with the process in `futex_wait`. Measured twice:
+  2h48m of silence on one run, and 20 minutes on another *with* a 900s request
+  timeout configured, zero retries either time. A separate watchdog now
+  abandons a stream that produces nothing for 180s, and a stalled stream is
+  retryable.
 - **A completion can come back with nothing in it, and that is not the model
   giving up.** Traced on one proxy: extended thinking consumed the whole output
   budget, so the reply carried an empty `thinking` block and no `text` block —

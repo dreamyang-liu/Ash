@@ -30,6 +30,49 @@ def _is_repeating(buf: str, window: int = 200, min_repeats: int = 3) -> bool:
     return tail.count(pattern) >= min_repeats
 
 
+def _with_stall_timeout(stream, seconds: float, trace):
+    """Yield from a stream, raising if it goes quiet for too long.
+
+    The request timeout does not cover this. It bounds getting the response
+    started; once a streaming response is open, iterating it can block
+    forever, and does: a provider that stops sending leaves the socket in
+    CLOSE-WAIT and the iteration waiting. Measured twice on this stack --
+    2h48m of silence on one run, 20 minutes on another with a 900s request
+    timeout set and no retry, because the timeout was never in play.
+
+    Implemented with a worker thread rather than a signal so it works off the
+    main thread, and daemon so a truly wedged read cannot keep the process
+    alive.
+    """
+    import queue
+    import threading
+
+    items: "queue.Queue" = queue.Queue(maxsize=1)
+    DONE = object()
+
+    def pump():
+        try:
+            for item in stream:
+                items.put(item)
+            items.put(DONE)
+        except BaseException as error:      # noqa: BLE001 - forwarded below
+            items.put(error)
+
+    threading.Thread(target=pump, daemon=True, name="llm-stream").start()
+    while True:
+        try:
+            item = items.get(timeout=seconds)
+        except queue.Empty:
+            trace(f"\n[STALL] stream produced nothing for {seconds:.0f}s\n")
+            raise TimeoutError(
+                f"model stream stalled for {seconds:.0f}s") from None
+        if item is DONE:
+            return
+        if isinstance(item, BaseException):
+            raise item
+        yield item
+
+
 #: Ceiling on a single completion. Long enough for a model writing a whole
 #: file with extended thinking, short enough that a silently dead connection
 #: costs one retry instead of the rest of the run.
@@ -40,6 +83,10 @@ REQUEST_TIMEOUT_SECONDS = 900
 #: telling you something the loop should handle rather than something a retry
 #: will fix.
 EMPTY_RETRIES = 3
+
+#: Seconds a streaming response may go silent before it is abandoned. The
+#: request timeout cannot cover this; see `_with_stall_timeout`.
+STREAM_STALL_TIMEOUT_SECONDS = 180
 
 
 class LLMClient:
@@ -62,6 +109,11 @@ class LLMClient:
         #: Seconds one completion may take before it is treated as failed and
         #: retried. A ceiling, not a target: the point is that there IS one.
         self.request_timeout = REQUEST_TIMEOUT_SECONDS
+        #: How long a streaming response may produce nothing before it is
+        #: treated as failed. Much shorter than the request timeout: this is
+        #: the gap *between* chunks, and a model that is working sends
+        #: something continuously.
+        self.stream_stall_timeout = STREAM_STALL_TIMEOUT_SECONDS
 
     # -- prompt caching -----------------------------------------------------
 
@@ -196,7 +248,9 @@ class LLMClient:
         err_type = type(e).__name__
         err_str = str(e).lower()
         return (
-            "RateLimitError" in err_type
+            "TimeoutError" in err_type
+            or "stalled" in err_str
+            or "RateLimitError" in err_type
             or "rate" in err_str
             or "Timeout" in err_type
             or "timed out" in err_str
@@ -218,7 +272,8 @@ class LLMClient:
 
         self._trace(f"\n{'='*60}\n[step {step_n}] model call\n{'='*60}\n")
 
-        for chunk in raw:
+        for chunk in _with_stall_timeout(raw, self.stream_stall_timeout,
+                                        self._trace):
             chunks.append(chunk)
             delta = chunk.choices[0].delta
 
