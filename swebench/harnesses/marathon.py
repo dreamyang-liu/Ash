@@ -176,7 +176,14 @@ class MarathonHarness(BaseHarness):
                 always=checkpoint_cfg.get("trigger", "mutation") == "every_step",
                 disk_only=checkpoint_cfg.get("mode", "disk_only") != "full",
                 reboard=checkpoint_cfg.get("reboard", True),
-                name_prefix=f"marathon-{task.instance_id}-",
+                # The run id keeps two attempts at one task from colliding:
+                # snapshot aliases are unique per repository, so a rerun (or a
+                # second run started before the first was stopped) would fail
+                # every capture with "alias already points to ...". Captures
+                # fail softly, so the symptom is a run that silently stops
+                # checkpointing rather than an error.
+                name_prefix=(f"marathon-{task.instance_id}-"
+                             f"{(agent.run_id or new_run_id())[:8]}-"),
                 # Every checkpoint writes the trajectory beside it: snapshots
                 # that outlive an interrupted run are only resumable if
                 # something records which step each one is.

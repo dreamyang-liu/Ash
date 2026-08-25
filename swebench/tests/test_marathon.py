@@ -286,3 +286,15 @@ def test_cli_exposes_resume_from():
     source = inspect.getsource(cli)
     assert '"--resume-from"' in source
     assert '"resume_from"' in source
+
+
+def test_snapshot_names_are_unique_per_run():
+    """Snapshot aliases are unique per repository, so two attempts at one task
+    -- a rerun, or a second run started before the first was stopped -- would
+    collide on every capture. Captures fail softly, so the symptom is a run
+    that silently stops checkpointing."""
+    import inspect
+    from swebench.harnesses import marathon
+    source = inspect.getsource(marathon)
+    assert "agent.run_id or new_run_id()" in source, (
+        "the run id must be in the name, and must not assume one was passed")
