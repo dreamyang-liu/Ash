@@ -347,3 +347,25 @@ def test_staging_still_fails_closed_when_uploads_keep_failing(tmp_path, monkeypa
     session = FakeSession(can_upload=False)
     result = grade(session, task)
     assert result.error and "staging failed" in result.error
+
+
+def test_the_shape_reaches_the_template_not_the_spawn():
+    """A microVM's CPU and memory are fixed by its template -- only a cold
+    start can choose them, and the pool rejects the argument on a template or
+    snapshot spawn rather than ignoring it (which broke a resume outright).
+    So the task's declaration has to reach the template build, and the shape
+    has to be part of the template's identity: a 16 GB task must not land on
+    the 1 GB template an earlier run built from the same image."""
+    import inspect
+    from swebench import sandbox, templates
+
+    source = inspect.getsource(sandbox)
+    assert "builder.template_for(image, resources)" in source
+    assert "self._pool.spawn(image=image)" in source, (
+        "no resources on the template path")
+
+    # The shape is hashed into the name.
+    a = templates.template_name("img", "fp", 3000, {"cpu": 4, "memory_mb": 16384})
+    b = templates.template_name("img", "fp", 3000, {"cpu": 2, "memory_mb": 1024})
+    assert a != b
+    assert templates.template_name("img", "fp", 3000) != a

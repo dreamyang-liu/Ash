@@ -85,17 +85,26 @@ def _could_be_snapshot_name(name: str) -> bool:
     return bool(name) and all(c.isalnum() or c in "-_" for c in name)
 
 
-def template_name(image: str, runtime_fingerprint: str, port: int) -> str:
-    """A stable, legal template name for one (image, runtime, port).
+def template_name(image: str, runtime_fingerprint: str, port: int,
+                  resources: "Optional[dict]" = None) -> str:
+    """A stable, legal template name for one (image, runtime, port, shape).
 
     Content-addressed rather than derived from the image name: template names
     are length-limited and the alias grammar is narrow, while image names
     carry slashes, colons and dots. Hashing the runtime's fingerprint in too
     means a rebuilt runtime binary cannot land on a template built with the
     old one.
+
+    The shape is part of the identity because a microVM's CPU and memory are
+    fixed by its template: a 16 GB task must not be handed the 1 GB template
+    an earlier run built from the same image.
     """
+    shape = ""
+    if resources:
+        shape = f"{resources.get('cpu', '')}x{resources.get('memory_mb', '')}"
     digest = hashlib.sha256(
-        "\0".join((image, runtime_fingerprint, str(port))).encode()).hexdigest()[:24]
+        "\0".join((image, runtime_fingerprint, str(port),
+                    shape)).encode()).hexdigest()[:24]
     return f"ash-swebench-{digest}"
 
 
@@ -146,7 +155,8 @@ class TemplateBuilder:
         if self.ripgrep_bin is not None:
             self._fingerprint += ":" + runtime_fingerprint(self.ripgrep_bin)
 
-    def template_for(self, image: str) -> str:
+    def template_for(self, image: str,
+                     resources: "Optional[dict]" = None) -> str:
         """The name of a template built from ``image``, building if needed.
 
         A name the backend already knows -- a checkpoint snapshot a replay
@@ -158,12 +168,16 @@ class TemplateBuilder:
         if image in self._resolved:
             return self._resolved[image]
 
-        name = template_name(image, self._fingerprint, self.runtime_port)
+        name = template_name(image, self._fingerprint, self.runtime_port,
+                             resources)
         with self._client() as client:
             if _could_be_snapshot_name(image) and self._known(client, image):
+                # A snapshot carries the shape it was captured with; asking
+                # for a different one here is not possible and not wanted --
+                # a resumed run continues in the machine it was running on.
                 name = image
             elif not self._template_exists(client, name):
-                staged = self._stage_runtime(client, image, name)
+                staged = self._stage_runtime(client, image, name, resources)
                 self._build_from(client, name, image, staged)
         self._resolved[image] = name
         return name
@@ -200,19 +214,30 @@ class TemplateBuilder:
         raise TemplateError(
             f"could not check {name}: HTTP {resp.status_code} {resp.text[:200]}")
 
-    def _stage_runtime(self, client: httpx.Client, image: str,
-                       name: str) -> str:
+    def _stage_runtime(self, client: httpx.Client, image: str, name: str,
+                       resources: "Optional[dict]" = None) -> str:
         """Cold-start ``image``, install the runtime, and snapshot it.
 
         Returns the staged snapshot's id. Uses the backend's file service
         rather than the runtime, which is what makes this able to install the
         runtime in the first place.
         """
-        created = client.post("/sandboxes-cold", json={
+        # Cold start is the only place a shape can be chosen; the template
+        # built from this snapshot inherits it, and so does every sandbox
+        # started from that template.
+        payload: dict = {
             "image": image,
             "timeout": COLD_START_TIMEOUT_SECONDS,
             "autoPause": False,
-        }, timeout=max(self.request_timeout, COLD_START_TIMEOUT_SECONDS))
+        }
+        if resources:
+            if resources.get("cpu"):
+                payload["cpuCount"] = int(resources["cpu"])
+            if resources.get("memory_mb"):
+                payload["memoryMB"] = int(resources["memory_mb"])
+        created = client.post("/sandboxes-cold", json=payload,
+                              timeout=max(self.request_timeout,
+                                          COLD_START_TIMEOUT_SECONDS))
         if created.status_code != 201:
             raise TemplateError(
                 f"could not cold-start {image}: "
