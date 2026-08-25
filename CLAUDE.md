@@ -279,6 +279,15 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
   sandbox started from that snapshot — the live layer stack is never compacted, so
   without that every later capture would re-compact the chain. `MicroVMPool` gained
   `snapshot`/`squash`/`get_snapshot`; other pools declare `supports_snapshot()` false.
+  **Every checkpoint writes the trajectory** (pass `trajectory_path=` to
+  `install`): snapshots outlive an interrupted run, and without the step→snapshot
+  map beside them the survivors are unusable. Saving used to happen only after a
+  clean finish, which is how a 5-hour marathon run was killed leaving 300
+  snapshots and no record of which step each was; persisting belongs to
+  checkpointing rather than to each harness, so a new harness cannot forget it.
+  `--resume-from <snapshot>` (marathon) continues a task from a checkpoint
+  instead of rebuilding its image -- the environment carries the work, the
+  transcript does not, and the prompt says so.
   Each trajectory (and each rollout reply, success or failure) also carries an
   `environment` block, because a SWE-bench image name is usually a mutable tag and
   cannot identify what a run ran against: `base_image` is the origin, pinned when
