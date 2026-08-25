@@ -276,19 +276,33 @@ class LLMClient:
 
     @staticmethod
     def _retryable(e: Exception) -> bool:
+        """Retry unless the failure is clearly permanent.
+
+        This used to be an allowlist of retryable type names, and it kept
+        losing to the provider's taxonomy: a 103-step run died because a
+        Bedrock 5xx arrived wrapped as MidStreamFallbackError, which no
+        allowlist had heard of. The asymmetry decides the policy -- wasting
+        eight backoffs (~4 minutes) on a permanent error is nothing against
+        losing hours of run to a transient one -- so unknown failures retry,
+        and only the provably-permanent classes fail fast.
+        """
         err_type = type(e).__name__
         err_str = str(e).lower()
-        return (
-            "TimeoutError" in err_type
-            or "stalled" in err_str
-            or "RateLimitError" in err_type
-            or "rate" in err_str
-            or "Timeout" in err_type
-            or "timed out" in err_str
-            or "timeout" in err_str
-            or "ServiceUnavailableError" in err_type
-            or "InternalServerError" in err_type
+        permanent_types = (
+            "AuthenticationError", "PermissionDeniedError", "NotFoundError",
+            "BadRequestError", "InvalidRequestError",
+            "UnprocessableEntityError", "ContextWindowExceededError",
+            "ContentPolicyViolationError", "BudgetExceededError",
         )
+        if any(t in err_type for t in permanent_types):
+            return False
+        # Some gateways misclassify configuration rejections as connection
+        # errors; the message still says so.
+        permanent_markers = (
+            "unsupported model", "did not allow", "invalid api key",
+            "authentication", "model not found",
+        )
+        return not any(m in err_str for m in permanent_markers)
 
     def _consume_stream(self, raw, stream_chunk_builder) -> Any:
         """Display thinking tokens as a rolling line, detect loops, build response."""
