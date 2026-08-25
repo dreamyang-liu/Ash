@@ -161,23 +161,8 @@ class MarathonHarness(BaseHarness):
         agent.before_query_hooks.append(make_context_window_guard(
             strategy=config.get("context_strategy", "summarize")))
 
-        # Save as it goes, not only at the end. A run this long is going to be
-        # interrupted -- a killed process, a provider that stops answering --
-        # and a trajectory that only exists after a clean finish is exactly
-        # the one that is missing when it matters. Observed: a 5-hour run
-        # stalled and was killed, leaving the checkpoints but no transcript to
-        # resume alongside them.
         trajectory_path = (output_dir / "trajectories" /
                            f"{task.instance_id}.json")
-        save_every = int(config.get("trajectory_save_every", 20))
-
-        def save_progress(agent_ref, _conv) -> None:
-            if save_every and agent_ref.cost.api_calls % save_every == 0:
-                agent_ref.trajectory.info.setdefault("exit_status", "in_progress")
-                agent_ref.trajectory.cost = agent_ref.cost
-                agent_ref.trajectory.save(trajectory_path)
-
-        agent.before_query_hooks.append(save_progress)
 
         checkpointer = None
         checkpoint_cfg = config.get("checkpoints") or {}
@@ -187,7 +172,11 @@ class MarathonHarness(BaseHarness):
                 always=checkpoint_cfg.get("trigger", "mutation") == "every_step",
                 disk_only=checkpoint_cfg.get("mode", "disk_only") != "full",
                 reboard=checkpoint_cfg.get("reboard", True),
-                name_prefix=f"marathon-{task.instance_id}-")
+                name_prefix=f"marathon-{task.instance_id}-",
+                # Every checkpoint writes the trajectory beside it: snapshots
+                # that outlive an interrupted run are only resumable if
+                # something records which step each one is.
+                trajectory_path=trajectory_path)
 
         prompt = task.instruction
         if config.get("resume_from"):
@@ -228,11 +217,7 @@ class MarathonHarness(BaseHarness):
             },
         }
         if checkpointer is not None:
-            agent.trajectory.info["checkpoints"] = {
-                "step_snapshots": checkpointer.step_map(),
-                "disk_only": checkpointer.disk_only,
-                "records": [vars(record) for record in checkpointer.records],
-            }
+            agent.trajectory.info["checkpoints"] = checkpointer.as_info()
         agent.trajectory.cost = agent.cost
         agent.trajectory.save(trajectory_path)
 

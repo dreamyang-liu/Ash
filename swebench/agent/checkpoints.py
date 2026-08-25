@@ -198,6 +198,13 @@ class Checkpointer:
     name_prefix: str = ""
     #: Reports each checkpoint (e.g. to a trace stream).
     on_checkpoint: Optional[Callable[[CheckpointRecord], None]] = None
+    #: Called after every recorded checkpoint to persist the run so far. A
+    #: checkpoint without the transcript and the step map beside it is not
+    #: resumable: the snapshots survive an interrupted run but nothing says
+    #: which step each belongs to. Learned the hard way -- a 5-hour run was
+    #: killed with 300 snapshots on the server and no trajectory on disk,
+    #: because saving happened only after a clean finish.
+    persist: Optional[Callable[["Checkpointer"], None]] = None
 
     records: list[CheckpointRecord] = field(default_factory=list)
     latest_snapshot_id: Optional[str] = None
@@ -338,12 +345,31 @@ class Checkpointer:
         self.records.append(record)
         if self.on_checkpoint:
             self.on_checkpoint(record)
+        if self.persist:
+            # Best effort, and never in the way: a failed write costs
+            # resumability from this step, while raising here would cost the
+            # step itself.
+            try:
+                self.persist(self)
+            except Exception as error:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "could not persist checkpoint state: %s", error)
         return record
+
+    def as_info(self) -> dict:
+        """The checkpoint block a trajectory carries, for replay to read."""
+        return {
+            "step_snapshots": self.step_map(),
+            "disk_only": self.disk_only,
+            "records": [vars(record) for record in self.records],
+        }
 
 
 def install(agent, session, *, always: bool = False, disk_only: bool = True,
             reboard: bool = True, squash_lineage_at: int = 128,
             name_prefix: str = "",
+            trajectory_path=None,
             on_checkpoint: Optional[Callable[[CheckpointRecord], None]] = None,
             ) -> Checkpointer:
     """Wire per-step checkpoints into an agent's loop.
@@ -366,10 +392,21 @@ def install(agent, session, *, always: bool = False, disk_only: bool = True,
                       if existing is not None
                       else default_pipeline(extra=[tracker]))
 
+    # Persisting is part of checkpointing, not a harness's responsibility to
+    # remember: whoever turns checkpoints on gets a resumable record, and a
+    # new harness cannot forget to add it.
+    persist = None
+    if trajectory_path is not None:
+        def persist(checkpointer_ref, path=trajectory_path, agent_ref=agent):
+            agent_ref.trajectory.info.setdefault("exit_status", "in_progress")
+            agent_ref.trajectory.info["checkpoints"] = checkpointer_ref.as_info()
+            agent_ref.trajectory.cost = agent_ref.cost
+            agent_ref.trajectory.save(path)
+
     checkpointer = Checkpointer(
         session=session, tracker=tracker, always=always, disk_only=disk_only,
         reboard=reboard, squash_lineage_at=squash_lineage_at,
-        name_prefix=name_prefix, on_checkpoint=on_checkpoint,
+        name_prefix=name_prefix, on_checkpoint=on_checkpoint, persist=persist,
     )
 
     def checkpoint_before_query(agent_ref, _conv) -> None:

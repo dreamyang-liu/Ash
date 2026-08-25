@@ -267,17 +267,17 @@ def test_resume_skips_the_build_and_says_so_in_the_prompt():
     assert "resumed from an earlier" in source
 
 
-def test_trajectory_is_saved_as_the_run_goes():
-    """A run this long gets interrupted, and a trajectory that only exists
-    after a clean finish is the one that is missing when it matters: a 5-hour
-    run stalled and was killed, leaving checkpoints but no transcript."""
+def test_harnesses_hand_the_trajectory_path_to_checkpointing():
+    """Persisting belongs to checkpointing, not to each harness: a 5-hour run
+    was killed leaving 300 snapshots and no transcript, because saving happened
+    only after a clean finish. Every harness that installs checkpoints passes
+    the path, so a new one cannot forget to."""
     import inspect
-    from swebench.harnesses.marathon import MarathonHarness
+    from swebench.harnesses import litellm, marathon
 
-    source = inspect.getsource(MarathonHarness._attempt)
-    assert "trajectory_save_every" in source
-    assert "save_progress" in source
-    assert "before_query_hooks.append(save_progress)" in source
+    for module in (litellm, marathon):
+        source = inspect.getsource(module)
+        assert "trajectory_path=" in source, module.__name__
 
 
 def test_cli_exposes_resume_from():

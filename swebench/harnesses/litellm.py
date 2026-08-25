@@ -161,6 +161,10 @@ class LiteLLMHarness(BaseHarness):
                     squash_lineage_at=int(checkpoint_cfg.get(
                         "squash_lineage_at", 128)),
                     name_prefix=checkpoint_cfg.get("name_prefix", ""),
+                    # Checkpoints persist the run themselves, so an
+                    # interrupted benchmark run is resumable too.
+                    trajectory_path=(output_dir / "trajectories" /
+                                     f"{instance_id}.json"),
                     on_checkpoint=_checkpoint_tracer(agent),
                 )
 
@@ -207,11 +211,7 @@ class LiteLLMHarness(BaseHarness):
             if checkpointer is not None:
                 # What a replay needs: for each step, the snapshot holding the
                 # environment as it stood after that step.
-                agent.trajectory.info["checkpoints"] = {
-                    "step_snapshots": checkpointer.step_map(),
-                    "disk_only": checkpointer.disk_only,
-                    "records": [vars(r) for r in checkpointer.records],
-                }
+                agent.trajectory.info["checkpoints"] = checkpointer.as_info()
             agent.trajectory.cost = agent.cost
             traj_path = output_dir / "trajectories" / f"{instance_id}.json"
             agent.trajectory.save(traj_path)

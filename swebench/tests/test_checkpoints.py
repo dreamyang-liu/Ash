@@ -495,3 +495,63 @@ def test_lineage_squash_can_be_disabled():
     cp.after_step(1)
     cp.after_step(2)
     assert session.squash_calls == []
+
+
+# --- persistence ------------------------------------------------------------ #
+
+def test_every_checkpoint_writes_the_trajectory(tmp_path):
+    """Snapshots outlive an interrupted run; the map from step to snapshot has
+    to as well, or the surviving snapshots are unusable. A real 5-hour run was
+    killed with 300 snapshots on the server and nothing on disk saying which
+    step each belonged to."""
+    import json
+
+    from swebench.models import Trajectory
+
+    path = tmp_path / "traj.json"
+
+    class Agent:
+        def __init__(self):
+            self.before_query_hooks = []
+            self.pipeline = None
+            self.trajectory = Trajectory(instance_id="task")
+            self.trajectory.add_message("assistant", "did a thing")
+
+            class Cost:
+                api_calls = 3
+                def to_dict(self):
+                    return {}
+            self.cost = Cost()
+
+    agent = Agent()
+    session = FakeSession()
+    cp = install(agent, session, always=True, trajectory_path=path)
+
+    cp.after_step(1)
+    assert path.exists(), "the first checkpoint already wrote the trajectory"
+    saved = json.loads(path.read_text())
+    assert saved["info"]["checkpoints"]["step_snapshots"] == {"1": "snap-0"}
+    assert saved["info"]["exit_status"] == "in_progress"
+
+    cp.after_step(2)
+    saved = json.loads(path.read_text())
+    assert set(saved["info"]["checkpoints"]["step_snapshots"]) == {"1", "2"}
+
+
+def test_a_failed_write_does_not_lose_the_step():
+    """Resumability from this step is worth less than the step itself."""
+    def explode(_checkpointer):
+        raise OSError("disk full")
+
+    session = FakeSession()
+    cp = Checkpointer(session=session, always=True, persist=explode)
+    record = cp.after_step(1)
+    assert record is not None and record.captured
+
+
+def test_no_path_means_no_writing(tmp_path):
+    """Checkpoints still work for callers that manage their own records."""
+    agent = FakeAgent()
+    cp = install(agent, FakeSession(), always=True)
+    assert cp.persist is None
+    assert cp.after_step(1).captured
