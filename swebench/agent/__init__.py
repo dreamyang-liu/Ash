@@ -32,6 +32,24 @@ from . import interceptors
 __all__ = ["AshAgent", "build_system_prompt", "build_instance_message"]
 
 
+#: Placeholders a provider substitutes for an empty completion. They are not
+#: the model's answer, and reading them as one is how a 57-step run ended as
+#: "completed" with nothing built: three genuinely empty turns were correctly
+#: re-prompted, then the proxy replaced the fourth with a notice, which looked
+#: like a text-only answer and tripped the two-strikes finish rule.
+_PROVIDER_PLACEHOLDERS = ("[system:",)
+
+
+def _is_vacuous(content: "str | None") -> bool:
+    """Whether a completion carries nothing the model actually said."""
+    text = (content or "").strip()
+    if not text:
+        return True
+    lowered = text.lower()
+    return (text.startswith("[") and text.endswith("]")
+            and any(lowered.startswith(p) for p in _PROVIDER_PLACEHOLDERS))
+
+
 class AshAgent:
     """Agent that uses tool calls to solve SWE-bench tasks."""
 
@@ -285,7 +303,7 @@ class AshAgent:
 
     def _nudge(self, conv: Conversation, message) -> Optional[str]:
         """Handle a turn with no tool calls. Return 'completed' to stop, else None."""
-        if not (message.content or "").strip():
+        if _is_vacuous(message.content):
             # Empty response — always reprompt
             conv.add_user("You must call a tool to proceed.")
             self._trace("\n[NUDGE] empty response, prompting retry\n")

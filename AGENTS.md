@@ -298,6 +298,11 @@ and cannot become one.
   disk-only chain is ~1.4 GB; the store on this machine grew to 85 GB across a
   few days of experiments. Reclaiming means stopping the server and removing
   `$AENV_HOME/snapshot-store` (task images then reconvert, minutes each).
+- **A provider may substitute a placeholder for an empty completion.** One
+  proxy returns `[System: Empty message content sanitised to satisfy protocol]`,
+  which looked like a text-only answer and tripped the loop's two-strikes
+  finish rule: a run ended as `completed` at step 57 with nothing built.
+  Vacuous completions are now re-prompted and do not count toward finishing.
 - **Killing a run leaks its sandbox.** `session.destroy()` runs in a `finally`
   that a `kill -9` skips; the sandbox then lives until its TTL. Delete it with
   `DELETE /sandboxes/<id>`.
