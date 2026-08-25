@@ -167,6 +167,11 @@ def main():
     parser.add_argument("--instance", "-i", default=None)
     parser.add_argument("--slice", default=None)
     parser.add_argument("--filter", default=None)
+    parser.add_argument("--resume-with-transcript", dest="resume_transcript",
+                        default=None, metavar="TRAJECTORY_JSON",
+                        help="resume with memory: restore the snapshot AND "
+                             "seed the conversation with the transcript "
+                             "prefix cut at the same step (marathon)")
     parser.add_argument("--resume-from", default=None,
                         help="Snapshot id to continue a marathon task from, "
                              "instead of building its image fresh. The "
@@ -244,7 +249,7 @@ def main():
                 "step_limit", "cost_limit", "temperature", "reasoning_effort",
                 "prompt_cache", "max_budget", "timeout", "runtime_bin",
                 "image_template", "subset", "workers", "custom_tools_dir",
-                "backend", "resume_from", "task_dir"]:
+                "backend", "resume_from", "resume_transcript", "task_dir"]:
         cli_val = getattr(args, key.replace("-", "_"), None)
         if cli_val is not None:
             harness_config[key] = cli_val

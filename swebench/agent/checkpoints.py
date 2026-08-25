@@ -434,7 +434,11 @@ def install(agent, session, *, always: bool = False, disk_only: bool = True,
     def checkpoint_before_query(agent_ref, _conv) -> None:
         # api_calls counts completed model calls, so this labels the step whose
         # tool calls just finished; 0 on the first firing (the initial state).
-        checkpointer.after_step(agent_ref.cost.api_calls)
+        # turn_base shifts a resumed-with-history run so its steps continue
+        # the seeded transcript's numbering -- turn N must always mean "the
+        # transcript's first N assistant messages", whichever run wrote them.
+        checkpointer.after_step(
+            getattr(agent_ref, "turn_base", 0) + agent_ref.cost.api_calls)
 
     agent.before_query_hooks = list(agent.before_query_hooks) + [
         checkpoint_before_query]

@@ -71,6 +71,20 @@ class Conversation:
         self.trajectory = trajectory
         self.consecutive_no_tool = 0
 
+    def seed(self, messages: list[dict]) -> None:
+        """Adopt a transcript verbatim as this conversation's history.
+
+        Verbatim is the contract: no system prompt is regenerated (the seeded
+        history brings its own, possibly from an older prompt builder), no
+        note is appended, and `tool_calls` / `tool_call_id` keys pass through
+        untouched -- the model must see exactly the conversation the original
+        run held, or a resumed run is a subtly different experiment.
+        """
+        for message in messages:
+            copy = dict(message)
+            self.messages.append(copy)
+            self.trajectory.messages.append(dict(copy))
+
     def add_system(self, content: str) -> None:
         self.messages.append({"role": "system", "content": content})
         self.trajectory.add_message("system", content)

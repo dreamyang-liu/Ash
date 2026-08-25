@@ -87,7 +87,45 @@ class MarathonHarness(BaseHarness):
         # it away. Hours are exactly what these tasks cost, so continuing is
         # the difference between finishing one and restarting it.
         resume_from = c.get("resume_from")
-        if resume_from:
+        resume_transcript = c.get("resume_transcript")
+        history = None
+        if resume_transcript:
+            # Resume WITH memory: the snapshot restores the environment and
+            # the transcript prefix restores the conversation, cut at the
+            # same step so they describe the same moment. Deriving both from
+            # one file is what makes the alignment impossible to get wrong.
+            from ..replay import (load_step_snapshots, messages_through_step,
+                                  replay_caveats)
+            try:
+                step_map = load_step_snapshots(resume_transcript)
+            except (OSError, ValueError, KeyError) as exc:
+                return self._failure(instance,
+                                     f"error: unreadable transcript: {exc}")
+            if not step_map:
+                return self._failure(
+                    instance, "error: transcript has no step->snapshot map")
+            if resume_from:
+                steps = [s_ for s_, snap in step_map.items()
+                         if snap == resume_from]
+                if not steps:
+                    return self._failure(
+                        instance,
+                        f"error: snapshot {resume_from} is not in the "
+                        "transcript's step map; refusing a mismatched "
+                        "environment/history pair")
+                step = max(steps)
+            else:
+                step = max(step_map)
+                resume_from = step_map[step]
+            history = messages_through_step(resume_transcript, step)
+            image = resume_from
+            if not quiet:
+                print(S.kv("resume  ", S.cyan(
+                    f"{str(resume_from)[:13]}… with memory: step {step}, "
+                    f"{len(history)} messages")))
+                for caveat in replay_caveats(resume_transcript, step):
+                    print(S.kv("caveat  ", S.yellow(caveat)))
+        elif resume_from:
             image = resume_from
             if not quiet:
                 print(S.kv("resume  ", S.cyan(str(resume_from)[:13] + "…")))
@@ -104,14 +142,15 @@ class MarathonHarness(BaseHarness):
             if not session.create(image):
                 return self._failure(instance,
                                      f"error: sandbox creation failed for {image}")
-            return self._attempt(task, session, output_dir, quiet)
+            return self._attempt(task, session, output_dir, quiet,
+                                 history=history)
         finally:
             session.destroy()
 
     # --- internals ---
 
     def _attempt(self, task, session: AshSession, output_dir: Path,
-                 quiet: bool) -> dict:
+                 quiet: bool, history: "Optional[list[dict]]" = None) -> dict:
         config = self.config
         agent_config = AgentConfig(
             model=config.get("model", "bedrock/us.anthropic.claude-sonnet-4-6"),
@@ -190,11 +229,12 @@ class MarathonHarness(BaseHarness):
                 trajectory_path=trajectory_path)
 
         prompt = task.instruction
-        if config.get("resume_from"):
-            # A resumed run has the artifacts but not the transcript, so the
-            # environment has to be described rather than assumed. Stating it
-            # plainly beats letting the agent rediscover it: the first thing it
-            # would otherwise do is read files it has already written.
+        if config.get("resume_from") and not history:
+            # Environment-only resume: the artifacts survived but the
+            # conversation did not, so the prompt has to say so. The
+            # with-memory path adds nothing -- the seeded history IS the
+            # prompt, verbatim, and any note would make the resumed run a
+            # subtly different experiment.
             prompt += (
                 "\n\n---\n\nNOTE: this environment is resumed from an earlier "
                 "session of this same task. Work already exists on disk -- "
@@ -203,7 +243,8 @@ class MarathonHarness(BaseHarness):
                 "rather than starting over. You do not have the earlier "
                 "conversation, only what is on disk.")
 
-        exit_status = agent.run(prompt, instance_id=task.instance_id)
+        exit_status = agent.run(prompt, instance_id=task.instance_id,
+                                history=history)
 
         result = grade(session, task)
         if not quiet:
@@ -217,6 +258,11 @@ class MarathonHarness(BaseHarness):
             "exit_status": exit_status,
             "submission": "",
             "environment": session.environment(),
+            **({"resumed": {
+                "snapshot": config.get("resume_from"),
+                "transcript": str(config.get("resume_transcript")),
+                "seeded_messages": len(history),
+            }} if history else {}),
             "marathon": {
                 "task": task.name,
                 "reward": result.reward,
