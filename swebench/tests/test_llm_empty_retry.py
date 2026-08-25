@@ -87,3 +87,38 @@ def test_streaming_emptiness_is_judged_after_assembly(monkeypatch):
     result = c.query([{"role": "user", "content": "go"}])
     assert result.choices[0].message.content == "done"
     assert len(consumed) == 2, "each attempt assembled once"
+
+
+def test_cache_markers_only_go_to_models_that_take_them(monkeypatch):
+    """cache_control is an Anthropic Messages API concept. Bedrock turns the
+    markers into cachePoint blocks, and its non-Anthropic models reject those
+    as a hard error -- "your request did not allow prompt caching" killed a
+    luna run on its very first call. Metadata decides; unknown models get
+    markers only when addressed over the Anthropic protocol, where an ignored
+    marker is legal."""
+    import swebench.agent.llm as llm
+
+    def fake_info(model):
+        return {"bedrock/us.anthropic.claude-sonnet-4-6":
+                    {"supports_prompt_caching": True},
+                "bedrock/us.openai.gpt-5.6-luna": {}}[model]
+
+    class FakeLitellm:
+        get_model_info = staticmethod(fake_info)
+    monkeypatch.setitem(__import__("sys").modules, "litellm", FakeLitellm)
+
+    def client_for(model):
+        c = LLMClient(AgentConfig(model=model), CostTracker(), tools_schema=[])
+        return c
+
+    assert client_for("bedrock/us.anthropic.claude-sonnet-4-6")._model_takes_cache_markers()
+    assert not client_for("bedrock/us.openai.gpt-5.6-luna")._model_takes_cache_markers()
+    # Unknown to litellm, but spoken to over the Anthropic protocol: the
+    # marker is protocol-legal there and the server may simply ignore it.
+    class NoInfo:
+        @staticmethod
+        def get_model_info(model):
+            raise ValueError("unmapped")
+    monkeypatch.setitem(__import__("sys").modules, "litellm", NoInfo)
+    assert client_for("anthropic/deepseek-v4-flash")._model_takes_cache_markers()
+    assert not client_for("openai/some-proxy-model")._model_takes_cache_markers()
