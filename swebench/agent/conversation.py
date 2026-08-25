@@ -93,7 +93,15 @@ class Conversation:
         self.trajectory.add_message(
             "assistant", message.content or "",
             **({"tool_calls": msg["tool_calls"]} if message.tool_calls else {}))
-        self.consecutive_no_tool = 0 if message.tool_calls else self.consecutive_no_tool + 1
+        # A turn that said nothing does not count toward "the agent is done":
+        # the finish rule is meant to catch a model that has stopped acting
+        # because it believes the work is complete, not one whose completion
+        # came back empty (or as a provider's placeholder for empty).
+        from . import _is_vacuous
+        if message.tool_calls or _is_vacuous(message.content):
+            self.consecutive_no_tool = 0
+        else:
+            self.consecutive_no_tool += 1
 
     def add_tool_result(self, tool_call_id: str, content: str, **meta) -> None:
         self.messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": content})
