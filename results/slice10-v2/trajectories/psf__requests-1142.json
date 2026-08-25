@@ -1,0 +1,435 @@
+{
+  "trajectory_format": "ash-agent-2.0",
+  "instance_id": "psf__requests-1142",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant that can interact with a computer to solve software engineering tasks.\n"
+    },
+    {
+      "role": "user",
+      "content": "Please solve this issue: requests.get is ALWAYS sending content length\nHi,\n\nIt seems like that request.get always adds 'content-length' header to the request.\nI think that the right behavior is not to add this header automatically in GET requests or add the possibility to not send it.\n\nFor example http://amazon.com returns 503 for every get request that contains 'content-length' header.\n\nThanks,\n\nOren\n\n\n\nYou can use tools to execute commands, search code, read files, and edit files.\n\n## Available Tools\n\n- `shell`: Execute bash commands. Use `tail` param to limit output. Use `background: true` for long-running commands.\n- `grep_files`: Search code with ripgrep. Always set `include` (e.g. \"*.py\") and `limit`.\n- `text_editor`: View and edit files. Commands: `view` (read range), `str_replace` (exact match replace), `insert` (after line N), `write` (create/overwrite).\n- `process`: Manage background processes. Actions: `read` (get output), `kill`.\n\n## Recommended Workflow\n\n1. Analyze the codebase by finding and reading relevant files\n2. Create a script to reproduce the issue\n3. Edit the source code to resolve the issue\n4. Verify your fix works by running your script again\n5. Test edge cases to ensure your fix is robust by running related tests\n\n## Tool Usage Rules\n\nYou are operating in an environment where:\n\n1. You issue at least one tool call\n2. The system executes the tool(s) and returns results\n3. You see the result(s)\n4. You write your next tool call(s)\n\nEach response should include:\n\n1. **Reasoning text** where you explain your analysis and plan\n2. At least one tool call\n\n**CRITICAL REQUIREMENTS:**\n\n- Your response SHOULD include reasoning text explaining what you're doing\n- Your response MUST include AT LEAST ONE tool call\n- Always read a file before editing it\n- Always run tests after editing: `shell({\"command\": \"cd /testbed && python -m pytest path/to/test -x\", \"tail\": 30})`\n- NEVER modify test files. If you accidentally did, revert them before finishing:\n  `shell({\"command\": \"cd /testbed && git checkout -- '**/test*' '**/conftest*'\"})`\n- Fix ALL instances of a bug pattern, not just one\n- Keep patches clean: only source changes, no temp files\n- When you are done, clean up any temporary files you created:\n  `shell({\"command\": \"cd /testbed && rm -f repro*.py reproduce*.py test_fix*.py\"})`\n\n## Tool Examples\n\n### Search for code:\n```\ngrep_files({\"pattern\": \"def function_name\", \"path\": \"/testbed\", \"include\": \"*.py\", \"limit\": 20})\n```\n\n### Read a file:\n```\ntext_editor({\"command\": \"view\", \"path\": \"/testbed/src/module.py\", \"view_range\": [100, 150]})\n```\n\n### Edit a file:\n```\ntext_editor({\"command\": \"str_replace\", \"path\": \"/testbed/src/module.py\",\n  \"old_str\": \"original code here\",\n  \"new_str\": \"replacement code here\"})\n```\n\n### Run a command:\n```\nshell({\"command\": \"cd /testbed && python -c \\\"print('hello')\\\"\", \"tail\": 30})\n```\n\n### Run tests:\n```\nshell({\"command\": \"cd /testbed && python -m pytest tests/test_module.py -x\", \"tail\": 30})\n```\n"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll analyze the codebase to understand the issue and find where `content-length` header is being added to GET requests."
+    },
+    {
+      "role": "tool_result",
+      "content": "/testbed/setup.py\n/testbed/requests/sessions.py\n/testbed/requests/packages/urllib3/contrib/__init__.py\n/testbed/requests/packages/urllib3/contrib/ntlmpool.py\n/testbed/requests/packages/urllib3/packages/__init__.py\n/testbed/requests/packages/urllib3/packages/ssl_match_hostname/__init__.py\n/testbed/requests/packages/urllib3/packages/ordered_dict.py\n/testbed/requests/packages/urllib3/packages/six.py\n/testbed/requests/packages/urllib3/__init__.py\n/testbed/requests/packages/urllib3/connectionpool.py\n/testbed/requests/packages/urllib3/response.py\n/testbed/requests/packages/urllib3/util.py\n/testbed/requests/packages/urllib3/exceptions.py\n/testbed/requests/packages/urllib3/poolmanager.py\n/testbed/requests/packages/urllib3/_collections.py\n/testbed/requests/packages/urllib3/filepost.py\n/testbed/requests/packages/urllib3/request.py\n/testbed/requests/packages/charade/mbcsgroupprober.py\n/testbed/requests/packages/charade/euctwfreq.py\n/testbed/requests/packages/charade/euckrprober.py\nAUTHORS.rst\nHISTORY.rst\nLICENSE\nMANIFEST.in\nMakefile\nNOTICE\nREADME.rst\nbuild\ndocs\next\nrequests\nrequests.egg-info\nrequirements.txt\nsetup.py\ntest_requests.py\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "find /testbed -type f -name \"*.py\" | head -20 && ls /testbed"
+      },
+      "success": true
+    },
+    {
+      "role": "tool_result",
+      "content": "/testbed/build/lib/requests/models.py:362:                self.headers['Content-Length'] = length\n/testbed/build/lib/requests/models.py:380:            self.prepare_content_length(body)\n/testbed/build/lib/requests/models.py:388:    def prepare_content_length(self, body):\n/testbed/build/lib/requests/models.py:389:        self.headers['Content-Length'] = '0'\n/testbed/build/lib/requests/models.py:392:            self.headers['Content-Length'] = str(body.tell())\n/testbed/build/lib/requests/models.py:395:            self.headers['Content-Length'] = str(len(body))\n/testbed/build/lib/requests/models.py:410:            # Recompute Content-Length\n/testbed/build/lib/requests/models.py:411:            self.prepare_content_length(self.body)\n/testbed/build/lib/requests/adapters.py:157:        chunked = not (request.body is None or 'Content-Length' in request.headers)\n/testbed/requests/models.py:362:                self.headers['Content-Length'] = length\n/testbed/requests/models.py:380:            self.prepare_content_length(body)\n/testbed/requests/models.py:388:    def prepare_content_length(self, body):\n/testbed/requests/models.py:389:        self.headers['Content-Length'] = '0'\n/testbed/requests/models.py:392:            self.headers['Content-Length'] = str(body.tell())\n/testbed/requests/models.py:395:            self.headers['Content-Length'] = str(len(body))\n/testbed/requests/models.py:410:            # Recompute Content-Length\n/testbed/requests/models.py:411:            self.prepare_content_length(self.body)\n/testbed/requests/adapters.py:157:        chunked = not (request.body is None or 'Content-Length' in request.headers)\n",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "pattern": "content.length|content_length|Content-Length",
+        "path": "/testbed",
+        "include": "*.py",
+        "limit": 30
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "     370 |             if files:\n     371 |                 (body, content_type) = self._encode_files(files, data)\n     372 |             else:\n     373 |                 if data:\n     374 |                     body = self._encode_params(data)\n     375 |                     if isinstance(data, str) or isinstance(data, builtin_str) or hasattr(data, 'read'):\n     376 |                         content_type = None\n     377 |                     else:\n     378 |                         content_type = 'application/x-www-form-urlencoded'\n     379 | \n     380 |             self.prepare_content_length(body)\n     381 | \n     382 |             # Add content-type if it wasn't explicitly provided.\n     383 |             if (content_type) and (not 'content-type' in self.headers):\n     384 |                 self.headers['Content-Type'] = content_type\n     385 | \n     386 |         self.body = body\n     387 | \n     388 |     def prepare_content_length(self, body):\n     389 |         self.headers['Content-Length'] = '0'\n     390 |         if hasattr(body, 'seek') and hasattr(body, 'tell'):\n     391 |             body.seek(0, 2)\n     392 |             self.headers['Content-Length'] = str(body.tell())\n     393 |             body.seek(0, 0)\n     394 |         elif body is not None:\n     395 |             self.headers['Content-Length'] = str(len(body))\n     396 | \n     397 |     def prepare_auth(self, auth):\n     398 |         \"\"\"Prepares the given HTTP auth data.\"\"\"\n     399 |         if auth:\n     400 |             if isinstance(auth, tuple) and len(auth) == 2:\n     401 |                 # special-case basic HTTP auth\n     402 |                 auth = HTTPBasicAuth(*auth)\n     403 | \n     404 |             # Allow auth to make its changes.\n     405 |             r = auth(self)\n     406 | \n     407 |             # Update self to reflect the auth changes.\n     408 |             self.__dict__.update(r.__dict__)\n     409 | \n     410 |             # Recompute Content-Length\n     411 |             self.prepare_content_length(self.body)\n     412 | \n     413 |     def prepare_cookies(self, cookies):\n     414 |         \"\"\"Prepares the given HTTP cookie data.\"\"\"\n     415 | \n     416 |         if isinstance(cookies, cookielib.CookieJar):\n     417 |             cookies = cookies\n     418 |         else:\n     419 |             cookies = cookiejar_from_dict(cookies)\n     420 | \n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/requests/models.py",
+        "view_range": [
+          370,
+          420
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now I can see the issue. In `prepare_content_length`, it always sets `Content-Length` to `'0'` even when `body` is `None`. This means GET requests (which have no body) will always get a `Content-Length: 0` header. Let me look at more context:"
+    },
+    {
+      "role": "tool_result",
+      "content": "     340 |         content_type = None\n     341 |         length = None\n     342 |         is_stream = False\n     343 | \n     344 |         is_stream = all([\n     345 |             hasattr(data, '__iter__'),\n     346 |             not isinstance(data, basestring),\n     347 |             not isinstance(data, dict)\n     348 |         ])\n     349 | \n     350 |         try:\n     351 |             length = str(super_len(data))\n     352 |         except (TypeError, AttributeError):\n     353 |             length = False\n     354 | \n     355 |         if is_stream:\n     356 |             body = data\n     357 | \n     358 |             if files:\n     359 |                 raise NotImplementedError('Streamed bodies and files are mutually exclusive.')\n     360 | \n     361 |             if length:\n     362 |                 self.headers['Content-Length'] = length\n     363 |             else:\n     364 |                 self.headers['Transfer-Encoding'] = 'chunked'\n     365 |         # Check if file, fo, generator, iterator.\n     366 |         # If not, run through normal process.\n     367 | \n     368 |         else:\n     369 |             # Multi-part file uploads.\n     370 |             if files:\n     371 |                 (body, content_type) = self._encode_files(files, data)\n     372 |             else:\n     373 |                 if data:\n     374 |                     body = self._encode_params(data)\n     375 |                     if isinstance(data, str) or isinstance(data, builtin_str) or hasattr(data, 'read'):\n     376 |                         content_type = None\n     377 |                     else:\n     378 |                         content_type = 'application/x-www-form-urlencoded'\n     379 | \n     380 |             self.prepare_content_length(body)\n     381 | \n     382 |             # Add content-type if it wasn't explicitly provided.\n     383 |             if (content_type) and (not 'content-type' in self.headers):\n     384 |                 self.headers['Content-Type'] = content_type\n     385 | \n     386 |         self.body = body\n     387 | \n     388 |     def prepare_content_length(self, body):\n     389 |         self.headers['Content-Length'] = '0'\n     390 |         if hasattr(body, 'seek') and hasattr(body, 'tell'):\n     391 |             body.seek(0, 2)\n     392 |             self.headers['Content-Length'] = str(body.tell())\n     393 |             body.seek(0, 0)\n     394 |         elif body is not None:\n     395 |             self.headers['Content-Length'] = str(len(body))\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/requests/models.py",
+        "view_range": [
+          340,
+          395
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now let me also check what the `build/lib` version has for comparison, and also look at the test file to understand expected behavior:"
+    },
+    {
+      "role": "tool_result",
+      "content": "     385 | \n     386 |         self.body = body\n     387 | \n     388 |     def prepare_content_length(self, body):\n     389 |         self.headers['Content-Length'] = '0'\n     390 |         if hasattr(body, 'seek') and hasattr(body, 'tell'):\n     391 |             body.seek(0, 2)\n     392 |             self.headers['Content-Length'] = str(body.tell())\n     393 |             body.seek(0, 0)\n     394 |         elif body is not None:\n     395 |             self.headers['Content-Length'] = str(len(body))\n     396 | \n     397 |     def prepare_auth(self, auth):\n     398 |         \"\"\"Prepares the given HTTP auth data.\"\"\"\n     399 |         if auth:\n     400 |             if isinstance(auth, tuple) and len(auth) == 2:\n     401 |                 # special-case basic HTTP auth\n     402 |                 auth = HTTPBasicAuth(*auth)\n     403 | \n     404 |             # Allow auth to make its changes.\n     405 |             r = auth(self)\n     406 | \n     407 |             # Update self to reflect the auth changes.\n     408 |             self.__dict__.update(r.__dict__)\n     409 | \n     410 |             # Recompute Content-Length\n     411 |             self.prepare_content_length(self.body)\n     412 | \n     413 |     def prepare_cookies(self, cookies):\n     414 |         \"\"\"Prepares the given HTTP cookie data.\"\"\"\n     415 | \n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/build/lib/requests/models.py",
+        "view_range": [
+          385,
+          415
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "tool_result",
+      "content": "No matches found.",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "pattern": "content.length|Content-Length|content_length",
+        "path": "/testbed/test_requests.py",
+        "include": "*.py",
+        "limit": 30
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Both `requests/models.py` and `build/lib/requests/models.py` have the same bug. The fix is clear: in `prepare_content_length`, when `body` is `None`, we should NOT set `Content-Length` at all (not even `'0'`). The `Content-Length: 0` should only be set when there's no body but for methods like POST/PUT that might send an empty body - but even then, for GET requests, it should not be added.\n\nThe simplest and most correct fix is: don't set `Content-Length` when the body is `None`. The `'0'` default should only apply when there IS a body but its length is 0.\n\nLet me create a reproduction script first:"
+    },
+    {
+      "role": "tool_result",
+      "content": "Headers for GET request: {'Content-Length': '0'}\nContent-Length present: True\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -c \"\nimport requests\nreq = requests.Request('GET', 'http://example.com')\nprepared = req.prepare()\nprint('Headers for GET request:', dict(prepared.headers))\nprint('Content-Length present:', 'Content-Length' in prepared.headers)\n\""
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "I've confirmed the bug. Now let me fix the `prepare_content_length` method in both `requests/models.py` and `build/lib/requests/models.py`:"
+    },
+    {
+      "role": "tool_result",
+      "content": "OK",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "str_replace",
+        "path": "/testbed/requests/models.py",
+        "old_str": "    def prepare_content_length(self, body):\n        self.headers['Content-Length'] = '0'\n        if hasattr(body, 'seek') and hasattr(body, 'tell'):\n            body.seek(0, 2)\n            self.headers['Content-Length'] = str(body.tell())\n            body.seek(0, 0)\n        elif body is not None:\n            self.headers['Content-Length'] = str(len(body))",
+        "new_str": "    def prepare_content_length(self, body):\n        if hasattr(body, 'seek') and hasattr(body, 'tell'):\n            body.seek(0, 2)\n            self.headers['Content-Length'] = str(body.tell())\n            body.seek(0, 0)\n        elif body is not None:\n            self.headers['Content-Length'] = str(len(body))\n        elif self.method not in ('GET', 'HEAD'):\n            self.headers['Content-Length'] = '0'"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Wait, let me check if `self.method` is available at that point in the code flow:"
+    },
+    {
+      "role": "tool_result",
+      "content": "     280 |             # We're on Python 3.\n     281 |             url = str(url)\n     282 |         except UnicodeDecodeError:\n     283 |             pass\n     284 | \n     285 |         # Support for unicode domain names and paths.\n     286 |         scheme, netloc, path, _params, query, fragment = urlparse(url)\n     287 | \n     288 |         if not (scheme and netloc):\n     289 |             raise MissingSchema(\"Invalid URL %r: No schema supplied\" % url)\n     290 | \n     291 |         try:\n     292 |             netloc = netloc.encode('idna').decode('utf-8')\n     293 |         except UnicodeError:\n     294 |             raise InvalidURL('URL has an invalid label.')\n     295 | \n     296 |         # Bare domains aren't valid URLs.\n     297 |         if not path:\n     298 |             path = '/'\n     299 | \n     300 |         if is_py2:\n     301 |             if isinstance(scheme, str):\n     302 |                 scheme = scheme.encode('utf-8')\n     303 |             if isinstance(netloc, str):\n     304 |                 netloc = netloc.encode('utf-8')\n     305 |             if isinstance(path, str):\n     306 |                 path = path.encode('utf-8')\n     307 |             if isinstance(_params, str):\n     308 |                 _params = _params.encode('utf-8')\n     309 |             if isinstance(query, str):\n     310 |                 query = query.encode('utf-8')\n     311 |             if isinstance(fragment, str):\n     312 |                 fragment = fragment.encode('utf-8')\n     313 | \n     314 |         enc_params = self._encode_params(params)\n     315 |         if enc_params:\n     316 |             if query:\n     317 |                 query = '%s&%s' % (query, enc_params)\n     318 |             else:\n     319 |                 query = enc_params\n     320 | \n     321 |         url = requote_uri(urlunparse([scheme, netloc, path, _params, query, fragment]))\n     322 |         self.url = url\n     323 | \n     324 |     def prepare_headers(self, headers):\n     325 |         \"\"\"Prepares the given HTTP headers.\"\"\"\n     326 | \n     327 |         if headers:\n     328 |             self.headers = CaseInsensitiveDict(headers)\n     329 |         else:\n     330 |             self.headers = CaseInsensitiveDict()\n     331 | \n     332 |     def prepare_body(self, data, files):\n     333 |         \"\"\"Prepares the given HTTP body data.\"\"\"\n     334 | \n     335 |         # Check if file, fo, generator, iterator.\n     336 |         # If not, run through normal process.\n     337 | \n     338 |         # Nottin' on you.\n     339 |         body = None\n     340 |         content_type = None\n     341 |         length = None\n     342 |         is_stream = False\n     343 | \n     344 |         is_stream = all([\n     345 |             hasattr(data, '__iter__'),\n     346 |             not isinstance(data, basestring),\n     347 |             not isinstance(data, dict)\n     348 |         ])\n     349 | \n     350 |         try:\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/requests/models.py",
+        "view_range": [
+          280,
+          350
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "     220 |         p.prepare_method(self.method)\n     221 |         p.prepare_url(self.url, self.params)\n     222 |         p.prepare_headers(self.headers)\n     223 |         p.prepare_cookies(self.cookies)\n     224 |         p.prepare_body(self.data, self.files)\n     225 |         # Note that prepare_auth must be last to enable authentication schemes\n     226 |         # such as OAuth to work on a fully prepared request.\n     227 |         p.prepare_auth(self.auth)\n     228 |         # This MUST go after prepare_auth. Authenticators could add a hook\n     229 |         p.prepare_hooks(self.hooks)\n     230 | \n     231 |         return p\n     232 | \n     233 | \n     234 | class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):\n     235 |     \"\"\"The fully mutable :class:`PreparedRequest <PreparedRequest>` object,\n     236 |     containing the exact bytes that will be sent to the server.\n     237 | \n     238 |     Generated from either a :class:`Request <Request>` object or manually.\n     239 | \n     240 |     Usage::\n     241 | \n     242 |       >>> import requests\n     243 |       >>> req = requests.Request('GET', 'http://httpbin.org/get')\n     244 |       >>> r = req.prepare()\n     245 |       <PreparedRequest [GET]>\n     246 | \n     247 |       >>> s = requests.Session()\n     248 |       >>> s.send(r)\n     249 |       <Response [200]>\n     250 | \n     251 |     \"\"\"\n     252 | \n     253 |     def __init__(self):\n     254 |         #: HTTP verb to send to the server.\n     255 |         self.method = None\n     256 |         #: HTTP URL to send the request to.\n     257 |         self.url = None\n     258 |         #: dictionary of HTTP headers.\n     259 |         self.headers = None\n     260 |         #: request body to send to the server.\n     261 |         self.body = None\n     262 |         #: dictionary of callback hooks, for internal usage.\n     263 |         self.hooks = default_hooks()\n     264 | \n     265 |     def __repr__(self):\n     266 |         return '<PreparedRequest [%s]>' % (self.method)\n     267 | \n     268 |     def prepare_method(self, method):\n     269 |         \"\"\"Prepares the given HTTP method.\"\"\"\n     270 |         self.method = method\n     271 |         if self.method is not None:\n     272 |             self.method = self.method.upper()\n     273 | \n     274 |     def prepare_url(self, url, params):\n     275 |         \"\"\"Prepares the given HTTP URL.\"\"\"\n     276 |         #: Accept objects that have string representations.\n     277 |         try:\n     278 |             url = unicode(url)\n     279 |         except NameError:\n     280 |             # We're on Python 3.\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/requests/models.py",
+        "view_range": [
+          220,
+          280
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "`self.method` is set by `prepare_method` before `prepare_body` is called (line 220 vs 224 in the `prepare()` method). So `self.method` should be available when `prepare_content_length` is called.\n\nHowever, I want to reconsider the approach. Looking at the issue more carefully:\n\n1. For GET/HEAD requests with no body: `Content-Length` should **not** be set at all\n2. For POST/PUT/PATCH requests with no body: `Content-Length: 0` is acceptable (some servers expect it)\n3. For requests with a body: `Content-Length` should always be set\n\nBut actually, let me re-think this. The issue says Content-Length is being sent on GET requests. The simplest and most correct fix is: **if body is None, don't set Content-Length regardless of method**. POST requests with empty bodies may still work without Content-Length. Let me check what happens in practice:"
+    },
+    {
+      "role": "tool_result",
+      "content": "     386 |         self.body = body\n     387 | \n     388 |     def prepare_content_length(self, body):\n     389 |         if hasattr(body, 'seek') and hasattr(body, 'tell'):\n     390 |             body.seek(0, 2)\n     391 |             self.headers['Content-Length'] = str(body.tell())\n     392 |             body.seek(0, 0)\n     393 |         elif body is not None:\n     394 |             self.headers['Content-Length'] = str(len(body))\n     395 |         elif self.method not in ('GET', 'HEAD'):\n     396 |             self.headers['Content-Length'] = '0'\n     397 | \n     398 |     def prepare_auth(self, auth):\n     399 |         \"\"\"Prepares the given HTTP auth data.\"\"\"\n     400 |         if auth:\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/requests/models.py",
+        "view_range": [
+          386,
+          400
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Wait, my current fix uses `self.method` which might cause issues if `prepare_content_length` is called directly (without having set `self.method` first). Let me reconsider.\n\nLooking at the actual issue: the problem is that `Content-Length: 0` is being sent on GET requests even when there's no body. The proper fix is to simply not add `Content-Length: 0` when `body is None`. Let me simplify the fix:"
+    },
+    {
+      "role": "tool_result",
+      "content": "OK",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "str_replace",
+        "path": "/testbed/requests/models.py",
+        "old_str": "    def prepare_content_length(self, body):\n        if hasattr(body, 'seek') and hasattr(body, 'tell'):\n            body.seek(0, 2)\n            self.headers['Content-Length'] = str(body.tell())\n            body.seek(0, 0)\n        elif body is not None:\n            self.headers['Content-Length'] = str(len(body))\n        elif self.method not in ('GET', 'HEAD'):\n            self.headers['Content-Length'] = '0'",
+        "new_str": "    def prepare_content_length(self, body):\n        if hasattr(body, 'seek') and hasattr(body, 'tell'):\n            body.seek(0, 2)\n            self.headers['Content-Length'] = str(body.tell())\n            body.seek(0, 0)\n        elif body is not None:\n            self.headers['Content-Length'] = str(len(body))"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now apply the same fix to `build/lib/requests/models.py`:"
+    },
+    {
+      "role": "tool_result",
+      "content": "OK",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "str_replace",
+        "new_str": "    def prepare_content_length(self, body):\n        if hasattr(body, 'seek') and hasattr(body, 'tell'):\n            body.seek(0, 2)\n            self.headers['Content-Length'] = str(body.tell())\n            body.seek(0, 0)\n        elif body is not None:\n            self.headers['Content-Length'] = str(len(body))",
+        "old_str": "    def prepare_content_length(self, body):\n        self.headers['Content-Length'] = '0'\n        if hasattr(body, 'seek') and hasattr(body, 'tell'):\n            body.seek(0, 2)\n            self.headers['Content-Length'] = str(body.tell())\n            body.seek(0, 0)\n        elif body is not None:\n            self.headers['Content-Length'] = str(len(body))",
+        "path": "/testbed/build/lib/requests/models.py"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now let's verify the fix works:"
+    },
+    {
+      "role": "tool_result",
+      "content": "GET request headers: {}\nContent-Length present in GET: False\n\nGET+params request headers: {}\nContent-Length present in GET+params: False\n\nPOST with body headers: {'Content-Length': '9', 'Content-Type': 'application/x-www-form-urlencoded'}\nContent-Length present in POST+body: True\nContent-Length value: 9\n\nPOST without body headers: {}\nContent-Length present in POST (no body): False\n\nHEAD request headers: {}\nContent-Length present in HEAD: False\n--- stderr ---\n/testbed/requests/models.py:559: SyntaxWarning: \"is\" with a literal. Did you mean \"==\"?\n  if self.status_code is 0:",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -c \"\nimport requests\n\n# Test GET request - should NOT have Content-Length\nreq = requests.Request('GET', 'http://example.com')\nprepared = req.prepare()\nprint('GET request headers:', dict(prepared.headers))\nprint('Content-Length present in GET:', 'Content-Length' in prepared.headers)\nprint()\n\n# Test GET request with params - should NOT have Content-Length\nreq2 = requests.Request('GET', 'http://example.com', params={'key': 'value'})\nprepared2 = req2.prepare()\nprint('GET+params request headers:', dict(prepared2.headers))\nprint('Content-Length present in GET+params:', 'Content-Length' in prepared2.headers)\nprint()\n\n# Test POST request with body - should have Content-Length\nreq3 = requests.Request('POST', 'http://example.com', data={'key': 'value'})\nprepared3 = req3.prepare()\nprint('POST with body headers:', dict(prepared3.headers))\nprint('Content-Length present in POST+body:', 'Content-Length' in prepared3.headers)\nprint('Content-Length value:', prepared3.headers.get('Content-Length'))\nprint()\n\n# Test POST request without body - should NOT have Content-Length (body is None)\nreq4 = requests.Request('POST', 'http://example.com')\nprepared4 = req4.prepare()\nprint('POST without body headers:', dict(prepared4.headers))\nprint('Content-Length present in POST (no body):', 'Content-Length' in prepared4.headers)\nprint()\n\n# Test HEAD request - should NOT have Content-Length\nreq5 = requests.Request('HEAD', 'http://example.com')\nprepared5 = req5.prepare()\nprint('HEAD request headers:', dict(prepared5.headers))\nprint('Content-Length present in HEAD:', 'Content-Length' in prepared5.headers)\n\"\n"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "The fix works correctly:\n- GET requests no longer have `Content-Length: 0`\n- HEAD requests no longer have `Content-Length: 0`\n- POST requests with a body still correctly include `Content-Length`\n- POST requests without a body also don't add unnecessary `Content-Length: 0`\n\nNow let's run the existing tests to make sure nothing is broken:"
+    },
+    {
+      "role": "tool_result",
+      "content": "test_requests.py::RequestsTestCase::test_BASICAUTH_TUPLE_HTTP_200_OK_GET FAILED [  3%]\n\n=================================== FAILURES ===================================\n____________ RequestsTestCase.test_BASICAUTH_TUPLE_HTTP_200_OK_GET _____________\n\nself = <test_requests.RequestsTestCase testMethod=test_BASICAUTH_TUPLE_HTTP_200_OK_GET>\n\n    def test_BASICAUTH_TUPLE_HTTP_200_OK_GET(self):\n        auth = ('user', 'pass')\n        url = httpbin('basic-auth', 'user', 'pass')\n    \n>       r = requests.get(url, auth=auth)\n\ntest_requests.py:136: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nrequests/api.py:55: in get\n    return request('get', url, **kwargs)\nrequests/api.py:44: in request\n    return session.request(method=method, url=url, **kwargs)\nrequests/sessions.py:280: in request\n    resp = self.send(prep, stream=stream, timeout=timeout, verify=verify, cert=cert, proxies=proxies)\nrequests/sessions.py:373: in send\n    r = adapter.send(request, **kwargs)\nrequests/adapters.py:161: in send\n    resp = conn.urlopen(\nrequests/packages/urllib3/connectionpool.py:416: in urlopen\n    conn = self._get_conn(timeout=pool_timeout)\nrequests/packages/urllib3/connectionpool.py:231: in _get_conn\n    return conn or self._new_conn()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = <requests.packages.urllib3.connectionpool.HTTPConnectionPool object at 0x7f0e506f6100>\n\n    def _new_conn(self):\n        \"\"\"\n        Return a fresh :class:`httplib.HTTPConnection`.\n        \"\"\"\n        self.num_connections += 1\n        log.info(\"Starting new HTTP connection (%d): %s\" %\n                 (self.num_connections, self.host))\n>       return HTTPConnection(host=self.host,\n                              port=self.port,\n                              strict=self.strict)\nE       TypeError: __init__() got an unexpected keyword argument 'strict'\n\nrequests/packages/urllib3/connectionpool.py:196: TypeError\n=============================== warnings summary ===============================\nrequests/packages/urllib3/_collections.py:7\n  /testbed/requests/packages/urllib3/_collections.py:7: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    from collections import MutableMapping\n\ntest_requests.py::RequestsTestCase::test_BASICAUTH_TUPLE_HTTP_200_OK_GET\n  /testbed/requests/models.py:140: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    if isinstance(hook, collections.Callable):\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED test_requests.py::RequestsTestCase::test_BASICAUTH_TUPLE_HTTP_200_OK_GET\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!\n======================== 1 failed, 2 warnings in 0.07s =========================\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -m pytest test_requests.py -x -v 2>&1 | tail -60"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "The test failure is due to a network/environment issue (`TypeError: __init__() got an unexpected keyword argument 'strict'` when trying to connect), unrelated to our fix. Let me run only the unit tests that don't require network connectivity:"
+    },
+    {
+      "role": "tool_result",
+      "content": "requests/packages/urllib3/connectionpool.py:416: in urlopen\n    conn = self._get_conn(timeout=pool_timeout)\nrequests/packages/urllib3/connectionpool.py:231: in _get_conn\n    return conn or self._new_conn()\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = <requests.packages.urllib3.connectionpool.HTTPConnectionPool object at 0x7ff58f2f3b80>\n\n    def _new_conn(self):\n        \"\"\"\n        Return a fresh :class:`httplib.HTTPConnection`.\n        \"\"\"\n        self.num_connections += 1\n        log.info(\"Starting new HTTP connection (%d): %s\" %\n                 (self.num_connections, self.host))\n>       return HTTPConnection(host=self.host,\n                              port=self.port,\n                              strict=self.strict)\nE       TypeError: __init__() got an unexpected keyword argument 'strict'\n\nrequests/packages/urllib3/connectionpool.py:196: TypeError\n=============================== warnings summary ===============================\nrequests/packages/urllib3/_collections.py:7\n  /testbed/requests/packages/urllib3/_collections.py:7: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    from collections import MutableMapping\n\ntest_requests.py::RequestsTestCase::test_custom_content_type\n  /testbed/requests/models.py:140: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    if isinstance(hook, collections.Callable):\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED test_requests.py::RequestsTestCase::test_custom_content_type - TypeErr...\nFAILED test_requests.py::RequestsTestCase::test_decompress_gzip - TypeError: ...\nFAILED test_requests.py::RequestsTestCase::test_links - TypeError: __init__()...\nFAILED test_requests.py::RequestsTestCase::test_prepared_request_hook - TypeE...\nFAILED test_requests.py::RequestsTestCase::test_request_ok_set - TypeError: _...\nFAILED test_requests.py::RequestsTestCase::test_status_raising - TypeError: _...\nFAILED test_requests.py::RequestsTestCase::test_user_agent_transfers - TypeEr...\n============ 7 failed, 5 passed, 14 deselected, 2 warnings in 0.17s ============\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -m pytest test_requests.py -v -k \"not HTTP and not HTTPS and not GET and not POST and not PUT and not PATCH and not DELETE and not HEAD and not OPTIONS\" 2>&1 | tail -40"
+      },
+      "success": true
+    },
+    {
+      "role": "tool_result",
+      "content": "    \n    If the fixture may be used for many test cases, create as\n    many test methods as are needed. When instantiating such a TestCase\n    subclass, specify in the constructor arguments the name of the test method\n    that the instance is to execute.\n    \n    Test authors should subclass TestCase for their own tests. Construction\n    and deconstruction of the test's environment ('fixture') can be\n    implemented by overriding the 'setUp' and 'tearDown' methods respectively.\n    \n    If it is necessary to override the __init__ method, the base class\n    __init__ method must always be called. It is important that subclasses\n    should not change the signature of their __init__ method, since instances\n    of the classes are instantiated automatically by parts of the framework\n    in order to be run.\n    \n    When subclassing TestCase, you can set these attributes:\n    * failureException: determines which exception will be raised when\n        the instance's assertion methods fail; test methods raising this\n        exception will be deemed to have 'failed' rather than 'errored'.\n    * longMessage: determines whether long messages (including repr of\n        objects used in assert methods) will be printed on failure in *addition*\n        to any explicit message passed.\n    * maxDiff: sets the maximum length of a diff in failure messages\n        by assert methods using difflib. It is looked up as an instance\n        attribute so can be configured by individual tests if required.\n    <TestCaseFunction test_BASICAUTH_TUPLE_HTTP_200_OK_GET>\n    <TestCaseFunction test_DIGESTAUTH_WRONG_HTTP_401_GET>\n    <TestCaseFunction test_DIGEST_HTTP_200_OK_GET>\n    <TestCaseFunction test_HTTP_200_OK_GET_ALTERNATIVE>\n    <TestCaseFunction test_HTTP_200_OK_GET_WITH_MIXED_PARAMS>\n    <TestCaseFunction test_HTTP_200_OK_GET_WITH_PARAMS>\n    <TestCaseFunction test_HTTP_200_OK_HEAD>\n    <TestCaseFunction test_HTTP_200_OK_PUT>\n    <TestCaseFunction test_HTTP_302_ALLOW_REDIRECT_GET>\n    <TestCaseFunction test_POSTBIN_GET_POST_FILES>\n    <TestCaseFunction test_POSTBIN_GET_POST_FILES_WITH_DATA>\n    <TestCaseFunction test_basic_building>\n    <TestCaseFunction test_custom_content_type>\n    <TestCaseFunction test_decompress_gzip>\n    <TestCaseFunction test_different_encodings_dont_break_post>\n    <TestCaseFunction test_entry_points>\n    <TestCaseFunction test_invalid_url>\n    <TestCaseFunction test_links>\n    <TestCaseFunction test_params_are_added_before_fragment>\n    <TestCaseFunction test_path_is_not_double_encoded>\n    <TestCaseFunction test_prepared_request_hook>\n    <TestCaseFunction test_request_ok_set>\n    <TestCaseFunction test_status_raising>\n    <TestCaseFunction test_unicode_get>\n    <TestCaseFunction test_urlencoded_get_query_multivalued_param>\n    <TestCaseFunction test_user_agent_transfers>\n\n=============================== warnings summary ===============================\nrequests/packages/urllib3/_collections.py:7\n  /testbed/requests/packages/urllib3/_collections.py:7: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    from collections import MutableMapping\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n========================= 26 tests collected in 0.03s ==========================\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -m pytest test_requests.py -v --collect-only 2>&1 | tail -60"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "All test failures are due to `TypeError: __init__() got an unexpected keyword argument 'strict'` - this is a Python version compatibility issue with the test environment (urllib3 using a deprecated `strict` parameter), completely unrelated to our change. Let me check the tests that passed:"
+    },
+    {
+      "role": "tool_result",
+      "content": "test_requests.py::RequestsTestCase::test_basic_building PASSED           [  8%]\ntest_requests.py::RequestsTestCase::test_custom_content_type FAILED      [ 16%]\ntest_requests.py::RequestsTestCase::test_decompress_gzip FAILED          [ 25%]\ntest_requests.py::RequestsTestCase::test_entry_points PASSED             [ 33%]\ntest_requests.py::RequestsTestCase::test_invalid_url PASSED              [ 41%]\ntest_requests.py::RequestsTestCase::test_links FAILED                    [ 50%]\ntest_requests.py::RequestsTestCase::test_params_are_added_before_fragment PASSED [ 58%]\ntest_requests.py::RequestsTestCase::test_path_is_not_double_encoded PASSED [ 66%]\ntest_requests.py::RequestsTestCase::test_prepared_request_hook FAILED    [ 75%]\ntest_requests.py::RequestsTestCase::test_request_ok_set FAILED           [ 83%]\ntest_requests.py::RequestsTestCase::test_status_raising FAILED           [ 91%]\ntest_requests.py::RequestsTestCase::test_user_agent_transfers FAILED     [100%]\nFAILED test_requests.py::RequestsTestCase::test_custom_content_type - TypeErr...\nFAILED test_requests.py::RequestsTestCase::test_decompress_gzip - TypeError: ...\nFAILED test_requests.py::RequestsTestCase::test_links - TypeError: __init__()...\nFAILED test_requests.py::RequestsTestCase::test_prepared_request_hook - TypeE...\nFAILED test_requests.py::RequestsTestCase::test_request_ok_set - TypeError: _...\nFAILED test_requests.py::RequestsTestCase::test_status_raising - TypeError: _...\nFAILED test_requests.py::RequestsTestCase::test_user_agent_transfers - TypeEr...\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -m pytest test_requests.py -v -k \"not HTTP and not HTTPS and not GET and not POST and not PUT and not PATCH and not DELETE and not HEAD and not OPTIONS\" 2>&1 | grep -E \"PASSED|FAILED|ERROR\" | head -30"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "The passing tests (`test_basic_building`, `test_entry_points`, `test_invalid_url`, `test_params_are_added_before_fragment`, `test_path_is_not_double_encoded`) all pass fine. The failing tests all fail with the same `TypeError: __init__() got an unexpected keyword argument 'strict'` which is a pre-existing environment issue.\n\nLet me verify that the `test_basic_building` test (which is relevant) passes:"
+    },
+    {
+      "role": "tool_result",
+      "content": "============================= test session starts ==============================\nplatform linux -- Python 3.9.20, pytest-7.4.4, pluggy-1.0.0 -- /opt/miniconda3/envs/testbed/bin/python\ncachedir: .pytest_cache\nrootdir: /testbed\ncollecting ... collected 1 item\n\ntest_requests.py::RequestsTestCase::test_basic_building PASSED           [100%]\n\n=============================== warnings summary ===============================\nrequests/packages/urllib3/_collections.py:7\n  /testbed/requests/packages/urllib3/_collections.py:7: DeprecationWarning: Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3, and in 3.10 it will stop working\n    from collections import MutableMapping\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n========================= 1 passed, 1 warning in 0.03s =========================\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -m pytest test_requests.py::RequestsTestCase::test_basic_building -v 2>&1 | tail -20"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Let me also look at what `test_basic_building` tests to make sure it's comprehensive:"
+    },
+    {
+      "role": "tool_result",
+      "content": "51:    def test_basic_building(self):\n",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "include": "*.py",
+        "limit": 30,
+        "path": "/testbed/test_requests.py",
+        "pattern": "def test_basic_building"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "      51 |     def test_basic_building(self):\n      52 |         req = requests.Request()\n      53 |         req.url = 'http://kennethreitz.org/'\n      54 |         req.data = {'life': '42'}\n      55 | \n      56 |         pr = req.prepare()\n      57 |         assert pr.url == req.url\n      58 |         assert pr.body == 'life=42'\n      59 | \n      60 | \n      61 |     def test_path_is_not_double_encoded(self):\n      62 |         request = requests.Request('GET', \"http://0.0.0.0/get/test case\").prepare()\n      63 | \n      64 |         self.assertEqual(request.path_url, \"/get/test%20case\")\n      65 | \n      66 |     def test_params_are_added_before_fragment(self):\n      67 |         request = requests.Request('GET',\n      68 |             \"http://example.com/path#fragment\", params={\"a\": \"b\"}).prepare()\n      69 |         self.assertEqual(request.url,\n      70 |             \"http://example.com/path?a=b#fragment\")\n      71 |         request = requests.Request('GET',\n      72 |             \"http://example.com/path?key=value#fragment\", params={\"a\": \"b\"}).prepare()\n      73 |         self.assertEqual(request.url,\n      74 |             \"http://example.com/path?key=value&a=b#fragment\")\n      75 | \n      76 |     def test_HTTP_200_OK_GET_ALTERNATIVE(self):\n      77 |         r = requests.Request('GET', httpbin('get'))\n      78 |         s = requests.Session()\n      79 | \n      80 |         r = s.send(r.prepare())\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/test_requests.py",
+        "view_range": [
+          51,
+          80
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Let me now verify the fix is complete by checking our changes:"
+    },
+    {
+      "role": "tool_result",
+      "content": "     388 |     def prepare_content_length(self, body):\n     389 |         if hasattr(body, 'seek') and hasattr(body, 'tell'):\n     390 |             body.seek(0, 2)\n     391 |             self.headers['Content-Length'] = str(body.tell())\n     392 |             body.seek(0, 0)\n     393 |         elif body is not None:\n     394 |             self.headers['Content-Length'] = str(len(body))\n     395 | \n     396 |     def prepare_auth(self, auth):\n     397 |         \"\"\"Prepares the given HTTP auth data.\"\"\"\n     398 |         if auth:\n     399 |             if isinstance(auth, tuple) and len(auth) == 2:\n     400 |                 # special-case basic HTTP auth\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/requests/models.py",
+        "view_range": [
+          388,
+          400
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "The fix is clean and correct. Let me do a final comprehensive test:"
+    },
+    {
+      "role": "tool_result",
+      "content": "=== Testing Content-Length behavior ===\n\nPASS: GET request has no Content-Length\nPASS: HEAD request has no Content-Length\nPASS: POST with body has Content-Length = 9\nPASS: POST without body has no Content-Length\nPASS: PUT with body has Content-Length = 5\nPASS: Request with file-like body has Content-Length = 9\n\nAll tests passed!\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -c \"\nimport requests\nimport io\n\nprint('=== Testing Content-Length behavior ===')\nprint()\n\n# Test 1: GET with no body - should NOT have Content-Length\nreq = requests.Request('GET', 'http://example.com').prepare()\nassert 'Content-Length' not in req.headers, 'FAIL: GET should not have Content-Length'\nprint('PASS: GET request has no Content-Length')\n\n# Test 2: HEAD with no body - should NOT have Content-Length\nreq = requests.Request('HEAD', 'http://example.com').prepare()\nassert 'Content-Length' not in req.headers, 'FAIL: HEAD should not have Content-Length'\nprint('PASS: HEAD request has no Content-Length')\n\n# Test 3: POST with form data - should have Content-Length\nreq = requests.Request('POST', 'http://example.com', data={'key': 'value'}).prepare()\nassert 'Content-Length' in req.headers, 'FAIL: POST with data should have Content-Length'\nassert req.headers['Content-Length'] == '9', 'FAIL: Content-Length should be 9'\nprint('PASS: POST with body has Content-Length =', req.headers['Content-Length'])\n\n# Test 4: POST with no body - should NOT have Content-Length\nreq = requests.Request('POST', 'http://example.com').prepare()\nassert 'Content-Length' not in req.headers, 'FAIL: POST without body should not have Content-Length'\nprint('PASS: POST without body has no Content-Length')\n\n# Test 5: PUT with body - should have Content-Length\nreq = requests.Request('PUT', 'http://example.com', data='hello').prepare()\nassert 'Content-Length' in req.headers, 'FAIL: PUT with data should have Content-Length'\nassert req.headers['Content-Length'] == '5', 'FAIL: Content-Length should be 5'\nprint('PASS: PUT with body has Content-Length =', req.headers['Content-Length'])\n\n# Test 6: GET with file-like body - should have Content-Length\nbody = io.BytesIO(b'test data')\nreq = requests.Request('GET', 'http://example.com').prepare()\nreq.body = body\n# When prepare_content_length is called with a file-like object\nreq.prepare_content_length(body)\nassert 'Content-Length' in req.headers, 'FAIL: Request with file body should have Content-Length'\nprint('PASS: Request with file-like body has Content-Length =', req.headers['Content-Length'])\n\nprint()\nprint('All tests passed!')\n\"\n"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "All tests pass. Let me run the full test suite one more time to confirm the overall state:"
+    },
+    {
+      "role": "tool_result",
+      "content": "FAILED test_requests.py::RequestsTestCase::test_DIGEST_HTTP_200_OK_GET - Type...\nFAILED test_requests.py::RequestsTestCase::test_HTTP_200_OK_GET_ALTERNATIVE\nFAILED test_requests.py::RequestsTestCase::test_HTTP_200_OK_GET_WITH_MIXED_PARAMS\nFAILED test_requests.py::RequestsTestCase::test_HTTP_200_OK_GET_WITH_PARAMS\nFAILED test_requests.py::RequestsTestCase::test_HTTP_200_OK_HEAD - TypeError:...\nFAILED test_requests.py::RequestsTestCase::test_HTTP_200_OK_PUT - TypeError: ...\nFAILED test_requests.py::RequestsTestCase::test_HTTP_302_ALLOW_REDIRECT_GET\nFAILED test_requests.py::RequestsTestCase::test_POSTBIN_GET_POST_FILES - Type...\nFAILED test_requests.py::RequestsTestCase::test_POSTBIN_GET_POST_FILES_WITH_DATA\nFAILED test_requests.py::RequestsTestCase::test_custom_content_type - TypeErr...\nFAILED test_requests.py::RequestsTestCase::test_decompress_gzip - TypeError: ...\nFAILED test_requests.py::RequestsTestCase::test_different_encodings_dont_break_post\nFAILED test_requests.py::RequestsTestCase::test_links - TypeError: __init__()...\nFAILED test_requests.py::RequestsTestCase::test_prepared_request_hook - TypeE...\nFAILED test_requests.py::RequestsTestCase::test_request_ok_set - TypeError: _...\nFAILED test_requests.py::RequestsTestCase::test_status_raising - TypeError: _...\nFAILED test_requests.py::RequestsTestCase::test_unicode_get - TypeError: __in...\nFAILED test_requests.py::RequestsTestCase::test_urlencoded_get_query_multivalued_param\nFAILED test_requests.py::RequestsTestCase::test_user_agent_transfers - TypeEr...\n=================== 21 failed, 5 passed, 2 warnings in 0.41s ===================\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -m pytest test_requests.py -v 2>&1 | grep -E \"PASSED|FAILED|ERROR|passed|failed\" | tail -20"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "Saved working directory and index state WIP on main: 546130c SWE-bench\nFAILED test_requests.py::RequestsTestCase::test_decompress_gzip - TypeError: ...\nFAILED test_requests.py::RequestsTestCase::test_different_encodings_dont_break_post\nFAILED test_requests.py::RequestsTestCase::test_links - TypeError: __init__()...\nFAILED test_requests.py::RequestsTestCase::test_prepared_request_hook - TypeE...\nFAILED test_requests.py::RequestsTestCase::test_request_ok_set - TypeError: _...\nFAILED test_requests.py::RequestsTestCase::test_status_raising - TypeError: _...\nFAILED test_requests.py::RequestsTestCase::test_unicode_get - TypeError: __in...\nFAILED test_requests.py::RequestsTestCase::test_urlencoded_get_query_multivalued_param\nFAILED test_requests.py::RequestsTestCase::test_user_agent_transfers - TypeEr...\n=================== 21 failed, 5 passed, 4 warnings in 0.41s ===================\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && git stash && python -m pytest test_requests.py -v 2>&1 | grep -E \"PASSED|FAILED|ERROR|passed|failed\" | tail -10"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "The same 21 tests fail and 5 pass both before and after our change. Our fix doesn't introduce any regressions. Let me restore the fix:"
+    },
+    {
+      "role": "tool_result",
+      "content": "On branch main\nChanges not staged for commit:\n  (use \"git add <file>...\" to update what will be committed)\n  (use \"git restore <file>...\" to discard changes in working directory)\n\tmodified:   requests/models.py\n\nUntracked files:\n  (use \"git add <file>...\" to include in what will be committed)\n\tbuild/\n\nno changes added to commit (use \"git add\" and/or \"git commit -a\")\nDropped refs/stash@{0} (59580e5c7b62ca17439721ef330f31e015a19ccb)\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && git stash pop"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "The fix is in place. Let me verify the final state of the fix:"
+    },
+    {
+      "role": "tool_result",
+      "content": "diff --git a/requests/models.py b/requests/models.py\nindex 9926045..0c99e5d 100644\n--- a/requests/models.py\n+++ b/requests/models.py\n@@ -386,7 +386,6 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):\n         self.body = body\n \n     def prepare_content_length(self, body):\n-        self.headers['Content-Length'] = '0'\n         if hasattr(body, 'seek') and hasattr(body, 'tell'):\n             body.seek(0, 2)\n             self.headers['Content-Length'] = str(body.tell())\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && git diff requests/models.py"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "The fix is minimal and targeted: we simply removed the line `self.headers['Content-Length'] = '0'` from the `prepare_content_length` method.\n\n## Summary\n\n**The Problem:** The `prepare_content_length` method in `requests/models.py` unconditionally set `Content-Length: 0` as a default before checking if the body had content. This caused all requests without a body (including GET requests) to always include a `Content-Length: 0` header.\n\n**The Fix:** Removed the line `self.headers['Content-Length'] = '0'` from `prepare_content_length`. Now the method only sets `Content-Length` when:\n1. The body is a file-like object (seekable) \u2014 sets it to the actual size\n2. The body is not `None` \u2014 sets it to `len(body)`\n\nWhen `body` is `None` (as it is for GET, HEAD, and other requests without a body), no `Content-Length` header is added. This matches the HTTP specification, which states that `Content-Length` should only be included when there is an actual message body."
+    },
+    {
+      "role": "user",
+      "content": "If your fix is complete, stop. Otherwise proceed by calling a tool (e.g. run the failing test to verify, or make the next edit)."
+    },
+    {
+      "role": "assistant",
+      "content": "The fix is complete. The change removes the unconditional `self.headers['Content-Length'] = '0'` default from `prepare_content_length`, so GET (and HEAD) requests without a body no longer include a spurious `Content-Length: 0` header. Requests with actual bodies still correctly set `Content-Length`. The test suite shows no regressions introduced by the change."
+    }
+  ],
+  "info": {
+    "model_stats": {
+      "api_calls": 26,
+      "instance_cost": 0.4352,
+      "input_tokens": 322728,
+      "output_tokens": 5844,
+      "cache_read_tokens": 249943,
+      "cache_write_tokens": 19548
+    },
+    "exit_status": "completed",
+    "submission": "diff --git a/requests/models.py b/requests/models.py\nindex 9926045..0c99e5d 100644\n--- a/requests/models.py\n+++ b/requests/models.py\n@@ -386,7 +386,6 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):\n         self.body = body\n \n     def prepare_content_length(self, body):\n-        self.headers['Content-Length'] = '0'\n         if hasattr(body, 'seek') and hasattr(body, 'tell'):\n             body.seek(0, 2)\n             self.headers['Content-Length'] = str(body.tell())\n"
+  }
+}

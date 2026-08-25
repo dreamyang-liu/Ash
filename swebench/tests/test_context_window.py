@@ -296,3 +296,20 @@ def test_valid_large_tool_calls_are_left_alone():
     kept = plain_tool_calls([{"id": "k", "type": "function",
                              "function": {"name": "text_editor", "arguments": big}}])
     assert kept[0]["function"]["arguments"] == big
+
+
+def test_trajectory_pairs_every_tool_result_with_its_call():
+    """A replay re-feeds the transcript, and a provider rejects a tool result
+    it cannot match to a call. The id was kept only in the model-facing copy,
+    so a saved trajectory paired calls and results by guessing at their order."""
+    conv = Conversation(Trajectory())
+    conv.add_assistant(FakeMessage("running it", tool_calls=[
+        {"id": "call-1", "type": "function",
+         "function": {"name": "shell", "arguments": '{"command": "ls"}'}}]))
+    conv.add_tool_result("call-1", "a.txt", tool_name="shell", success=True)
+
+    saved = conv.trajectory.messages
+    call_ids = {tc["id"] for m in saved for tc in (m.get("tool_calls") or ())}
+    result_ids = {m.get("tool_call_id") for m in saved
+                  if m["role"] == "tool_result"}
+    assert call_ids == result_ids == {"call-1"}

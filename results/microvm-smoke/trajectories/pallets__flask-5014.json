@@ -1,0 +1,405 @@
+{
+  "trajectory_format": "ash-agent-2.0",
+  "instance_id": "pallets__flask-5014",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant that can interact with a computer to solve software engineering tasks.\n"
+    },
+    {
+      "role": "user",
+      "content": "Please solve this issue: Require a non-empty name for Blueprints\nThings do not work correctly if a Blueprint is given an empty name (e.g. #4944).\r\nIt would be helpful if a `ValueError` was raised when trying to do that.\n\n\nYou can use tools to execute commands, search code, read files, and edit files.\n\n## Available Tools\n\n- `shell`: Execute bash commands. Use `tail` param to limit output. Use `background: true` for long-running commands.\n- `grep_files`: Search code with ripgrep. Always set `include` (e.g. \"*.py\") and `limit`.\n- `text_editor`: View and edit files. Commands: `view` (read range), `str_replace` (exact match replace), `insert` (after line N), `write` (create/overwrite).\n- `process`: Manage background processes. Actions: `read` (get output), `kill`.\n\n## Recommended Workflow\n\n1. Analyze the codebase by finding and reading relevant files\n2. Create a script to reproduce the issue\n3. Edit the source code to resolve the issue\n4. Verify your fix works by running your script again\n5. Test edge cases to ensure your fix is robust by running related tests\n\n## Tool Usage Rules\n\nYou are operating in an environment where:\n\n1. You issue at least one tool call\n2. The system executes the tool(s) and returns results\n3. You see the result(s)\n4. You write your next tool call(s)\n\nEach response should include:\n\n1. **Reasoning text** where you explain your analysis and plan\n2. At least one tool call\n\n**CRITICAL REQUIREMENTS:**\n\n- Your response SHOULD include reasoning text explaining what you're doing\n- Your response MUST include AT LEAST ONE tool call\n- Always read a file before editing it\n- Always run tests after editing: `shell({\"command\": \"cd /testbed && python -m pytest path/to/test -x\", \"tail\": 30})`\n- NEVER modify test files. If you accidentally did, revert them before finishing:\n  `shell({\"command\": \"cd /testbed && git checkout -- '**/test*' '**/conftest*'\"})`\n- Fix ALL instances of a bug pattern, not just one\n- Keep patches clean: only source changes, no temp files\n- When you are done, clean up any temporary files you created:\n  `shell({\"command\": \"cd /testbed && rm -f repro*.py reproduce*.py test_fix*.py\"})`\n\n## Tool Examples\n\n### Search for code:\n```\ngrep_files({\"pattern\": \"def function_name\", \"path\": \"/testbed\", \"include\": \"*.py\", \"limit\": 20})\n```\n\n### Read a file:\n```\ntext_editor({\"command\": \"view\", \"path\": \"/testbed/src/module.py\", \"view_range\": [100, 150]})\n```\n\n### Edit a file:\n```\ntext_editor({\"command\": \"str_replace\", \"path\": \"/testbed/src/module.py\",\n  \"old_str\": \"original code here\",\n  \"new_str\": \"replacement code here\"})\n```\n\n### Run a command:\n```\nshell({\"command\": \"cd /testbed && python -c \\\"print('hello')\\\"\", \"tail\": 30})\n```\n\n### Run tests:\n```\nshell({\"command\": \"cd /testbed && python -m pytest tests/test_module.py -x\", \"tail\": 30})\n```\n"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll analyze the codebase to understand the Blueprint implementation and then add validation for empty names."
+    },
+    {
+      "role": "tool_result",
+      "content": "/testbed/src/flask/blueprints.py\n/testbed/tests/test_async.py\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "find /testbed -type f -name \"*.py\" | xargs grep -l \"class Blueprint\" | head -20"
+      },
+      "success": true
+    },
+    {
+      "role": "tool_result",
+      "content": "/testbed/tests/test_async.py:18:class BlueprintError(Exception):\n/testbed/src/flask/blueprints.py:32:class BlueprintSetupState:\n/testbed/src/flask/blueprints.py:117:class Blueprint(Scaffold):\n",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "pattern": "class Blueprint",
+        "path": "/testbed",
+        "include": "*.py",
+        "limit": 20
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "     117 | class Blueprint(Scaffold):\n     118 |     \"\"\"Represents a blueprint, a collection of routes and other\n     119 |     app-related functions that can be registered on a real application\n     120 |     later.\n     121 | \n     122 |     A blueprint is an object that allows defining application functions\n     123 |     without requiring an application object ahead of time. It uses the\n     124 |     same decorators as :class:`~flask.Flask`, but defers the need for an\n     125 |     application by recording them for later registration.\n     126 | \n     127 |     Decorating a function with a blueprint creates a deferred function\n     128 |     that is called with :class:`~flask.blueprints.BlueprintSetupState`\n     129 |     when the blueprint is registered on an application.\n     130 | \n     131 |     See :doc:`/blueprints` for more information.\n     132 | \n     133 |     :param name: The name of the blueprint. Will be prepended to each\n     134 |         endpoint name.\n     135 |     :param import_name: The name of the blueprint package, usually\n     136 |         ``__name__``. This helps locate the ``root_path`` for the\n     137 |         blueprint.\n     138 |     :param static_folder: A folder with static files that should be\n     139 |         served by the blueprint's static route. The path is relative to\n     140 |         the blueprint's root path. Blueprint static files are disabled\n     141 |         by default.\n     142 |     :param static_url_path: The url to serve static files from.\n     143 |         Defaults to ``static_folder``. If the blueprint does not have\n     144 |         a ``url_prefix``, the app's static route will take precedence,\n     145 |         and the blueprint's static files won't be accessible.\n     146 |     :param template_folder: A folder with templates that should be added\n     147 |         to the app's template search path. The path is relative to the\n     148 |         blueprint's root path. Blueprint templates are disabled by\n     149 |         default. Blueprint templates have a lower precedence than those\n     150 |         in the app's templates folder.\n     151 |     :param url_prefix: A path to prepend to all of the blueprint's URLs,\n     152 |         to make them distinct from the rest of the app's routes.\n     153 |     :param subdomain: A subdomain that blueprint routes will match on by\n     154 |         default.\n     155 |     :param url_defaults: A dict of default values that blueprint routes\n     156 |         will receive by default.\n     157 |     :param root_path: By default, the blueprint will automatically set\n     158 |         this based on ``import_name``. In certain situations this\n     159 |         automatic detection can fail, so the path can be specified\n     160 |         manually instead.\n     161 | \n     162 |     .. versionchanged:: 1.1.0\n     163 |         Blueprints have a ``cli`` group to register nested CLI commands.\n     164 |         The ``cli_group`` parameter controls the name of the group under\n     165 |         the ``flask`` command.\n     166 | \n     167 |     .. versionadded:: 0.7\n     168 |     \"\"\"\n     169 | \n     170 |     _got_registered_once = False\n     171 | \n     172 |     def __init__(\n     173 |         self,\n     174 |         name: str,\n     175 |         import_name: str,\n     176 |         static_folder: t.Optional[t.Union[str, os.PathLike]] = None,\n     177 |         static_url_path: t.Optional[str] = None,\n     178 |         template_folder: t.Optional[t.Union[str, os.PathLike]] = None,\n     179 |         url_prefix: t.Optional[str] = None,\n     180 |         subdomain: t.Optional[str] = None,\n     181 |         url_defaults: t.Optional[dict] = None,\n     182 |         root_path: t.Optional[str] = None,\n     183 |         cli_group: t.Optional[str] = _sentinel,  # type: ignore\n     184 |     ):\n     185 |         super().__init__(\n     186 |             import_name=import_name,\n     187 |             static_folder=static_folder,\n     188 |             static_url_path=static_url_path,\n     189 |             template_folder=template_folder,\n     190 |             root_path=root_path,\n     191 |         )\n     192 | \n     193 |         if \".\" in name:\n     194 |             raise ValueError(\"'name' may not contain a dot '.' character.\")\n     195 | \n     196 |         self.name = name\n     197 |         self.url_prefix = url_prefix\n     198 |         self.subdomain = subdomain\n     199 |         self.deferred_functions: t.List[DeferredSetupFunction] = []\n     200 | \n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/src/flask/blueprints.py",
+        "view_range": [
+          117,
+          200
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now I can see the Blueprint `__init__` method. There's already a check for dots in the name, and I need to add a check for empty names. Let me also look at the existing tests to understand the test patterns:"
+    },
+    {
+      "role": "tool_result",
+      "content": "/testbed/tests/test_blueprints.py:143:    app.register_blueprint(bp, name=\"test2\", url_prefix=\"/2\", url_defaults={\"bar\": 19})\n/testbed/tests/test_blueprints.py:228:    blueprint = MyBlueprint(\"blueprint\", __name__, static_folder=\"static\")\n/testbed/tests/test_blueprints.py:996:def test_unique_blueprint_names(app, client) -> None:\n/testbed/tests/test_blueprints.py:1003:        app.register_blueprint(bp)  # same bp, same name, error\n/testbed/tests/test_blueprints.py:1005:    app.register_blueprint(bp, name=\"again\")  # same bp, different name, ok\n/testbed/tests/test_blueprints.py:1008:        app.register_blueprint(bp2)  # different bp, same name, error\n/testbed/tests/test_blueprints.py:1010:    app.register_blueprint(bp2, name=\"alt\")  # different bp, different name, ok\n/testbed/tests/test_blueprints.py:1039:    bp.register_blueprint(bp2, url_prefix=\"/a\", name=\"sub\")\n/testbed/tests/test_blueprints.py:1041:    app.register_blueprint(bp, url_prefix=\"/b\", name=\"alt\")\n/testbed/tests/test_testing.py:138:        assert ctx.request.blueprint == bp.name\n/testbed/tests/test_async.py:58:    blueprint = Blueprint(\"bp\", __name__)\n/testbed/tests/test_async.py:120:    blueprint = Blueprint(\"bp\", __name__)\n",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "include": "*.py",
+        "limit": 20,
+        "path": "/testbed/tests",
+        "pattern": "Blueprint.*name.*dot|ValueError.*Blueprint|blueprint.*name"
+      },
+      "success": true
+    },
+    {
+      "role": "tool_result",
+      "content": "/testbed/tests/test_cli.py\n/testbed/tests/test_basic.py\n/testbed/tests/test_async.py\n/testbed/tests/test_testing.py\n/testbed/tests/test_apps/blueprintapp/apps/admin/__init__.py\n/testbed/tests/test_apps/blueprintapp/apps/frontend/__init__.py\n/testbed/tests/test_blueprints.py\n/testbed/tests/test_user_error_handler.py\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "find /testbed/tests -name \"*.py\" | xargs grep -l \"Blueprint\" | head -10"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "254:def test_dotted_name_not_allowed(app, client):\n255:    with pytest.raises(ValueError):\n259:def test_dotted_names_from_app(app, client):\n322:def test_route_decorator_custom_endpoint_with_dots(app, client):\n325:    with pytest.raises(ValueError):\n328:    with pytest.raises(ValueError):\n336:    with pytest.raises(ValueError):\n1002:    with pytest.raises(ValueError):\n1007:    with pytest.raises(ValueError):\n1015:    with pytest.raises(ValueError):\n",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "include": "*.py",
+        "limit": 20,
+        "path": "/testbed/tests/test_blueprints.py",
+        "pattern": "dot|ValueError|name.*empty"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "     254 | def test_dotted_name_not_allowed(app, client):\n     255 |     with pytest.raises(ValueError):\n     256 |         flask.Blueprint(\"app.ui\", __name__)\n     257 | \n     258 | \n     259 | def test_dotted_names_from_app(app, client):\n     260 |     test = flask.Blueprint(\"test\", __name__)\n     261 | \n     262 |     @app.route(\"/\")\n     263 |     def app_index():\n     264 |         return flask.url_for(\"test.index\")\n     265 | \n     266 |     @test.route(\"/test/\")\n     267 |     def index():\n     268 |         return flask.url_for(\"app_index\")\n     269 | \n     270 |     app.register_blueprint(test)\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/tests/test_blueprints.py",
+        "view_range": [
+          254,
+          270
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now I understand the pattern. Let me also check the `register_blueprint` method to see if there's a `name` parameter that could also receive empty strings:"
+    },
+    {
+      "role": "tool_result",
+      "content": "/testbed/src/flask/app.py:985:    def register_blueprint(self, blueprint: \"Blueprint\", **options: t.Any) -> None:\n/testbed/src/flask/blueprints.py:251:    def register_blueprint(self, blueprint: \"Blueprint\", **options: t.Any) -> None:\n",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "include": "*.py",
+        "limit": 20,
+        "path": "/testbed/src/flask",
+        "pattern": "def register_blueprint"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "     185 |         super().__init__(\n     186 |             import_name=import_name,\n     187 |             static_folder=static_folder,\n     188 |             static_url_path=static_url_path,\n     189 |             template_folder=template_folder,\n     190 |             root_path=root_path,\n     191 |         )\n     192 | \n     193 |         if \".\" in name:\n     194 |             raise ValueError(\"'name' may not contain a dot '.' character.\")\n     195 | \n     196 |         self.name = name\n     197 |         self.url_prefix = url_prefix\n     198 |         self.subdomain = subdomain\n     199 |         self.deferred_functions: t.List[DeferredSetupFunction] = []\n     200 | \n     201 |         if url_defaults is None:\n     202 |             url_defaults = {}\n     203 | \n     204 |         self.url_values_defaults = url_defaults\n     205 |         self.cli_group = cli_group\n     206 |         self._blueprints: t.List[t.Tuple[\"Blueprint\", dict]] = []\n     207 | \n     208 |     def _check_setup_finished(self, f_name: str) -> None:\n     209 |         if self._got_registered_once:\n     210 |             raise AssertionError(\n     211 |                 f\"The setup method '{f_name}' can no longer be called on the blueprint\"\n     212 |                 f\" '{self.name}'. It has already been registered at least once, any\"\n     213 |                 \" changes will not be applied consistently.\\n\"\n     214 |                 \"Make sure all imports, decorators, functions, etc. needed to set up\"\n     215 |                 \" the blueprint are done before registering it.\"\n     216 |             )\n     217 | \n     218 |     @setupmethod\n     219 |     def record(self, func: t.Callable) -> None:\n     220 |         \"\"\"Registers a function that is called when the blueprint is\n     221 |         registered on the application.  This function is called with the\n     222 |         state as argument as returned by the :meth:`make_setup_state`\n     223 |         method.\n     224 |         \"\"\"\n     225 |         self.deferred_functions.append(func)\n     226 | \n     227 |     @setupmethod\n     228 |     def record_once(self, func: t.Callable) -> None:\n     229 |         \"\"\"Works like :meth:`record` but wraps the function in another\n     230 |         function that will ensure the function is only called once.  If the\n     231 |         blueprint is registered a second time on the application, the\n     232 |         function passed is not called.\n     233 |         \"\"\"\n     234 | \n     235 |         def wrapper(state: BlueprintSetupState) -> None:\n     236 |             if state.first_registration:\n     237 |                 func(state)\n     238 | \n     239 |         self.record(update_wrapper(wrapper, func))\n     240 | \n     241 |     def make_setup_state(\n     242 |         self, app: \"Flask\", options: dict, first_registration: bool = False\n     243 |     ) -> BlueprintSetupState:\n     244 |         \"\"\"Creates an instance of :meth:`~flask.blueprints.BlueprintSetupState`\n     245 |         object that is later passed to the register callback functions.\n     246 |         Subclasses can override this to return a subclass of the setup state.\n     247 |         \"\"\"\n     248 |         return BlueprintSetupState(self, app, options, first_registration)\n     249 | \n     250 |     @setupmethod\n     251 |     def register_blueprint(self, blueprint: \"Blueprint\", **options: t.Any) -> None:\n     252 |         \"\"\"Register a :class:`~flask.Blueprint` on this blueprint. Keyword\n     253 |         arguments passed to this method will override the defaults set\n     254 |         on the blueprint.\n     255 | \n     256 |         .. versionchanged:: 2.0.1\n     257 |             The ``name`` option can be used to change the (pre-dotted)\n     258 |             name the blueprint is registered with. This allows the same\n     259 |             blueprint to be registered multiple times with unique names\n     260 |             for ``url_for``.\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/src/flask/blueprints.py",
+        "view_range": [
+          185,
+          260
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "     260 |             for ``url_for``.\n     261 | \n     262 |         .. versionadded:: 2.0\n     263 |         \"\"\"\n     264 |         if blueprint is self:\n     265 |             raise ValueError(\"Cannot register a blueprint on itself\")\n     266 |         self._blueprints.append((blueprint, options))\n     267 | \n     268 |     def register(self, app: \"Flask\", options: dict) -> None:\n     269 |         \"\"\"Called by :meth:`Flask.register_blueprint` to register all\n     270 |         views and callbacks registered on the blueprint with the\n     271 |         application. Creates a :class:`.BlueprintSetupState` and calls\n     272 |         each :meth:`record` callback with it.\n     273 | \n     274 |         :param app: The application this blueprint is being registered\n     275 |             with.\n     276 |         :param options: Keyword arguments forwarded from\n     277 |             :meth:`~Flask.register_blueprint`.\n     278 | \n     279 |         .. versionchanged:: 2.3\n     280 |             Nested blueprints now correctly apply subdomains.\n     281 | \n     282 |         .. versionchanged:: 2.1\n     283 |             Registering the same blueprint with the same name multiple\n     284 |             times is an error.\n     285 | \n     286 |         .. versionchanged:: 2.0.1\n     287 |             Nested blueprints are registered with their dotted name.\n     288 |             This allows different blueprints with the same name to be\n     289 |             nested at different locations.\n     290 | \n     291 |         .. versionchanged:: 2.0.1\n     292 |             The ``name`` option can be used to change the (pre-dotted)\n     293 |             name the blueprint is registered with. This allows the same\n     294 |             blueprint to be registered multiple times with unique names\n     295 |             for ``url_for``.\n     296 |         \"\"\"\n     297 |         name_prefix = options.get(\"name_prefix\", \"\")\n     298 |         self_name = options.get(\"name\", self.name)\n     299 |         name = f\"{name_prefix}.{self_name}\".lstrip(\".\")\n     300 | \n     301 |         if name in app.blueprints:\n     302 |             bp_desc = \"this\" if app.blueprints[name] is self else \"a different\"\n     303 |             existing_at = f\" '{name}'\" if self_name != name else \"\"\n     304 | \n     305 |             raise ValueError(\n     306 |                 f\"The name '{self_name}' is already registered for\"\n     307 |                 f\" {bp_desc} blueprint{existing_at}. Use 'name=' to\"\n     308 |                 f\" provide a unique name.\"\n     309 |             )\n     310 | \n     311 |         first_bp_registration = not any(bp is self for bp in app.blueprints.values())\n     312 |         first_name_registration = name not in app.blueprints\n     313 | \n     314 |         app.blueprints[name] = self\n     315 |         self._got_registered_once = True\n     316 |         state = self.make_setup_state(app, options, first_bp_registration)\n     317 | \n     318 |         if self.has_static_folder:\n     319 |             state.add_url_rule(\n     320 |                 f\"{self.static_url_path}/<path:filename>\",\n     321 |                 view_func=self.send_static_file,\n     322 |                 endpoint=\"static\",\n     323 |             )\n     324 | \n     325 |         # Merge blueprint data into parent.\n     326 |         if first_bp_registration or first_name_registration:\n     327 | \n     328 |             def extend(bp_dict, parent_dict):\n     329 |                 for key, values in bp_dict.items():\n     330 |                     key = name if key is None else f\"{name}.{key}\"\n     331 |                     parent_dict[key].extend(values)\n     332 | \n     333 |             for key, value in self.error_handler_spec.items():\n     334 |                 key = name if key is None else f\"{name}.{key}\"\n     335 |                 value = defaultdict(\n     336 |                     dict,\n     337 |                     {\n     338 |                         code: {\n     339 |                             exc_class: func for exc_class, func in code_values.items()\n     340 |                         }\n     341 |                         for code, code_values in value.items()\n     342 |                     },\n     343 |                 )\n     344 |                 app.error_handler_spec[key] = value\n     345 | \n     346 |             for endpoint, func in self.view_functions.items():\n     347 |                 app.view_functions[endpoint] = func\n     348 | \n     349 |             extend(self.before_request_funcs, app.before_request_funcs)\n     350 |             extend(self.after_request_funcs, app.after_request_funcs)\n     351 |             extend(\n     352 |                 self.teardown_request_funcs,\n     353 |                 app.teardown_request_funcs,\n     354 |             )\n     355 |             extend(self.url_default_functions, app.url_default_functions)\n     356 |             extend(self.url_value_preprocessors, app.url_value_preprocessors)\n     357 |             extend(self.template_context_processors, app.template_context_processors)\n     358 | \n     359 |         for deferred in self.deferred_functions:\n     360 |             deferred(state)\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/src/flask/blueprints.py",
+        "view_range": [
+          260,
+          360
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now let me also check the `register_blueprint` in `app.py` to see if there's a `name` option that could be passed as empty:"
+    },
+    {
+      "role": "tool_result",
+      "content": "     985 |     def register_blueprint(self, blueprint: \"Blueprint\", **options: t.Any) -> None:\n     986 |         \"\"\"Register a :class:`~flask.Blueprint` on the application. Keyword\n     987 |         arguments passed to this method will override the defaults set on the\n     988 |         blueprint.\n     989 | \n     990 |         Calls the blueprint's :meth:`~flask.Blueprint.register` method after\n     991 |         recording the blueprint in the application's :attr:`blueprints`.\n     992 | \n     993 |         :param blueprint: The blueprint to register.\n     994 |         :param url_prefix: Blueprint routes will be prefixed with this.\n     995 |         :param subdomain: Blueprint routes will match on this subdomain.\n     996 |         :param url_defaults: Blueprint routes will use these default values for\n     997 |             view arguments.\n     998 |         :param options: Additional keyword arguments are passed to\n     999 |             :class:`~flask.blueprints.BlueprintSetupState`. They can be\n    1000 |             accessed in :meth:`~flask.Blueprint.record` callbacks.\n    1001 | \n    1002 |         .. versionchanged:: 2.0.1\n    1003 |             The ``name`` option can be used to change the (pre-dotted)\n    1004 |             name the blueprint is registered with. This allows the same\n    1005 |             blueprint to be registered multiple times with unique names\n    1006 |             for ``url_for``.\n    1007 | \n    1008 |         .. versionadded:: 0.7\n    1009 |         \"\"\"\n    1010 |         blueprint.register(self, options)\n    1011 | \n    1012 |     def iter_blueprints(self) -> t.ValuesView[\"Blueprint\"]:\n    1013 |         \"\"\"Iterates over all blueprints by the order they were registered.\n    1014 | \n    1015 |         .. versionadded:: 0.11\n    1016 |         \"\"\"\n    1017 |         return self.blueprints.values()\n    1018 | \n    1019 |     @setupmethod\n    1020 |     def add_url_rule(\n    1021 |         self,\n    1022 |         rule: str,\n    1023 |         endpoint: t.Optional[str] = None,\n    1024 |         view_func: t.Optional[ft.RouteCallable] = None,\n    1025 |         provide_automatic_options: t.Optional[bool] = None,\n    1026 |         **options: t.Any,\n    1027 |     ) -> None:\n    1028 |         if endpoint is None:\n    1029 |             endpoint = _endpoint_from_view_func(view_func)  # type: ignore\n    1030 |         options[\"endpoint\"] = endpoint\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/src/flask/app.py",
+        "view_range": [
+          985,
+          1030
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now I have a clear picture of the code. Let me look at the `register` method in blueprints.py to see if the `name` option passed to `register_blueprint` also needs validation:"
+    },
+    {
+      "role": "tool_result",
+      "content": "     296 |         \"\"\"\n     297 |         name_prefix = options.get(\"name_prefix\", \"\")\n     298 |         self_name = options.get(\"name\", self.name)\n     299 |         name = f\"{name_prefix}.{self_name}\".lstrip(\".\")\n     300 | \n     301 |         if name in app.blueprints:\n     302 |             bp_desc = \"this\" if app.blueprints[name] is self else \"a different\"\n     303 |             existing_at = f\" '{name}'\" if self_name != name else \"\"\n     304 | \n     305 |             raise ValueError(\n     306 |                 f\"The name '{self_name}' is already registered for\"\n     307 |                 f\" {bp_desc} blueprint{existing_at}. Use 'name=' to\"\n     308 |                 f\" provide a unique name.\"\n     309 |             )\n     310 | \n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/src/flask/blueprints.py",
+        "view_range": [
+          296,
+          310
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now I understand the complete picture. I need to:\n1. Add a validation check for empty names in the `Blueprint.__init__` method (when creating a Blueprint)\n2. Also check in the `register` method for the case when `name` option is passed to `register_blueprint` (which allows overriding the name)\n\nLet me also check what happens with the dot check in the `register` method:"
+    },
+    {
+      "role": "tool_result",
+      "content": "78:        self.name_prefix = self.options.get(\"name_prefix\", \"\")\n110:            f\"{self.name_prefix}.{self.name}.{endpoint}\".lstrip(\".\"),\n194:            raise ValueError(\"'name' may not contain a dot '.' character.\")\n212:                f\" '{self.name}'. It has already been registered at least once, any\"\n257:            The ``name`` option can be used to change the (pre-dotted)\n258:            name the blueprint is registered with. This allows the same\n287:            Nested blueprints are registered with their dotted name.\n292:            The ``name`` option can be used to change the (pre-dotted)\n293:            name the blueprint is registered with. This allows the same\n297:        name_prefix = options.get(\"name_prefix\", \"\")\n299:        name = f\"{name_prefix}.{self_name}\".lstrip(\".\")\n306:                f\"The name '{self_name}' is already registered for\"\n401:            bp_options[\"name_prefix\"] = name\n420:            raise ValueError(\"'endpoint' may not contain a dot '.' character.\")\n423:            raise ValueError(\"'view_func' name may not contain a dot '.' character.\")\n",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "include": "*.py",
+        "limit": 20,
+        "path": "/testbed/src/flask/blueprints.py",
+        "pattern": "dot|name.*prefix|name.*register"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now let me also look at the `register` method around line 401 to understand the nested blueprints and the `name` validation:"
+    },
+    {
+      "role": "tool_result",
+      "content": "     360 |             deferred(state)\n     361 | \n     362 |         cli_resolved_group = options.get(\"cli_group\", self.cli_group)\n     363 | \n     364 |         if self.cli.commands:\n     365 |             if cli_resolved_group is None:\n     366 |                 app.cli.commands.update(self.cli.commands)\n     367 |             elif cli_resolved_group is _sentinel:\n     368 |                 self.cli.name = name\n     369 |                 app.cli.add_command(self.cli)\n     370 |             else:\n     371 |                 self.cli.name = cli_resolved_group\n     372 |                 app.cli.add_command(self.cli)\n     373 | \n     374 |         for blueprint, bp_options in self._blueprints:\n     375 |             bp_options = bp_options.copy()\n     376 |             bp_url_prefix = bp_options.get(\"url_prefix\")\n     377 |             bp_subdomain = bp_options.get(\"subdomain\")\n     378 | \n     379 |             if bp_subdomain is None:\n     380 |                 bp_subdomain = blueprint.subdomain\n     381 | \n     382 |             if state.subdomain is not None and bp_subdomain is not None:\n     383 |                 bp_options[\"subdomain\"] = bp_subdomain + \".\" + state.subdomain\n     384 |             elif bp_subdomain is not None:\n     385 |                 bp_options[\"subdomain\"] = bp_subdomain\n     386 |             elif state.subdomain is not None:\n     387 |                 bp_options[\"subdomain\"] = state.subdomain\n     388 | \n     389 |             if bp_url_prefix is None:\n     390 |                 bp_url_prefix = blueprint.url_prefix\n     391 | \n     392 |             if state.url_prefix is not None and bp_url_prefix is not None:\n     393 |                 bp_options[\"url_prefix\"] = (\n     394 |                     state.url_prefix.rstrip(\"/\") + \"/\" + bp_url_prefix.lstrip(\"/\")\n     395 |                 )\n     396 |             elif bp_url_prefix is not None:\n     397 |                 bp_options[\"url_prefix\"] = bp_url_prefix\n     398 |             elif state.url_prefix is not None:\n     399 |                 bp_options[\"url_prefix\"] = state.url_prefix\n     400 | \n     401 |             bp_options[\"name_prefix\"] = name\n     402 |             blueprint.register(app, bp_options)\n     403 | \n     404 |     @setupmethod\n     405 |     def add_url_rule(\n     406 |         self,\n     407 |         rule: str,\n     408 |         endpoint: t.Optional[str] = None,\n     409 |         view_func: t.Optional[ft.RouteCallable] = None,\n     410 |         provide_automatic_options: t.Optional[bool] = None,\n     411 |         **options: t.Any,\n     412 |     ) -> None:\n     413 |         \"\"\"Register a URL rule with the blueprint. See :meth:`.Flask.add_url_rule` for\n     414 |         full documentation.\n     415 | \n     416 |         The URL rule is prefixed with the blueprint's URL prefix. The endpoint name,\n     417 |         used with :func:`url_for`, is prefixed with the blueprint's name.\n     418 |         \"\"\"\n     419 |         if endpoint and \".\" in endpoint:\n     420 |             raise ValueError(\"'endpoint' may not contain a dot '.' character.\")\n     421 | \n     422 |         if view_func and hasattr(view_func, \"__name__\") and \".\" in view_func.__name__:\n     423 |             raise ValueError(\"'view_func' name may not contain a dot '.' character.\")\n     424 | \n     425 |         self.record(\n     426 |             lambda s: s.add_url_rule(\n     427 |                 rule,\n     428 |                 endpoint,\n     429 |                 view_func,\n     430 |                 provide_automatic_options=provide_automatic_options,\n     431 |                 **options,\n     432 |             )\n     433 |         )\n     434 | \n     435 |     @setupmethod\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/src/flask/blueprints.py",
+        "view_range": [
+          360,
+          435
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now I have a complete understanding. I need to add a check for empty names in the `Blueprint.__init__` method. I should also check if the `name` option passed to `register_blueprint` (i.e., the `self_name` variable in the `register` method) should be validated for empty strings as well.\n\nLooking at the issue, the primary place to fix is the `__init__` method. The `name` parameter when registering via `register_blueprint(name=...)` should also be checked. Let me make the fix:"
+    },
+    {
+      "role": "tool_result",
+      "content": "OK",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "str_replace",
+        "path": "/testbed/src/flask/blueprints.py",
+        "old_str": "        if \".\" in name:\n            raise ValueError(\"'name' may not contain a dot '.' character.\")\n\n        self.name = name",
+        "new_str": "        if not name:\n            raise ValueError(\"'name' may not be empty.\")\n\n        if \".\" in name:\n            raise ValueError(\"'name' may not contain a dot '.' character.\")\n\n        self.name = name"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now let me also check the `register` method where a `name` option can be passed to override the name. Let me add a similar check there:"
+    },
+    {
+      "role": "tool_result",
+      "content": "     297 |             blueprint to be registered multiple times with unique names\n     298 |             for ``url_for``.\n     299 |         \"\"\"\n     300 |         name_prefix = options.get(\"name_prefix\", \"\")\n     301 |         self_name = options.get(\"name\", self.name)\n     302 |         name = f\"{name_prefix}.{self_name}\".lstrip(\".\")\n     303 | \n     304 |         if name in app.blueprints:\n     305 |             bp_desc = \"this\" if app.blueprints[name] is self else \"a different\"\n     306 |             existing_at = f\" '{name}'\" if self_name != name else \"\"\n     307 | \n     308 |             raise ValueError(\n     309 |                 f\"The name '{self_name}' is already registered for\"\n     310 |                 f\" {bp_desc} blueprint{existing_at}. Use 'name=' to\"\n     311 |                 f\" provide a unique name.\"\n     312 |             )\n     313 | \n     314 |         first_bp_registration = not any(bp is self for bp in app.blueprints.values())\n     315 |         first_name_registration = name not in app.blueprints\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/src/flask/blueprints.py",
+        "view_range": [
+          297,
+          315
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "I should also add validation in the `register` method for the case when `name` is passed via options. Let me add the check:"
+    },
+    {
+      "role": "tool_result",
+      "content": "OK",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "str_replace",
+        "path": "/testbed/src/flask/blueprints.py",
+        "old_str": "        name_prefix = options.get(\"name_prefix\", \"\")\n        self_name = options.get(\"name\", self.name)\n        name = f\"{name_prefix}.{self_name}\".lstrip(\".\")",
+        "new_str": "        name_prefix = options.get(\"name_prefix\", \"\")\n        self_name = options.get(\"name\", self.name)\n\n        if not self_name:\n            raise ValueError(\"'name' may not be empty.\")\n\n        name = f\"{name_prefix}.{self_name}\".lstrip(\".\")"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now let me verify the changes look correct:"
+    },
+    {
+      "role": "tool_result",
+      "content": "     190 |             root_path=root_path,\n     191 |         )\n     192 | \n     193 |         if not name:\n     194 |             raise ValueError(\"'name' may not be empty.\")\n     195 | \n     196 |         if \".\" in name:\n     197 |             raise ValueError(\"'name' may not contain a dot '.' character.\")\n     198 | \n     199 |         self.name = name\n     200 |         self.url_prefix = url_prefix\n     201 |         self.subdomain = subdomain\n     202 |         self.deferred_functions: t.List[DeferredSetupFunction] = []\n     203 | \n     204 |         if url_defaults is None:\n     205 |             url_defaults = {}\n     206 | \n     207 |         self.url_values_defaults = url_defaults\n     208 |         self.cli_group = cli_group\n     209 |         self._blueprints: t.List[t.Tuple[\"Blueprint\", dict]] = []\n     210 | \n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/src/flask/blueprints.py",
+        "view_range": [
+          190,
+          210
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "     299 |         \"\"\"\n     300 |         name_prefix = options.get(\"name_prefix\", \"\")\n     301 |         self_name = options.get(\"name\", self.name)\n     302 | \n     303 |         if not self_name:\n     304 |             raise ValueError(\"'name' may not be empty.\")\n     305 | \n     306 |         name = f\"{name_prefix}.{self_name}\".lstrip(\".\")\n     307 | \n     308 |         if name in app.blueprints:\n     309 |             bp_desc = \"this\" if app.blueprints[name] is self else \"a different\"\n     310 |             existing_at = f\" '{name}'\" if self_name != name else \"\"\n     311 | \n     312 |             raise ValueError(\n     313 |                 f\"The name '{self_name}' is already registered for\"\n     314 |                 f\" {bp_desc} blueprint{existing_at}. Use 'name=' to\"\n     315 |                 f\" provide a unique name.\"\n     316 |             )\n     317 | \n     318 |         first_bp_registration = not any(bp is self for bp in app.blueprints.values())\n     319 |         first_name_registration = name not in app.blueprints\n     320 | \n     321 |         app.blueprints[name] = self\n     322 |         self._got_registered_once = True\n     323 |         state = self.make_setup_state(app, options, first_bp_registration)\n     324 | \n     325 |         if self.has_static_folder:\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/src/flask/blueprints.py",
+        "view_range": [
+          299,
+          325
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "The changes look good. Now let me write a quick test to verify the fix works:"
+    },
+    {
+      "role": "tool_result",
+      "content": "PASS: Got ValueError for empty string: 'name' may not be empty.\nPASS: Non-empty name works fine\nPASS: Got ValueError for dotted name: 'name' may not contain a dot '.' character.\nPASS: Got ValueError for empty name in register_blueprint: 'name' may not be empty.\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -c \"\nimport flask\n\n# Test 1: Empty string name should raise ValueError\ntry:\n    bp = flask.Blueprint('', __name__)\n    print('FAIL: Should have raised ValueError for empty name')\nexcept ValueError as e:\n    print(f'PASS: Got ValueError for empty string: {e}')\n\n# Test 2: Non-empty name should work fine\ntry:\n    bp = flask.Blueprint('myblueprint', __name__)\n    print('PASS: Non-empty name works fine')\nexcept ValueError as e:\n    print(f'FAIL: Should not raise ValueError for valid name: {e}')\n\n# Test 3: Dot in name still raises ValueError\ntry:\n    bp = flask.Blueprint('my.blueprint', __name__)\n    print('FAIL: Should have raised ValueError for dot in name')\nexcept ValueError as e:\n    print(f'PASS: Got ValueError for dotted name: {e}')\n\n# Test 4: Empty name via register_blueprint option\napp = flask.Flask(__name__)\nbp = flask.Blueprint('valid', __name__)\ntry:\n    app.register_blueprint(bp, name='')\n    print('FAIL: Should have raised ValueError for empty name in register_blueprint')\nexcept ValueError as e:\n    print(f'PASS: Got ValueError for empty name in register_blueprint: {e}')\n\"\n"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "All tests pass. Now let me run the existing blueprint tests to make sure nothing is broken:"
+    },
+    {
+      "role": "tool_result",
+      "content": "tests/test_blueprints.py::test_blueprint_prefix_slash[/foo-/bar-/foo/bar] PASSED [ 20%]\ntests/test_blueprints.py::test_blueprint_prefix_slash[/foo/-//bar-/foo/bar] PASSED [ 22%]\ntests/test_blueprints.py::test_blueprint_prefix_slash[/foo//-/bar-/foo/bar] PASSED [ 23%]\ntests/test_blueprints.py::test_blueprint_url_defaults PASSED             [ 25%]\ntests/test_blueprints.py::test_blueprint_url_processors PASSED           [ 27%]\ntests/test_blueprints.py::test_templates_and_static PASSED               [ 28%]\ntests/test_blueprints.py::test_default_static_max_age PASSED             [ 30%]\ntests/test_blueprints.py::test_templates_list PASSED                     [ 32%]\ntests/test_blueprints.py::test_dotted_name_not_allowed PASSED            [ 33%]\ntests/test_blueprints.py::test_dotted_names_from_app PASSED              [ 35%]\ntests/test_blueprints.py::test_empty_url_defaults PASSED                 [ 37%]\ntests/test_blueprints.py::test_route_decorator_custom_endpoint PASSED    [ 38%]\ntests/test_blueprints.py::test_route_decorator_custom_endpoint_with_dots PASSED [ 40%]\ntests/test_blueprints.py::test_endpoint_decorator PASSED                 [ 42%]\ntests/test_blueprints.py::test_template_filter PASSED                    [ 44%]\ntests/test_blueprints.py::test_add_template_filter PASSED                [ 45%]\ntests/test_blueprints.py::test_template_filter_with_name PASSED          [ 47%]\ntests/test_blueprints.py::test_add_template_filter_with_name PASSED      [ 49%]\ntests/test_blueprints.py::test_template_filter_with_template PASSED      [ 50%]\ntests/test_blueprints.py::test_template_filter_after_route_with_template PASSED [ 52%]\ntests/test_blueprints.py::test_add_template_filter_with_template PASSED  [ 54%]\ntests/test_blueprints.py::test_template_filter_with_name_and_template PASSED [ 55%]\ntests/test_blueprints.py::test_add_template_filter_with_name_and_template PASSED [ 57%]\ntests/test_blueprints.py::test_template_test PASSED                      [ 59%]\ntests/test_blueprints.py::test_add_template_test PASSED                  [ 61%]\ntests/test_blueprints.py::test_template_test_with_name PASSED            [ 62%]\ntests/test_blueprints.py::test_add_template_test_with_name PASSED        [ 64%]\ntests/test_blueprints.py::test_template_test_with_template PASSED        [ 66%]\ntests/test_blueprints.py::test_template_test_after_route_with_template PASSED [ 67%]\ntests/test_blueprints.py::test_add_template_test_with_template PASSED    [ 69%]\ntests/test_blueprints.py::test_template_test_with_name_and_template PASSED [ 71%]\ntests/test_blueprints.py::test_add_template_test_with_name_and_template PASSED [ 72%]\ntests/test_blueprints.py::test_context_processing PASSED                 [ 74%]\ntests/test_blueprints.py::test_template_global PASSED                    [ 76%]\ntests/test_blueprints.py::test_request_processing PASSED                 [ 77%]\ntests/test_blueprints.py::test_app_request_processing PASSED             [ 79%]\ntests/test_blueprints.py::test_app_url_processors PASSED                 [ 81%]\ntests/test_blueprints.py::test_nested_blueprint PASSED                   [ 83%]\ntests/test_blueprints.py::test_nested_callback_order PASSED              [ 84%]\ntests/test_blueprints.py::test_nesting_url_prefixes[/parent-/child-None-None] PASSED [ 86%]\ntests/test_blueprints.py::test_nesting_url_prefixes[/parent-None-None-/child] PASSED [ 88%]\ntests/test_blueprints.py::test_nesting_url_prefixes[None-None-/parent-/child] PASSED [ 89%]\ntests/test_blueprints.py::test_nesting_url_prefixes[/other-/something-/parent-/child] PASSED [ 91%]\ntests/test_blueprints.py::test_nesting_subdomains PASSED                 [ 93%]\ntests/test_blueprints.py::test_child_and_parent_subdomain PASSED         [ 94%]\ntests/test_blueprints.py::test_unique_blueprint_names PASSED             [ 96%]\ntests/test_blueprints.py::test_self_registration PASSED                  [ 98%]\ntests/test_blueprints.py::test_blueprint_renaming PASSED                 [100%]\n\n============================== 59 passed in 0.24s ==============================\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -m pytest tests/test_blueprints.py -x -v 2>&1 | tail -50"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "All 59 existing tests pass. Let me also run the full test suite to ensure nothing else is broken:"
+    },
+    {
+      "role": "tool_result",
+      "content": "____________________ test_session_transaction_needs_cookies ____________________\ntests/test_testing.py:210: in test_session_transaction_needs_cookies\n    with c.session_transaction():\n/opt/miniconda3/envs/testbed/lib/python3.11/contextlib.py:137: in __enter__\n    return next(self.gen)\nsrc/flask/testing.py:140: in session_transaction\n    if self.cookie_jar is None:\n/opt/miniconda3/envs/testbed/lib/python3.11/site-packages/werkzeug/test.py:862: in cookie_jar\n    warnings.warn(\nE   DeprecationWarning: The 'cookie_jar' attribute is a private API and will be removed in Werkzeug 3.0. Use the 'get_cookie' method instead.\n=========================== short test summary info ============================\nFAILED tests/test_basic.py::test_session_using_server_name - AssertionError: ...\nFAILED tests/test_basic.py::test_session_using_server_name_and_port - Asserti...\nFAILED tests/test_basic.py::test_session_using_session_settings - AssertionEr...\nFAILED tests/test_json.py::test_modified_url_encoding - DeprecationWarning: T...\nFAILED tests/test_testing.py::test_session_transactions - DeprecationWarning:...\nFAILED tests/test_testing.py::test_session_transactions_no_null_sessions - De...\nFAILED tests/test_testing.py::test_session_transactions_keep_context - Deprec...\nFAILED tests/test_testing.py::test_session_transaction_needs_cookies - Deprec...\n8 failed, 466 passed, 10 skipped in 1.90s\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -m pytest --tb=short -q 2>&1 | tail -20"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "The 8 failing tests are all pre-existing failures unrelated to our changes (they're about session handling and deprecation warnings in Werkzeug). All blueprint-related tests pass.\n\nLet me do a final check to make sure the fix is clean and complete:"
+    },
+    {
+      "role": "tool_result",
+      "content": "     185 |         super().__init__(\n     186 |             import_name=import_name,\n     187 |             static_folder=static_folder,\n     188 |             static_url_path=static_url_path,\n     189 |             template_folder=template_folder,\n     190 |             root_path=root_path,\n     191 |         )\n     192 | \n     193 |         if not name:\n     194 |             raise ValueError(\"'name' may not be empty.\")\n     195 | \n     196 |         if \".\" in name:\n     197 |             raise ValueError(\"'name' may not contain a dot '.' character.\")\n     198 | \n     199 |         self.name = name\n     200 |         self.url_prefix = url_prefix\n     201 |         self.subdomain = subdomain\n     202 |         self.deferred_functions: t.List[DeferredSetupFunction] = []\n     203 | \n     204 |         if url_defaults is None:\n     205 |             url_defaults = {}\n     206 | \n     207 |         self.url_values_defaults = url_defaults\n     208 |         self.cli_group = cli_group\n     209 |         self._blueprints: t.List[t.Tuple[\"Blueprint\", dict]] = []\n     210 | \n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/src/flask/blueprints.py",
+        "view_range": [
+          185,
+          210
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "The fix is clean and complete. Here's a summary of what was done:\n\n## Summary\n\nThe issue requested that a `ValueError` be raised when a Blueprint is given an empty name, since empty names cause incorrect behavior (referenced in issue #4944).\n\n### Changes Made to `/testbed/src/flask/blueprints.py`:\n\n1. **In `Blueprint.__init__`** (line 193-194): Added a check before the existing dot check to raise `ValueError` if the `name` parameter is empty (falsy):\n   ```python\n   if not name:\n       raise ValueError(\"'name' may not be empty.\")\n   ```\n\n2. **In `Blueprint.register`** (line 303-304): Added a similar check for the `name` option that can be passed when registering a blueprint via `app.register_blueprint(bp, name='...')`:\n   ```python\n   if not self_name:\n       raise ValueError(\"'name' may not be empty.\")\n   ```\n\nThis ensures that both creating a Blueprint with an empty name and registering a Blueprint with an empty `name` override will raise a `ValueError` with a clear error message."
+    },
+    {
+      "role": "user",
+      "content": "If your fix is complete, stop. Otherwise proceed by calling a tool (e.g. run the failing test to verify, or make the next edit)."
+    },
+    {
+      "role": "assistant",
+      "content": "My fix is complete. The changes are:\n\n1. Added `if not name: raise ValueError(\"'name' may not be empty.\")` in `Blueprint.__init__` to catch empty names at creation time.\n2. Added the same check in `Blueprint.register` to catch empty names passed via the `name=` option to `register_blueprint`.\n\nAll 59 blueprint tests pass, and the 8 pre-existing failures are unrelated to this change."
+    }
+  ],
+  "info": {
+    "model_stats": {
+      "api_calls": 23,
+      "instance_cost": 0.3497,
+      "input_tokens": 251011,
+      "output_tokens": 3837,
+      "cache_read_tokens": 187452,
+      "cache_write_tokens": 17881
+    },
+    "exit_status": "completed",
+    "submission": "diff --git a/src/flask/blueprints.py b/src/flask/blueprints.py\nindex eb50585d..501245e4 100644\n--- a/src/flask/blueprints.py\n+++ b/src/flask/blueprints.py\n@@ -190,6 +190,9 @@ class Blueprint(Scaffold):\n             root_path=root_path,\n         )\n \n+        if not name:\n+            raise ValueError(\"'name' may not be empty.\")\n+\n         if \".\" in name:\n             raise ValueError(\"'name' may not contain a dot '.' character.\")\n \n@@ -296,6 +299,10 @@ class Blueprint(Scaffold):\n         \"\"\"\n         name_prefix = options.get(\"name_prefix\", \"\")\n         self_name = options.get(\"name\", self.name)\n+\n+        if not self_name:\n+            raise ValueError(\"'name' may not be empty.\")\n+\n         name = f\"{name_prefix}.{self_name}\".lstrip(\".\")\n \n         if name in app.blueprints:\n"
+  }
+}

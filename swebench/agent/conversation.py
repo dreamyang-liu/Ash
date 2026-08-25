@@ -97,7 +97,12 @@ class Conversation:
 
     def add_tool_result(self, tool_call_id: str, content: str, **meta) -> None:
         self.messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": content})
-        self.trajectory.add_message("tool_result", content, **meta)
+        # The id belongs in the record too, not only in the model-facing copy.
+        # A replay re-feeds this transcript, and a provider rejects a tool
+        # result it cannot match to a call; without the id, results and calls
+        # can only be paired by guessing at their order.
+        self.trajectory.add_message("tool_result", content,
+                                    tool_call_id=tool_call_id, **meta)
 
     def add_error(self, content: str) -> None:
         """Record an error in the trajectory only (not a real model message)."""

@@ -1,0 +1,62 @@
+[
+  {
+    "instance_id": "django__django-10880",
+    "model_patch": "diff --git a/django/db/models/aggregates.py b/django/db/models/aggregates.py\nindex ac0b62d0bf..ea88c54b0d 100644\n--- a/django/db/models/aggregates.py\n+++ b/django/db/models/aggregates.py\n@@ -68,7 +68,7 @@ class Aggregate(Func):\n         return []\n \n     def as_sql(self, compiler, connection, **extra_context):\n-        extra_context['distinct'] = 'DISTINCT' if self.distinct else ''\n+        extra_context['distinct'] = 'DISTINCT ' if self.distinct else ''\n         if self.filter:\n             if connection.features.supports_aggregate_filter_clause:\n                 filter_sql, filter_params = self.filter.as_sql(compiler, connection)\n",
+    "model_name_or_path": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "exit_status": "completed"
+  },
+  {
+    "instance_id": "matplotlib__matplotlib-20488",
+    "model_patch": "diff --git a/lib/matplotlib/image.py b/lib/matplotlib/image.py\nindex 95bb42d75..8722a442e 100644\n--- a/lib/matplotlib/image.py\n+++ b/lib/matplotlib/image.py\n@@ -533,8 +533,8 @@ class _ImageBase(martist.Artist, cm.ScalarMappable):\n                 # that may have moved input values in/out of range\n                 s_vmin, s_vmax = vrange\n                 if isinstance(self.norm, mcolors.LogNorm):\n-                    if s_vmin < 0:\n-                        s_vmin = max(s_vmin, np.finfo(scaled_dtype).eps)\n+                    if s_vmin <= 0:\n+                        s_vmin = np.finfo(scaled_dtype).eps\n                 with cbook._setattr_cm(self.norm,\n                                        vmin=s_vmin,\n                                        vmax=s_vmax,\n",
+    "model_name_or_path": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "exit_status": "completed"
+  },
+  {
+    "instance_id": "psf__requests-1142",
+    "model_patch": "diff --git a/requests/models.py b/requests/models.py\nindex 9926045..0c99e5d 100644\n--- a/requests/models.py\n+++ b/requests/models.py\n@@ -386,7 +386,6 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):\n         self.body = body\n \n     def prepare_content_length(self, body):\n-        self.headers['Content-Length'] = '0'\n         if hasattr(body, 'seek') and hasattr(body, 'tell'):\n             body.seek(0, 2)\n             self.headers['Content-Length'] = str(body.tell())\n",
+    "model_name_or_path": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "exit_status": "completed"
+  },
+  {
+    "instance_id": "astropy__astropy-13033",
+    "model_patch": "diff --git a/astropy/timeseries/core.py b/astropy/timeseries/core.py\nindex c279f35f8..b7d0e995a 100644\n--- a/astropy/timeseries/core.py\n+++ b/astropy/timeseries/core.py\n@@ -76,9 +76,24 @@ class BaseTimeSeries(QTable):\n \n             elif self.colnames[:len(required_columns)] != required_columns:\n \n-                raise ValueError(\"{} object is invalid - expected '{}' \"\n-                                 \"as the first column{} but found '{}'\"\n-                                 .format(self.__class__.__name__, required_columns[0], plural, self.colnames[0]))\n+                if self.colnames[0] == required_columns[0]:\n+                    # The first column is correct but subsequent required columns\n+                    # are missing or in the wrong order\n+                    missing = [col for col in required_columns\n+                               if col not in self.colnames]\n+                    if missing:\n+                        raise ValueError(\"{} object is invalid - required column\"\n+                                         \" '{}' is missing\".format(\n+                                             self.__class__.__name__, missing[0]))\n+                    else:\n+                        raise ValueError(\"{} object is invalid - expected '{}' \"\n+                                         \"as the first column{} but found '{}'\"\n+                                         .format(self.__class__.__name__, required_columns[0],\n+                                                 plural, self.colnames[0]))\n+                else:\n+                    raise ValueError(\"{} object is invalid - expected '{}' \"\n+                                     \"as the first column{} but found '{}'\"\n+                                     .format(self.__class__.__name__, required_columns[0], plural, self.colnames[0]))\n \n             if (self._required_columns_relax\n                     and self._required_columns == self.colnames[:len(self._required_columns)]):\n",
+    "model_name_or_path": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "exit_status": "completed"
+  },
+  {
+    "instance_id": "pylint-dev__pylint-4661",
+    "model_patch": "diff --git a/pylint/config/__init__.py b/pylint/config/__init__.py\nindex 84774d0e..65f0116c 100644\n--- a/pylint/config/__init__.py\n+++ b/pylint/config/__init__.py\n@@ -63,7 +63,10 @@ if \"PYLINTHOME\" in os.environ:\n elif USER_HOME == \"~\":\n     PYLINT_HOME = \".pylint.d\"\n else:\n-    PYLINT_HOME = os.path.join(USER_HOME, \".pylint.d\")\n+    PYLINT_HOME = os.path.join(\n+        os.environ.get(\"XDG_DATA_HOME\", os.path.join(USER_HOME, \".local\", \"share\")),\n+        \"pylint\",\n+    )\n \n \n def _get_pdata_path(base_name, recurs):\n@@ -83,7 +86,7 @@ def load_results(base):\n def save_results(results, base):\n     if not os.path.exists(PYLINT_HOME):\n         try:\n-            os.mkdir(PYLINT_HOME)\n+            os.makedirs(PYLINT_HOME)\n         except OSError:\n             print(\"Unable to create directory %s\" % PYLINT_HOME, file=sys.stderr)\n     data_file = _get_pdata_path(base, 1)\n@@ -110,8 +113,8 @@ ENV_HELP = (\n The following environment variables are used:\n     * PYLINTHOME\n     Path to the directory where persistent data for the run will be stored. If\n-not found, it defaults to ~/.pylint.d/ or .pylint.d (in the current working\n-directory).\n+not found, it defaults to ~/.local/share/pylint or .pylint.d (in the current\n+working directory).\n     * PYLINTRC\n     Path to the configuration file. See the documentation for the method used\n to search for configuration file.\n",
+    "model_name_or_path": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "exit_status": "completed"
+  },
+  {
+    "instance_id": "pydata__xarray-2905",
+    "model_patch": "diff --git a/xarray/core/variable.py b/xarray/core/variable.py\nindex 45553eb9..8f6d8cc1 100644\n--- a/xarray/core/variable.py\n+++ b/xarray/core/variable.py\n@@ -218,7 +218,8 @@ def as_compatible_data(data, fastpath=False):\n         data = np.timedelta64(getattr(data, \"value\", data), \"ns\")\n \n     # we don't want nested self-described arrays\n-    data = getattr(data, \"values\", data)\n+    if isinstance(data, (pd.Series, pd.DataFrame)):\n+        data = data.values\n \n     if isinstance(data, np.ma.MaskedArray):\n         mask = np.ma.getmaskarray(data)\n",
+    "model_name_or_path": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "exit_status": "completed"
+  },
+  {
+    "instance_id": "scikit-learn__scikit-learn-10297",
+    "model_patch": "diff --git a/sklearn/linear_model/ridge.py b/sklearn/linear_model/ridge.py\nindex 911c74ae3..526a42ea9 100755\n--- a/sklearn/linear_model/ridge.py\n+++ b/sklearn/linear_model/ridge.py\n@@ -1293,6 +1293,12 @@ class RidgeClassifierCV(LinearClassifierMixin, _BaseRidgeCV):\n         Refer :ref:`User Guide <cross_validation>` for the various\n         cross-validation strategies that can be used here.\n \n+    store_cv_values : boolean, default=False\n+        Flag indicating if the cross-validation values corresponding to\n+        each alpha should be stored in the `cv_values_` attribute (see\n+        below). This flag is only compatible with `cv=None` (i.e. using\n+        Generalized Cross-Validation).\n+\n     class_weight : dict or 'balanced', optional\n         Weights associated with classes in the form ``{class_label: weight}``.\n         If not given, all classes are supposed to have weight one.\n@@ -1333,10 +1339,11 @@ class RidgeClassifierCV(LinearClassifierMixin, _BaseRidgeCV):\n     advantage of the multi-variate response support in Ridge.\n     \"\"\"\n     def __init__(self, alphas=(0.1, 1.0, 10.0), fit_intercept=True,\n-                 normalize=False, scoring=None, cv=None, class_weight=None):\n+                 normalize=False, scoring=None, cv=None, class_weight=None,\n+                 store_cv_values=False):\n         super(RidgeClassifierCV, self).__init__(\n             alphas=alphas, fit_intercept=fit_intercept, normalize=normalize,\n-            scoring=scoring, cv=cv)\n+            scoring=scoring, cv=cv, store_cv_values=store_cv_values)\n         self.class_weight = class_weight\n \n     def fit(self, X, y, sample_weight=None):\n",
+    "model_name_or_path": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "exit_status": "completed"
+  },
+  {
+    "instance_id": "sympy__sympy-11618",
+    "model_patch": "diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py\nindex 593048464..8d9f47b58 100644\n--- a/sympy/geometry/point.py\n+++ b/sympy/geometry/point.py\n@@ -11,7 +11,7 @@\n from __future__ import division, print_function\n \n from sympy.core import S, sympify\n-from sympy.core.compatibility import iterable\n+from sympy.core.compatibility import iterable, zip_longest\n from sympy.core.containers import Tuple\n from sympy.simplify import nsimplify, simplify\n from sympy.geometry.exceptions import GeometryError\n@@ -266,8 +266,8 @@ def distance(self, p):\n         sqrt(x**2 + y**2)\n \n         \"\"\"\n-        return sqrt(sum([(a - b)**2 for a, b in zip(\n-            self.args, p.args if isinstance(p, Point) else p)]))\n+        return sqrt(sum([(a - b)**2 for a, b in zip_longest(\n+            self.args, p.args if isinstance(p, Point) else p, fillvalue=S.Zero)]))\n \n     def taxicab_distance(self, p):\n         \"\"\"The Taxicab Distance from self to point p.\n@@ -300,7 +300,7 @@ def taxicab_distance(self, p):\n \n         \"\"\"\n         p = Point(p)\n-        return sum(abs(a - b) for a, b in zip(self.args, p.args))\n+        return sum(abs(a - b) for a, b in zip_longest(self.args, p.args, fillvalue=S.Zero))\n \n     def midpoint(self, p):\n         \"\"\"The midpoint between self and point p.\n@@ -329,7 +329,7 @@ def midpoint(self, p):\n         Point2D(7, 3)\n \n         \"\"\"\n-        return Point([simplify((a + b)*S.Half) for a, b in zip(self.args, p.args)])\n+        return Point([simplify((a + b)*S.Half) for a, b in zip_longest(self.args, p.args, fillvalue=S.Zero)])\n \n     def evalf(self, prec=None, **options):\n         \"\"\"Evaluate the coordinates of the point.\n",
+    "model_name_or_path": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "exit_status": "completed"
+  },
+  {
+    "instance_id": "pytest-dev__pytest-10051",
+    "model_patch": "diff --git a/src/_pytest/logging.py b/src/_pytest/logging.py\nindex a4f4214b1..9ef50c1b5 100644\n--- a/src/_pytest/logging.py\n+++ b/src/_pytest/logging.py\n@@ -440,7 +440,17 @@ class LogCaptureFixture:\n \n     def clear(self) -> None:\n         \"\"\"Reset the list of log records and the captured log text.\"\"\"\n+        old_records = self.handler.records\n         self.handler.reset()\n+        # At the start of each test phase, _runtest_for() stores a\n+        # reference to caplog_handler.records in the stash.  Since\n+        # handler.reset() replaces the list with a new one, the stash\n+        # entry becomes stale.  Update it to the new (empty) list so\n+        # that get_records() stays consistent with caplog.records.\n+        stash_records = self._item.stash[caplog_records_key]\n+        for key in stash_records:\n+            if stash_records[key] is old_records:\n+                stash_records[key] = self.handler.records\n \n     def set_level(self, level: Union[int, str], logger: Optional[str] = None) -> None:\n         \"\"\"Set the level of a logger for the duration of a test.\n",
+    "model_name_or_path": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "exit_status": "completed"
+  },
+  {
+    "instance_id": "sphinx-doc__sphinx-10323",
+    "model_patch": "",
+    "model_name_or_path": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "exit_status": "cost_limit"
+  }
+]

@@ -1,0 +1,244 @@
+{
+  "trajectory_format": "ash-agent-2.0",
+  "instance_id": "pallets__flask-5014",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant that can interact with a computer to solve software engineering tasks.\n"
+    },
+    {
+      "role": "user",
+      "content": "Please solve this issue: Require a non-empty name for Blueprints\nThings do not work correctly if a Blueprint is given an empty name (e.g. #4944).\r\nIt would be helpful if a `ValueError` was raised when trying to do that.\n\n\nYou can use tools to execute commands, search code, read files, and edit files.\n\n## Available Tools\n\n- `shell`: Execute bash commands. Use `tail` param to limit output. Use `background: true` for long-running commands.\n- `grep_files`: Search code with ripgrep. Always set `include` (e.g. \"*.py\") and `limit`.\n- `text_editor`: View and edit files. Commands: `view` (read range), `str_replace` (exact match replace), `insert` (after line N), `write` (create/overwrite).\n- `process`: Manage background processes. Actions: `read` (get output), `kill`.\n\n## Recommended Workflow\n\n1. Analyze the codebase by finding and reading relevant files\n2. Create a script to reproduce the issue\n3. Edit the source code to resolve the issue\n4. Verify your fix works by running your script again\n5. Test edge cases to ensure your fix is robust by running related tests\n\n## Tool Usage Rules\n\nYou are operating in an environment where:\n\n1. You issue at least one tool call\n2. The system executes the tool(s) and returns results\n3. You see the result(s)\n4. You write your next tool call(s)\n\nEach response should include:\n\n1. **Reasoning text** where you explain your analysis and plan\n2. At least one tool call\n\n**CRITICAL REQUIREMENTS:**\n\n- Your response SHOULD include reasoning text explaining what you're doing\n- Your response MUST include AT LEAST ONE tool call\n- Always read a file before editing it\n- Always run tests after editing: `shell({\"command\": \"cd /testbed && python -m pytest path/to/test -x\", \"tail\": 30})`\n- NEVER modify test files. If you accidentally did, revert them before finishing:\n  `shell({\"command\": \"cd /testbed && git checkout -- '**/test*' '**/conftest*'\"})`\n- Fix ALL instances of a bug pattern, not just one\n- Keep patches clean: only source changes, no temp files\n- When you are done, clean up any temporary files you created:\n  `shell({\"command\": \"cd /testbed && rm -f repro*.py reproduce*.py test_fix*.py\"})`\n\n## Tool Examples\n\n### Search for code:\n```\ngrep_files({\"pattern\": \"def function_name\", \"path\": \"/testbed\", \"include\": \"*.py\", \"limit\": 20})\n```\n\n### Read a file:\n```\ntext_editor({\"command\": \"view\", \"path\": \"/testbed/src/module.py\", \"view_range\": [100, 150]})\n```\n\n### Edit a file:\n```\ntext_editor({\"command\": \"str_replace\", \"path\": \"/testbed/src/module.py\",\n  \"old_str\": \"original code here\",\n  \"new_str\": \"replacement code here\"})\n```\n\n### Run a command:\n```\nshell({\"command\": \"cd /testbed && python -c \\\"print('hello')\\\"\", \"tail\": 30})\n```\n\n### Run tests:\n```\nshell({\"command\": \"cd /testbed && python -m pytest tests/test_module.py -x\", \"tail\": 30})\n```\n"
+    },
+    {
+      "role": "assistant",
+      "content": "I'll start by exploring the codebase to understand how Blueprints are implemented and where the name is set."
+    },
+    {
+      "role": "tool_result",
+      "content": "/testbed/src/flask/cli.py\n/testbed/src/flask/json/provider.py\n/testbed/src/flask/json/__init__.py\n/testbed/src/flask/json/tag.py\n/testbed/src/flask/sessions.py\n/testbed/src/flask/templating.py\n/testbed/src/flask/ctx.py\n/testbed/src/flask/config.py\n/testbed/src/flask/__init__.py\n/testbed/src/flask/helpers.py\n/testbed/src/flask/blueprints.py\n/testbed/src/flask/wrappers.py\n/testbed/src/flask/signals.py\n/testbed/src/flask/testing.py\n/testbed/src/flask/__main__.py\n/testbed/src/flask/app.py\n/testbed/src/flask/views.py\n/testbed/src/flask/debughelpers.py\n/testbed/src/flask/typing.py\n/testbed/src/flask/logging.py\nCHANGES.rst\nCODE_OF_CONDUCT.md\nCONTRIBUTING.rst\nLICENSE.rst\nMANIFEST.in\nREADME.rst\nartwork\ndocs\nexamples\npyproject.toml\nrequirements\nsrc\ntests\ntox.ini\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "find /testbed -type f -name \"*.py\" | head -20 && ls /testbed"
+      },
+      "success": true
+    },
+    {
+      "role": "tool_result",
+      "content": "/testbed/src/flask/blueprints.py:32:class BlueprintSetupState:\n/testbed/src/flask/blueprints.py:117:class Blueprint(Scaffold):\n/testbed/tests/test_async.py:18:class BlueprintError(Exception):\n",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "pattern": "class Blueprint",
+        "path": "/testbed",
+        "include": "*.py",
+        "limit": 10
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "     117 | class Blueprint(Scaffold):\n     118 |     \"\"\"Represents a blueprint, a collection of routes and other\n     119 |     app-related functions that can be registered on a real application\n     120 |     later.\n     121 | \n     122 |     A blueprint is an object that allows defining application functions\n     123 |     without requiring an application object ahead of time. It uses the\n     124 |     same decorators as :class:`~flask.Flask`, but defers the need for an\n     125 |     application by recording them for later registration.\n     126 | \n     127 |     Decorating a function with a blueprint creates a deferred function\n     128 |     that is called with :class:`~flask.blueprints.BlueprintSetupState`\n     129 |     when the blueprint is registered on an application.\n     130 | \n     131 |     See :doc:`/blueprints` for more information.\n     132 | \n     133 |     :param name: The name of the blueprint. Will be prepended to each\n     134 |         endpoint name.\n     135 |     :param import_name: The name of the blueprint package, usually\n     136 |         ``__name__``. This helps locate the ``root_path`` for the\n     137 |         blueprint.\n     138 |     :param static_folder: A folder with static files that should be\n     139 |         served by the blueprint's static route. The path is relative to\n     140 |         the blueprint's root path. Blueprint static files are disabled\n     141 |         by default.\n     142 |     :param static_url_path: The url to serve static files from.\n     143 |         Defaults to ``static_folder``. If the blueprint does not have\n     144 |         a ``url_prefix``, the app's static route will take precedence,\n     145 |         and the blueprint's static files won't be accessible.\n     146 |     :param template_folder: A folder with templates that should be added\n     147 |         to the app's template search path. The path is relative to the\n     148 |         blueprint's root path. Blueprint templates are disabled by\n     149 |         default. Blueprint templates have a lower precedence than those\n     150 |         in the app's templates folder.\n     151 |     :param url_prefix: A path to prepend to all of the blueprint's URLs,\n     152 |         to make them distinct from the rest of the app's routes.\n     153 |     :param subdomain: A subdomain that blueprint routes will match on by\n     154 |         default.\n     155 |     :param url_defaults: A dict of default values that blueprint routes\n     156 |         will receive by default.\n     157 |     :param root_path: By default, the blueprint will automatically set\n     158 |         this based on ``import_name``. In certain situations this\n     159 |         automatic detection can fail, so the path can be specified\n     160 |         manually instead.\n     161 | \n     162 |     .. versionchanged:: 1.1.0\n     163 |         Blueprints have a ``cli`` group to register nested CLI commands.\n     164 |         The ``cli_group`` parameter controls the name of the group under\n     165 |         the ``flask`` command.\n     166 | \n     167 |     .. versionadded:: 0.7\n     168 |     \"\"\"\n     169 | \n     170 |     _got_registered_once = False\n     171 | \n     172 |     def __init__(\n     173 |         self,\n     174 |         name: str,\n     175 |         import_name: str,\n     176 |         static_folder: t.Optional[t.Union[str, os.PathLike]] = None,\n     177 |         static_url_path: t.Optional[str] = None,\n     178 |         template_folder: t.Optional[t.Union[str, os.PathLike]] = None,\n     179 |         url_prefix: t.Optional[str] = None,\n     180 |         subdomain: t.Optional[str] = None,\n     181 |         url_defaults: t.Optional[dict] = None,\n     182 |         root_path: t.Optional[str] = None,\n     183 |         cli_group: t.Optional[str] = _sentinel,  # type: ignore\n     184 |     ):\n     185 |         super().__init__(\n     186 |             import_name=import_name,\n     187 |             static_folder=static_folder,\n     188 |             static_url_path=static_url_path,\n     189 |             template_folder=template_folder,\n     190 |             root_path=root_path,\n     191 |         )\n     192 | \n     193 |         if \".\" in name:\n     194 |             raise ValueError(\"'name' may not contain a dot '.' character.\")\n     195 | \n     196 |         self.name = name\n     197 |         self.url_prefix = url_prefix\n     198 |         self.subdomain = subdomain\n     199 |         self.deferred_functions: t.List[DeferredSetupFunction] = []\n     200 | \n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/src/flask/blueprints.py",
+        "view_range": [
+          117,
+          200
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now I can see the `__init__` method of `Blueprint`. I need to add a check for empty names. Let me also look at the existing tests to understand the test pattern:"
+    },
+    {
+      "role": "tool_result",
+      "content": "No matches found.",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "pattern": "Blueprint.*name.*dot\\|ValueError.*dot\\|name.*may not contain",
+        "path": "/testbed/tests",
+        "include": "*.py",
+        "limit": 20
+      },
+      "success": true
+    },
+    {
+      "role": "tool_result",
+      "content": "No matches found.",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "pattern": "test.*blueprint.*name\\|blueprint.*empty\\|ValueError.*blueprint",
+        "path": "/testbed/tests",
+        "include": "*.py",
+        "limit": 20
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "No matches found.",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "include": "*.py",
+        "limit": 20,
+        "path": "/testbed/tests",
+        "pattern": "may not contain a dot"
+      },
+      "success": true
+    },
+    {
+      "role": "tool_result",
+      "content": "conftest.py\nstatic\ntemplates\ntest_appctx.py\ntest_apps\ntest_async.py\ntest_basic.py\ntest_blueprints.py\ntest_cli.py\ntest_config.py\ntest_converters.py\ntest_helpers.py\ntest_instance_config.py\ntest_json.py\ntest_json_tag.py\ntest_logging.py\ntest_regression.py\ntest_reqctx.py\ntest_session_interface.py\ntest_signals.py\ntest_subclassing.py\ntest_templating.py\ntest_testing.py\ntest_user_error_handler.py\ntest_views.py\ntyping\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "ls /testbed/tests/"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "No matches found.",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "include": "*.py",
+        "limit": 20,
+        "path": "/testbed/tests/test_blueprints.py",
+        "pattern": "ValueError\\|dot\\|name"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "8:def test_blueprint_specific_error_handling(app, client):\n46:def test_blueprint_specific_user_error_handling(app, client):\n80:def test_blueprint_app_error_handling(app, client):\n120:def test_blueprint_prefix_slash(app, client, prefix, rule, url):\n131:def test_blueprint_url_defaults(app, client):\n151:def test_blueprint_url_processors(app, client):\n176:def test_templates_and_static(test_apps):\n223:def test_default_static_max_age(app):\n247:def test_templates_list(test_apps):\n254:def test_dotted_name_not_allowed(app, client):\n259:def test_dotted_names_from_app(app, client):\n276:def test_empty_url_defaults(app, client):\n290:def test_route_decorator_custom_endpoint(app, client):\n322:def test_route_decorator_custom_endpoint_with_dots(app, client):\n340:def test_endpoint_decorator(app, client):\n357:def test_template_filter(app):\n370:def test_add_template_filter(app):\n383:def test_template_filter_with_name(app):\n396:def test_add_template_filter_with_name(app):\n409:def test_template_filter_with_template(app, client):\n",
+      "tool_name": "grep_files",
+      "tool_args": {
+        "include": "*.py",
+        "limit": 20,
+        "path": "/testbed/tests/test_blueprints.py",
+        "pattern": "def test_"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": ""
+    },
+    {
+      "role": "tool_result",
+      "content": "     254 | def test_dotted_name_not_allowed(app, client):\n     255 |     with pytest.raises(ValueError):\n     256 |         flask.Blueprint(\"app.ui\", __name__)\n     257 | \n     258 | \n     259 | def test_dotted_names_from_app(app, client):\n     260 |     test = flask.Blueprint(\"test\", __name__)\n     261 | \n     262 |     @app.route(\"/\")\n     263 |     def app_index():\n     264 |         return flask.url_for(\"test.index\")\n     265 | \n     266 |     @test.route(\"/test/\")\n     267 |     def index():\n     268 |         return flask.url_for(\"app_index\")\n     269 | \n     270 |     app.register_blueprint(test)\n     271 | \n     272 |     rv = client.get(\"/\")\n     273 |     assert rv.data == b\"/test/\"\n     274 | \n     275 | \n     276 | def test_empty_url_defaults(app, client):\n     277 |     bp = flask.Blueprint(\"bp\", __name__)\n     278 | \n     279 |     @bp.route(\"/\", defaults={\"page\": 1})\n     280 |     @bp.route(\"/page/<int:page>\")\n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/tests/test_blueprints.py",
+        "view_range": [
+          254,
+          280
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now I have a clear understanding of the codebase. Let me make the fix - I need to add a check for empty names in the `Blueprint.__init__` method, similar to the existing check for dots:"
+    },
+    {
+      "role": "tool_result",
+      "content": "OK",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "str_replace",
+        "path": "/testbed/src/flask/blueprints.py",
+        "old_str": "        if \".\" in name:\n            raise ValueError(\"'name' may not contain a dot '.' character.\")\n\n        self.name = name",
+        "new_str": "        if not name:\n            raise ValueError(\"'name' may not be empty.\")\n\n        if \".\" in name:\n            raise ValueError(\"'name' may not contain a dot '.' character.\")\n\n        self.name = name"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now let me verify the change looks correct:"
+    },
+    {
+      "role": "tool_result",
+      "content": "     185 |         super().__init__(\n     186 |             import_name=import_name,\n     187 |             static_folder=static_folder,\n     188 |             static_url_path=static_url_path,\n     189 |             template_folder=template_folder,\n     190 |             root_path=root_path,\n     191 |         )\n     192 | \n     193 |         if not name:\n     194 |             raise ValueError(\"'name' may not be empty.\")\n     195 | \n     196 |         if \".\" in name:\n     197 |             raise ValueError(\"'name' may not contain a dot '.' character.\")\n     198 | \n     199 |         self.name = name\n     200 |         self.url_prefix = url_prefix\n     201 |         self.subdomain = subdomain\n     202 |         self.deferred_functions: t.List[DeferredSetupFunction] = []\n     203 | \n     204 |         if url_defaults is None:\n     205 |             url_defaults = {}\n     206 | \n     207 |         self.url_values_defaults = url_defaults\n     208 |         self.cli_group = cli_group\n     209 |         self._blueprints: t.List[t.Tuple[\"Blueprint\", dict]] = []\n     210 | \n",
+      "tool_name": "text_editor",
+      "tool_args": {
+        "command": "view",
+        "path": "/testbed/src/flask/blueprints.py",
+        "view_range": [
+          185,
+          210
+        ]
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "Now let me run a quick test to verify the fix works:"
+    },
+    {
+      "role": "tool_result",
+      "content": "OK: Empty string raises ValueError: 'name' may not be empty.\nOK: Valid name works fine\nOK: Dot in name raises ValueError: 'name' may not contain a dot '.' character.\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -c \"\nimport flask\n\n# Test that empty string raises ValueError\ntry:\n    bp = flask.Blueprint('', __name__)\n    print('ERROR: Should have raised ValueError for empty name')\nexcept ValueError as e:\n    print(f'OK: Empty string raises ValueError: {e}')\n\n# Test that a valid name still works\ntry:\n    bp = flask.Blueprint('valid_name', __name__)\n    print('OK: Valid name works fine')\nexcept ValueError as e:\n    print(f'ERROR: Valid name raised ValueError: {e}')\n\n# Test that dot in name still raises ValueError\ntry:\n    bp = flask.Blueprint('app.ui', __name__)\n    print('ERROR: Should have raised ValueError for dot in name')\nexcept ValueError as e:\n    print(f'OK: Dot in name raises ValueError: {e}')\n\"\n"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "The fix works correctly. Now let's run the blueprint tests to make sure nothing is broken:"
+    },
+    {
+      "role": "tool_result",
+      "content": "tests/test_blueprints.py::test_blueprint_prefix_slash[/foo-/bar-/foo/bar] PASSED [ 20%]\ntests/test_blueprints.py::test_blueprint_prefix_slash[/foo/-//bar-/foo/bar] PASSED [ 22%]\ntests/test_blueprints.py::test_blueprint_prefix_slash[/foo//-/bar-/foo/bar] PASSED [ 23%]\ntests/test_blueprints.py::test_blueprint_url_defaults PASSED             [ 25%]\ntests/test_blueprints.py::test_blueprint_url_processors PASSED           [ 27%]\ntests/test_blueprints.py::test_templates_and_static PASSED               [ 28%]\ntests/test_blueprints.py::test_default_static_max_age PASSED             [ 30%]\ntests/test_blueprints.py::test_templates_list PASSED                     [ 32%]\ntests/test_blueprints.py::test_dotted_name_not_allowed PASSED            [ 33%]\ntests/test_blueprints.py::test_dotted_names_from_app PASSED              [ 35%]\ntests/test_blueprints.py::test_empty_url_defaults PASSED                 [ 37%]\ntests/test_blueprints.py::test_route_decorator_custom_endpoint PASSED    [ 38%]\ntests/test_blueprints.py::test_route_decorator_custom_endpoint_with_dots PASSED [ 40%]\ntests/test_blueprints.py::test_endpoint_decorator PASSED                 [ 42%]\ntests/test_blueprints.py::test_template_filter PASSED                    [ 44%]\ntests/test_blueprints.py::test_add_template_filter PASSED                [ 45%]\ntests/test_blueprints.py::test_template_filter_with_name PASSED          [ 47%]\ntests/test_blueprints.py::test_add_template_filter_with_name PASSED      [ 49%]\ntests/test_blueprints.py::test_template_filter_with_template PASSED      [ 50%]\ntests/test_blueprints.py::test_template_filter_after_route_with_template PASSED [ 52%]\ntests/test_blueprints.py::test_add_template_filter_with_template PASSED  [ 54%]\ntests/test_blueprints.py::test_template_filter_with_name_and_template PASSED [ 55%]\ntests/test_blueprints.py::test_add_template_filter_with_name_and_template PASSED [ 57%]\ntests/test_blueprints.py::test_template_test PASSED                      [ 59%]\ntests/test_blueprints.py::test_add_template_test PASSED                  [ 61%]\ntests/test_blueprints.py::test_template_test_with_name PASSED            [ 62%]\ntests/test_blueprints.py::test_add_template_test_with_name PASSED        [ 64%]\ntests/test_blueprints.py::test_template_test_with_template PASSED        [ 66%]\ntests/test_blueprints.py::test_template_test_after_route_with_template PASSED [ 67%]\ntests/test_blueprints.py::test_add_template_test_with_template PASSED    [ 69%]\ntests/test_blueprints.py::test_template_test_with_name_and_template PASSED [ 71%]\ntests/test_blueprints.py::test_add_template_test_with_name_and_template PASSED [ 72%]\ntests/test_blueprints.py::test_context_processing PASSED                 [ 74%]\ntests/test_blueprints.py::test_template_global PASSED                    [ 76%]\ntests/test_blueprints.py::test_request_processing PASSED                 [ 77%]\ntests/test_blueprints.py::test_app_request_processing PASSED             [ 79%]\ntests/test_blueprints.py::test_app_url_processors PASSED                 [ 81%]\ntests/test_blueprints.py::test_nested_blueprint PASSED                   [ 83%]\ntests/test_blueprints.py::test_nested_callback_order PASSED              [ 84%]\ntests/test_blueprints.py::test_nesting_url_prefixes[/parent-/child-None-None] PASSED [ 86%]\ntests/test_blueprints.py::test_nesting_url_prefixes[/parent-None-None-/child] PASSED [ 88%]\ntests/test_blueprints.py::test_nesting_url_prefixes[None-None-/parent-/child] PASSED [ 89%]\ntests/test_blueprints.py::test_nesting_url_prefixes[/other-/something-/parent-/child] PASSED [ 91%]\ntests/test_blueprints.py::test_nesting_subdomains PASSED                 [ 93%]\ntests/test_blueprints.py::test_child_and_parent_subdomain PASSED         [ 94%]\ntests/test_blueprints.py::test_unique_blueprint_names PASSED             [ 96%]\ntests/test_blueprints.py::test_self_registration PASSED                  [ 98%]\ntests/test_blueprints.py::test_blueprint_renaming PASSED                 [100%]\n\n============================== 59 passed in 0.24s ==============================\n",
+      "tool_name": "shell",
+      "tool_args": {
+        "command": "cd /testbed && python -m pytest tests/test_blueprints.py -x -v 2>&1 | tail -50"
+      },
+      "success": true
+    },
+    {
+      "role": "assistant",
+      "content": "All 59 tests pass. The fix is clean and minimal:\n\n## Summary\n\nI added a validation check for empty Blueprint names in the `Blueprint.__init__` method in `/testbed/src/flask/blueprints.py`. \n\nThe change adds a check `if not name:` before the existing dot-character check, raising a `ValueError` with the message `\"'name' may not be empty.\"` when an empty string (or any falsy value) is passed as the `name` parameter.\n\nThis follows the same pattern as the existing validation for dot characters in the name, and ensures users get a clear error message instead of mysterious failures (like issue #4944) when trying to use a Blueprint with an empty name."
+    },
+    {
+      "role": "user",
+      "content": "If your fix is complete, stop. Otherwise proceed by calling a tool (e.g. run the failing test to verify, or make the next edit)."
+    },
+    {
+      "role": "assistant",
+      "content": "The fix is complete. All 59 blueprint tests pass, and the validation correctly raises a `ValueError` for empty Blueprint names while leaving all other functionality intact."
+    }
+  ],
+  "info": {
+    "model_stats": {
+      "api_calls": 13,
+      "instance_cost": 0.1593,
+      "input_tokens": 85455,
+      "output_tokens": 1997,
+      "cache_read_tokens": 55114,
+      "cache_write_tokens": 9722
+    },
+    "exit_status": "completed",
+    "submission": "diff --git a/src/flask/blueprints.py b/src/flask/blueprints.py\nindex eb50585d..1aa82562 100644\n--- a/src/flask/blueprints.py\n+++ b/src/flask/blueprints.py\n@@ -190,6 +190,9 @@ class Blueprint(Scaffold):\n             root_path=root_path,\n         )\n \n+        if not name:\n+            raise ValueError(\"'name' may not be empty.\")\n+\n         if \".\" in name:\n             raise ValueError(\"'name' may not contain a dot '.' character.\")\n \n"
+  }
+}

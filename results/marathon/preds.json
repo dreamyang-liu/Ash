@@ -1,0 +1,14 @@
+[
+  {
+    "instance_id": "zstd-decoder",
+    "model_patch": "",
+    "model_name_or_path": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "exit_status": "error",
+    "reward": 0.0,
+    "partial_score": 0.0,
+    "cost": 0.9503566050000002,
+    "turns": 15,
+    "metrics": {},
+    "grading_error": "staging failed: could not stage decompressed/audio.wav into the sandbox; grading needs the task's fixtures at /tests (binary and multi-megabyte, so the tool surface cannot carry them)"
+  }
+]

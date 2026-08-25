@@ -1,0 +1,14 @@
+[
+  {
+    "instance_id": "pallets__flask-5014",
+    "model_patch": "diff --git a/src/flask/blueprints.py b/src/flask/blueprints.py\nindex eb50585d..501245e4 100644\n--- a/src/flask/blueprints.py\n+++ b/src/flask/blueprints.py\n@@ -190,6 +190,9 @@ class Blueprint(Scaffold):\n             root_path=root_path,\n         )\n \n+        if not name:\n+            raise ValueError(\"'name' may not be empty.\")\n+\n         if \".\" in name:\n             raise ValueError(\"'name' may not contain a dot '.' character.\")\n \n@@ -296,6 +299,10 @@ class Blueprint(Scaffold):\n         \"\"\"\n         name_prefix = options.get(\"name_prefix\", \"\")\n         self_name = options.get(\"name\", self.name)\n+\n+        if not self_name:\n+            raise ValueError(\"'name' may not be empty.\")\n+\n         name = f\"{name_prefix}.{self_name}\".lstrip(\".\")\n \n         if name in app.blueprints:\n",
+    "model_name_or_path": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "exit_status": "completed"
+  },
+  {
+    "instance_id": "psf__requests-2317",
+    "model_patch": "diff --git a/requests/sessions.py b/requests/sessions.py\nindex d701ff2..dfce7cf 100755\n--- a/requests/sessions.py\n+++ b/requests/sessions.py\n@@ -13,7 +13,7 @@ from collections import Mapping\n from datetime import datetime\n \n from .auth import _basic_auth_str\n-from .compat import cookielib, OrderedDict, urljoin, urlparse, builtin_str\n+from .compat import cookielib, OrderedDict, urljoin, urlparse\n from .cookies import (\n     cookiejar_from_dict, extract_cookies_to_jar, RequestsCookieJar, merge_cookies)\n from .models import Request, PreparedRequest, DEFAULT_REDIRECT_LIMIT\n@@ -425,7 +425,7 @@ class Session(SessionRedirectMixin):\n             If Tuple, ('cert', 'key') pair.\n         \"\"\"\n \n-        method = builtin_str(method)\n+        method = to_native_string(method)\n \n         # Create the Request.\n         req = Request(\n",
+    "model_name_or_path": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "exit_status": "completed"
+  }
+]
