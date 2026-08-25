@@ -148,10 +148,16 @@ class CheckpointRecord:
 
     turn: int
     snapshot_id: str
-    #: False when this step reused the previous step's snapshot because
-    #: nothing could have changed.
+    #: False when this step did not produce its own snapshot.
     captured: bool
-    disk_only: bool
+    #: Why, when it did not. "clean" means nothing could have changed and the
+    #: previous snapshot already is this step's state -- free and expected.
+    #: "failed" means a capture was attempted and did not happen, which is an
+    #: alarm: checkpointing has stopped working. Recording only `captured`
+    #: conflated the two, and a run whose captures were all failing looked
+    #: exactly like a run with a very clean workload.
+    reason: str = "captured"
+    disk_only: bool = False
     #: Wall time of the capture call; 0.0 for reused steps.
     capture_seconds: float = 0.0
     rootfs_layers: Optional[int] = None
@@ -208,6 +214,7 @@ class Checkpointer:
 
     records: list[CheckpointRecord] = field(default_factory=list)
     latest_snapshot_id: Optional[str] = None
+    _failed_captures: int = 0
     _previous_layers: Optional[int] = None
     _previous_memory_layers: Optional[int] = None
     _consecutive_compactions: int = 0
@@ -237,7 +244,7 @@ class Checkpointer:
             # state, so record the mapping without paying for a capture.
             return self._record(CheckpointRecord(
                 turn=turn, snapshot_id=self.latest_snapshot_id,
-                captured=False, disk_only=self.disk_only,
+                captured=False, reason="clean", disk_only=self.disk_only,
                 live_background=live_background))
 
         name = f"{self.name_prefix}step-{turn}" if self.name_prefix else None
@@ -246,12 +253,23 @@ class Checkpointer:
         capture_seconds = time.monotonic() - capture_started
         if snapshot is None:
             # Capture failed (or the backend declined). Fall back to the last
-            # good snapshot so the map stays complete and monotonic.
+            # good snapshot so the map stays complete and monotonic -- but say
+            # so, because a run that has silently stopped checkpointing is
+            # indistinguishable from one with nothing to capture.
+            self._failed_captures += 1
+            if self._failed_captures in (1, 10, 100) or (
+                    self._failed_captures % 250 == 0):
+                import logging
+                logging.getLogger(__name__).warning(
+                    "checkpoint capture has failed %d time(s); steps are "
+                    "mapping to an older snapshot and replay from them will "
+                    "be wrong", self._failed_captures)
             if not self.latest_snapshot_id:
                 return None
             return self._record(CheckpointRecord(
                 turn=turn, snapshot_id=self.latest_snapshot_id,
-                captured=False, disk_only=self.disk_only))
+                captured=False, reason="failed", disk_only=self.disk_only,
+                live_background=live_background))
 
         if self.tracker is not None:
             self.tracker.clear()
@@ -362,6 +380,10 @@ class Checkpointer:
         return {
             "step_snapshots": self.step_map(),
             "disk_only": self.disk_only,
+            "captured": sum(1 for r in self.records if r.captured),
+            # Surfaced rather than left to be counted: a nonzero value means
+            # some steps map to an older snapshot than they should.
+            "failed_captures": self._failed_captures,
             "records": [vars(record) for record in self.records],
         }
 
