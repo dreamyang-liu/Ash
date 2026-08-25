@@ -2,6 +2,11 @@
 
 Guidance for Claude Code (and humans) working in this repository.
 
+> For how this repository relates to **AgentENV** and the patched **firecracker**
+> — the three-repo checkpointed-rollout stack, how to configure it end to end,
+> and how to run SWE-bench or SWE-Marathon against it — see
+> [`AGENTS.md`](AGENTS.md). This file covers Ash's own internals.
+
 ## What Ash is
 
 **Ash — Agent Sandbox Hive** is scalable sandbox infrastructure for LLM agents and RL
