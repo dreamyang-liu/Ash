@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import time
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -234,11 +235,30 @@ def _stage_tests(session: Any, task: MarathonTask) -> None:
         destination = f"{TESTS_MOUNT}/{relative}"
         session.execute("shell", {
             "command": f"mkdir -p {shlex.quote(str(Path(destination).parent))}"})
-        if not session.upload_file(path, destination):
+        if not _upload_with_retry(session, path, destination):
             raise MarathonError(
                 f"could not stage {relative} into the sandbox; grading needs "
                 f"the task's fixtures at {TESTS_MOUNT} (binary and "
                 f"multi-megabyte, so the tool surface cannot carry them)")
+
+
+def _upload_with_retry(session: Any, path: Path, destination: str,
+                       attempts: int = 3) -> bool:
+    """Upload, riding out a transient file-service hiccup.
+
+    Grading happens once, at the end, so a single flaky upload used to cost
+    the whole verdict: a 1473-turn run graded 0.0 with empty metrics because
+    one fixture failed to stage, while re-grading the same task from its
+    final checkpoint minutes later staged everything and scored 8/43. The
+    upload is idempotent (same bytes, same destination), which makes the
+    retry free of caveats.
+    """
+    for attempt in range(attempts):
+        if session.upload_file(path, destination):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(2 ** attempt)
+    return False
 
 
 def _read_reward(session: Any) -> Optional[float]:

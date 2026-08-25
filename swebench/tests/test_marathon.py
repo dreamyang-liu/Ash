@@ -311,3 +311,39 @@ def test_task_resources_reach_the_sandbox():
     assert '"cpu": task.cpus' in source
     assert '"memory_mb": task.memory_mb' in source
     assert "session.create(image, resources=resources)" in source
+
+
+def test_staging_rides_out_a_transient_upload_failure(tmp_path, monkeypatch):
+    """Grading happens once, at the end: a single flaky upload cost a
+    1473-turn run its whole verdict (0.0, empty metrics), while a re-grade
+    from the final checkpoint minutes later staged the same files and scored
+    8/43. Same bytes, same destination -- the retry has no caveats."""
+    import swebench.marathon as marathon_module
+    monkeypatch.setattr(marathon_module.time, "sleep", lambda _s: None)
+
+    task = load_task(write_task(tmp_path))
+
+    class FlakySession(FakeSession):
+        def __init__(self):
+            super().__init__()
+            self.failures = 1          # first upload attempt fails
+
+        def upload_file(self, source, destination):
+            if self.failures:
+                self.failures -= 1
+                return False
+            return super().upload_file(source, destination)
+
+    session = FlakySession()
+    result = grade(session, task)
+    assert result.error is None, "one hiccup must not void the verdict"
+    assert result.reward == 1.0
+
+
+def test_staging_still_fails_closed_when_uploads_keep_failing(tmp_path, monkeypatch):
+    import swebench.marathon as marathon_module
+    monkeypatch.setattr(marathon_module.time, "sleep", lambda _s: None)
+    task = load_task(write_task(tmp_path))
+    session = FakeSession(can_upload=False)
+    result = grade(session, task)
+    assert result.error and "staging failed" in result.error
