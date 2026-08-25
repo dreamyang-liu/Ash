@@ -35,6 +35,12 @@ def _is_repeating(buf: str, window: int = 200, min_repeats: int = 3) -> bool:
 #: costs one retry instead of the rest of the run.
 REQUEST_TIMEOUT_SECONDS = 900
 
+#: How many times to ask again for a completion that came back with neither
+#: text nor a tool call. Few, because a model that keeps returning nothing is
+#: telling you something the loop should handle rather than something a retry
+#: will fix.
+EMPTY_RETRIES = 3
+
 
 class LLMClient:
     """Wraps litellm.completion with the project's call-time behavior."""
@@ -133,9 +139,29 @@ class LLMClient:
 
         max_retries = 8
         raw = None
+        consumed = False
         for attempt in range(max_retries):
             try:
                 raw = completion(**kwargs)
+                if self.stream:
+                    # Assembled first: a stream's emptiness is only visible
+                    # once its chunks are joined.
+                    raw = self._consume_stream(raw, stream_chunk_builder)
+                    consumed = True
+                if self._is_empty_completion(raw) and attempt < EMPTY_RETRIES:
+                    # A completion with neither text nor a tool call is worth
+                    # asking for again rather than handing upstream: the loop
+                    # can only re-prompt, which spends a turn and puts a
+                    # meaningless assistant message in the transcript -- and
+                    # some providers replace that empty message with a
+                    # placeholder on the next request, which then reads like
+                    # the model talking. Measured cause on one proxy: extended
+                    # thinking consumed the whole output budget, so the reply
+                    # carried an empty thinking block and no text.
+                    self._trace(f"\n[RETRY] empty completion, attempt "
+                                f"{attempt + 1}/{EMPTY_RETRIES}\n")
+                    time.sleep(min(2 ** attempt, 8))
+                    continue
                 break
             except Exception as e:
                 if not self._retryable(e):
@@ -146,10 +172,24 @@ class LLMClient:
                 if attempt == max_retries - 1:
                     raise
 
-        if not self.stream:
+        if not consumed:
             self.cost.update(raw)
-            return raw
-        return self._consume_stream(raw, stream_chunk_builder)
+        return raw
+
+    @staticmethod
+    def _is_empty_completion(raw: Any) -> bool:
+        """Whether a completion carries nothing to act on.
+
+        Streaming responses are not inspected here -- they are consumed later
+        and checked once assembled.
+        """
+        try:
+            message = raw.choices[0].message
+        except (AttributeError, IndexError, TypeError):
+            return False
+        if getattr(message, "tool_calls", None):
+            return False
+        return not (getattr(message, "content", None) or "").strip()
 
     @staticmethod
     def _retryable(e: Exception) -> bool:

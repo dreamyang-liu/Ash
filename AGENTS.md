@@ -298,11 +298,17 @@ and cannot become one.
   disk-only chain is ~1.4 GB; the store on this machine grew to 85 GB across a
   few days of experiments. Reclaiming means stopping the server and removing
   `$AENV_HOME/snapshot-store` (task images then reconvert, minutes each).
-- **A provider may substitute a placeholder for an empty completion.** One
-  proxy returns `[System: Empty message content sanitised to satisfy protocol]`,
-  which looked like a text-only answer and tripped the loop's two-strikes
-  finish rule: a run ended as `completed` at step 57 with nothing built.
-  Vacuous completions are now re-prompted and do not count toward finishing.
+- **A completion can come back with nothing in it, and that is not the model
+  giving up.** Traced on one proxy: extended thinking consumed the whole output
+  budget, so the reply carried an empty `thinking` block and no `text` block —
+  litellm turns that into `content: None`. Sending that empty assistant message
+  back made the proxy substitute
+  `[System: Empty message content sanitised to satisfy protocol]` for it, which
+  reads like a text-only answer and tripped the loop's two-strikes finish rule:
+  a run reported `completed` at step 57 over an unbuilt decoder. Empty
+  completions are now retried in the LLM client (3 attempts, streaming judged
+  after assembly), and if they persist the loop re-prompts rather than counting
+  them toward finishing.
 - **Killing a run leaks its sandbox.** `session.destroy()` runs in a `finally`
   that a `kill -9` skips; the sandbox then lives until its TTL. Delete it with
   `DELETE /sandboxes/<id>`.
