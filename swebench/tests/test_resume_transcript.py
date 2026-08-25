@@ -116,6 +116,39 @@ def test_cli_exposes_resume_with_transcript():
     assert '"resume_transcript"' in source
 
 
+def test_trajectory_rows_are_translated_back_to_wire_format(tmp_path):
+    """The trajectory is a record, not a transcript: tool results are stored
+    as tool_result rows with evaluation metadata, and error rows never went in
+    front of the model at all. Seeding rows verbatim died on the first model
+    call -- "Invalid Message ... role 'tool_result'" -- with the environment
+    already restored, so the run graded 0 having done nothing."""
+    from swebench.replay import messages_through_step
+
+    path = tmp_path / "t.json"
+    path.write_text(json.dumps({"messages": [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function",
+             "function": {"name": "shell", "arguments": "{}"}}]},
+        {"role": "tool_result", "tool_call_id": "c1", "content": "out",
+         "tool_name": "shell", "tool_args": {"command": "ls"}, "success": True},
+        {"role": "error", "content": "litellm.SomethingTransient: ..."},
+        {"role": "assistant", "content": "done"},
+    ]}))
+    prefix = messages_through_step(path, 2)
+    assert prefix == [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function",
+             "function": {"name": "shell", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "out"},
+        {"role": "assistant", "content": "done"},
+    ], ("tool_result becomes role=tool with only wire keys; the error row "
+        "is omitted entirely")
+
+
 def test_prefix_cut_matches_the_map_on_a_resumed_trajectory(tmp_path):
     """End to end on files: a seg-2 trajectory carries seeded history plus new
     turns, its map numbers from the seed, and cutting at a map key returns
@@ -126,7 +159,7 @@ def test_prefix_cut_matches_the_map_on_a_resumed_trajectory(tmp_path):
         {"role": "assistant", "content": "resumed work", "tool_calls": [
             {"id": "c2", "type": "function",
              "function": {"name": "shell", "arguments": "{}"}}]},
-        {"role": "tool", "tool_call_id": "c2", "content": "ran"},
+        {"role": "tool_result", "tool_call_id": "c2", "content": "ran"},
         {"role": "assistant", "content": "more"},
     ]
     path = tmp_path / "t.json"
@@ -137,4 +170,6 @@ def test_prefix_cut_matches_the_map_on_a_resumed_trajectory(tmp_path):
     step_map = load_step_snapshots(path)
     assert step_map[2] == "snap-b"
     prefix = messages_through_step(path, 2)
-    assert prefix == messages[:6], "through assistant #2 and its tool result"
+    assert len(prefix) == 6, "through assistant #2 and its tool result"
+    assert prefix[-1]["role"] == "tool", "translated on the way out"
+    assert prefix[-1]["tool_call_id"] == "c2"
