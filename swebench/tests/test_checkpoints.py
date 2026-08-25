@@ -598,3 +598,43 @@ def test_repeated_failures_do_not_flood_the_log(caplog):
             cp.after_step(turn)
     warnings = [r for r in caplog.records if "capture has failed" in r.message]
     assert len(warnings) == 2, "first and tenth, not one per step"
+
+
+def test_every_checkpoint_records_which_sandbox_the_run_is_on(tmp_path):
+    """Re-boarding changes a run's sandbox id, so the id is only knowable from
+    the run itself -- and only if it keeps saying. A cleanup that trusted the
+    id it saw at launch deleted a live 1473-turn run's sandbox; every later
+    tool call answered 404 and the loop read the resulting prose as
+    "completed"."""
+    import json
+
+    class SessionWithEnvironment(FakeSession):
+        def __init__(self):
+            super().__init__()
+            self.sandbox_id = "sandbox-first"
+
+        def environment(self):
+            return {"sandbox_id": self.sandbox_id, "base_image": "img"}
+
+    from swebench.models import CostTracker, Trajectory
+
+    class Agent:
+        pipeline = None
+        before_query_hooks = []
+        cost = CostTracker()
+        trajectory = Trajectory()
+
+    path = tmp_path / "t.json"
+    session = SessionWithEnvironment()
+    agent = Agent()
+    checkpointer = install(agent, session, always=True, trajectory_path=path)
+    agent.before_query_hooks[-1](agent, None)
+    assert json.loads(path.read_text())["info"]["environment"]["sandbox_id"] \
+        == "sandbox-first"
+
+    # After a re-board the file must name the new sandbox, not the old one.
+    session.sandbox_id = "sandbox-after-reboard"
+    agent.cost.api_calls = 1
+    agent.before_query_hooks[-1](agent, None)
+    assert json.loads(path.read_text())["info"]["environment"]["sandbox_id"] \
+        == "sandbox-after-reboard"
