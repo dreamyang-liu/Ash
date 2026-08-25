@@ -172,6 +172,11 @@ def main():
                         help="resume with memory: restore the snapshot AND "
                              "seed the conversation with the transcript "
                              "prefix cut at the same step (marathon)")
+    parser.add_argument("--resume-at-step", dest="resume_at_step", type=int,
+                        default=None, metavar="N",
+                        help="with --resume-with-transcript: branch from step "
+                             "N instead of the latest, looking the snapshot up "
+                             "in the transcript's own map")
     parser.add_argument("--resume-from", default=None,
                         help="Snapshot id to continue a marathon task from, "
                              "instead of building its image fresh. The "
@@ -249,7 +254,8 @@ def main():
                 "step_limit", "cost_limit", "temperature", "reasoning_effort",
                 "prompt_cache", "max_budget", "timeout", "runtime_bin",
                 "image_template", "subset", "workers", "custom_tools_dir",
-                "backend", "resume_from", "resume_transcript", "task_dir"]:
+                "backend", "resume_from", "resume_transcript",
+                     "resume_at_step", "task_dir"]:
         cli_val = getattr(args, key.replace("-", "_"), None)
         if cli_val is not None:
             harness_config[key] = cli_val
