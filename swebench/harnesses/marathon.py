@@ -140,7 +140,11 @@ class MarathonHarness(BaseHarness):
         session = AshSession(runtime_bin=c.get("runtime_bin"), quiet=quiet,
                              backend=backend_config(c))
         try:
-            if not session.create(image):
+            # The task declares what it needs to run; the backend default
+            # (2 CPUs, 1 GB) OOMs a build-heavy task rather than failing
+            # loudly. jax-pytorch-rewrite asks for 32 GB; zstd merely fit.
+            resources = {"cpu": task.cpus, "memory_mb": task.memory_mb}
+            if not session.create(image, resources=resources):
                 return self._failure(instance,
                                      f"error: sandbox creation failed for {image}")
             return self._attempt(task, session, output_dir, quiet,

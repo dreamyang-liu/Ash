@@ -1,0 +1,15 @@
+# All 20 SWE-Marathon tasks on Bedrock's GPT-5.6 Luna.
+#
+# workers=3 is a memory budget, not a throughput guess: tasks declare up to
+# 64 GB (parameter-golf) and the host has 371 GB, so three worst-case tasks
+# fit with room for the store's page cache. Two tasks need a GPU this host
+# does not have (post-train-ifeval-gpu, trimul-cuda); they are left in so the
+# batch records *how* they fail rather than pretending they were not asked.
+extends: marathon-luna
+
+limits:
+  cost_limit: 30.0        # per task; luna prices make even 2000 steps ~$5-15
+
+execution:
+  workers: 3
+  output: /tmp/marathon-batch-luna
