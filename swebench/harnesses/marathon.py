@@ -62,6 +62,27 @@ def _default_max_tokens(model: str | None, fallback: int = 16384) -> int:
     return fallback
 
 
+class _Deadline(Exception):
+    """Raised through a before_query hook when the task's clock runs out."""
+
+
+def _make_deadline(timeout_sec: float):
+    """A hook that stops the run when the task's allotted time is spent."""
+    if not timeout_sec or timeout_sec <= 0:
+        return None
+    import time
+    started = time.monotonic()
+
+    def check(agent, conv) -> None:
+        spent = time.monotonic() - started
+        if spent >= timeout_sec:
+            agent._trace(f"\n[DEADLINE] task allotted {timeout_sec:.0f}s; "
+                         f"{spent:.0f}s spent\n")
+            raise _Deadline(f"task wall clock of {timeout_sec:.0f}s reached")
+
+    return check
+
+
 class MarathonHarness(BaseHarness):
     """One agent, one marathon task, graded by the task's own verifier."""
 
@@ -209,9 +230,17 @@ class MarathonHarness(BaseHarness):
                          sandbox_id=session.sandbox_id)
         if quiet:
             agent.stream = False
-        agent.use_panel(build_panel(config.get("tools", DEFAULT_PANEL),
-                                    agent_config.custom_tools_dir,
-                                    registry=session.tools))
+        # The reference runner passes disallowed_tools="WebSearch WebFetch"
+        # for every internet-restricted task -- 16 of the 20 -- because the
+        # environment blocks the network but a server-side web tool would
+        # reach out anyway. Offering them here would answer a different, easier
+        # question on most of the suite.
+        panel_name = config.get("tools", DEFAULT_PANEL)
+        panel = build_panel(panel_name, agent_config.custom_tools_dir,
+                            registry=session.tools)
+        if task.internet_restricted:
+            panel = panel.without(("web_fetch", "web_search"))
+        agent.use_panel(panel)
         # Summarize rather than elide, by default and only here. On this
         # horizon the facts worth keeping live in tool output and nowhere
         # else: measured on a real 133-step attempt, 7 of 8 sampled facts --
@@ -228,12 +257,16 @@ class MarathonHarness(BaseHarness):
             budget_fraction=float(config.get("context_budget_fraction", 0.60)),
             target_fraction=float(config.get("context_target_fraction", 0.35))))
 
-        # Claimed completion is challenged once or twice when it arrives
-        # implausibly early. Measured on a 20-task batch: eleven tasks stopped
-        # between 13 and 59 steps of 2000, one of them announcing that 68,186
-        # golden tests passed -- a number it got by counting the golden file,
-        # with the test script last run three edits earlier.
-        if config.get("completion_gate", True):
+        # Off by default, and that is the point. Two of the five failure
+        # buckets the benchmark's own audit assigns -- premature_termination
+        # and poor_self_verification -- are exactly what this hook suppresses,
+        # and the reference harness (Harbor driving claude-code or codex) has
+        # nothing like it: a trial runs until the agent stops or the task's
+        # wall clock ends. Nudging an agent to verify measures an easier
+        # benchmark, and the number would not belong on the same axis as a
+        # leaderboard score. Kept because the comparison is interesting on its
+        # own, opt-in because it is not SWE-Marathon.
+        if config.get("completion_gate", False):
             agent.before_finish_hooks.append(make_completion_challenge(
                 step_limit=agent_config.step_limit,
                 expert_hours=task.metadata.get("expert_time_estimate_hours")))
@@ -276,6 +309,15 @@ class MarathonHarness(BaseHarness):
                 "builds, what the visible tests say) and continue from there "
                 "rather than starting over. You do not have the earlier "
                 "conversation, only what is on disk.")
+
+        # The task's own wall clock is the ceiling the benchmark defines
+        # (task.toml [agent] timeout_sec, 4 to 10 hours depending on the
+        # task). Without it a run could quietly exceed what every published
+        # trial was allowed, which makes a score incomparable in the direction
+        # that flatters us.
+        deadline_hook = _make_deadline(task.agent_timeout_sec)
+        if deadline_hook is not None:
+            agent.before_query_hooks.append(deadline_hook)
 
         exit_status = agent.run(prompt, instance_id=task.instance_id,
                                 history=history)

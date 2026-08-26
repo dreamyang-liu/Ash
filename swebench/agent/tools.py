@@ -91,6 +91,23 @@ class ToolPanel:
 
         return (self.registry or DEFAULT_REGISTRY).is_custom_tool(name)
 
+    def without(self, names) -> "ToolPanel":
+        """This panel minus some tools, schema and routing together.
+
+        Both halves, because dropping a tool from only one of them is how a
+        model came to be offered a parameter the runtime rejected: a name the
+        schema omits but the views still route is a tool the model cannot see
+        and could still reach through a rename.
+        """
+        drop = set(names)
+        return ToolPanel(
+            schema=[entry for entry in self.schema
+                    if (entry.get("function") or {}).get("name") not in drop],
+            views={name: view for name, view in self.views.items()
+                   if name not in drop},
+            registry=self.registry,
+        )
+
     def route(self, name: str, args: dict) -> tuple[str, dict]:
         """Translate an agent-facing call into a runtime call.
 

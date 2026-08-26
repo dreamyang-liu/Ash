@@ -61,6 +61,11 @@ class MarathonTask:
     cpus: int = 4
     memory_mb: int = 16384
     metadata: dict = field(default_factory=dict)
+    #: Whether the task restricts network access. The reference runner turns
+    #: the agent's server-side web tools off for these -- 16 of the 20 tasks --
+    #: because the sandbox blocks the network but a provider-side web tool
+    #: would reach out regardless, answering an easier question.
+    internet_restricted: bool = False
     #: Where the agent should start, from the image's own final WORKDIR. It is
     #: /app for most of the suite but /workspace, /workspace/rust-java-lsp or
     #: /app/rj-rust for others, and an agent started in the wrong one is a
@@ -88,6 +93,45 @@ def _parse_toml(path: Path) -> dict:
         import tomli as tomllib  # type: ignore
     with open(path, "rb") as handle:
         return tomllib.load(handle)
+
+
+#: The suite's open-internet tasks, per the reference runner. Used only when
+#: that runner is not in the checkout; the four clone tasks have been the open
+#: set since v1.0.
+_KNOWN_OPEN_TASKS = frozenset({"excel-clone", "mastodon-clone", "s3-clone",
+                               "slack-clone"})
+
+
+def _internet_restricted(directory: Path, config: dict) -> bool:
+    """Whether this task's agent should be denied provider-side web tools.
+
+    The restriction is a property of the *run command*, not of task.toml: the
+    benchmark's own `scripts/run-benchmark.sh` passes
+    `--allow-agent-host <provider>` and `disallowed_tools="WebSearch WebFetch"`
+    for 16 of the 20 tasks, because their sandboxes block the network and a
+    provider-side web tool would reach out anyway. Reading task.toml finds only
+    the two with build allowlists, so the runner script is the authority when
+    the checkout has it -- which it does, being the same repository as the
+    tasks.
+    """
+    for parent in [directory, *directory.parents][:6]:
+        script = parent / "scripts" / "run-benchmark.sh"
+        if not script.is_file():
+            continue
+        try:
+            text = script.read_text(errors="ignore")
+        except OSError:
+            break
+        for line in text.splitlines():
+            if f"tasks/{directory.name} " in line + " " or \
+                    line.rstrip().endswith(f"tasks/{directory.name}"):
+                return "--allow-agent-host" in line
+        break
+    # No runner in the checkout: fall back to the published open set, and treat
+    # an unknown task as restricted -- the conservative direction, since the
+    # error that matters is handing an agent network access the benchmark
+    # denied every published trial.
+    return directory.name not in _KNOWN_OPEN_TASKS
 
 
 def _dockerfile_workdir(dockerfile: Path) -> str:
@@ -145,6 +189,7 @@ def load_task(directory: Path | str) -> MarathonTask:
         memory_mb=int(environment.get("memory_mb", 16384)),
         metadata=metadata,
         workdir=_dockerfile_workdir(directory / "environment" / "Dockerfile"),
+        internet_restricted=_internet_restricted(directory, config),
     )
 
 
