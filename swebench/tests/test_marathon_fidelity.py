@@ -47,19 +47,38 @@ def test_an_unknown_task_is_treated_as_restricted(tmp_path):
     assert "slack-clone" in _KNOWN_OPEN_TASKS
 
 
-def test_the_panel_drops_both_halves(tmp_path):
-    """Schema and routing together: a tool the schema omits but the views still
-    route is reachable through a rename, which is how a panel came to offer a
-    parameter the runtime rejected."""
-    from swebench.agent.tools import DEFAULT_PANEL, build_panel
+def test_the_restricted_panel_is_a_manifest_not_harness_code(tmp_path):
+    """What a model sees is configuration in this repository: the harness picks
+    a panel by name and never names a tool. The manifest also has to omit the
+    tools from schema *and* routing, which a manifest does by construction --
+    an earlier in-code filter had to be told to do both."""
+    import inspect
 
-    panel = build_panel(DEFAULT_PANEL, None)
-    stripped = panel.without(("web_fetch", "web_search"))
-    names = [e["function"]["name"] for e in stripped.schema]
+    from swebench.agent.tools import build_panel
+    from swebench.harnesses import marathon
+
+    source = inspect.getsource(marathon)
+    assert "web_fetch" not in source and "web_search" not in source, (
+        "the harness must not name tools")
+    assert 'config.get("tools_restricted", RESTRICTED_PANEL)' in source
+
+    restricted = build_panel("no_web", None)
+    names = [e["function"]["name"] for e in restricted.schema]
     assert "web_fetch" not in names and "web_search" not in names
-    assert "web_fetch" not in stripped.views
-    assert "shell" in names and "shell" in stripped.views
-    assert len(names) == len(panel.schema) - 2
+    assert "web_fetch" not in restricted.views, "routing too, not only schema"
+    assert {"shell", "text_editor", "grep_files"} <= set(names)
+
+
+def test_the_default_panel_does_not_claim_a_benchmark_specific_path():
+    """The shell description said the working directory defaults to /testbed,
+    which is SWE-bench's path: on marathon tasks it is /app, /workspace or
+    /app/rj-rust, so the model was reading a false statement about its own
+    environment."""
+    from swebench.agent.tools import build_panel
+
+    for panel_name in ("default", "no_web"):
+        for entry in build_panel(panel_name, None).schema:
+            assert "/testbed" not in entry["function"]["description"], panel_name
 
 
 def test_the_task_wall_clock_is_enforced():

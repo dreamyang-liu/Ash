@@ -69,6 +69,15 @@ parameters under names of your choosing, and describe both the tool and those
 parameters for the task rather than for the runtime. `bash_only` mode is one such view:
 a single tool with only `command`.
 
+Three panels ship. `default` offers all seven runtime tools; `bash_only` offers one;
+`no_web` is `default` without `web_fetch` and `web_search`. That last one exists
+because those two tools are served by the model provider rather than by the sandbox,
+so they reach the network even when the environment cannot — SWE-Marathon's own runner
+withholds them from the 16 of 20 tasks whose environments are network-restricted, and
+a benchmark harness that offered them would be answering an easier question. Which
+panel a run uses is configuration (`agent.tools`, and `execution.tools_restricted` for
+the marathon harness's per-task choice); no call site names a tool.
+
 Types, enums and defaults are always the runtime's. A view may not restate them,
 because it could then contradict the tool it dispatches to — a view claiming `integer`
 where the runtime takes a string would have the model send something that cannot work.

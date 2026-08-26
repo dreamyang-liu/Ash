@@ -1,13 +1,14 @@
-# The tool panel the model sees, compiled against the runtime's own declaration
-# (ash-runtime --dump-schema). See docs/TOOL_PANEL.md.
+# The panel for tasks whose environment has no network.
 #
-# `arguments` is the whole parameter surface: what is listed is offered, what is not
-# does not exist for this view. A call using something else is an error, not a silent
-# drop -- a dropped argument leaves the model believing a setting took effect.
+# Identical to `default` minus web_fetch and web_search. Those two are served by
+# the model provider, not by the sandbox, so they reach the internet even when
+# the environment cannot -- SWE-Marathon's own runner passes
+# disallowed_tools="WebSearch WebFetch" for the 16 of 20 tasks in that position,
+# and offering them answers an easier question than the benchmark asks.
 #
-# A list means "offered under the runtime's own names". A mapping renames:
-#   arguments: {cmd: command}     # model calls it `cmd`, runtime gets `command`
-
+# It is a manifest rather than a line of harness code because what a model sees
+# is configuration here: the harness chooses a panel by name, and never names a
+# tool.
 agent_tools:
   - name: shell
     description: |-
@@ -43,14 +44,6 @@ agent_tools:
         kill: Terminate the process
     arguments: [action, pid, tail]
     required: [pid, action]
-
-  - name: web_fetch
-    arguments: [format, headers, max_output_bytes, timeout, truncate_mode, url]
-    required: [url]
-
-  - name: web_search
-    arguments: [backend, max_results, query]
-    required: [query]
 
   - name: wait_for_events
     description: |-
