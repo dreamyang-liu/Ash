@@ -37,6 +37,7 @@ from .base import BaseHarness
 from .. import style as S
 from ..agent import AshAgent
 from ..agent.checkpoints import install as install_checkpoints
+from ..agent.completion_gate import make_completion_challenge
 from ..agent.context_window import make_context_window_guard
 from ..agent.tools import DEFAULT_PANEL, build_panel
 from ..agent.trace import new_run_id
@@ -191,9 +192,12 @@ class MarathonHarness(BaseHarness):
             reasoning_effort=config.get("reasoning_effort"),
             prompt_cache=config.get("prompt_cache", True),
             tools=config.get("tools", "default"),
-            # The task owns its working directory; its instructions and its
-            # verifier both name absolute paths under it.
-            workdir=config.get("workdir", "/app"),
+            # The task owns its working directory, and it differs across the
+            # suite: the Dockerfile's final WORKDIR is /app for most tasks but
+            # /workspace, /workspace/rust-java-lsp or /app/rj-rust for others.
+            # Hardcoding /app dropped an agent somewhere its own deliverables
+            # were not.
+            workdir=config.get("workdir") or task.workdir or "/app",
         )
 
         agent_id = "agent"
@@ -223,6 +227,16 @@ class MarathonHarness(BaseHarness):
             window_tokens=int(window_tokens) if window_tokens else None,
             budget_fraction=float(config.get("context_budget_fraction", 0.60)),
             target_fraction=float(config.get("context_target_fraction", 0.35))))
+
+        # Claimed completion is challenged once or twice when it arrives
+        # implausibly early. Measured on a 20-task batch: eleven tasks stopped
+        # between 13 and 59 steps of 2000, one of them announcing that 68,186
+        # golden tests passed -- a number it got by counting the golden file,
+        # with the test script last run three edits earlier.
+        if config.get("completion_gate", True):
+            agent.before_finish_hooks.append(make_completion_challenge(
+                step_limit=agent_config.step_limit,
+                expert_hours=task.metadata.get("expert_time_estimate_hours")))
 
         trajectory_path = (output_dir / "trajectories" /
                            f"{task.instance_id}.json")

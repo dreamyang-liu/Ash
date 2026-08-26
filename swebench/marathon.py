@@ -61,6 +61,11 @@ class MarathonTask:
     cpus: int = 4
     memory_mb: int = 16384
     metadata: dict = field(default_factory=dict)
+    #: Where the agent should start, from the image's own final WORKDIR. It is
+    #: /app for most of the suite but /workspace, /workspace/rust-java-lsp or
+    #: /app/rj-rust for others, and an agent started in the wrong one is a
+    #: directory away from the files its instructions name.
+    workdir: str = ""
 
     @property
     def instance_id(self) -> str:
@@ -83,6 +88,27 @@ def _parse_toml(path: Path) -> dict:
         import tomli as tomllib  # type: ignore
     with open(path, "rb") as handle:
         return tomllib.load(handle)
+
+
+def _dockerfile_workdir(dockerfile: Path) -> str:
+    """The last WORKDIR a Dockerfile sets, or "".
+
+    The last one, because the image's working directory is whatever was in
+    effect at the end -- an intermediate WORKDIR is a build detail.
+    """
+    try:
+        text = dockerfile.read_text(errors="ignore")
+    except OSError:
+        return ""
+    found = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("WORKDIR "):
+            candidate = stripped.split(None, 1)[1].strip().strip('"\'')
+            # Build args are not resolvable here; a literal path is.
+            if candidate.startswith("/") and "$" not in candidate:
+                found = candidate
+    return found
 
 
 def load_task(directory: Path | str) -> MarathonTask:
@@ -118,6 +144,7 @@ def load_task(directory: Path | str) -> MarathonTask:
         cpus=int(environment.get("cpus", 4)),
         memory_mb=int(environment.get("memory_mb", 16384)),
         metadata=metadata,
+        workdir=_dockerfile_workdir(directory / "environment" / "Dockerfile"),
     )
 
 
