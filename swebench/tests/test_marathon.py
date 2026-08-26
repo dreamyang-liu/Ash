@@ -369,3 +369,38 @@ def test_the_shape_reaches_the_template_not_the_spawn():
     b = templates.template_name("img", "fp", 3000, {"cpu": 2, "memory_mb": 1024})
     assert a != b
     assert templates.template_name("img", "fp", 3000) != a
+
+
+def test_the_agent_starts_where_the_image_does(tmp_path):
+    """The suite's working directories differ -- /app for most tasks but
+    /workspace, /workspace/rust-java-lsp and /app/rj-rust for others -- and the
+    harness hardcoded /app, dropping an agent a directory away from the files
+    its own instructions name. The image's final WORKDIR is the authority."""
+    directory = write_task(tmp_path)
+    (directory / "environment" / "Dockerfile").write_text(
+        "FROM ubuntu:24.04\n"
+        "WORKDIR /build\n"          # an intermediate one
+        "RUN echo hi\n"
+        "WORKDIR /workspace/app\n")  # what is in effect at the end
+    assert load_task(directory).workdir == "/workspace/app"
+
+    # Unresolvable or relative ones are ignored rather than guessed at.
+    (directory / "environment" / "Dockerfile").write_text(
+        "FROM ubuntu:24.04\nWORKDIR $BUILD_DIR\n")
+    assert load_task(directory).workdir == ""
+
+    import inspect
+    from swebench.harnesses import marathon
+    assert 'config.get("workdir") or task.workdir or "/app"' in \
+        inspect.getsource(marathon)
+
+
+def test_marathon_mounts_the_completion_gate():
+    """Eleven of twenty tasks in one batch reported completion between 13 and
+    59 steps of 2000. The gate is what disagrees with that."""
+    import inspect
+    from swebench.harnesses import marathon
+    source = inspect.getsource(marathon)
+    assert "make_completion_challenge(" in source
+    assert "before_finish_hooks.append" in source
+    assert 'config.get("completion_gate", True)' in source
