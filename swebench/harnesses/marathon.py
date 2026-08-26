@@ -40,6 +40,10 @@ from ..agent.checkpoints import install as install_checkpoints
 from ..agent.completion_gate import make_completion_challenge
 from ..agent.context_window import make_context_window_guard
 from ..agent.tools import DEFAULT_PANEL, build_panel
+
+#: Panel for tasks whose environment has no network. See the manifest for why
+#: provider-served web tools have to be withheld rather than merely unused.
+RESTRICTED_PANEL = "no_web"
 from ..agent.trace import new_run_id
 from ..backends import backend_config
 from ..marathon import MarathonError, build_image, grade, load_task
@@ -230,17 +234,18 @@ class MarathonHarness(BaseHarness):
                          sandbox_id=session.sandbox_id)
         if quiet:
             agent.stream = False
-        # The reference runner passes disallowed_tools="WebSearch WebFetch"
-        # for every internet-restricted task -- 16 of the 20 -- because the
-        # environment blocks the network but a server-side web tool would
-        # reach out anyway. Offering them here would answer a different, easier
-        # question on most of the suite.
-        panel_name = config.get("tools", DEFAULT_PANEL)
-        panel = build_panel(panel_name, agent_config.custom_tools_dir,
-                            registry=session.tools)
-        if task.internet_restricted:
-            panel = panel.without(("web_fetch", "web_search"))
-        agent.use_panel(panel)
+        # Two panels, chosen by name: what a model sees is configuration in
+        # this repository, so the harness picks a manifest and never names a
+        # tool. The reference runner passes
+        # disallowed_tools="WebSearch WebFetch" for every internet-restricted
+        # task -- 16 of the 20 -- because those tools are served by the model
+        # provider rather than the sandbox and so reach the network the
+        # environment denies.
+        panel_name = (config.get("tools_restricted", RESTRICTED_PANEL)
+                      if task.internet_restricted
+                      else config.get("tools", DEFAULT_PANEL))
+        agent.use_panel(build_panel(panel_name, agent_config.custom_tools_dir,
+                                    registry=session.tools))
         # Summarize rather than elide, by default and only here. On this
         # horizon the facts worth keeping live in tool output and nowhere
         # else: measured on a real 133-step attempt, 7 of 8 sampled facts --
