@@ -295,3 +295,97 @@ def test_missing_ripgrep_binary_degrades_to_none(runtime_bin, tmp_path):
                         runtime_bin=runtime_bin,
                         ripgrep_bin=tmp_path / "no-such-rg")
     assert b.ripgrep_bin is None, "a vanished cache entry must not fail builds"
+
+
+class _Resp:
+    def __init__(self, status_code, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+
+class _FakeClient:
+    """Answers the two lookups a template check makes."""
+
+    def __init__(self, aliases, statuses):
+        self.aliases = aliases        # name -> template id
+        self.statuses = statuses      # template id -> build status
+        self.gets = []
+
+    def get(self, path, **kwargs):
+        self.gets.append(path)
+        if path.startswith("/templates/aliases/"):
+            name = path.rsplit("/", 1)[1]
+            if name in self.aliases:
+                return _Resp(200, {"templateID": self.aliases[name]})
+            return _Resp(404)
+        if path.startswith("/templates/") and path.endswith("/status"):
+            tid = path.split("/")[2]
+            return _Resp(200, {"status": self.statuses.get(tid, "ready")})
+        raise AssertionError(path)
+
+
+def bare_builder():
+    """A TemplateBuilder with no I/O wiring: these tests exercise lookup
+    logic, which must not need a server or a runtime binary."""
+    from swebench.templates import TemplateBuilder
+    return TemplateBuilder.__new__(TemplateBuilder)
+
+
+def test_a_template_whose_build_failed_is_not_usable():
+    """Existence was answering a weaker question than the caller asks: a
+    failed build still leaves its alias resolvable, so every later run adopted
+    a template it could not spawn from (HTTP 500, "snapshot ... is not
+    ready"). One failed build took out all 20 tasks of a batch."""
+    b = bare_builder()
+    client = _FakeClient({"t": "id-broken"}, {"id-broken": "error"})
+    assert not b._template_exists(client, "t")
+
+    ok = _FakeClient({"t": "id-good"}, {"id-good": "ready"})
+    assert b._template_exists(ok, "t")
+
+    # Only an explicit failure disqualifies: an unrecognised or absent status
+    # must not make a working template look broken, or every template built
+    # before the status endpoint existed would be rebuilt under a new name.
+    unknown = _FakeClient({"t": "id-odd"}, {"id-odd": "some-new-state"})
+    assert b._template_exists(unknown, "t")
+
+
+def test_a_poisoned_name_is_routed_around_not_retried():
+    """Template aliases cannot be rebound -- re-creating one is refused with
+    "cannot rebind" -- so a name owned by a failed build is permanently
+    unusable and the only way forward is a different name."""
+    b = bare_builder()
+    built = []
+    b._stage_runtime = lambda c, image, name, resources=None: built.append(name) or "snap"
+    b._build_from = lambda c, name, image, staged, resources=None: None
+
+    client = _FakeClient({"base": "id-broken"}, {"id-broken": "error"})
+    name = b._usable_template(client, "base", "img", None)
+    assert name == "base-r1", "the next name, not the poisoned one"
+    assert built == ["base-r1"]
+
+
+def test_an_existing_good_template_is_reused_without_building():
+    b = bare_builder()
+    b._stage_runtime = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("must not rebuild a usable template"))
+    client = _FakeClient({"base": "id-good"}, {"id-good": "ready"})
+    assert b._usable_template(client, "base", "img", None) == "base"
+
+
+def test_the_search_for_a_name_is_bounded():
+    """Needing many variants means something fails repeatably, and a loud
+    error beats a longer search."""
+    from swebench.templates import MAX_TEMPLATE_ATTEMPTS, TemplateError
+    import pytest
+
+    b = bare_builder()
+    aliases = {"base": "x0", **{f"base-r{i}": f"x{i}"
+                                for i in range(1, MAX_TEMPLATE_ATTEMPTS + 1)}}
+    client = _FakeClient(aliases, {v: "error" for v in aliases.values()})
+    with pytest.raises(TemplateError, match="no usable template name"):
+        b._usable_template(client, "base", "img", None)
