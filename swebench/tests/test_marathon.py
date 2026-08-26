@@ -395,12 +395,17 @@ def test_the_agent_starts_where_the_image_does(tmp_path):
         inspect.getsource(marathon)
 
 
-def test_marathon_mounts_the_completion_gate():
+def test_the_completion_gate_exists_but_is_opt_in():
     """Eleven of twenty tasks in one batch reported completion between 13 and
-    59 steps of 2000. The gate is what disagrees with that."""
+    59 steps of 2000, one claiming 68,186 tests passed without having run them.
+    The gate disagrees with that -- and stays off by default, because
+    premature_termination and poor_self_verification are two of the five
+    failure buckets the benchmark's own audit assigns, and the reference
+    harness has nothing like it. Suppressing what the benchmark measures would
+    make the score incomparable; see test_marathon_fidelity."""
     import inspect
     from swebench.harnesses import marathon
     source = inspect.getsource(marathon)
     assert "make_completion_challenge(" in source
     assert "before_finish_hooks.append" in source
-    assert 'config.get("completion_gate", True)' in source
+    assert 'config.get("completion_gate", False)' in source
