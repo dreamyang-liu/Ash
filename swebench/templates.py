@@ -31,6 +31,7 @@ already offers:
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +50,11 @@ DEFAULT_RUNTIME_PORT = 3000
 #: every instance, and landing in the episode's first checkpoint (measured:
 #: the first grep_files cost +89 MiB; with rg present, +0). Same release the
 #: runtime's own provisioning would fetch.
+#: How many suffixed template names to try before giving up. Each one costs a
+#: lookup; needing more than a couple means something is failing repeatably
+#: and a louder error is better than a longer search.
+MAX_TEMPLATE_ATTEMPTS = 6
+
 RIPGREP_PATH = "/usr/local/bin/rg"
 RIPGREP_VERSION = "14.1.1"
 RIPGREP_URL = ("https://github.com/BurntSushi/ripgrep/releases/download/"
@@ -168,17 +174,17 @@ class TemplateBuilder:
         if image in self._resolved:
             return self._resolved[image]
 
-        name = template_name(image, self._fingerprint, self.runtime_port,
+        base = template_name(image, self._fingerprint, self.runtime_port,
                              resources)
+        name = base
         with self._client() as client:
             if _could_be_snapshot_name(image) and self._known(client, image):
                 # A snapshot carries the shape it was captured with; asking
                 # for a different one here is not possible and not wanted --
                 # a resumed run continues in the machine it was running on.
                 name = image
-            elif not self._template_exists(client, name):
-                staged = self._stage_runtime(client, image, name, resources)
-                self._build_from(client, name, image, staged)
+            else:
+                name = self._usable_template(client, base, image, resources)
         self._resolved[image] = name
         return name
 
@@ -198,12 +204,92 @@ class TemplateBuilder:
         return (self._lookup(client, f"/snapshots/{name}", name)
                 or self._template_exists(client, name))
 
-    def _template_exists(self, client: httpx.Client, name: str) -> bool:
-        # Not /snapshots/{name}: that endpoint deliberately answers only for
-        # sandbox-sourced snapshots, and a built template is template-sourced.
-        # Asking the wrong one reports every built template as missing, and
-        # the rebuild then collides with the very template it failed to see.
+    def _usable_template(self, client: httpx.Client, base: str, image: str,
+                         resources: "Optional[dict]") -> str:
+        """The name of a usable template for ``image``, building if needed.
+
+        Tries the content-addressed name first, then suffixed variants. The
+        suffix exists because a template alias cannot be rebound: a build that
+        failed leaves the canonical name pointing at a template that can never
+        be spawned ("snapshot ... is not ready"), and re-creating it is
+        refused ("cannot rebind"). So a poisoned name is permanent, and the
+        only way forward is a different one. Measured cost of not doing this:
+        one failed build took out all 20 tasks of a batch, each reporting
+        `sandbox creation failed` with the real reason three layers down.
+        """
+        for attempt in range(MAX_TEMPLATE_ATTEMPTS):
+            name = base if attempt == 0 else f"{base}-r{attempt}"
+            if self._template_exists(client, name):
+                if attempt:
+                    logging.getLogger(__name__).warning(
+                        "template %s was unusable; using %s", base, name)
+                return name
+            if not self._name_taken(client, name):
+                staged = self._stage_runtime(client, image, name, resources)
+                self._build_from(client, name, image, staged, resources)
+                return name
+            # Taken but unusable: a failed build owns this name for good.
+            logging.getLogger(__name__).warning(
+                "template %s exists but its build failed; trying the next name",
+                name)
+        raise TemplateError(
+            f"no usable template name for {image}: {MAX_TEMPLATE_ATTEMPTS} "
+            f"variants of {base} are taken by failed builds")
+
+    def _name_taken(self, client: httpx.Client, name: str) -> bool:
+        """Whether the alias resolves at all, usable or not."""
         return self._lookup(client, f"/templates/aliases/{name}", name)
+
+    def _template_exists(self, client: httpx.Client, name: str) -> bool:
+        """Whether a template of this name exists *and is usable*.
+
+        Not /snapshots/{name}: that endpoint deliberately answers only for
+        sandbox-sourced snapshots, and a built template is template-sourced.
+        Asking the wrong one reports every built template as missing, and the
+        rebuild then collides with the very template it failed to see.
+
+        And not existence alone. A build that failed still leaves the alias
+        resolvable, so "it exists" was answering a weaker question than the
+        caller asks -- every later run adopted the broken template and got
+        HTTP 500 ("snapshot ... is not ready") when spawning from it. One
+        failed build poisoned all 20 tasks of a batch that way.
+        """
+        resp = client.get(f"/templates/aliases/{name}")
+        if resp.status_code == 404:
+            return False
+        if resp.status_code != 200:
+            raise TemplateError(
+                f"could not check {name}: HTTP {resp.status_code} "
+                f"{resp.text[:200]}")
+        template_id = (resp.json() or {}).get("templateID")
+        if not template_id:
+            # The alias resolves but does not say to what. Not evidence of a
+            # failed build, so not grounds for condemning it -- the same
+            # polarity as _build_succeeded below.
+            return True
+        return self._build_succeeded(client, template_id)
+
+    def _build_succeeded(self, client: httpx.Client, template_id: str) -> bool:
+        """Whether the template's build is *not known to have failed*.
+
+        Polarity matters here. Requiring a recognised success value would make
+        every unexpected answer -- an older template with no status, a renamed
+        state, a backend that does not implement the endpoint -- look like a
+        failed build, which is the same mistake as reading a missing signal as
+        a bad one. Only an explicit failure disqualifies a template; anything
+        else is used, and a template that is genuinely unusable fails loudly at
+        spawn instead of silently multiplying template names.
+        """
+        try:
+            resp = client.get(
+                f"/templates/{template_id}/builds/{template_id}/status")
+        except Exception:
+            return True
+        if resp.status_code != 200:
+            return True
+        status = str((resp.json() or {}).get("status") or "").lower()
+        return status not in ("error", "failed", "failure", "cancelled",
+                             "canceled")
 
     def _lookup(self, client: httpx.Client, path: str, name: str) -> bool:
         resp = client.get(path)
@@ -280,8 +366,20 @@ class TemplateBuilder:
         # any steps at all.
 
     def _build_from(self, client: httpx.Client, name: str, image: str,
-                    staged_snapshot: str) -> None:
-        created = client.post("/v3/templates", json={"name": name})
+                    staged_snapshot: str, resources: "Optional[dict]" = None) -> None:
+        # The template's declared shape must match the staged snapshot's: a
+        # snapshot-based build resumes a committed VM, so the backend refuses
+        # one whose CPU or memory would differ ("snapshot-based build cannot
+        # change CPU or memory"). Passing the shape at creation is what makes
+        # the whole chain consistent -- cold start, snapshot, template, and
+        # every sandbox spawned from it.
+        payload: dict = {"name": name}
+        if resources:
+            if resources.get("cpu"):
+                payload["cpuCount"] = int(resources["cpu"])
+            if resources.get("memory_mb"):
+                payload["memoryMB"] = int(resources["memory_mb"])
+        created = client.post("/v3/templates", json=payload)
         if created.status_code == 409 or (
                 created.status_code == 400 and "already points" in created.text):
             # Another worker (or an earlier attempt) got there first; its
