@@ -20,6 +20,12 @@
 
     # stand a gateway up on its own (many runs, one gateway)
     python -m harness gateway --routes routes.json --port 8787
+
+    # a batch: bounded concurrency, per-task isolation, resumable by skipping
+    python -m harness batch tasks.jsonl --slot codex --workers 8 --out runs/b1
+
+    # reclaim sandboxes/snapshots left behind by killed runs
+    python -m harness reap --dry-run
 """
 
 from __future__ import annotations
@@ -32,10 +38,13 @@ from collections import Counter
 from pathlib import Path
 
 from harness.atif import export_file
+from harness.batch import BatchRunner, load_tasks
 from harness.core.journal import JournalWriter, new_run_id, read_journal
 from harness.core.slot import TaskSpec
 from harness.execution.wiring import http_wiring, stdio_wiring
 from harness.gateway import GatewayServer, RoutingTable
+from harness.reap import AgentEnvClient, Reaper, parse_duration
+from harness.resources import ResourceLedger
 from harness.rollback import fork_plan
 from harness.slots import available, load_slot
 
@@ -163,6 +172,94 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_batch(args: argparse.Namespace) -> int:
+    tasks = load_tasks(args.tasks)
+    mcp = None
+    if args.mcp_url:
+        mcp = http_wiring(args.mcp_url)
+    elif args.mcp_stdio is not None:
+        mcp = stdio_wiring(args=shlex.split(args.mcp_stdio))
+
+    done = {"n": 0}
+    total = len(tasks)
+
+    def report(task_id, outcome):
+        done["n"] += 1
+        mark = "skip" if outcome.skipped else outcome.status
+        print("[%d/%d] %-28s %-10s %5.0fs%s" % (
+            done["n"], total, task_id[:28], mark, outcome.seconds,
+            "" if outcome.attempts <= 1 else "  (attempt %d)" % outcome.attempts,
+        ))
+
+    runner = BatchRunner(
+        args.slot,
+        args.out,
+        workers=args.workers,
+        max_attempts=args.max_attempts,
+        timeout_s=args.timeout,
+        mcp_factory=(lambda _task: mcp) if mcp else None,
+        on_update=report,
+        resume=not args.no_resume,
+    )
+    print("batch    %d tasks, %d workers, slot=%s" % (total, runner.workers, args.slot))
+    try:
+        runner.run(tasks)
+    except KeyboardInterrupt:
+        runner.stop()
+        print("\ninterrupted; in-flight tasks finishing", file=sys.stderr)
+
+    counts = runner.counts()
+    print("\ncounts   %s" % json.dumps(counts))
+    print("summary  %s" % (Path(args.out) / "summary.json"))
+    print("cleanup  python -m harness reap --ledger %s"
+          % (Path(args.out) / "resources.jsonl"))
+    return 0 if counts.get("completed", 0) == total else 1
+
+
+def _cmd_reap(args: argparse.Namespace) -> int:
+    ledger = ResourceLedger(args.ledger) if args.ledger else ResourceLedger()
+    if args.compact:
+        dropped = ledger.compact()
+        print("compacted ledger, dropped %d entries" % dropped)
+
+    older_than = parse_duration(args.older_than) if args.older_than else None
+    if args.include_unknown and older_than is None:
+        print("refusing --include-unknown without --older-than", file=sys.stderr)
+        return 2
+
+    reaper = Reaper(AgentEnvClient(), ledger)
+    plan = reaper.plan(include_unknown=args.include_unknown, older_than=older_than)
+
+    if plan.unsupported:
+        print("%d snapshot(s) are reclaimable but this backend has no snapshot"
+              % len(plan.unsupported))
+        print("delete API (DELETE /snapshots/{id} -> 405). They must be freed")
+        print("server-side; a reaper cannot do it from outside. Ids:")
+        for resource_id in plan.unsupported[:10]:
+            print("  %s" % resource_id)
+        if len(plan.unsupported) > 10:
+            print("  ... and %d more" % (len(plan.unsupported) - 10))
+        print()
+
+    if not plan.total():
+        print("nothing to reap (%d kept)" % len(plan.kept))
+        return 0
+    for kind, items in (("sandbox", plan.sandboxes), ("snapshot", plan.snapshots)):
+        for resource_id in items:
+            print("  %-9s %s  %s" % (kind, resource_id, plan.reasons.get(resource_id, "")))
+    if args.dry_run:
+        print("\n%d resource(s) would be freed (dry run)" % plan.total())
+        return 0
+
+    done = reaper.apply(plan)
+    print("\nfreed %d sandbox(es), %d snapshot(s)"
+          % (len(done["sandboxes"]), len(done["snapshots"])))
+    if done["failed"]:
+        print("failed: %s" % ", ".join(done["failed"]), file=sys.stderr)
+        return 1
+    return 0
+
+
 def _cmd_fork_plan(args: argparse.Namespace) -> int:
     plan = fork_plan(args.journal, args.step)
     print(json.dumps(plan, indent=2))
@@ -232,6 +329,32 @@ def main(argv=None) -> int:
         help="accept unauthenticated requests (local debugging only)",
     )
     gw.set_defaults(func=_cmd_gateway)
+
+    batch = sub.add_parser("batch", help="run a task file with bounded concurrency")
+    batch.add_argument("tasks", help="JSONL: one {id, prompt, cwd, ...} per line")
+    batch.add_argument("--slot", required=True, choices=available())
+    batch.add_argument("--out", default="runs/batch")
+    batch.add_argument("--workers", type=int, default=4)
+    batch.add_argument("--max-attempts", type=int, default=2)
+    batch.add_argument("--timeout", type=float, default=1800.0)
+    batch.add_argument("--mcp-stdio", help="args for `python -m swebench.mcp_server`")
+    batch.add_argument("--mcp-url")
+    batch.add_argument(
+        "--no-resume", action="store_true",
+        help="re-run tasks that already have a terminal status",
+    )
+    batch.set_defaults(func=_cmd_batch)
+
+    reap = sub.add_parser("reap", help="reclaim resources left by dead runs")
+    reap.add_argument("--ledger", default=None, help="path to resources.jsonl")
+    reap.add_argument("--dry-run", action="store_true")
+    reap.add_argument(
+        "--include-unknown", action="store_true",
+        help="also consider backend resources the ledger never saw (needs care)",
+    )
+    reap.add_argument("--older-than", help="with --include-unknown, e.g. 24h")
+    reap.add_argument("--compact", action="store_true", help="prune released entries")
+    reap.set_defaults(func=_cmd_reap)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -14,6 +14,12 @@ Wiring notes:
 - ``--pure`` skips external plugins so a developer's local plugins cannot leak
   into eval runs (same intent as ``claude --bare``).
 - Prompt is passed as a positional arg; opencode has no stdin prompt mode.
+- **Concurrency needs a per-lane data dir.** opencode keeps sessions in a SQLite
+  database under ``$XDG_DATA_HOME/opencode``; several processes sharing it fail
+  with "database is locked" (observed immediately in a 3-worker batch). Set
+  ``extra["data_home"]`` to give a lane its own directory. Scope it per *task*,
+  not per attempt: a fork or resume must find the session the earlier run wrote,
+  and that lives in this database.
 """
 
 from __future__ import annotations
@@ -74,6 +80,11 @@ class OpenCodeSlot(JsonlCliSlot):
         config = self._render_config(mcp, task)
         if config is not None:
             env["OPENCODE_CONFIG"] = config
+        data_home = (task.extra or {}).get("data_home")
+        if data_home:
+            # Isolates the session SQLite db so concurrent lanes do not contend.
+            os.makedirs(str(data_home), exist_ok=True)
+            env["XDG_DATA_HOME"] = str(data_home)
         return env
 
     def _render_config(self, mcp: Optional[McpWiring], task: TaskSpec) -> Optional[str]:

@@ -59,6 +59,9 @@ python -m harness fork-plan runs/<id>.jsonl --step 12
 ## Layout
 
 ```
+batch.py           worker pool + registry: concurrency, retry class, resumable
+resources.py       write-ahead ledger of allocations (sandboxes, snapshots)
+reap.py            reclaim what dead runs left behind
 core/events.py     unified event model (v2), Usage with separated dimensions
 core/journal.py    append-only JSONL writer + in-process event bus (subscribe)
 core/slot.py       AgentSlot contract: run/kill/version + TaskSpec/McpWiring/SlotResult
@@ -214,6 +217,55 @@ holds its own slot token — provider credentials stay in the routing table.
 Verdict-style rewriting is *not* here: tool-call policy belongs in the MCP proxy
 (L2) where a call is semantically addressable. This layer speaks HTTP and tokens.
 
+## Batch runs and resource reclamation
+
+```bash
+python -m harness batch tasks.jsonl --slot opencode --workers 3 --out runs/b1
+python -m harness reap --ledger runs/b1/resources.jsonl --dry-run
+```
+
+`batch.py` is deliberately thin — a worker pool plus a ledger, not a durable
+scheduler. If a batch dies you re-run it; correctness of *cleanup* comes from the
+ledger, and resumability from skipping tasks whose journal already reports a
+terminal status. A persistent state machine is only worth building once RL
+rollout defines what it must recover.
+
+What it does have, because a few hundred tasks cannot work without it: bounded
+concurrency, per-task failure isolation, per-task timeout, and **retry
+classification** — a rate limit is retried, a context overflow or a safety
+refusal is not (retrying a real outcome turns agent behaviour into apparent
+environment noise).
+
+Verified: 6 tasks / 3 workers, all correct, re-run skipped all 6.
+
+**Per-task state isolation matters for concurrency.** The first real batch failed
+2 of 6 with `database is locked`: opencode keeps sessions in one SQLite database,
+and parallel lanes contend on it. The batch now gives each task its own
+`XDG_DATA_HOME` (per *task*, not per attempt — a retry or later fork must find
+the session the first attempt wrote). Same class of problem as `--pure` and
+`setting_sources: []`: an agent's ambient state is not neutral.
+
+### Resource ledger — the "no GC" problem
+
+`resources.py` is a write-ahead ledger: record the intent to allocate *before*
+allocating, mark it released after freeing. A crash therefore leaves a stale
+claim (harmless — `reap` re-checks the backend) rather than an unreachable
+resource. `claim.attach(journal)` records snapshots automatically from
+`checkpoint.captured` events.
+
+`reap` reads two sources: the ledger (knows the owner, so it can attribute an
+orphan to a dead pid) and the backend (knows what exists, but has no owner
+field — hence `--include-unknown --older-than 24h` as an explicit opt-in, since
+"delete every snapshot older than N hours" is exactly the command that eats a
+colleague's experiment).
+
+**Finding: snapshot GC needs a backend change.** AgentENV exposes DELETE for
+`/sandboxes/{id}` and `/templates/{id}` only; `DELETE /snapshots/{id}` answers
+405, and `aenv snapshot` has no delete subcommand. A handful of fork-demo runs
+left 17 orphaned snapshots (~420 MB chain each) that no client can reclaim. The
+reaper detects this and reports it as *unsupported* rather than emitting N
+failures — but the fix belongs in AgentENV.
+
 ## Threading rules (learned by breaking them)
 
 `AshSession` drives a private event loop via `run_until_complete`. Two rules
@@ -230,8 +282,10 @@ follow, and violating either fails *quietly* — tool calls or snapshots return
 
 ## Not here yet
 
-- Orchestrator (registry / scheduling / concurrency / guaranteed teardown) —
-  currently one run per CLI invocation. Budget enforcement exists in the gateway.
+- A durable orchestrator: cross-process recovery, a persistent state machine, IAC
+  routing for agents that spawn sub-agents. `batch.py` covers concurrency and
+  isolation; the gateway covers budget; `reap` covers cleanup. What remains is
+  only needed once RL rollout defines the recovery semantics.
 - Live behaviour probes in `contracts/ci_check.py` (need credentials).
 - Fork for the CLI slots against microvm: `opencode` has native session fork and
   `codex` replays its prompt, but neither has been run through the full pair
