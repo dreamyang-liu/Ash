@@ -1,0 +1,18 @@
+# One SWE-Marathon task on Bedrock's GPT-5.6 Terra.
+#
+# Like luna, litellm knows this model (1M input window, 128K output, tool
+# calling), so the context guard and output ceiling configure themselves from
+# metadata. Terra is not cheap ($2.2/$13.2 per 1M, 10x luna), but the cost
+# ceiling is deliberately off here -- only steps and the task's wall clock
+# bind. 1e9 is the codebase's own "unlimited" convention (rollout_server.py's
+# UNLIMITED_COST); the loop has no 0-means-off rule, it just compares.
+extends: marathon-full
+
+model:
+  name: bedrock/us.openai.gpt-5.6-terra
+
+limits:
+  cost_limit: 1.0e+9    # NOT "1.0e9": PyYAML parses that as a string
+
+execution:
+  output: /tmp/marathon-terra

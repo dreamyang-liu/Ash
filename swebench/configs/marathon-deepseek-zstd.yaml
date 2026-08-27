@@ -1,0 +1,41 @@
+# SWE-Marathon on an Anthropic-compatible proxy (deepseek-v4-flash).
+#
+# The key goes in one of two places, and litellm reads neither of Claude
+# Code's variables (ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL):
+#   1. model.api_key / model.api_base below, or
+#   2. export ANTHROPIC_API_KEY=... and ANTHROPIC_API_BASE=...
+extends: default
+
+model:
+  name: anthropic/deepseek-v4-flash
+  api_base: http://47.100.35.241
+  api_key: REDACTED-SEE-CONFIG-COMMENT
+
+limits:
+  step_limit: 2000
+  cost_limit: 150.0
+
+execution:
+  workers: 1
+  output: /tmp/marathon-zstd-v4
+  backend: microvm
+  microvm:
+    server_url: http://127.0.0.1:18000
+    api_key: bench-key-0123456789abcdef0123456789abcdef
+    runtime_bin: /tmp/ash-runtime
+    sandbox_ttl: 28800
+  checkpoints:
+    enabled: true
+    mode: disk_only
+    trigger: mutation
+  context_strategy: summarize
+  # The proxy serves a 1M-token window (measured: 1,000,087 prompt tokens
+  # accepted). litellm has no metadata for the name, so state it here or the
+  # guard falls back to a conservative 200K and folds far too early.
+  context_window_tokens: 1000000
+  # Fold at 600K rather than nearer the ceiling: the window is what the model
+  # accepts, not what it should be filled with. Measured on this proxy,
+  # latency grows ~13s per 100K input tokens (29s at 200K, 137s at 1M), so
+  # every token kept is paid for on every subsequent step.
+  context_budget_fraction: 0.60
+  context_target_fraction: 0.35

@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Callable, Optional, Sequence
 
-from ...models import CommandOutcome
-from ..pipeline import ToolInterceptor, ToolPipeline
+from harness.core.result import CommandOutcome
+from harness.execution.pipeline import ToolInterceptor, ToolPipeline
 from .guardrail import GuardrailInterceptor, GuardrailState
 from .present import OutcomePresenter, render_outcome
 from .truncate import TruncateInterceptor

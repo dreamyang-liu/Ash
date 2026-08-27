@@ -1,4 +1,4 @@
-"""Bridge: ``swebench.agent.checkpoints.Checkpointer`` -> ``RollbackLedger``.
+"""Bridge: ``harness.execution.checkpoints.Checkpointer`` -> ``RollbackLedger``.
 
 The environment half of rollback already exists and is battle-tested (mutation
 tracking, clean-step snapshot reuse, layer-chain compaction re-boarding, lineage
@@ -227,7 +227,7 @@ def _build_checkpointer(
     name_prefix: str,
     on_checkpoint,
 ):
-    from swebench.agent.checkpoints import Checkpointer, MutationTracker
+    from harness.execution.checkpoints import Checkpointer, MutationTracker
 
     return Checkpointer(
         session=session,

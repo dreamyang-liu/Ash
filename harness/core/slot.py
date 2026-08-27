@@ -41,7 +41,7 @@ class McpWiring:
     """One MCP server the agent should be given access to.
 
     Exactly one of ``command`` (stdio subprocess) or ``url`` (remote HTTP)
-    should be set. ``swebench.mcp_server`` supports both modes; see
+    should be set. ``harness.execution.server`` supports both modes; see
     harness/execution/wiring.py for the standard constructors.
     """
 

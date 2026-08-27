@@ -27,6 +27,7 @@ scratch to be cleaned up, so the two reinforce rather than substitute.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable, Iterable
 
 #: Where SWE-bench images check out the repository under test.
@@ -133,3 +134,83 @@ def extract_patch(shell: Shell, base_commit: str = "",
     for command in stage_commands(added):
         shell(command)
     return format_patch(_output(shell(diff_command(base_commit)))), added
+
+
+# ---------------------------------------------------------------------------
+# Sandbox observer
+# ---------------------------------------------------------------------------
+
+class PatchObserver:
+    """Keeps a git diff per sandbox — SWE-bench's notion of "the answer".
+
+    Mounted on the execution plane with
+    ``--observer swebench.patch:patch_observer``; the proxy itself knows nothing
+    about patches (see harness/execution/observers.py).
+
+    Two things have to happen at the right moment, and both were learned the hard
+    way. The untracked-file baseline must be taken *before* an agent runs, or a
+    ``build/`` tree the image shipped is indistinguishable later from a file the
+    agent created. And the diff is re-extracted after every mutating call rather
+    than at shutdown: extraction at shutdown races the harness's read under load,
+    and a killed run left nothing at all.
+    """
+
+    name = "swebench-patch"
+
+    def __init__(self, patch_dir: "str | Path | None" = None) -> None:
+        self.patch_dir = Path(patch_dir) if patch_dir else None
+        self.patches: dict[str, str] = {}
+
+    async def on_created(self, entry) -> None:
+        probe = await entry.sandbox.call("shell", command=f"cd {WORKDIR} && {UNTRACKED_LIST}")
+        baseline = set()
+        if not probe.is_error:
+            baseline = {line.strip() for line in (probe.output or "").splitlines() if line.strip()}
+        entry.meta["baseline_untracked"] = baseline
+        # An empty diff on disk immediately, so a reader always finds a current
+        # file even if the agent never edits anything.
+        await self._extract(entry)
+
+    async def after_mutating_call(self, entry, tool_name: str, args: dict) -> None:
+        await self._extract(entry)
+
+    async def on_destroy(self, entry) -> None:
+        await self._extract(entry)
+
+    async def _extract(self, entry) -> str:
+        listed = await entry.sandbox.call(
+            "shell", command=f"cd {WORKDIR} && {UNTRACKED_LIST}")
+        if listed.is_error:
+            # No repository to diff (e.g. a plain image with no /testbed). Record
+            # an empty patch rather than the shell's error payload: `format_patch`
+            # does not distinguish them, so the error text used to be written into
+            # the .diff and read back as if it were a prediction.
+            self.patches[entry.id] = ""
+            self._write(entry, "")
+            return ""
+        added = select_added((listed.output or "").splitlines(),
+                             entry.meta.get("baseline_untracked", set()))
+        for command in stage_commands(added):
+            await entry.sandbox.call("shell", command=f"cd {WORKDIR} && {command}")
+        result = await entry.sandbox.call(
+            "shell", command=f"cd {WORKDIR} && {diff_command(entry.base_commit)}")
+        patch = "" if result.is_error else format_patch(result.output)
+        self.patches[entry.id] = patch
+        self._write(entry, patch)
+        return patch
+
+    def _write(self, entry, patch: str) -> None:
+        if self.patch_dir:
+            self.patch_dir.mkdir(parents=True, exist_ok=True)
+            (self.patch_dir / f"{entry.id}.diff").write_text(patch)
+
+
+def patch_observer() -> PatchObserver:
+    """Factory for ``--observer swebench.patch:patch_observer``.
+
+    Reads ``ASH_PATCH_DIR`` because an observer spec carries no arguments; the
+    harness that spawns the proxy sets it alongside the spec.
+    """
+    import os
+
+    return PatchObserver(os.environ.get("ASH_PATCH_DIR"))

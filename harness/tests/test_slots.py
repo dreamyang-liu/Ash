@@ -48,11 +48,11 @@ def test_codex_command_defaults_to_readonly_host_sandbox():
 
 
 def test_codex_mcp_stdio_becomes_config_overrides():
-    mcp = McpWiring(name="ash", command=["python", "-m", "swebench.mcp_server", "--x"], env={"K": "v"})
+    mcp = McpWiring(name="ash", command=["python", "-m", "harness.execution.server", "--x"], env={"K": "v"})
     command = CodexSlot().build_command(TaskSpec(prompt="p", cwd="/w"), mcp)
     joined = " ".join(command)
     assert '-c mcp_servers.ash.command="python"' in joined
-    assert 'mcp_servers.ash.args=["-m","swebench.mcp_server","--x"]' in joined
+    assert 'mcp_servers.ash.args=["-m","harness.execution.server","--x"]' in joined
     assert 'mcp_servers.ash.env.K="v"' in joined
 
 
@@ -96,7 +96,7 @@ def test_opencode_writes_isolated_mcp_config(tmp_path):
     config = json.loads(open(env["OPENCODE_CONFIG"]).read())
     entry = config["mcp"]["ash"]
     assert entry["type"] == "local"
-    assert entry["command"][1:3] == ["-m", "swebench.mcp_server"]
+    assert entry["command"][1:3] == ["-m", "harness.execution.server"]
     assert entry["enabled"] is True
 
 

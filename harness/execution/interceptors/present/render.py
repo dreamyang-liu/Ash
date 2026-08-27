@@ -6,7 +6,7 @@ Replaceable by construction: `OutcomePresenter(my_renderer)` takes any
 
 from __future__ import annotations
 
-from ....models import CommandOutcome
+from harness.core.result import CommandOutcome
 
 __all__ = ["render_outcome"]
 

@@ -1,0 +1,757 @@
+"""MCP server that exposes ash sandbox tools to external agents.
+
+Supports multiple sandboxes with ownership + group-based visibility:
+- Each sandbox has an owner (session) and optional groups
+- A session sees: its own private sandboxes + any shared sandbox whose groups
+  overlap with the session's groups
+- Runs as HTTP/SSE for multi-session, or stdio for single-session (backwards-compat)
+- Optionally routes exec tool calls through the L2 interceptor pipeline
+  (docs/ARCHITECTURE.md): OFF by default; --guardrails mounts read-before-edit
+  and edit-streak nudges, --plugins <file.py> supplies your own interceptors.
+- Knows nothing about what a run's *answer* is. Anything that has to inspect the
+  sandbox to produce one (SWE-bench's git diff, a verifier score) is a
+  SandboxObserver supplied with --observer; see harness/execution/observers.py.
+
+Usage:
+    # HTTP mode (multi-session):
+    python -m harness.execution.server --http --port 8400
+
+    # HTTP mode with governance mounted on the tool path:
+    python -m harness.execution.server --http --port 8400 --guardrails reject
+
+    # Stdio mode (single-session, backwards-compat):
+    python -m harness.execution.server --image <docker-image> --observer swebench.patch:patch_observer
+"""
+
+import asyncio
+import copy
+import json
+import sys
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from ash_sandbox import Pool, Sandbox
+from ash_sandbox.result import ToolResult as SdkToolResult
+
+from harness.core.result import ToolResult
+from harness.execution.backends import BACKENDS, BackendError, build_pool
+from harness.execution.interceptors import GuardrailInterceptor, TruncateInterceptor
+from harness.execution.observers import ObserverSet, load_observer
+from harness.execution.pipeline import CallContext, ToolPipeline, load_pipeline
+
+
+# ---------------------------------------------------------------------------
+# Core state
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SandboxEntry:
+    id: str
+    sandbox: Sandbox
+    image: str
+    groups: list[str]        # visibility = group intersection
+    base_commit: str = ""
+    #: Per-sandbox scratch space for observers. The execution plane never reads
+    #: it; an observer stashes whatever it needs to produce a submission later
+    #: (SWE-bench's patch extractor keeps its untracked-file baseline here).
+    meta: dict = field(default_factory=dict)
+
+    def visible_to(self, session_groups: list[str]) -> bool:
+        return bool(set(self.groups) & set(session_groups))
+
+
+@dataclass
+class Session:
+    id: str
+    groups: list[str] = field(default_factory=lambda: ["default"])
+    # Fixed single-sandbox binding. Set once at startup in single-sandbox stdio
+    # mode, or per session in HTTP mode from the `x-session-sandbox` header (an
+    # orchestrator that provisioned the sandbox states which one this slot owns).
+    # A bound session is served the single-sandbox tool schema, so the model
+    # never sees a `sandbox_id` parameter and cannot name another sandbox.
+    # Left None otherwise: an explicit sandbox_id is then required on every exec
+    # call — there is no switchable "active" state.
+    bound_id: str | None = None
+
+    @property
+    def owner_group(self) -> str:
+        """The implicit private group for this session's owner."""
+        return f"owner:{self.id}"
+
+
+# ---------------------------------------------------------------------------
+# Tool schemas
+# ---------------------------------------------------------------------------
+
+LIFECYCLE_TOOLS = [
+    {
+        "name": "sandbox_create",
+        "description": (
+            "Create a new sandbox container from a Docker image.\n"
+            "Your owner group is always attached (private by default).\n"
+            "Pass additional groups to share with other sessions in those groups."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "image": {"type": "string", "description": "Docker image to spawn"},
+                "groups": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": "Additional groups to share this sandbox with (your owner group is always included)",
+                },
+            },
+            "required": ["image"],
+        },
+    },
+    {
+        "name": "sandbox_list",
+        "description": "List sandboxes visible to you (your private + shared via groups).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "group": {"type": "string", "description": "Filter by group (omit for all visible)"},
+            },
+        },
+    },
+    {
+        "name": "sandbox_destroy",
+        "description": "Destroy a sandbox (must have your owner group).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sandbox_id": {"type": "string", "description": "Sandbox ID to destroy"},
+            },
+            "required": ["sandbox_id"],
+        },
+    },
+]
+
+EXEC_TOOLS = [
+    {
+        "name": "shell",
+        "description": (
+            "Execute a shell command in a sandbox container.\n"
+            "Working directory defaults to /testbed.\n"
+            "Use 'tail' to limit output. Use 'background: true' for long-running commands."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to execute"},
+                "background": {"type": "boolean", "default": False},
+                "timeout": {"type": "integer", "default": 300},
+                "tail": {"type": "integer", "description": "Only return last N lines"},
+                "working_dir": {"type": "string", "description": "Working directory (default: /testbed)"},
+                "sandbox_id": {"type": "string", "description": "Target sandbox (default: active)"},
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "text_editor",
+        "description": "View or edit files in a sandbox.\nCommands: view, str_replace, insert, write",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "enum": ["view", "str_replace", "insert", "write"]},
+                "path": {"type": "string"},
+                "view_range": {"type": "array", "items": {"type": "integer"}},
+                "old_str": {"type": "string"},
+                "new_str": {"type": "string"},
+                "insert_line": {"type": "integer"},
+                "insert_text": {"type": "string"},
+                "file_text": {"type": "string"},
+                "sandbox_id": {"type": "string", "description": "Target sandbox (default: active)"},
+            },
+            "required": ["command", "path"],
+        },
+    },
+    {
+        "name": "grep_files",
+        "description": "Search files using ripgrep.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "path": {"type": "string"},
+                "include": {"type": "string"},
+                "limit": {"type": "integer"},
+                "sandbox_id": {"type": "string", "description": "Target sandbox (default: active)"},
+            },
+            "required": ["pattern"],
+        },
+    },
+    {
+        "name": "process",
+        "description": "Manage a background process (read output or kill).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pid": {"type": "string"},
+                "action": {"type": "string", "enum": ["read", "kill"]},
+                "tail": {"type": "integer"},
+                "sandbox_id": {"type": "string", "description": "Target sandbox (default: active)"},
+            },
+            "required": ["pid", "action"],
+        },
+    },
+]
+
+def _single_sandbox_tools() -> list[dict]:
+    """Exec tools only, with the multi-sandbox `sandbox_id` arg removed.
+
+    Used in single-sandbox stdio mode: the sandbox is pre-provisioned and bound
+    at startup, so the agent should see only shell/text_editor/grep_files/
+    process — no lifecycle tools, no sandbox routing.
+    """
+    tools = copy.deepcopy(EXEC_TOOLS)
+    for t in tools:
+        t["inputSchema"]["properties"].pop("sandbox_id", None)
+    return tools
+
+
+def _multi_sandbox_tools() -> list[dict]:
+    """Exec tools with `sandbox_id` REQUIRED — stateless multi-sandbox mode.
+
+    Every exec call names its target sandbox explicitly; there is no switchable
+    "active" sandbox, so concurrent calls can't race and no lock is needed.
+    """
+    tools = copy.deepcopy(EXEC_TOOLS)
+    for t in tools:
+        props = t["inputSchema"]["properties"]
+        if "sandbox_id" in props:
+            props["sandbox_id"]["description"] = "Target sandbox ID (required)"
+        req = t["inputSchema"].setdefault("required", [])
+        if "sandbox_id" not in req:
+            req.append("sandbox_id")
+    return tools
+
+
+EXEC_TOOLS_SINGLE = _single_sandbox_tools()
+EXEC_TOOLS_MULTI = _multi_sandbox_tools()
+
+# Multi-sandbox surface: lifecycle (create/list/destroy) + id-required exec tools.
+ALL_TOOLS = LIFECYCLE_TOOLS + EXEC_TOOLS_MULTI
+
+
+# ---------------------------------------------------------------------------
+# Sandbox Pool (shared across all sessions)
+# ---------------------------------------------------------------------------
+
+class SandboxPool:
+    """Manages all sandboxes. Session-agnostic — visibility is enforced at the server layer."""
+
+    def __init__(self, runtime_bin: str | None = None,
+                 backend: dict | None = None,
+                 observers: "ObserverSet | None" = None):
+        self.runtime_bin = runtime_bin
+        #: Lifecycle hooks that turn a sandbox into a benchmark's answer. Empty
+        #: by default: the proxy runs tools and nothing else.
+        self.observers = observers or ObserverSet()
+        #: Where sandboxes come from (``harness/execution/backends.py``); empty means
+        #: local Docker. The proxy names no concrete pool, so every sandbox a
+        #: client creates through it lands on the configured backend.
+        self.backend = backend or {}
+        self._pool: Pool | None = None
+        self._sandboxes: dict[str, SandboxEntry] = {}
+        self._counter = 0
+
+    def _next_id(self) -> str:
+        self._counter += 1
+        return f"sb-{self._counter}"
+
+    async def create(self, image: str, groups: list[str]) -> SandboxEntry:
+        if not self._pool:
+            self._pool = build_pool(self.backend, runtime_bin=self.runtime_bin)
+        sandbox = await self._pool.spawn(image=image)
+        r = await sandbox.call("shell", command="git -C /testbed rev-parse HEAD")
+        base_commit = r.output.strip() if not r.is_error else ""
+        sb_id = self._next_id()
+        entry = SandboxEntry(id=sb_id, sandbox=sandbox, image=image,
+                             groups=groups, base_commit=base_commit)
+        self._sandboxes[sb_id] = entry
+        # Before any agent can touch it: an observer that needs a baseline has to
+        # take it now or it can never tell the image's state from the agent's.
+        await self.observers.on_created(entry)
+        self._log(f"created {sb_id} groups={groups}")
+        return entry
+
+    async def destroy(self, sb_id: str) -> None:
+        """Destroy a sandbox, giving observers their last look at it."""
+        entry = self._sandboxes.pop(sb_id, None)
+        if not entry:
+            return
+        await self.observers.on_destroy(entry)
+        if self._pool:
+            await self._pool.destroy(entry.sandbox)
+        self._log(f"destroyed {sb_id}")
+
+    async def destroy_all(self):
+        for sb_id in list(self._sandboxes):
+            await self.destroy(sb_id)
+
+    def get(self, sb_id: str) -> SandboxEntry | None:
+        return self._sandboxes.get(sb_id)
+
+    def visible_to(self, session: Session, group_filter: str | None = None) -> list[SandboxEntry]:
+        results = []
+        for entry in self._sandboxes.values():
+            if not entry.visible_to(session.groups):
+                continue
+            if group_filter and group_filter not in entry.groups:
+                continue
+            results.append(entry)
+        return results
+
+    def _log(self, text: str):
+        sys.stderr.write(f"[ash-pool] {text}\n")
+        sys.stderr.flush()
+
+
+# ---------------------------------------------------------------------------
+# Session handler (per-connection tool dispatch)
+# ---------------------------------------------------------------------------
+
+class SessionHandler:
+    """Handles tool calls scoped to a single session's visibility."""
+
+    # Exec tools that can mutate the filesystem — observers are told after these.
+    _MUTATING = {"shell", "text_editor", "process"}
+
+    def __init__(self, session: Session, pool: SandboxPool, notify_mutations: bool = False,
+                 pipeline: "ToolPipeline | None" = None):
+        self.session = session
+        self.pool = pool
+        # notify_mutations: tell observers after every mutating call so their
+        # artefact is always current (single-sandbox mode). Removes any reliance
+        # on shutdown-time extraction, which races the reader under load and
+        # leaves a killed run with nothing.
+        self.notify_mutations = notify_mutations
+        # pipeline: L2 interceptor chain (shared across sessions — coordination
+        # state must span agents). None = dispatch exactly as before (default).
+        self.pipeline = pipeline
+
+    def _resolve(self, sandbox_id: str | None) -> SandboxEntry | None:
+        """Resolve the target sandbox by explicit id, falling back to the fixed
+        single-sandbox binding. No switchable "active" state."""
+        target = sandbox_id or self.session.bound_id
+        if not target:
+            return None
+        entry = self.pool.get(target)
+        if entry and entry.visible_to(self.session.groups):
+            return entry
+        return None
+
+    async def call_tool(self, name: str, args: dict) -> dict:
+        # -- Lifecycle tools --
+        if name == "sandbox_create":
+            # Always include the caller's owner group; add any extra shared groups.
+            extra_groups = args.get("groups", [])
+            groups = [self.session.owner_group] + extra_groups
+            entry = await self.pool.create(args["image"], groups)
+            return _ok(json.dumps({"id": entry.id, "groups": entry.groups}))
+
+        if name == "sandbox_list":
+            entries = self.pool.visible_to(self.session, args.get("group"))
+            items = [{"id": e.id, "image": e.image, "groups": e.groups,
+                      "mine": self.session.owner_group in e.groups} for e in entries]
+            return _ok(json.dumps(items, indent=2))
+
+        if name == "sandbox_destroy":
+            sb_id = args["sandbox_id"]
+            entry = self.pool.get(sb_id)
+            if not entry:
+                return _err(f"sandbox {sb_id} not found")
+            if self.session.owner_group not in entry.groups:
+                return _err(f"cannot destroy {sb_id}: not the owner")
+            await self.pool.destroy(sb_id)
+            return _ok(f"Destroyed {sb_id}.")
+
+        # -- Exec tools -- sandbox_id is required in multi-sandbox mode; in
+        # single-sandbox mode it is omitted and resolves to the bound sandbox.
+        args = dict(args)  # copy so we never mutate the caller's argument dict
+        sandbox_id = args.pop("sandbox_id", None)
+        entry = self._resolve(sandbox_id)
+        if not entry:
+            return _err("sandbox_id is required and must reference a sandbox visible "
+                        "to you (see sandbox_create / sandbox_list).")
+
+        try:
+            if self.pipeline is not None:
+                content = await self._exec_via_pipeline(entry, name, args)
+            else:
+                result: SdkToolResult = await entry.sandbox.call(name, **args)
+                content = {"type": "text", "text": result.output,
+                           "isError": result.is_error}
+        except Exception as e:
+            return _err(str(e))
+
+        # Keep observers' artefacts current: a run killed mid-flight must still
+        # leave a usable submission behind.
+        if self.notify_mutations and self.pool.observers and name in self._MUTATING:
+            entry = self._resolve(args.get("sandbox_id"))
+            if entry:
+                await self.pool.observers.after_mutating_call(entry, name, args)
+
+        return content
+
+    async def _exec_via_pipeline(self, entry: SandboxEntry, name: str,
+                                 args: dict) -> dict:
+        """Run one exec tool through the interceptor pipeline (L2 governance).
+
+        The pipeline contract is synchronous, and an interceptor is allowed to
+        block (waiting on a lock, say), so it runs on a worker thread; the raw
+        executor bridges
+        each inner/probe call back onto this event loop. agent_id is the MCP
+        session identity; sandbox_id is the resolved sandbox.
+        """
+        loop = asyncio.get_running_loop()
+
+        def raw_executor(tool: str, tool_args: dict) -> ToolResult:
+            future = asyncio.run_coroutine_threadsafe(
+                entry.sandbox.call(tool, **tool_args), loop)
+            sdk = future.result()
+            # from_sdk, so a command's outcome reaches interceptors on this path too
+            # (a presenter rendering it, audit reading its byte counts).
+            result = ToolResult.from_sdk(sdk)
+            if sdk.is_error and not result.error:
+                result.error = "tool error"
+            return result
+
+        ctx = CallContext(agent_id=self.session.id, sandbox_id=entry.id,
+                          tool_name=name, args=dict(args),
+                          metadata={"executor": raw_executor})
+        result = await asyncio.to_thread(self.pipeline.execute, ctx, raw_executor)
+        text = result.output if (result.success or result.output) \
+            else f"Error: {result.error or 'unknown error'}"
+        return {"type": "text", "text": text, "isError": not result.success}
+
+
+def _ok(text: str) -> dict:
+    return {"type": "text", "text": text}
+
+
+def _err(text: str) -> dict:
+    return {"type": "text", "text": f"Error: {text}", "isError": True}
+
+
+# ---------------------------------------------------------------------------
+# Transport: HTTP/SSE (multi-session)
+# ---------------------------------------------------------------------------
+
+class HttpMcpServer:
+    """HTTP/SSE transport — one SandboxPool, multiple concurrent sessions."""
+
+    def __init__(self, pool: SandboxPool, host: str = "0.0.0.0", port: int = 8400,
+                 pipeline: "ToolPipeline | None" = None):
+        self.pool = pool
+        self.host = host
+        self.port = port
+        self.pipeline = pipeline
+        self._sessions: dict[str, Session] = {}
+
+    #: Headers that identify the caller, most explicit first. ``mcp-session-id``
+    #: is the protocol's own mechanism: ``initialize`` returns it both as a
+    #: response header (which is what makes a conforming client echo it back)
+    #: and in the result body.
+    SESSION_HEADERS = ("x-session-owner", "mcp-session-id")
+
+    #: Binds a session to one pre-provisioned sandbox. The caller that created
+    #: the sandbox states its id here; that session is then served the
+    #: single-sandbox schema and every exec call resolves to it implicitly.
+    SANDBOX_HEADER = "x-session-sandbox"
+
+    def _get_or_create_session(self, headers: dict) -> Session:
+        owner = next((headers[h] for h in self.SESSION_HEADERS if headers.get(h)), None)
+        if owner is None:
+            # Anonymous request: a fresh identity, so sandboxes stay private.
+            # Interceptors keyed by agent_id (the guardrails) can hold no
+            # state across such requests — each one looks like a new agent — so
+            # a client that wants governance must identify itself.
+            owner = str(uuid.uuid4())
+        if owner not in self._sessions:
+            groups_header = headers.get("x-session-groups", "")
+            explicit_groups = [g.strip() for g in groups_header.split(",") if g.strip()]
+            # owner_group is always included — ensures private sandbox visibility
+            session = Session(id=owner, groups=[f"owner:{owner}"] + explicit_groups)
+            self._sessions[owner] = session
+
+        session = self._sessions[owner]
+        bound = headers.get(self.SANDBOX_HEADER)
+        if bound:
+            # Re-read every request: the header is the caller's standing
+            # statement of which sandbox this slot owns, and a slot that is
+            # re-boarded onto a new sandbox (checkpoint restore) says so by
+            # changing it. Binding is a *default*, not a grant -- the visibility
+            # check in _resolve still applies, so naming someone else's sandbox
+            # here gains nothing.
+            session.bound_id = bound
+        return session
+
+    async def run(self):
+        from aiohttp import web
+
+        async def handle_mcp(request: web.Request) -> web.Response:
+            headers = {k.lower(): v for k, v in request.headers.items()}
+            session = self._get_or_create_session(headers)
+            handler = SessionHandler(session, self.pool, pipeline=self.pipeline)
+
+            body = await request.json()
+            method = body.get("method", "")
+            id_ = body.get("id")
+
+            if method == "initialize":
+                result = {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "ash-sandbox", "version": "2.0.0"},
+                    "sessionId": session.id,
+                }
+                # The response *header* is what makes a conforming MCP client
+                # echo the id back on later requests; the body field alone is
+                # invisible to it, so without this every request looked like a
+                # new anonymous session and sandboxes created by an earlier one
+                # were no longer visible.
+                return web.json_response(
+                    {"jsonrpc": "2.0", "id": id_, "result": result},
+                    headers={"Mcp-Session-Id": session.id},
+                )
+
+            elif method == "tools/list":
+                # A bound session gets the single-sandbox surface: no sandbox_id
+                # parameter to fill in, so the model cannot target another
+                # sandbox and cannot omit the argument either.
+                tools = EXEC_TOOLS_SINGLE if session.bound_id else ALL_TOOLS
+                return web.json_response({"jsonrpc": "2.0", "id": id_, "result": {"tools": tools}})
+
+            elif method == "tools/call":
+                params = body.get("params", {})
+                # Stateless: every exec call carries its own sandbox_id, so
+                # concurrent same-session requests share no mutable routing state.
+                content = await handler.call_tool(params.get("name", ""), params.get("arguments", {}))
+                return web.json_response({
+                    "jsonrpc": "2.0", "id": id_,
+                    "result": {"content": [content], "isError": content.get("isError", False)},
+                })
+
+            elif method == "ping":
+                return web.json_response({"jsonrpc": "2.0", "id": id_, "result": {}})
+
+            else:
+                return web.json_response({
+                    "jsonrpc": "2.0", "id": id_,
+                    "error": {"code": -32601, "message": f"Unknown method: {method}"},
+                })
+
+        app = web.Application()
+        app.router.add_post("/mcp", handle_mcp)
+
+        self._log(f"listening on {self.host}:{self.port}")
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, self.host, self.port)
+        await site.start()
+        try:
+            await asyncio.Event().wait()  # run forever
+        finally:
+            await self.pool.destroy_all()
+            await runner.cleanup()
+
+    def _log(self, text: str):
+        sys.stderr.write(f"[ash-mcp-http] {text}\n")
+        sys.stderr.flush()
+
+
+# ---------------------------------------------------------------------------
+# Transport: stdio (single-session, backwards-compat)
+# ---------------------------------------------------------------------------
+
+class StdioMcpServer:
+    """Stdio transport — single session, backwards-compatible."""
+
+    def __init__(self, pool: SandboxPool, single_sandbox: bool = False,
+                 pipeline: "ToolPipeline | None" = None):
+        self.pool = pool
+        self.session = Session(id="stdio", groups=["owner:stdio", "default"])
+        self.handler = SessionHandler(self.session, pool, notify_mutations=single_sandbox,
+                                      pipeline=pipeline)
+        # single_sandbox: expose only exec tools bound to the active sandbox
+        # (lifecycle tools hidden — the harness pre-provisions the sandbox).
+        self.single_sandbox = single_sandbox
+
+    async def run(self):
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        await asyncio.get_running_loop().connect_read_pipe(lambda: protocol, sys.stdin)
+
+        try:
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
+                line = line.decode().strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                response = await self._handle(msg)
+                if response:
+                    sys.stdout.write(json.dumps(response) + "\n")
+                    sys.stdout.flush()
+        finally:
+            await self.pool.destroy_all()
+
+    async def _handle(self, msg: dict) -> dict | None:
+        method = msg.get("method", "")
+        id_ = msg.get("id")
+
+        if method == "initialize":
+            return {"jsonrpc": "2.0", "id": id_, "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "ash-sandbox", "version": "2.0.0"},
+            }}
+        elif method == "notifications/initialized":
+            return None
+        elif method == "tools/list":
+            tools = EXEC_TOOLS_SINGLE if self.single_sandbox else ALL_TOOLS
+            return {"jsonrpc": "2.0", "id": id_, "result": {"tools": tools}}
+        elif method == "tools/call":
+            params = msg.get("params", {})
+            content = await self.handler.call_tool(params.get("name", ""), params.get("arguments", {}))
+            return {"jsonrpc": "2.0", "id": id_,
+                    "result": {"content": [content], "isError": content.get("isError", False)}}
+        elif method == "ping":
+            return {"jsonrpc": "2.0", "id": id_, "result": {}}
+        else:
+            return {"jsonrpc": "2.0", "id": id_,
+                    "error": {"code": -32601, "message": f"Unknown method: {method}"}}
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+
+def _build_pipeline(args) -> "ToolPipeline | None":
+    """Assemble the L2 interceptor pipeline (docs/ARCHITECTURE.md).
+
+    Default OFF: with no --plugins or --guardrails the proxy dispatches tool calls
+    exactly as before. --plugins replaces the default assembly entirely — the
+    PIPELINE list in the file is the configuration, which is also how a
+    coordination interceptor comes back (Waggle was removed; see git history).
+
+    Order is semantics: guardrails annotate on the way out, so their ``after``
+    runs last and a warning is appended to whatever result the model ends up
+    seeing. Truncation sits innermost, so it bounds the runtime's result and the
+    interceptors above it annotate already-bounded text.
+    """
+    if args.plugins:
+        return load_pipeline(args.plugins)
+    interceptors: list = []
+    if args.guardrails:
+        interceptors.append(GuardrailInterceptor(enforcement=args.guardrails))
+    if interceptors and args.max_output_bytes > 0:
+        # Only with another interceptor: mounting the chain for truncation alone would
+        # change the default dispatch path, and the runtime already bounds its
+        # own output (ASH_MAX_OUTPUT_BYTES).
+        interceptors.append(TruncateInterceptor(max_len=args.max_output_bytes))
+    return ToolPipeline(interceptors) if interceptors else None
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Ash sandbox MCP server")
+    parser.add_argument("--http", action="store_true", help="Run as HTTP server (multi-session)")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8400)
+    parser.add_argument("--image", default=None, help="Auto-create a sandbox on start (stdio mode)")
+    parser.add_argument("--runtime-bin", default=None)
+    parser.add_argument("--backend", default=None, choices=sorted(BACKENDS),
+                        help="Where sandboxes come from (default: docker). "
+                             "'microvm' needs AENV_SERVER_URL (+ AENV_API_KEY); "
+                             "'k8s' needs ASH_CONTROL_PLANE_URL and "
+                             "ASH_GATEWAY_URL.")
+    parser.add_argument("--observer", action="append", default=None,
+                        metavar="module:factory",
+                        help="Sandbox observer to mount (repeatable). The factory "
+                             "takes no arguments and returns a SandboxObserver; "
+                             "e.g. swebench.patch:patch_observer writes a git diff "
+                             "per sandbox. The proxy itself has no notion of what "
+                             "a run's answer is.")
+    parser.add_argument("--guardrails", nargs="?", const="warn", default=None,
+                        choices=["warn", "reject"],
+                        help="Mount read-before-edit / edit-streak guardrails: "
+                             "'warn' annotates the result, 'reject' refuses the "
+                             "call. Default: off.")
+    parser.add_argument("--max-output-bytes", type=int, default=12000,
+                        help="Bound each tool result to this many characters "
+                             "when the pipeline is mounted (0 disables)")
+    parser.add_argument("--plugins", default=None,
+                        help="Python file exporting PIPELINE: list[ToolInterceptor]; "
+                             "replaces the default pipeline assembly")
+    args = parser.parse_args()
+
+    # Fail at startup, not on the first sandbox_create: a proxy that accepted a
+    # backend it cannot build would report the misconfiguration as a tool error
+    # to whatever client happened to ask first.
+    backend = {"backend": args.backend} if args.backend else {}
+    try:
+        build_pool(backend, runtime_bin=args.runtime_bin)
+    except BackendError as exc:
+        sys.stderr.write(f"[ash-mcp] {exc}\n")
+        raise SystemExit(2)
+
+    try:
+        observers = ObserverSet([load_observer(spec) for spec in (args.observer or [])])
+    except Exception as exc:  # noqa: BLE001 - a bad spec must fail at startup
+        sys.stderr.write(f"[ash-exec] could not load observer: {exc}\n")
+        raise SystemExit(2)
+    if observers:
+        sys.stderr.write("[ash-exec] observers: %s\n" % ", ".join(observers.names()))
+        sys.stderr.flush()
+
+    pool = SandboxPool(runtime_bin=args.runtime_bin, backend=backend,
+                       observers=observers)
+    pipeline = _build_pipeline(args)
+    if pipeline is not None:
+        names = ", ".join(i.name for i in pipeline.interceptors) or "(empty)"
+        sys.stderr.write(f"[ash-mcp] interceptor pipeline: {names}\n")
+        if args.http:
+            # Per-agent state is keyed by session identity, so an unidentified
+            # client gets a new one per request and the chain can hold nothing.
+            sys.stderr.write(
+                "[ash-mcp] note: interceptor state is per session — clients must send "
+                f"one of {', '.join(HttpMcpServer.SESSION_HEADERS)}\n")
+        sys.stderr.flush()
+
+    if args.http:
+        server = HttpMcpServer(pool, host=args.host, port=args.port, pipeline=pipeline)
+        asyncio.run(server.run())
+    else:
+        async def run_stdio():
+            # When an image is given, pre-provision the sandbox and set it active
+            # so the agent gets a ready-to-use environment and only sees exec tools.
+            single = bool(args.image)
+            stdio = StdioMcpServer(pool, single_sandbox=single, pipeline=pipeline)
+            if args.image:
+                try:
+                    entry = await pool.create(args.image, groups=["owner:stdio", "default"])
+                except Exception as e:
+                    sys.stderr.write(
+                        f"[ash-mcp] failed to create sandbox from image '{args.image}': {e}\n")
+                    sys.stderr.flush()
+                    raise SystemExit(1)
+                stdio.session.bound_id = entry.id
+            await stdio.run()
+        asyncio.run(run_stdio())
+
+
+if __name__ == "__main__":
+    main()

@@ -1,6 +1,6 @@
 """MCP wiring constructors.
 
-The execution plane is ``swebench.mcp_server`` (stdio or HTTP). This module only
+The execution plane is ``harness.execution.server`` (stdio or HTTP). This module only
 builds the *addressing* -- how a slot is told to reach it -- so harness/slots
 never grows knowledge of tool semantics or of benchmark code.
 
@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 
 from harness.core.slot import McpWiring
 
-DEFAULT_SERVER_MODULE = "swebench.mcp_server"
+DEFAULT_SERVER_MODULE = "harness.execution.server"
 
 
 def stdio_wiring(
@@ -29,7 +29,7 @@ def stdio_wiring(
     env: Optional[Dict[str, str]] = None,
     python: Optional[str] = None,
 ) -> McpWiring:
-    """MCP server as a stdio subprocess: ``python -m swebench.mcp_server ...``."""
+    """MCP server as a stdio subprocess: ``python -m harness.execution.server ...``."""
     command = [python or sys.executable, "-m", module]
     command.extend(args or [])
     return McpWiring(name=name, command=command, env=dict(env or {}))
@@ -46,7 +46,7 @@ def http_wiring(
 ) -> McpWiring:
     """Remote MCP server.
 
-    Header names are the ones ``swebench.mcp_server`` actually reads -- they are
+    Header names are the ones ``harness.execution.server`` actually reads -- they are
     a wire contract, not decoration:
 
     ``X-Session-Owner``

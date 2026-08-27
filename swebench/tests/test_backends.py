@@ -187,11 +187,14 @@ def test_backend_config_drops_unset_values():
 def test_no_call_site_names_a_concrete_pool():
     """The point of this module: one place decides, so switching a backend is a
     config change rather than an edit in several files."""
-    root = Path(__file__).resolve().parents[1]
-    for name in ("sandbox.py", "mcp_server.py"):
-        source = (root / name).read_text()
-        assert "DockerPool(" not in source, f"{name} still constructs a DockerPool"
-        assert "build_pool(" in source, f"{name} should build its pool via backends.py"
+    repo = Path(__file__).resolve().parents[2]
+    # The MCP proxy now lives in the execution plane; both call sites must still
+    # go through build_pool.
+    for path in (repo / "swebench" / "sandbox.py",
+                 repo / "harness" / "execution" / "server.py"):
+        source = path.read_text()
+        assert "DockerPool(" not in source, f"{path.name} still constructs a DockerPool"
+        assert "build_pool(" in source, f"{path.name} should build its pool via backends.py"
 
 
 def test_every_harness_passes_its_backend_config_through():

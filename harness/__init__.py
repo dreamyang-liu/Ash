@@ -5,12 +5,14 @@ Layering (docs/ARCHITECTURE.md L2/L3):
 - ``harness.core``       event model v2, journal store, slot contract
 - ``harness.normalize``  per-agent native event -> unified journal events
 - ``harness.slots``      drivers: claude-code (Agent SDK), codex, opencode
-- ``harness.execution``  MCP wiring helpers (tool injection via swebench.mcp_server)
+- ``harness.execution``  the MCP execution plane: server, pipeline,
+                         interceptors, backends, observers, wiring
 - ``harness.atif``       journal -> ATIF v1.8 export
 
 Design notes live in harness/README.md. This package must not import
-benchmark-specific code (swebench.*) at module import time; slots reference
-swebench.mcp_server only as a subprocess command string.
+benchmark-specific code (``swebench.*``). What a run's *answer* is stays out of
+here too: anything that inspects a sandbox to produce one is a SandboxObserver
+supplied by the benchmark (see ``harness/execution/observers.py``).
 """
 
 from harness.core.events import JOURNAL_SCHEMA_VERSION

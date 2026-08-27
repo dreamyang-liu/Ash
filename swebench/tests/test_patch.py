@@ -210,9 +210,19 @@ def test_both_callers_use_the_shared_commands():
     """The session and the MCP proxy produce predictions for the same benchmark;
     they must not disagree about what a prediction contains."""
     root = Path(__file__).resolve().parents[1]
-    for name in ("sandbox.py", "mcp_server.py"):
+    # The proxy's extraction moved into this module as PatchObserver (the generic
+    # execution plane knows nothing about patches), so the two callers are the
+    # harness session and that observer.
+    for name in ("sandbox.py", "patch.py"):
         source = (root / name).read_text()
-        assert "git add -A" not in source, f"{name} force-adds untracked files again"
+        # Only executable lines: patch.py *documents* why `git add -A` is the
+        # wrong primitive, and that prose must not read as the mistake itself.
+        code = "\n".join(
+            line for line in source.splitlines()
+            if not line.lstrip().startswith(("#", "`"))
+        )
+        assert 'call("shell", command="git add -A' not in code, \
+            f"{name} force-adds untracked files again"
         assert "extract_patch" in source or "stage_commands" in source, \
             f"{name} should build its patch via swebench/patch.py"
 

@@ -14,7 +14,11 @@ import pathlib
 
 import pytest
 
-SEATS_DIR = pathlib.Path(__file__).resolve().parents[1] / "agent" / "interceptors"
+# The interceptors live in the execution plane (harness/execution/interceptors);
+# swebench.agent.interceptors re-exports them for callers written against the
+# old path, so the structural checks below follow the real directory.
+SEATS_DIR = (pathlib.Path(__file__).resolve().parents[2]
+             / "harness" / "execution" / "interceptors")
 
 
 def _interceptor_packages():
@@ -40,7 +44,7 @@ def test_each_interceptor_exports_its_interceptor():
                 "truncate": "TruncateInterceptor",
                 "present": "OutcomePresenter"}
     for pkg, cls in expected.items():
-        module = importlib.import_module(f"swebench.agent.interceptors.{pkg}")
+        module = importlib.import_module(f"harness.execution.interceptors.{pkg}")
         assert hasattr(module, cls), f"{pkg} does not export {cls}"
 
 

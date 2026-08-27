@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from ....models import ToolResult
-from ...pipeline import RAW_ERROR, RAW_OUTPUT, CallContext, ToolInterceptor
-from ...tools import truncate_output
+from harness.core.result import ToolResult
+from harness.execution.pipeline import RAW_ERROR, RAW_OUTPUT, CallContext, ToolInterceptor
+from harness.execution.tool_constants import truncate_output
 
 __all__ = ["TruncateInterceptor"]
 

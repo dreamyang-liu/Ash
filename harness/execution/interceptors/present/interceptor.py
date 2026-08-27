@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from ....models import CommandOutcome, ToolResult
-from ...pipeline import RAW_OUTPUT, CallContext, ToolInterceptor
+from harness.core.result import CommandOutcome, ToolResult
+from harness.execution.pipeline import RAW_OUTPUT, CallContext, ToolInterceptor
 from .render import render_outcome
 
 __all__ = ["OutcomePresenter"]

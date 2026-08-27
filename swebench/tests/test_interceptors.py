@@ -594,14 +594,14 @@ def _args(**kw):
 
 
 def test_proxy_pipeline_is_off_by_default():
-    from swebench.mcp_server import _build_pipeline
+    from harness.execution.server import _build_pipeline
     assert _build_pipeline(_args()) is None
 
 
 def test_proxy_bounds_output_whenever_it_mounts_the_chain():
     """Truncation only reaches proxy clients if the assembly actually includes
     it — the flag combinations, not the docstring, are the contract."""
-    from swebench.mcp_server import _build_pipeline
+    from harness.execution.server import _build_pipeline
     for args in (_args(guardrails="warn"), _args(guardrails="reject")):
         names = [i.name for i in _build_pipeline(args).interceptors]
         assert names[-1] == "TruncateInterceptor", names   # innermost interceptor
@@ -610,7 +610,7 @@ def test_proxy_bounds_output_whenever_it_mounts_the_chain():
 def test_proxy_guardrails_enforce_read_before_edit():
     """It used to be deferred to a coordination interceptor below, which is gone; with
     guardrails as the only interceptor, the rule has to be on."""
-    from swebench.mcp_server import _build_pipeline
+    from harness.execution.server import _build_pipeline
     interceptors = {i.name: i for i in
              _build_pipeline(_args(guardrails="warn")).interceptors}
     assert interceptors["GuardrailInterceptor"].read_before_edit is True
@@ -618,7 +618,7 @@ def test_proxy_guardrails_enforce_read_before_edit():
 
 def test_a_plugins_file_replaces_the_assembly(tmp_path):
     """How a coordination interceptor comes back after Waggle's removal: as a plugin."""
-    from swebench.mcp_server import _build_pipeline
+    from harness.execution.server import _build_pipeline
     path = tmp_path / "interceptors.py"
     path.write_text(
         "from swebench.agent.pipeline import ToolInterceptor\n"

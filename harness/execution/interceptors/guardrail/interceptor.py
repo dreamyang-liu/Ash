@@ -26,8 +26,8 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from ....models import ToolResult
-from ...pipeline import (RAW_OUTPUT, CallContext, Continue, Reject,
+from harness.core.result import ToolResult
+from harness.execution.pipeline import (RAW_OUTPUT, CallContext, Continue, Reject,
                          ToolInterceptor, Verdict)
 from .classify import is_content_edit, is_edit, is_read, is_test_run
 from .state import GuardrailState

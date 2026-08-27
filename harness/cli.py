@@ -305,7 +305,7 @@ def main(argv=None) -> int:
     run.add_argument("--run-id")
     run.add_argument("--agent-id", default="agent")
     run.add_argument("--mcp-name", default="ash")
-    run.add_argument("--mcp-stdio", help="args for `python -m swebench.mcp_server`")
+    run.add_argument("--mcp-stdio", help="args for `python -m harness.execution.server`")
     run.add_argument("--mcp-url", help="remote MCP endpoint")
     run.add_argument(
         "--sandbox-image",
@@ -369,7 +369,7 @@ def main(argv=None) -> int:
     batch.add_argument("--workers", type=int, default=4)
     batch.add_argument("--max-attempts", type=int, default=2)
     batch.add_argument("--timeout", type=float, default=1800.0)
-    batch.add_argument("--mcp-stdio", help="args for `python -m swebench.mcp_server`")
+    batch.add_argument("--mcp-stdio", help="args for `python -m harness.execution.server`")
     batch.add_argument("--mcp-url")
     batch.add_argument(
         "--no-resume", action="store_true",

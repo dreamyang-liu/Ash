@@ -7,7 +7,7 @@ any one rule: ``EDIT_COMMANDS`` and ``CONTENT_EDIT_COMMANDS`` live in
 
 from __future__ import annotations
 
-from ...tools import CONTENT_EDIT_COMMANDS, EDIT_COMMANDS
+from harness.execution.tool_constants import CONTENT_EDIT_COMMANDS, EDIT_COMMANDS
 
 __all__ = ["is_read", "is_edit", "is_content_edit", "is_test_run", "TEST_MARKERS"]
 
