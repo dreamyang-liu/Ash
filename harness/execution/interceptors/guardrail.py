@@ -1,38 +1,131 @@
-"""Tool-level guardrails: nudge the agent away from common failure patterns.
+"""Read-before-edit and edit-streak nudges.
 
-One kernel, one mounting (docs/ARCHITECTURE.md,
-ADR-2):
-
-``GuardrailState``
-    The kernel. Tracks, per ``(agent_id, sandbox_id)``, which files have been
-    read and how many times each has been edited without running tests.
-    Thread-safe: one instance is shared by every agent on a pipeline.
-
-``GuardrailInterceptor``
-    An L2 interceptor on the tool-call path. ``before`` decides (warn or reject),
-    ``after`` records successful reads and appends warnings to the result.
-    Mounted in the MCP proxy, on a harness executor via
-    ``AshSession.executor_for(pipeline=)``, or via ``--plugins``.
+Three parts, kept together because they are one rule: what counts as a read or an
+edit, the per-agent state that remembers it, and the interceptor that acts on it.
 
 Enforcement is a parameter, not a fork. ``enforcement="warn"`` appends advisory
-text (the agent loop's historical behavior, fail-open); ``enforcement="reject"``
-refuses the call outright. A coordination interceptor mounted below may enforce the same
-rule with a better message (it can name the version the agent is stale against);
-when one is, give this interceptor ``read_before_edit=False`` so the model is not told
-the same thing twice.
+text (fail-open); ``enforcement="reject"`` refuses the call. State is keyed by
+``(agent_id, sandbox_id)``: two agents in one sandbox must not satisfy each
+other's read-before-edit, and one agent across two sandboxes has not read a path
+in the second just because it read it in the first.
 """
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+import threading
 
+from harness.execution.pipeline import (RAW_OUTPUT, CallContext, Continue,
+                                        Reject, ToolInterceptor, Verdict)
 from harness.core.result import ToolResult
-from harness.execution.pipeline import (RAW_OUTPUT, CallContext, Continue, Reject,
-                         ToolInterceptor, Verdict)
-from .classify import is_content_edit, is_edit, is_read, is_test_run
-from .state import GuardrailState
+from harness.execution.tool_constants import (CONTENT_EDIT_COMMANDS,
+                                              EDIT_COMMANDS)
 
-__all__ = ["GuardrailInterceptor", "EDIT_STREAK_LIMIT"]
+__all__ = ["GuardrailInterceptor", "GuardrailState", "EDIT_STREAK_LIMIT",
+           "TEST_MARKERS", "is_read", "is_edit", "is_content_edit",
+           "is_test_run"]
+
+
+# --- what counts as what ---------------------------------------------------
+#: What a command has to mention to count as running the tests. Crude on purpose:
+#: the streak counter only needs to know the agent has stopped editing and gone to
+#: check, and a missed match costs one extra nudge rather than a wrong decision.
+TEST_MARKERS = ("pytest", "test_", "assert")
+
+
+def _command(tool_name: str, args: dict) -> str:
+    """This call's text_editor command, or ``''``.
+
+    A model can put anything in ``args`` — a list, a dict, a number. Membership
+    tests against a frozenset raise ``TypeError`` on unhashable values, and in
+    reject mode a fail-closed crash would turn malformed model output into a
+    policy refusal. Normalize once, here, so junk simply does not match.
+    """
+    if tool_name != "text_editor":
+        return ""
+    command = args.get("command")
+    return command if isinstance(command, str) else ""
+
+
+def is_read(tool_name: str, args: dict) -> bool:
+    return _command(tool_name, args) == "view"
+
+
+def is_edit(tool_name: str, args: dict) -> bool:
+    return _command(tool_name, args) in EDIT_COMMANDS
+
+
+def is_content_edit(tool_name: str, args: dict) -> bool:
+    """An edit to existing content — see ``tools.CONTENT_EDIT_COMMANDS``."""
+    return _command(tool_name, args) in CONTENT_EDIT_COMMANDS
+
+
+def is_test_run(tool_name: str, args: dict) -> bool:
+    if tool_name != "shell":
+        return False
+    command = args.get("command", "")
+    return any(marker in command for marker in TEST_MARKERS)
+
+
+# --- the state a rule needs ------------------------------------------------
+import threading
+
+
+
+class GuardrailState:
+    """Read/edit bookkeeping, keyed by ``(agent_id, sandbox_id)``.
+
+    One instance per interceptor, shared across agents — hence the keying:
+    files A read must never excuse B's blind edit. Thread-safe.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._files_read: dict[tuple[str, str], set[str]] = {}
+        self._edit_streak: dict[tuple[str, str], dict[str, int]] = {}
+
+    # -- reads --------------------------------------------------------------- #
+
+    def record_read(self, agent_id: str, sandbox_id: str, path: str) -> None:
+        with self._lock:
+            self._files_read.setdefault((agent_id, sandbox_id), set()).add(path)
+
+    def has_read(self, agent_id: str, sandbox_id: str, path: str) -> bool:
+        with self._lock:
+            return path in self._files_read.get((agent_id, sandbox_id), ())
+
+    # -- edit streaks -------------------------------------------------------- #
+
+    def record_edit(self, agent_id: str, sandbox_id: str, path: str) -> int:
+        """Count this edit and return the streak length since the last test run."""
+        with self._lock:
+            streaks = self._edit_streak.setdefault((agent_id, sandbox_id), {})
+            streaks[path] = streaks.get(path, 0) + 1
+            return streaks[path]
+
+    def reset_edits(self, agent_id: str, sandbox_id: str) -> None:
+        with self._lock:
+            self._edit_streak.pop((agent_id, sandbox_id), None)
+
+    def dump(self) -> dict:
+        """JSON-friendly snapshot, so an audit can read this interceptor's state.
+
+        Keyed over reads *and* streaks: an agent that only ever edited blindly
+        has no read entry, and it is exactly the behavior this audit exists to
+        surface.
+        """
+        with self._lock:
+            keys = set(self._files_read) | set(self._edit_streak)
+            return {
+                f"{agent}:{sbx}": {
+                    "files_read": sorted(self._files_read.get((agent, sbx), ())),
+                    "edit_streak": dict(self._edit_streak.get((agent, sbx), {})),
+                }
+                for agent, sbx in sorted(keys)
+            }
+
+
+# --- the interceptor -------------------------------------------------------
+from typing import Literal, Optional
 
 EDIT_STREAK_LIMIT = 3
 _WARNINGS = "guardrail_warnings"

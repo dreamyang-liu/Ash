@@ -46,9 +46,12 @@ There are four independently-versioned pieces:
 │       └── cli.py           # `ash-sandbox` console script
 ├── swebench/                # SWE-bench evaluation harness — see "The four layers"
 │   ├── __main__.py          # CLI entry (`python -m swebench`), YAML config w/ `extends`
-│   ├── agent/               # L2: the interceptor chain + this repo's agent loop
-│   │   ├── pipeline.py      #   the onion: verdicts, CallContext, ToolPipeline
-│   │   ├── interceptors/    #   one package each: guardrail, truncate, present
+│   ├── agent/               # L2: this repo's agent loop (the chain moved to
+│   │                        #   harness/execution/ — these are re-export shims)
+│   │   ├── pipeline.py      #   shim → harness/execution/pipeline.py
+│   │   ├── interceptors/    #   shim → harness/execution/interceptors/
+│   │                        #     one FILE each: guardrail, truncate, present,
+│   │                        #     mutation (+ pipeline.py = default_pipeline)
 │   │   └── tools.py         #   panel compilation + routing (ToolPanel)
 │   ├── harnesses/           # L3 topologies: litellm, claude-code (base.py = the API)
 │   ├── configs/             # Per-model YAML (`extends:`) + tool_panels/
@@ -96,8 +99,13 @@ another.
 │      interceptor fail-open or fail-closed. Never raises; every failure comes
 │      back as a ToolResult, because the caller above is an agent loop and an
 │      escaped exception kills a whole run.
-│      Ships guardrail (read-before-edit, edit streaks), truncate (bound one
-│      result), present (compose the model's text from the runtime's report).
+│      One file per interceptor in harness/execution/interceptors/, because an
+│      interceptor is the unit somebody replaces. Ships guardrail (read-before-
+│      edit, edit streaks), truncate (bound one result), present (compose the
+│      model's text from the runtime's report), and mutation (did this step
+│      change anything — opt-in, mounted only when checkpointing is on).
+│      That list is what we needed, not a taxonomy: a new interceptor adds a
+│      file, it does not have to fit a category.
 │      Mount your own: `default_pipeline(extra=[...])`, or
 │      `execution.interceptors: my_file.py`.
 │

@@ -1,9 +1,14 @@
-"""The default truncation interceptor: elide the middle, keep both ends."""
+"""Bound what a single tool result costs the model's context.
+
+Flow, not stock: this caps one result. Folding an accumulated transcript is a
+different seam (the agent loop's context-window guard).
+"""
 
 from __future__ import annotations
 
 from harness.core.result import ToolResult
-from harness.execution.pipeline import RAW_ERROR, RAW_OUTPUT, CallContext, ToolInterceptor
+from harness.execution.pipeline import (RAW_ERROR, RAW_OUTPUT, CallContext,
+                                        ToolInterceptor)
 from harness.execution.tool_constants import truncate_output
 
 __all__ = ["TruncateInterceptor"]

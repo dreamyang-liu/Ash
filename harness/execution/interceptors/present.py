@@ -1,14 +1,48 @@
-"""The interceptor that hands a rendered outcome to the model."""
+"""Compose the model's text from the runtime's structured report.
+
+The runtime returns a ``CommandOutcome`` (exit code, streams, truncation flags);
+a model reads prose. This is the only place that turns one into the other, so how
+a tool call *looks* to the model is one decision rather than several.
+"""
 
 from __future__ import annotations
 
-from typing import Callable
-
 from harness.core.result import CommandOutcome, ToolResult
 from harness.execution.pipeline import RAW_OUTPUT, CallContext, ToolInterceptor
-from .render import render_outcome
 
-__all__ = ["OutcomePresenter"]
+__all__ = ["OutcomePresenter", "render_outcome"]
+
+
+# --- rendering -------------------------------------------------------------
+def render_outcome(outcome: CommandOutcome) -> str:
+    """Turn a command's outcome into text for a model — the default rendering.
+
+    Sections come from the separate streams, so a command printing something that
+    looks like a divider cannot fake one. Exit status is stated from the number
+    rather than implied, because a silent failure has nothing else to show.
+    """
+    parts = []
+    if outcome.stdout:
+        parts.append(outcome.stdout.rstrip("\n"))
+    if outcome.stderr:
+        parts.append("--- stderr ---\n" + outcome.stderr.rstrip("\n"))
+    if outcome.running:
+        parts.append("[still running]")
+    elif outcome.timed_out:
+        parts.append("[timed out]")
+    elif outcome.exit_code:
+        parts.append(f"[exit {outcome.exit_code}]")
+    if outcome.truncated:
+        parts.append(f"[output clipped — {outcome.stdout_bytes} bytes on stdout, "
+                     f"{outcome.stderr_bytes} on stderr. Narrow the command, or "
+                     f"use `tail`/`grep` to select what you need]")
+    return "\n".join(parts)
+
+
+# --- the interceptor -------------------------------------------------------
+from typing import Callable
+
+
 
 
 class OutcomePresenter(ToolInterceptor):
