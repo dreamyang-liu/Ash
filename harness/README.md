@@ -262,9 +262,17 @@ colleague's experiment).
 **Finding: snapshot GC needs a backend change.** AgentENV exposes DELETE for
 `/sandboxes/{id}` and `/templates/{id}` only; `DELETE /snapshots/{id}` answers
 405, and `aenv snapshot` has no delete subcommand. A handful of fork-demo runs
-left 17 orphaned snapshots (~420 MB chain each) that no client can reclaim. The
-reaper detects this and reports it as *unsupported* rather than emitting N
-failures — but the fix belongs in AgentENV.
+left 17 orphaned snapshots that no client can reclaim. The reaper detects this
+and reports it as *unsupported* rather than emitting N failures — but the fix
+belongs in AgentENV.
+
+Until then, `scripts/aenv-snapshot-gc.py` reclaims them offline (mark-and-sweep
+over the on-disk store; keeps aliased templates and every layer they reference;
+requires the server stopped). Worth knowing what it measured: 17 orphaned
+snapshots freed **3.2 MB**, because overlaybd dedup means an incremental
+disk-only checkpoint holds almost nothing of its own and the `chainSizeMB` the
+API reports is the *logical* chain including shared base layers. Unbounded
+snapshot growth is a count problem, not a capacity one.
 
 ## Threading rules (learned by breaking them)
 
