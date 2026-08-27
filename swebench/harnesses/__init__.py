@@ -21,6 +21,7 @@ from .base import BaseHarness
 from .litellm import LiteLLMHarness
 from .claude_code import ClaudeCodeHarness
 from .marathon import MarathonHarness
+from .marathon_claude_code import MarathonClaudeCodeHarness
 
 HARNESSES = {
     "litellm": LiteLLMHarness,
@@ -28,6 +29,9 @@ HARNESSES = {
     # SWE-Marathon: tasks come from a directory rather than a dataset, and
     # grading is the task's own verifier script.
     "marathon": MarathonHarness,
+    # The same marathon topology with Claude Code as the agent (in-process
+    # MCP). Scaffold comparisons; no per-step checkpoints on this path.
+    "marathon-claude-code": MarathonClaudeCodeHarness,
     # "codex": CodexHarness,
 }
 
