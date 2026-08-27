@@ -192,3 +192,70 @@ def test_observer_failure_cannot_break_the_run(tmp_path):
     assert record["seq"] == 1
     assert read_journal(tmp_path / "j.jsonl")[0]["text"] == "still recorded"
     journal.close()
+
+
+def test_tool_boundary_fires_even_though_the_call_looks_in_flight(tmp_path):
+    """Regression: the in-flight guard must not block the tool-boundary path.
+
+    An external agent's tool call is journaled as tool.started, the executor
+    runs, then on_tool_boundary is called -- but tool.finished only arrives
+    later (the SDK surfaces the result on its next message). Without the force
+    bypass, depth is still 1 and every checkpoint is skipped, producing a
+    rollback-capable run with zero snapshots.
+    """
+    journal, bridge, checkpointer = make(tmp_path)
+    journal.emit(E.SESSION_REF, native_session_id="ses_1")
+    journal.emit(E.TOOL_STARTED, call_id="c1", name="shell", args={})
+
+    bridge.on_tool_boundary(1)                       # executor has returned
+    assert checkpointer.calls == [1]
+    assert bridge.ledger.checkpoints[-1].snapshot_id == "snap-1"
+
+    # the turn-boundary path still respects the guard
+    journal.emit(E.TURN_COMPLETED, usage={})
+    assert checkpointer.calls == [1]
+    journal.close()
+
+
+def test_clean_steps_keep_the_step_map_complete_rather_than_skipping(tmp_path):
+    """Redundant turns are the Checkpointer's business, not the bridge's.
+
+    It maps a read-only step to the previous snapshot, which keeps step ->
+    snapshot total. A bridge-side "skip if nothing changed" gate would look
+    cheaper and silently punch holes in that map.
+    """
+    journal, bridge, checkpointer = make(tmp_path, clean_steps=(2,))
+    journal.emit(E.SESSION_REF, native_session_id="ses_1")
+    journal.emit(E.TURN_COMPLETED, usage={})
+    journal.emit(E.TURN_COMPLETED, usage={})
+    assert checkpointer.calls == [1, 2]
+    assert bridge.ledger.step_map() == {1: "snap-1", 2: "snap-1"}
+    journal.close()
+
+
+def test_capture_is_declined_on_an_event_loop_thread(tmp_path):
+    """AshSession's run_until_complete cannot be entered from a running loop.
+
+    Doing it anyway fails and leaves the coroutine un-awaited -- which is what
+    produced a spurious "capture failed" on every SDK-slot run, because that slot
+    journals from inside its event loop.
+    """
+    import asyncio
+
+    journal, bridge, checkpointer = make(tmp_path)
+
+    async def emit_from_loop():
+        journal.emit(E.TOOL_STARTED, call_id="c1", name="shell", args={})
+        journal.emit(E.TOOL_FINISHED, call_id="c1", status="ok", output="")
+        journal.emit(E.TURN_COMPLETED, usage={})
+
+    asyncio.run(emit_from_loop())
+    assert checkpointer.calls == []
+    assert bridge._skipped_on_loop == 1
+
+    # off the loop the same sequence captures normally
+    journal.emit(E.TOOL_STARTED, call_id="c2", name="shell", args={})
+    journal.emit(E.TOOL_FINISHED, call_id="c2", status="ok", output="")
+    journal.emit(E.TURN_COMPLETED, usage={})
+    assert checkpointer.calls == [1]
+    journal.close()

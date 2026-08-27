@@ -142,3 +142,45 @@ def test_ledger_at_step_reuses_previous_snapshot_for_clean_steps(tmp_path):
         ledger.record(2, None, reason="clean")  # read-only step: nothing captured
         assert ledger.at_step(2).snapshot_id == "snap-1"
         assert ledger.step_map() == {1: "snap-1", 2: None}
+
+
+def test_inherited_prefix_is_marked_copied_not_the_child_own_work(tmp_path):
+    """A child journal's seqs restart at 1, so copied_through_seq must not be
+    fed a parent's seq number -- that marks the child's own work as copied."""
+    parent_records = build_journal(tmp_path / "parent.jsonl")
+    boundary = next(r["seq"] for r in parent_records if r["type"] == E.TURN_COMPLETED)
+    inherited = [r for r in parent_records if r["seq"] <= boundary]
+
+    child_path = tmp_path / "child.jsonl"
+    with JournalWriter(child_path, run_id="child") as journal:
+        journal.emit(E.RUN_STARTED, slot="opencode", task_prompt="branch")
+        journal.emit(E.AGENT_MESSAGE, text="my own answer")
+        journal.emit(E.TURN_COMPLETED, usage={"input_tokens": 3})
+
+    document = journal_to_atif(
+        read_journal(child_path), inherited=inherited, continued_from="run1"
+    )
+    flags = [s["is_copied_context"] for s in document["steps"]]
+    assert flags[-1] is False, "the child's own step must not be marked copied"
+    assert any(flags[:-1]), "the inherited prefix must be marked copied"
+    assert document["continued_trajectory_ref"] == "run1"
+
+
+def test_inherited_prefix_ends_a_step(tmp_path):
+    """The parent's boundary rarely lands on a turn.completed, so the prefix must
+    be flushed explicitly or the child's first step merges into it and inherits
+    copied=True."""
+    parent_records = build_journal(tmp_path / "p.jsonl")
+    # boundary mid-turn: after the tool result, before turn.completed
+    boundary = next(r["seq"] for r in parent_records if r["type"] == E.TOOL_FINISHED)
+    inherited = [r for r in parent_records if r["seq"] <= boundary]
+
+    child_path = tmp_path / "c.jsonl"
+    with JournalWriter(child_path, run_id="child") as journal:
+        journal.emit(E.AGENT_MESSAGE, text="child work")
+        journal.emit(E.TURN_COMPLETED, usage={})
+
+    document = journal_to_atif(read_journal(child_path), inherited=inherited)
+    assert len(document["steps"]) >= 2
+    own = [s for s in document["steps"] if not s["is_copied_context"]]
+    assert own and "child work" in (own[-1]["message"] or "")

@@ -36,12 +36,21 @@ def journal_to_atif(
     trajectory_id: Optional[str] = None,
     copied_through_seq: int = 0,
     continued_from: Optional[str] = None,
+    inherited: Optional[List[dict]] = None,
 ) -> dict:
     """Build an ATIF document from journal records.
 
-    ``copied_through_seq``: for a forked run, journal events with ``seq`` <= this
-    came from the parent trajectory; their steps get ``is_copied_context=True``.
+    ``inherited``: records replayed from a parent trajectory (a fork's prefix).
+    They are prepended and force-marked ``is_copied_context=True``, which makes
+    the child document self-contained for training while still letting an SFT
+    consumer filter the shared prefix instead of learning it once per branch.
+
+    ``copied_through_seq``: the single-journal form of the same thing -- events
+    with ``seq`` <= this are treated as inherited. Do **not** feed it a parent's
+    seq number when exporting a child journal: child seqs restart at 1, so the
+    child's own work would be marked copied.
     """
+    inherited = inherited or []
     run_id = _first(records, "run_id") or ""
     started = _first_of_type(records, E.RUN_STARTED) or {}
     finished = _last_of_type(records, E.RUN_FINISHED) or {}
@@ -57,6 +66,8 @@ def journal_to_atif(
             steps.append(current)
             current = None
 
+    copied_now = False
+
     def ensure(record: dict) -> dict:
         nonlocal current
         if current is None:
@@ -70,11 +81,23 @@ def journal_to_atif(
                 "tool_calls": [],
                 "observation": None,
                 "metrics": _empty_metrics(),
-                "is_copied_context": record.get("seq", 0) <= copied_through_seq,
+                "is_copied_context": copied_now
+                or record.get("seq", 0) <= copied_through_seq,
             }
         return current
 
-    for record in records:
+    tagged = [(r, True) for r in inherited] + [(r, False) for r in records]
+    was_inherited = None
+    for record, is_inherited in tagged:
+        if was_inherited is True and not is_inherited:
+            # The inherited prefix always ends a step. Without this flush the
+            # parent's trailing partial step (its boundary rarely lands exactly
+            # on a turn.completed) merges with the child's first one, and the
+            # merged step inherits copied=True -- hiding the child's own work
+            # from any consumer that filters copied context.
+            flush()
+        was_inherited = is_inherited
+        copied_now = is_inherited
         etype = record.get("type")
 
         if etype == E.AGENT_THINKING:

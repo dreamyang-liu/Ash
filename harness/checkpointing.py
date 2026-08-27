@@ -56,6 +56,8 @@ class SnapshotBridge:
     #: Depth of unfinished tool calls; a checkpoint is only safe at zero.
     _inflight: int = 0
     _pending: bool = False
+    #: Captures declined because the caller was on an event loop thread.
+    _skipped_on_loop: int = 0
     records: list = field(default_factory=list)
 
     # --- construction ------------------------------------------------------
@@ -128,14 +130,31 @@ class SnapshotBridge:
 
     # --- checkpoint triggers ----------------------------------------------
     def on_tool_boundary(self, index: int) -> Optional[Checkpoint]:
-        """Step boundary for the SDK slot (PreToolUse callback)."""
-        return self.maybe_checkpoint(step=index)
+        """Step boundary for an external agent: its tool call just executed.
 
-    def maybe_checkpoint(self, step: Optional[int] = None) -> Optional[Checkpoint]:
+        ``force`` is required here. The caller is asserting the executor has
+        returned, but the journal's ``tool.finished`` event is emitted later (the
+        SDK surfaces the ToolResultBlock on the next message), so the in-flight
+        guard would still see depth 1 and skip every checkpoint -- the bug that
+        made a rollback-capable run record zero snapshots.
+        """
+        return self.maybe_checkpoint(step=index, force=True)
+
+    def maybe_checkpoint(
+        self, step: Optional[int] = None, *, force: bool = False
+    ) -> Optional[Checkpoint]:
         """Take a checkpoint if we are quiesced and the session supports it."""
-        if self._inflight:
+        if self._inflight and not force:
             return None
         if self.checkpointer is None or not _enabled(self.checkpointer):
+            return None
+        if _on_running_loop():
+            # AshSession drives a private loop with run_until_complete, which
+            # cannot be entered from a thread that already has a running loop --
+            # it fails and leaves the coroutine un-awaited. The SDK slot journals
+            # from inside its event loop, and for that slot the tool boundary
+            # (a worker thread) is the correct trigger anyway.
+            self._skipped_on_loop += 1
             return None
         self.step = step if step is not None else self.step + 1
         record = self.checkpointer.after_step(self.step)
@@ -178,6 +197,17 @@ class SnapshotBridge:
 
 
 # --- helpers ---------------------------------------------------------------
+def _on_running_loop() -> bool:
+    """True when this thread already runs an asyncio loop."""
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
+
+
 def _enabled(checkpointer: Any) -> bool:
     enabled = getattr(checkpointer, "enabled", None)
     if callable(enabled):

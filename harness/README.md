@@ -143,25 +143,42 @@ journal is never rewritten).
 `fork_plan(journal, step)` resolves the pair and returns the `seq` boundary ATIF
 needs for `is_copied_context`.
 
-### Demo, and what it actually proves
+### Demo — verified end to end on AgentENV
 
 ```bash
-python -m harness.demo_fork --slot opencode --cwd /tmp/demo \
-    --sandbox-image python:3.11-slim --branch-at 1 \
-    --prompt "..." --direction "try X" --direction "try Y"
+export AENV_SERVER_URL=http://127.0.0.1:8000 AENV_API_KEY=...
+python -m harness.demo_fork --slot claude-code --in-process --backend microvm \
+    --sandbox-image docker.io/library/python:3.11-slim --branch-at 1 \
+    --cwd /tmp/demo --prompt "..." \
+    --direction "write branch_a.txt" --direction "is branch_a.txt there?"
 ```
 
-Verified with real agents: the conversation half branches correctly (each child
-gets its own native session; siblings are isolated). The environment half needs a
-snapshot-capable backend — **Docker cannot snapshot**, only `MicroVMPool`
-(AgentENV, `--backend microvm`) can. Run it on Docker and each branch gets a
-*fresh* sandbox rather than a restored one; the demo prints `env half ABSENT` in
-that case instead of implying a complete pair.
+Real result (Firecracker snapshots, claude-code, two branches off step 1):
 
-The first run of this demo without an env snapshot demonstrated exactly why the
-pair matters: branch 1 edited a file, and branch 2 — sharing the filesystem —
-reported "the file no longer contains the bug". That is the failure mode the
-snapshot half exists to prevent.
+```
+branch step 1  pair complete: True
+  env half          01a04476-a3fa-7bf1-8e2b-26e4a6d32407
+  conversation half 8d3b6503-4f85-429d-8f11-a016a75cb183
+branch 1 -> "base.txt branch_a.txt"   # inherited the parent's work, added its own
+branch 2 -> "NO"                      # sees the parent's base.txt, NOT its sibling's file
+distinct child sessions: yes
+```
+
+Branch 2 is the proof: it inherits everything the parent did and nothing its
+sibling did. Each ATIF export shows `step 1 copied=True` (the shared prefix) and
+`step 2 copied=False` (its own work).
+
+Two requirements for that result, both of which fail loudly if unmet:
+
+- **A snapshot-capable backend.** Docker cannot snapshot; only `MicroVMPool`
+  (`--backend microvm`) can. On Docker the demo prints `env half ABSENT` rather
+  than implying a complete pair — and an early run in that mode demonstrated
+  exactly why the pair matters: branch 1 edited a file and branch 2, sharing the
+  filesystem, reported "the file no longer contains the bug".
+- **`--in-process`** for the SDK slot. The stdio `swebench.mcp_server` subprocess
+  creates and owns its *own* sandbox, so the session being snapshotted would not
+  be the one the agent worked in — the pair would reference an environment nobody
+  touched. In-process keeps sandbox ownership in the harness.
 
 ## Inference gateway
 
@@ -197,10 +214,25 @@ holds its own slot token — provider credentials stay in the routing table.
 Verdict-style rewriting is *not* here: tool-call policy belongs in the MCP proxy
 (L2) where a call is semantically addressable. This layer speaks HTTP and tokens.
 
+## Threading rules (learned by breaking them)
+
+`AshSession` drives a private event loop via `run_until_complete`. Two rules
+follow, and violating either fails *quietly* — tool calls or snapshots return
+`None` with an un-awaited coroutine warning:
+
+- **Call the executor from a worker thread** (`asyncio.to_thread`) when inside an
+  SDK tool handler; that handler already runs on a loop, and loops cannot nest.
+- **Never checkpoint from a thread that has a running loop.** The bridge detects
+  this and declines (counted in `_skipped_on_loop`) instead of failing. For the
+  SDK slot the tool boundary — a worker thread — is the correct trigger anyway;
+  the turn-boundary trigger serves the CLI slots, whose journal writes come from
+  a plain reader thread.
+
 ## Not here yet
 
 - Orchestrator (registry / scheduling / concurrency / guaranteed teardown) —
   currently one run per CLI invocation. Budget enforcement exists in the gateway.
 - Live behaviour probes in `contracts/ci_check.py` (need credentials).
-- An end-to-end fork against `--backend microvm` (needs a running AgentENV);
-  the pairing logic is covered by tests with a snapshot-capable fake session.
+- Fork for the CLI slots against microvm: `opencode` has native session fork and
+  `codex` replays its prompt, but neither has been run through the full pair
+  end to end (the SDK slot has).
