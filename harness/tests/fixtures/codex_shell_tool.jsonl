@@ -1,0 +1,10 @@
+{"type":"thread.started","thread_id":"0199c0de-beef-4000-8000-000000000001"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","item_type":"reasoning"}}
+{"type":"item.completed","item":{"id":"item_1","item_type":"reasoning","text":"I should inspect the file."}}
+{"type":"item.started","item":{"id":"item_2","item_type":"command_execution","command":"cat probe.txt","cwd":"/tmp/oc-probe"}}
+{"type":"item.completed","item":{"id":"item_2","item_type":"command_execution","command":"cat probe.txt","aggregated_output":"hello\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_3","item_type":"mcp_tool_call","server":"ash","tool":"shell","arguments":"{\"command\":\"ls\"}"}}
+{"type":"item.completed","item":{"id":"item_3","item_type":"mcp_tool_call","server":"ash","tool":"shell","result":{"stdout":"probe.txt\n"},"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_4","item_type":"agent_message","text":"The file contains: hello"}}
+{"type":"turn.completed","usage":{"input_tokens":120,"cached_input_tokens":64,"output_tokens":31,"reasoning_output_tokens":12}}

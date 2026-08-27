@@ -1,0 +1,62 @@
+# Upstream assumptions of harness/slots/codex.py + normalize/codex.py.
+slot: codex
+upstream:
+  binary: codex
+  verified_versions:
+    cli: "0.145.0"
+
+cli_flags:
+  - "--json"                # stdout JSONL: the contract (rollout files are not)
+  - "--skip-git-repo-check"
+  - "--sandbox"             # read-only by default: effects belong in ash sandbox
+  - "--ephemeral"
+  - "-c"                    # mcp_servers.* overrides, avoids config.toml races
+  - "-m"
+  - "-C"
+  - "--output-schema"
+  - "-o"
+
+subcommands:
+  - "exec"
+  - "exec resume"           # resume=True capability
+
+# `-c mcp_servers.<name>.<key>=<toml>` keys we set.
+mcp_config_keys:
+  - command
+  - args
+  - env
+  - url                     # streamable-http
+  - http_headers
+
+# stdout event types the normalizer maps.
+event_types:
+  - thread.started
+  - turn.started
+  - turn.completed
+  - turn.failed
+  - item.started
+  - item.completed
+  - item.updated
+  - error
+
+item_types:
+  - agent_message
+  - reasoning
+  - command_execution
+  - mcp_tool_call
+
+usage_keys:
+  input_tokens: input_tokens
+  cached_input_tokens: cached_input_tokens
+  output_tokens: output_tokens
+  reasoning_output_tokens: reasoning_output_tokens
+
+known_breaking_changes:
+  # Watch list, not assertions.
+  - 'wire_api = "chat" was removed: third-party endpoints must speak Responses API'
+
+behaviors:
+  - id: json_stream_emits_thread_started
+    why: session id source for resume
+  - id: mcp_override_registers_server
+    why: tool injection path

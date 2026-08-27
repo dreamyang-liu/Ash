@@ -1,0 +1,69 @@
+# Upstream assumptions of harness/slots/claude_code.py + normalize/claude_code.py.
+#
+# Everything listed here is something we depend on but upstream does not promise.
+# ci_check.py asserts each item against the installed version; a failure means
+# the adapter needs updating BEFORE the next eval batch, not after a week of
+# quietly wrong trajectories.
+slot: claude-code
+upstream:
+  package: claude-agent-sdk
+  binary: claude
+  verified_versions:
+    sdk: "0.2.145"
+    cli: "2.1.239"
+
+# ClaudeAgentOptions fields the driver passes. Unknown kwargs are dropped at
+# runtime by _accepts(), so a silent rename would degrade behaviour without an
+# error -- hence asserting them here.
+options_fields:
+  - cwd
+  - mcp_servers
+  - allowed_tools
+  - disallowed_tools
+  - permission_mode
+  - can_use_tool          # the policy verdict seam
+  - setting_sources       # [] == ignore local CLAUDE.md/.claude (eval hygiene)
+  - resume
+  - fork_session          # rollback: conversation half of the pair
+  - model
+  - system_prompt
+  - max_turns
+
+sdk_exports:
+  - query
+  - ClaudeAgentOptions
+  - create_sdk_mcp_server  # in-process MCP (marathon path keeps sandbox ownership)
+
+# Message/block class names the normalizer duck-types on.
+message_types:
+  - AssistantMessage
+  - UserMessage
+  - ResultMessage
+  - SystemMessage
+block_types:
+  - TextBlock
+  - ThinkingBlock
+  - ToolUseBlock
+  - ToolResultBlock
+
+# Attribute paths read by normalize/claude_code.py.
+attributes:
+  ToolUseBlock: [id, name, input]
+  ToolResultBlock: [tool_use_id, content, is_error]
+  ResultMessage: [subtype, result, usage, total_cost_usd, session_id, is_error, num_turns]
+
+# Anthropic usage keys -> normalized Usage fields.
+usage_keys:
+  input_tokens: input_tokens
+  output_tokens: output_tokens
+  cache_read_input_tokens: cached_input_tokens
+  cache_creation_input_tokens: cache_creation_tokens
+
+behaviors:
+  # Each is a live probe in ci_check.py (needs credentials; skipped otherwise).
+  - id: can_use_tool_invoked
+    why: builtin-tool denial is enforced here, not in the prompt
+  - id: builtin_bash_denied
+    why: a leaked builtin writes to the host, escaping sandbox and snapshots
+  - id: fork_session_creates_new_id
+    why: conversation half of the rollback pair
