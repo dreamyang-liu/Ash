@@ -41,7 +41,14 @@ TOOL_FINISHED = "tool.finished"      # {call_id, name?, status: ok|error, output
 # Turn boundaries are the quiesce points for snapshotting (harness/rollback.py):
 # between turn.completed and the next turn.started there is no in-flight call.
 TURN_STARTED = "turn.started"        # {turn?}
-TURN_COMPLETED = "turn.completed"    # {turn?, usage: Usage.as_dict()}
+#: A turn boundary, and *only* that. The checkpoint bridge treats every one of
+#: these as a quiesce point, so anything that is not a boundary must not use it --
+#: a mid-turn usage report emitted here produced a checkpoint per token update.
+TURN_COMPLETED = "turn.completed"    # {turn?, usage?: Usage.as_dict()}
+#: Interim accounting. ``cumulative`` marks a total-for-the-thread figure that
+#: replaces earlier ones; without it a consumer summing every report multiplies
+#: a run's real token count by the number of updates.
+USAGE_UPDATED = "usage.updated"      # {usage: Usage.as_dict(), cumulative?: bool}
 
 # --- session & rollback ----------------------------------------------------
 SESSION_REF = "session.ref"          # {native_session_id, transcript_path?, capabilities?}

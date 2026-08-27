@@ -24,12 +24,28 @@ from harness.slots.codex import CodexSlot
 from harness.slots.opencode import OpenCodeSlot
 
 
-def test_registry_exposes_the_three_slots():
-    assert available() == ["claude-code", "codex", "opencode"]
+def test_registry_exposes_every_slot():
+    assert available() == ["claude-code", "codex", "codex-cli", "opencode", "opencode-cli"]
     for name in available():
         cls = load_slot(name)
         assert issubclass(cls, AgentSlot)
-        assert cls.name == name
+        # `-cli` variants drive the same agent a different way, so they keep the
+        # agent's name; the registry key is the driver, cls.name is the agent.
+        assert cls.name == name.replace("-cli", "")
+
+
+def test_default_names_bind_to_the_protocol_drivers():
+    """The CLI drivers cannot branch a run and parse an unversioned stdout, so a
+    bare slot name must not resolve to one."""
+    from harness.slots.codex_sdk import CodexSdkSlot
+    from harness.slots.opencode_server import OpenCodeServerSlot
+
+    assert load_slot("codex") is CodexSdkSlot
+    assert load_slot("opencode") is OpenCodeServerSlot
+    assert load_slot("codex-cli") is CodexSlot
+    assert load_slot("opencode-cli") is OpenCodeSlot
+    for name in ("codex", "opencode", "claude-code"):
+        assert load_slot(name).capabilities.fork, "%s should be forkable" % name
 
 
 def test_unknown_slot_lists_alternatives():

@@ -409,7 +409,7 @@ def test_batch_isolates_opencode_state_per_task(tmp_path, monkeypatch):
     their shared session database."""
     from harness.slots.opencode import OpenCodeSlot
 
-    runner = BatchRunner("opencode", tmp_path / "out", workers=2)
+    runner = BatchRunner("opencode-cli", tmp_path / "out", workers=2)
     captured = {}
 
     def fake_run(self, spec, journal, mcp=None):

@@ -20,6 +20,8 @@ Exit codes: 0 ok, 1 contract violation, 2 harness/setup error.
 from __future__ import annotations
 
 import argparse
+import importlib
+import inspect
 import json
 import shutil
 import subprocess
@@ -147,7 +149,9 @@ def check_normalizer_alignment(contract: dict, report: Report) -> None:
     slot = contract["slot"]
     module = {
         "codex": "harness.normalize.codex",
+        "codex-sdk": "harness.normalize.codex_sdk",
         "opencode": "harness.normalize.opencode",
+        "opencode-server": "harness.normalize.opencode_server",
         "claude-code": "harness.normalize.claude_code",
     }[slot]
     try:
@@ -163,11 +167,81 @@ def check_normalizer_alignment(contract: dict, report: Report) -> None:
             "%s handles usage key %s" % (slot, key)
         )
     for etype in (contract.get("event_types") or []) + (contract.get("item_types") or []):
-        if etype in ("turn.started",):
+        if etype in ("turn.started", "turn/started"):
             continue
         (report.ok if etype in source else report.fail)("%s handles event %s" % (slot, etype))
     for mtype in (contract.get("message_types") or []) + (contract.get("block_types") or []):
         (report.ok if mtype in source else report.fail)("%s handles type %s" % (slot, mtype))
+
+
+def check_python_api(contract: dict, report: Report) -> None:
+    """Assert the SDK surface a protocol driver calls is still there.
+
+    These are the names a version bump can remove silently: the driver would then
+    fail at run time, mid-eval, rather than here.
+    """
+    spec = contract.get("python_api") or {}
+    if not spec:
+        return
+    module_name = spec.get("module")
+    try:
+        mod = importlib.import_module(module_name)
+    except ImportError as exc:
+        report.skip("%s python api" % contract["slot"], "%s not installed (%s)" % (module_name, exc))
+        return
+
+    for name in spec.get("exports") or []:
+        (report.ok if hasattr(mod, name) else report.fail)(
+            "%s exports %s" % (module_name, name)
+        )
+
+    client_spec = spec.get("client") or {}
+    if client_spec:
+        try:
+            client_mod = importlib.import_module(client_spec["module"])
+            cls = getattr(client_mod, client_spec["cls"])
+        except (ImportError, AttributeError) as exc:
+            report.fail("%s.%s" % (client_spec.get("module"), client_spec.get("cls")), str(exc))
+            cls = None
+        if cls is not None:
+            params = inspect.signature(cls.__init__).parameters
+            for kwarg in client_spec.get("init_kwargs") or []:
+                (report.ok if kwarg in params else report.fail)(
+                    "%s.__init__ accepts %s" % (client_spec["cls"], kwarg)
+                )
+            for method in client_spec.get("methods") or []:
+                (report.ok if callable(getattr(cls, method, None)) else report.fail)(
+                    "%s.%s" % (client_spec["cls"], method)
+                )
+
+    for attr, names in (("thread_methods", "Thread"),
+                        ("turn_handle_methods", "TurnHandle")):
+        target = getattr(mod, names, None)
+        for method in spec.get(attr) or []:
+            (report.ok if target is not None and callable(getattr(target, method, None))
+             else report.fail)("%s.%s" % (names, method))
+
+    config_cls = getattr(mod, "CodexConfig", None)
+    if config_cls is not None and spec.get("config_fields"):
+        fields = set(getattr(config_cls, "__dataclass_fields__", {}) or {})
+        for field in spec["config_fields"]:
+            (report.ok if field in fields else report.fail)(
+                "CodexConfig field %s" % field
+            )
+
+    for entry in contract.get("private_api") or []:
+        try:
+            private_mod = importlib.import_module(entry["module"])
+            present = hasattr(private_mod, entry["name"])
+        except ImportError:
+            present = False
+        if present:
+            report.ok("private %s.%s" % (entry["module"], entry["name"]))
+        else:
+            report.fail(
+                "private %s.%s" % (entry["module"], entry["name"]),
+                "gone; driver falls back to: %s" % entry.get("fallback", "unknown"),
+            )
 
 
 def check_live(contract: dict, report: Report) -> None:
@@ -202,6 +276,7 @@ def main(argv=None) -> int:
         check_cli_flags(contract, report)
         if contract["slot"] == "claude-code":
             check_claude_sdk(contract, report)
+        check_python_api(contract, report)
         check_normalizer_alignment(contract, report)
         if args.live:
             check_live(contract, report)

@@ -1,0 +1,78 @@
+# Upstream assumptions of harness/slots/opencode_server.py +
+# normalize/opencode_server.py.
+#
+# opencode publishes an OpenAPI 3.1 document at GET /doc, so unlike the CLI's
+# stdout this surface is a real contract. What is asserted here is the subset the
+# driver calls -- notably fork/revert, which is why the server driver exists.
+slot: opencode-server
+upstream:
+  binary: opencode
+  verified_versions:
+    cli: "1.18.5"
+  openapi: "GET /doc"        # 3.1.0, 162 paths
+
+cli_flags:                   # the server command, not `run`
+  - "serve"
+  - "--port"
+  - "--hostname"
+  - "--pure"                 # ignore the developer's local plugins
+
+# Endpoints the driver calls. A rename here breaks the driver at run time.
+http_endpoints:
+  - "GET  /session/status"           # readiness probe
+  - "POST /session"                  # create
+  - "POST /session/{id}/message"     # prompt (blocking)
+  - "GET  /session/{id}/message"     # durable history: the authoritative record
+  - "POST /session/{id}/fork"        # {messageID} -- branch at a step
+  - "POST /session/{id}/revert"      # {messageID, partID} -- rollback
+  - "POST /session/{id}/unrevert"
+  - "POST /session/{id}/abort"       # interrupt
+  - "GET  /session/{id}/permission"  # pending policy requests
+  - "POST /session/{id}/permissions/{permissionID}"
+  - "POST /permission/{requestID}/reply"   # fallback route
+
+# Reply vocabulary for a permission request.
+permission_replies:
+  - once
+  - always
+  - reject
+
+# Message/part shapes the normalizer maps.
+message_roles:
+  - user
+  - assistant
+
+part_types:
+  - text
+  - reasoning
+  - tool
+  - step-start
+  - step-finish
+
+tool_states:
+  - completed
+  - error
+  - running
+
+# info.tokens -> journal Usage. `total` is deliberately unmapped: it counts cache
+# writes, so summing it across turns double counts.
+usage_keys:
+  input_tokens: input
+  output_tokens: output
+  reasoning_output_tokens: reasoning
+  cached_input_tokens: read       # tokens.cache.read
+  cache_creation_tokens: write    # tokens.cache.write
+
+known_breaking_changes:
+  - 'msg_/prt_ ids are the addressable branch points: fork takes a messageID'
+  - 'tokens.total includes cache writes -- never sum it'
+  - 'sessions live in SQLite under $XDG_DATA_HOME/opencode; concurrent servers
+     sharing it fail with "database is locked"'
+
+behaviors:
+  - id: fork_at_message_returns_new_session
+    why: conversation half of a rollback pair, at a chosen step
+  - id: permission_request_is_answered
+    why: an unanswered request blocks the agent forever
+  - id: history_matches_the_prompt_reply
+    why: the driver trusts history, not the single reply payload

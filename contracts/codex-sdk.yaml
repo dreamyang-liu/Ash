@@ -1,0 +1,116 @@
+# Upstream assumptions of harness/slots/codex_sdk.py + normalize/codex_sdk.py.
+#
+# The SDK is a supported package, but this driver leans on two things its own
+# docs page does not mention (fork/steer/interrupt and the approval handler) and
+# one genuine internal (`_collect_turn_result`). Those are exactly what a version
+# bump can take away silently, so they are asserted rather than assumed.
+slot: codex-sdk
+upstream:
+  package: openai-codex
+  binary: codex
+  verified_versions:
+    sdk: "0.147.0"
+    cli: "0.145.0"
+
+# Public API the driver calls. A missing name means the driver is broken.
+python_api:
+  module: openai_codex
+  exports:
+    - CodexConfig
+    - Sandbox
+    - Thread
+    - TurnHandle
+    - TurnResult
+  client:
+    module: openai_codex.client
+    cls: CodexClient
+    # `approval_handler` is a CodexClient parameter, NOT a Codex one -- the
+    # driver builds the client itself because of this.
+    init_kwargs:
+      - config
+      - approval_handler
+    methods:
+      - thread_start
+      - thread_resume
+      - thread_fork          # the fork primitive; `exec --json` had none
+      - thread_read
+      - thread_compact
+      - turn_start
+      - turn_interrupt
+      - turn_steer
+      - register_turn_notifications
+      - next_turn_notification
+  thread_methods:
+    - run
+    - turn                   # returns TurnHandle (streaming + control)
+    - read
+    - compact
+  turn_handle_methods:
+    - stream
+    - run
+    - steer
+    - interrupt
+  config_fields:
+    - cwd
+    - env
+    - config_overrides       # mcp_servers.* injection
+    - codex_bin
+    - client_name
+
+# Genuine internals. Used deliberately (see collect_and_journal): the turn stream
+# can only be consumed once, so the journal tap and the SDK's result collector
+# must share one pass. The driver degrades to "journal complete, TurnResult None"
+# if this disappears -- but we want to know when it does.
+private_api:
+  - module: openai_codex._run
+    name: _collect_turn_result
+    fallback: journal-only pass, TurnResult is None
+
+# Notification methods the normalizer maps.
+event_types:
+  - turn/started
+  - turn/completed
+  - thread/tokenUsage/updated
+  - item/started
+  - item/completed
+  - error
+
+item_types:                  # values of item.root.type
+  - userMessage
+  - agentMessage
+  - reasoning
+  - commandExecution
+  - mcpToolCall
+  - fileChange
+
+# Server->client requests the policy callback answers.
+approval_methods:
+  - item/commandExecution/requestApproval
+  - item/fileChange/requestApproval
+  - item/permissions/requestApproval
+  - item/tool/requestUserInput
+
+# token_usage.{last,total} -> journal Usage. Note the cache-write spelling.
+usage_keys:
+  input_tokens: input_tokens
+  output_tokens: output_tokens
+  cached_input_tokens: cached_input_tokens
+  cache_creation_tokens: cache_write_input_tokens
+  reasoning_output_tokens: reasoning_output_tokens
+
+known_breaking_changes:
+  # Watch list, not assertions. Each of these was a live defect once.
+  - 'payload.item is a RootModel: the concrete item is item.root'
+  - 'item discriminator is `type`, not `item_type`'
+  - 'TurnCompletedNotification.turn carries NO usage; tokens only arrive on
+     thread/tokenUsage/updated'
+  - 'token_usage.total is cumulative for the thread, so consumers replace not sum'
+  - 'TurnHandle.run() consumes the same stream as .stream(): calling both deadlocks'
+
+behaviors:
+  - id: approval_handler_is_invoked
+    why: the only place a codex tool call can be denied
+  - id: fork_returns_a_new_thread_id
+    why: conversation half of a rollback pair
+  - id: usage_is_nonzero_after_a_turn
+    why: zeros here mean the usage source moved again

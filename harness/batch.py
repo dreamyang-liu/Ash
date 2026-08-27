@@ -227,7 +227,10 @@ class BatchRunner:
         extra = dict(task.get("extra") or {})
         if self.slot_name == "claude-code":
             extra.setdefault("setting_sources", [])   # ignore local .claude config
-        if self.slot_name == "opencode":
+        if self.slot_name.startswith("opencode"):
+            # Both opencode drivers (server and CLI) share the SQLite session
+            # store, so both need the isolation -- matching on the exact name
+            # silently dropped it when the default driver was renamed.
             # Per-task, not per-attempt: a retry or a later fork must find the
             # session the first attempt wrote, and that lives in this db.
             extra.setdefault("data_home", str(self.out_dir / "state" / task_id))
