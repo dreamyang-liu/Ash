@@ -22,7 +22,7 @@ Usage:
     python -m harness.execution.server --http --port 8400 --guardrails reject
 
     # Stdio mode (single-session, backwards-compat):
-    python -m harness.execution.server --image <docker-image>
+    python -m harness.execution.server --attach <sandbox-id>
 """
 
 import asyncio
@@ -283,6 +283,34 @@ class SandboxPool:
     async def destroy_all(self):
         for sb_id in list(self._sandboxes):
             await self.destroy(sb_id)
+
+    async def attach(self, sandbox_id: str, groups: list[str]) -> SandboxEntry:
+        """Adopt a sandbox somebody else created, by id.
+
+        This is how a caller that owns the sandbox lends it to the proxy: the
+        orchestrator creates it (so it holds the handle, and can snapshot or
+        extract afterwards) and the proxy only serves tool calls into it.
+        Creating it here instead -- what ``--image`` did -- inverted that, and the
+        owner then had no handle at all.
+        """
+        if not self._pool:
+            self._pool = build_pool(self.backend, runtime_bin=self.runtime_bin)
+        attach = getattr(self._pool, "attach", None) or getattr(self._pool, "_attach", None)
+        if attach is None:
+            raise BackendError(
+                "backend %r cannot attach to an existing sandbox; it has no "
+                "attach(). Use an http wiring against a server that can, or let "
+                "this process create its own." % (self.backend.get("backend") or "docker"))
+        sandbox = attach(sandbox_id)
+        if hasattr(sandbox, "__await__"):
+            sandbox = await sandbox
+        result = await sandbox.call("shell", command="git -C /testbed rev-parse HEAD")
+        base_commit = result.output.strip() if not result.is_error else ""
+        entry = SandboxEntry(id=sandbox_id, sandbox=sandbox, image="",
+                             groups=groups, base_commit=base_commit)
+        self._sandboxes[sandbox_id] = entry
+        self._log(f"attached {sandbox_id} groups={groups}")
+        return entry
 
     async def after_mutating_call(self, entry: SandboxEntry, tool_name: str,
                                   args: dict) -> None:
@@ -671,7 +699,12 @@ def main(pool_cls=None):
     parser.add_argument("--http", action="store_true", help="Run as HTTP server (multi-session)")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8400)
-    parser.add_argument("--image", default=None, help="Auto-create a sandbox on start (stdio mode)")
+    parser.add_argument(
+        "--attach", default=None, metavar="SANDBOX_ID",
+        help="Serve tool calls into a sandbox the caller already created (stdio "
+             "mode). The caller keeps the handle, so it can snapshot the session "
+             "and extract from it afterwards -- which is why the proxy no longer "
+             "creates sandboxes itself.")
     parser.add_argument("--runtime-bin", default=None)
     parser.add_argument("--backend", default=None, choices=sorted(BACKENDS),
                         help="Where sandboxes come from (default: docker). "
@@ -719,16 +752,17 @@ def main(pool_cls=None):
         asyncio.run(server.run())
     else:
         async def run_stdio():
-            # When an image is given, pre-provision the sandbox and set it active
-            # so the agent gets a ready-to-use environment and only sees exec tools.
-            single = bool(args.image)
+            # A bound session is served the single-sandbox schema, so the model
+            # never sees a sandbox_id argument to fill in.
+            single = bool(args.attach)
             stdio = StdioMcpServer(pool, single_sandbox=single, pipeline=pipeline)
-            if args.image:
+            if args.attach:
                 try:
-                    entry = await pool.create(args.image, groups=["owner:stdio", "default"])
+                    entry = await pool.attach(args.attach,
+                                              groups=["owner:stdio", "default"])
                 except Exception as e:
                     sys.stderr.write(
-                        f"[ash-mcp] failed to create sandbox from image '{args.image}': {e}\n")
+                        f"[ash-mcp] cannot attach to sandbox '{args.attach}': {e}\n")
                     sys.stderr.flush()
                     raise SystemExit(1)
                 stdio.session.bound_id = entry.id

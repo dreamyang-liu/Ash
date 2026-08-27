@@ -333,7 +333,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("   note: this backend cannot snapshot -- branches get fresh")
                 print("         sandboxes, not restored ones. Use --backend microvm")
                 print("         (AENV_SERVER_URL) for the real environment half.")
-            mcp_args = ["--image", args.sandbox_image]
+            # --attach, not --image: the session above owns this sandbox, so it
+            # keeps the handle it needs to snapshot and to extract afterwards.
+            # Letting the proxy create its own would leave this demo unable to
+            # checkpoint the very environment it is branching.
+            sandbox_id = session.sandbox_id
+            mcp_args = ["--attach", str(sandbox_id)]
             if runtime_bin:
                 mcp_args += ["--runtime-bin", runtime_bin]
             if args.backend != "docker":
@@ -390,8 +395,26 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print("   !! could not restore %s" % plan["snapshot_id"])
                     branch_session = None
             elif base_mcp_args:
-                restored = ["--image", plan["snapshot_id"]] + base_mcp_args[2:]
-                branch_mcp = stdio_wiring(args=restored)
+                # Create this branch's sandbox here and lend it to the proxy by
+                # id. --image would have the proxy create its own, which is the
+                # inversion that left the owner unable to snapshot what the agent
+                # actually worked in.
+                from swebench.sandbox import AshSession
+
+                branch_session = AshSession(
+                    runtime_bin=runtime_bin, quiet=True,
+                    backend=_backend_config(args.backend, runtime_bin),
+                )
+                if branch_session.create(plan["snapshot_id"]):
+                    branch_sessions.append(branch_session)
+                    restored = (["--attach",
+                                 str(branch_session.sandbox_id)]
+                                + base_mcp_args[2:])
+                    branch_mcp = stdio_wiring(args=restored)
+                    print("   restored sandbox from %s" % plan["snapshot_id"][:20])
+                else:
+                    print("   !! could not restore %s" % plan["snapshot_id"])
+                    branch_session = None
 
         branches.append(
             run_branch(

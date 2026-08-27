@@ -107,7 +107,7 @@ def test_opencode_fork_requires_session():
 
 def test_opencode_writes_isolated_mcp_config(tmp_path):
     slot = OpenCodeSlot()
-    mcp = stdio_wiring(args=["--image", "python:3.11"])
+    mcp = stdio_wiring(args=["--attach", "sb-1"])
     env = slot.build_env(TaskSpec(prompt="p", cwd=str(tmp_path)), mcp)
     config = json.loads(open(env["OPENCODE_CONFIG"]).read())
     entry = config["mcp"]["ash"]
@@ -163,7 +163,7 @@ def test_claude_code_boundary_callback_failure_does_not_break_the_run():
 def test_claude_code_mcp_config_shapes():
     slot = ClaudeCodeSlot()
     servers, allowed = slot._mcp_config(
-        TaskSpec(prompt="p", cwd="/w"), stdio_wiring(args=["--image", "i"])
+        TaskSpec(prompt="p", cwd="/w"), stdio_wiring(args=["--attach", "sb-1"])
     )
     assert servers["ash"]["type"] == "stdio"
     assert allowed == ["mcp__ash"]

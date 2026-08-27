@@ -466,7 +466,7 @@ class MicroVMPool(Pool):
         # unambiguous identity of the environment: a cold start returns a
         # digest-pinned image reference, so a mutable tag like `:latest`
         # cannot silently stand in for two different images later.
-        return self._attach(_sandbox_id(body), agent_id,
+        return self.attach(_sandbox_id(body), agent_id,
                             base_ref=body.get("templateID") or "")
 
     async def spawn_from_image(self, image: str, agent_id: str = "",
@@ -499,7 +499,7 @@ class MicroVMPool(Pool):
                                        json=payload)
         resp.raise_for_status()
         body = resp.json()
-        return self._attach(_sandbox_id(body), agent_id,
+        return self.attach(_sandbox_id(body), agent_id,
                             base_ref=body.get("templateID") or image)
 
     async def destroy(self, *sandboxes: Sandbox) -> None:
@@ -567,7 +567,7 @@ class MicroVMPool(Pool):
         if errors:
             raise RuntimeError(f"{len(errors)}/{len(results)} forks failed: {errors}")
         return [
-            self._attach(
+            self.attach(
                 _sandbox_id(result["sandbox"]),
                 agent_ids[i] if agent_ids and i < len(agent_ids) else sandbox.agent_id,
                 base_ref=result["sandbox"].get("templateID")
@@ -624,9 +624,15 @@ class MicroVMPool(Pool):
 
     # --- Internals ---
 
-    def _attach(self, sandbox_id: str, agent_id: str = "",
-                base_ref: str = "") -> Sandbox:
-        """Wrap an AgentENV sandbox id as a Sandbox reachable via the proxy."""
+    def attach(self, sandbox_id: str, agent_id: str = "",
+               base_ref: str = "") -> Sandbox:
+        """Wrap an AgentENV sandbox id as a Sandbox reachable via the proxy.
+
+        Public because a caller that created a sandbox may lend it to another
+        process -- the MCP proxy's ``--attach`` serves tool calls into a sandbox
+        the orchestrator owns, so the owner keeps the handle it needs to snapshot
+        and extract afterwards.
+        """
         sb = Sandbox(backend=GatewayBackend(
             self.server_url, sandbox_id,
             sandbox_id_header=self.SANDBOX_ID_HEADER,
