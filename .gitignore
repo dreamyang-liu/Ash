@@ -21,3 +21,6 @@ runtime/ash-runtime
 k8s-scaffold/gateway/k8s-gateway
 __pycache__/
 results/*swebench/configs/marathon-deepseek.yaml
+
+# Run artefacts: journals, resource ledger, extracted answers.
+runs/
