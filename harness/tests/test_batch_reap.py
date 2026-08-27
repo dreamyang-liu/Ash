@@ -10,11 +10,11 @@ from datetime import timedelta
 
 import pytest
 
-from harness.batch import BatchRunner, is_retryable, load_tasks
+from harness.orchestrator.batch import BatchRunner, is_retryable, load_tasks
 from harness.core import events as E
 from harness.core.journal import JournalWriter
-from harness.reap import ReapPlan, Reaper, parse_duration
-from harness.resources import ResourceLedger
+from harness.orchestrator.reap import ReapPlan, Reaper, parse_duration
+from harness.orchestrator.resources import ResourceLedger
 
 # --- retry classification --------------------------------------------------
 @pytest.mark.parametrize(

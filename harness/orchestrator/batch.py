@@ -42,7 +42,7 @@ from typing import Callable, Dict, List, Optional, Union
 from harness.core.events import RUN_FINISHED
 from harness.core.journal import JournalWriter, read_journal
 from harness.core.slot import TaskSpec
-from harness.resources import ResourceLedger
+from harness.orchestrator.resources import ResourceLedger
 from harness.slots import load_slot
 
 #: Error substrings worth another attempt. Everything else is the agent's own

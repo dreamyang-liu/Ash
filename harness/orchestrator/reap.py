@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
-from harness.resources import Resource, ResourceLedger
+from harness.orchestrator.resources import Resource, ResourceLedger
 
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhd])$")
 

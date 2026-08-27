@@ -92,3 +92,50 @@ def test_usage_accumulates_dimensions_separately():
     # partial payloads must not raise or zero out other fields
     total.add_dict({})
     assert total.input_tokens == 13
+
+
+def test_events_emitted_from_inside_a_subscriber_reach_every_subscriber(tmp_path):
+    """Regression: nested emissions used to be suppressed entirely.
+
+    A subscriber that emits is normal -- the checkpoint bridge turns a
+    turn.completed into a checkpoint.captured. Suppressing that nested event made
+    it invisible to *other* subscribers, so the resource ledger never recorded the
+    snapshots the bridge had just claimed and a killed process left them
+    unreclaimable. Recursing instead would let a subscriber re-enter the fan-out
+    it is already in, so nested events are queued and drained after it.
+    """
+    journal = JournalWriter(tmp_path / "j.jsonl", run_id="r")
+    seen_by_observer = []
+
+    def emitter(record):
+        if record["type"] == "trigger":
+            journal.emit("derived", note="from inside a subscriber")
+
+    journal.subscribe(emitter)
+    journal.subscribe(lambda r: seen_by_observer.append(r["type"]))
+
+    journal.emit("trigger")
+    journal.close()
+
+    assert seen_by_observer == ["trigger", "derived"], seen_by_observer
+    assert [r["type"] for r in read_journal(tmp_path / "j.jsonl")] == ["trigger", "derived"]
+
+
+def test_a_subscriber_that_emits_its_own_trigger_does_not_recurse_forever(tmp_path):
+    """The queue is drained iteratively, so depth stays flat -- but an emitter with
+    no stop condition is still the caller's bug, bounded here only by the guard
+    that it is not re-entered."""
+    journal = JournalWriter(tmp_path / "j.jsonl", run_id="r")
+    count = {"n": 0}
+
+    def echo(record):
+        count["n"] += 1
+        if count["n"] < 5:                 # a stop condition, as any emitter needs
+            journal.emit("echo", depth=count["n"])
+
+    journal.subscribe(echo)
+    journal.emit("start")
+    journal.close()
+
+    assert count["n"] == 5
+    assert len(read_journal(tmp_path / "j.jsonl")) == 5

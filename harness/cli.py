@@ -42,97 +42,74 @@ from collections import Counter
 from pathlib import Path
 
 from harness.atif import export_file
-from harness.batch import BatchRunner, load_tasks
+from harness.orchestrator import (AgentEnvClient, BatchRunner, Orchestrator,
+                                  Reaper, ResourceLedger, RunSpec, load_tasks,
+                                  parse_duration)
 from harness.core.journal import JournalWriter, new_run_id, read_journal
 from harness.core.slot import TaskSpec
 from harness.execution.provision import provision_http
 from harness.extract import patch_extractor, run_extract
 from harness.execution.wiring import http_wiring, stdio_wiring
 from harness.gateway import GatewayServer, RoutingTable
-from harness.reap import AgentEnvClient, Reaper, parse_duration
-from harness.resources import ResourceLedger
 from harness.rollback import fork_plan
 from harness.slots import available, load_slot
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    slot_cls = load_slot(args.slot)
-    slot = slot_cls()
+    """Translate flags into a RunSpec and let the orchestrator drive.
 
-    mcp = None
-    provisioned = None
-    if args.mcp_url and args.sandbox_image:
-        # Orchestrator role: create the sandbox, then hand the slot a wiring
-        # bound to it. The agent is served the single-sandbox schema and never
-        # sees a sandbox_id argument.
-        provisioned = provision_http(
-            args.mcp_url,
-            image=args.sandbox_image,
-            agent_id=args.agent_id,
-            name=args.mcp_name,
-        )
-        mcp = provisioned.mcp
-        print("sandbox     %s (bound)" % provisioned.sandbox_id)
-    elif args.mcp_url:
-        mcp = http_wiring(
-            args.mcp_url, name=args.mcp_name, agent_id=args.agent_id,
-            sandbox_id=args.sandbox_id,
-        )
-    elif args.mcp_stdio is not None:
-        mcp = stdio_wiring(name=args.mcp_name, args=shlex.split(args.mcp_stdio))
-
-    run_id = args.run_id or new_run_id()
-    journal_path = Path(args.journal or "runs/%s.jsonl" % run_id)
-
-    extra = json.loads(args.extra) if args.extra else {}
-    if args.slot == "claude-code":
-        # Eval hygiene: ignore the developer's local CLAUDE.md / .claude config
-        # unless explicitly asked for (equivalent of `claude --bare`).
-        extra.setdefault("setting_sources", [])
-    if args.resume_session:
-        extra["resume_session_id"] = args.resume_session
-        if args.fork:
-            extra["fork"] = True
-
-    task = TaskSpec(
+    The sequence (provision, gateway, checkpoints, teardown) used to be inline
+    here, which meant nothing else could reuse it. This function is now argument
+    parsing and printing.
+    """
+    spec = RunSpec(
         prompt=args.prompt,
+        slot=args.slot,
         cwd=args.cwd,
         model=args.model,
         timeout_s=args.timeout,
-        extra=extra,
+        agent_id=args.agent_id,
+        run_id=args.run_id,
+        journal_path=args.journal,
+        mcp_url=args.mcp_url,
+        sandbox_image=args.sandbox_image,
+        sandbox_id=args.sandbox_id,
+        keep_sandbox=args.keep_sandbox,
+        mcp_stdio_args=shlex.split(args.mcp_stdio) if args.mcp_stdio is not None else None,
+        use_gateway=args.gateway,
+        routes_file=args.routes,
+        gateway_port=args.gateway_port,
+        budget_usd=args.budget_usd,
+        resume_session_id=args.resume_session,
+        fork=args.fork,
+        extra=json.loads(args.extra) if args.extra else {},
     )
 
-    with JournalWriter(journal_path, run_id=run_id, agent_id=args.agent_id) as journal:
-        gateway = None
-        if args.gateway or args.routes or args.budget_usd:
-            table = RoutingTable.from_file(args.routes) if args.routes else RoutingTable()
-            gateway = GatewayServer(table, journal=journal, port=args.gateway_port).start()
-            token = table.mint(
-                args.agent_id, run_id=run_id, budget_usd=args.budget_usd
-            )
-            task.env.update(gateway.env_for(token))
-            print("gateway     %s (budget %s)" % (gateway.base_url, args.budget_usd or "none"))
-        try:
-            result = slot.run(task, journal, mcp)
-        finally:
-            if gateway is not None:
-                gateway.stop()
-            if provisioned is not None and not args.keep_sandbox:
-                provisioned.destroy()
+    def report(kind: str, payload: dict) -> None:
+        if kind == "sandbox":
+            print("sandbox     %s (bound)" % payload["sandbox_id"])
+        elif kind == "gateway":
+            print("gateway     %s (budget %s)"
+                  % (payload["url"], payload.get("budget_usd") or "none"))
 
-    print("run_id      %s" % run_id)
-    print("journal     %s" % journal_path)
-    print("status      %s" % result.status)
-    if result.native_session_id:
-        print("session     %s" % result.native_session_id)
-    if result.usage:
-        print("usage       %s" % json.dumps(result.usage))
-    if result.error:
-        print("error       %s" % result.error, file=sys.stderr)
-    if result.final_text:
+    ledger = ResourceLedger() if args.mcp_url and args.sandbox_image else None
+    outcome = Orchestrator(ledger=ledger, on_event=report).run(spec)
+
+    print("run_id      %s" % outcome.run_id)
+    print("journal     %s" % outcome.journal_path)
+    print("status      %s" % outcome.status)
+    if outcome.native_session_id:
+        print("session     %s" % outcome.native_session_id)
+    if outcome.usage:
+        print("usage       %s" % json.dumps(outcome.usage))
+    if outcome.checkpoints:
+        print("checkpoints %d" % outcome.checkpoints)
+    if outcome.error:
+        print("error       %s" % outcome.error, file=sys.stderr)
+    if outcome.final_text:
         print("---")
-        print(result.final_text)
-    return 0 if result.status == "completed" else 1
+        print(outcome.final_text)
+    return 0 if outcome.ok else 1
 
 
 def _cmd_show(args: argparse.Namespace) -> int:

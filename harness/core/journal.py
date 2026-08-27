@@ -86,21 +86,41 @@ class JournalWriter:
         return record
 
     def _notify(self, record: dict) -> None:
+        """Deliver ``record`` to every subscriber, then anything they emitted.
+
+        Subscribers do emit -- the checkpoint bridge turns a ``turn.completed``
+        into a ``checkpoint.captured``. Naively recursing would let one subscriber
+        re-enter the notification it is already inside; simply *suppressing*
+        nested events is worse, and was a real defect: an event emitted from
+        inside a subscriber reached no subscriber at all, so the resource ledger
+        never saw the snapshots the bridge had just claimed and a killed process
+        left them unreclaimable.
+
+        So nested emissions are queued and drained after the current fan-out
+        finishes. Every event is delivered to every subscriber exactly once, and
+        the depth stays flat however many subscribers emit.
+        """
         if not self._subscribers:
             return
-        # A subscriber that emits (the checkpoint bridge does) would otherwise
-        # recurse into its own notification.
+
         if getattr(self._notifying, "active", False):
+            # We are inside a fan-out: hand this to the loop that owns it.
+            self._notifying.queue.append(record)
             return
+
         self._notifying.active = True
+        self._notifying.queue = [record]
         try:
-            for callback in list(self._subscribers):
-                try:
-                    callback(record)
-                except Exception:  # noqa: BLE001 - observers cannot break the run
-                    pass
+            while self._notifying.queue:
+                current = self._notifying.queue.pop(0)
+                for callback in list(self._subscribers):
+                    try:
+                        callback(current)
+                    except Exception:  # noqa: BLE001 - observers cannot break the run
+                        pass
         finally:
             self._notifying.active = False
+            self._notifying.queue = []
 
     @property
     def seq(self) -> int:
