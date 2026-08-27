@@ -60,15 +60,18 @@ python -m harness fork-plan runs/<id>.jsonl --step 12
 
 ```
 core/events.py     unified event model (v2), Usage with separated dimensions
-core/journal.py    append-only JSONL writer: monotonic seq, flush-per-line, thread-safe
+core/journal.py    append-only JSONL writer + in-process event bus (subscribe)
 core/slot.py       AgentSlot contract: run/kill/version + TaskSpec/McpWiring/SlotResult
 normalize/*.py     native events -> journal events. Pure mapping tables, no I/O.
 slots/cli_base.py  shared driver for JSONL-on-stdout CLIs (codex, opencode)
 slots/*.py         per-agent drivers: command construction, MCP wiring, capabilities
 execution/wiring.py  how a slot is told to reach the MCP proxy (stdio | http)
+checkpointing.py   bridge: swebench Checkpointer -> RollbackLedger, quiesce rule
 rollback.py        checkpoint pairing (env snapshot + session ref), fork plans
+gateway/           inference gateway: model swap, wire tap, enforced budget
 atif.py            journal -> ATIF v1.8 (interchange only; journal stays canonical)
-tests/             fixtures captured from real CLI runs + a fake-agent E2E
+demo_fork.py       acceptance demo: run -> branch at step N -> K continuations
+tests/             fixtures captured from real CLI runs + fake agent/upstream E2E
 ```
 
 ## Invariants worth keeping
@@ -115,25 +118,89 @@ and before bumping a pinned version.
 
 A rollback point is a **pair**: an environment snapshot and the agent's
 conversation reference. Neither half alone can branch a run — restoring files
-under an agent whose memory disagrees with them produces nonsense.
+under an agent whose memory disagrees with them produces nonsense, and branching
+a conversation while siblings share one filesystem lets them corrupt each other.
+
+`SnapshotBridge` wires both halves without any slot knowing it exists — it
+subscribes to the journal:
 
 ```python
-from harness.rollback import RollbackLedger
-ledger = RollbackLedger(journal)
-ledger.record(step, snapshot_id, session_ckpt=native_session_id)
+from harness.checkpointing import SnapshotBridge
+
+bridge = SnapshotBridge.install(journal, session)      # CLI slots: turn boundaries
+slot.run(task, journal, mcp)
+
+bridge = SnapshotBridge.install(journal, session)      # SDK slot: PreToolUse
+slot = ClaudeCodeSlot(on_tool_boundary=bridge.on_tool_boundary)
 ```
 
-Pair only at a quiesce point: a step boundary with no in-flight tool call
-(`turn.completed` → next `turn.started`, or the PreToolUse callback for the SDK
-slot). `fork_plan(journal, step)` resolves the pair and returns the `seq`
-boundary that ATIF export needs for `is_copied_context`.
+It only fires at a **quiesce point** — a step boundary with no in-flight tool
+call. Snapshotting mid-call pairs an unresolved call with an ambiguous
+filesystem, so the pair would not describe a resumable state. A session id that
+arrives after the first checkpoint is backfilled by appending a correction (the
+journal is never rewritten).
+
+`fork_plan(journal, step)` resolves the pair and returns the `seq` boundary ATIF
+needs for `is_copied_context`.
+
+### Demo, and what it actually proves
+
+```bash
+python -m harness.demo_fork --slot opencode --cwd /tmp/demo \
+    --sandbox-image python:3.11-slim --branch-at 1 \
+    --prompt "..." --direction "try X" --direction "try Y"
+```
+
+Verified with real agents: the conversation half branches correctly (each child
+gets its own native session; siblings are isolated). The environment half needs a
+snapshot-capable backend — **Docker cannot snapshot**, only `MicroVMPool`
+(AgentENV, `--backend microvm`) can. Run it on Docker and each branch gets a
+*fresh* sandbox rather than a restored one; the demo prints `env half ABSENT` in
+that case instead of implying a complete pair.
+
+The first run of this demo without an env snapshot demonstrated exactly why the
+pair matters: branch 1 edited a file, and branch 2 — sharing the filesystem —
+reported "the file no longer contains the bug". That is the failure mode the
+snapshot half exists to prevent.
+
+## Inference gateway
+
+The model seam (`harness/gateway/`). Wiring is one environment variable, which is
+why it works for any agent:
+
+```bash
+python -m harness gateway --routes routes.json --mint agent-1 --budget-usd 2.50
+# -> ANTHROPIC_BASE_URL=http://127.0.0.1:8787 + a per-slot token
+
+python -m harness run --slot claude-code --gateway --budget-usd 2.50 "..."
+```
+
+Three things no slot can provide:
+
+- **Model swap** — the reason it exists. A routing table entry redirects a model
+  name to any endpoint (another provider, local vLLM, an RL checkpoint):
+  `{"ash-rl-ckpt-42": {"base_url": "http://10.0.0.5:8000", "upstream_model": "checkpoint-42"}}`.
+- **Wire-level tap** — exact token counts and the real request, independent of
+  what the agent reports. Journaled as `gateway.request`.
+- **Enforced budget** — 429 once a slot is over its ceiling. Slot-side accounting
+  can only *ask* an agent to stop.
+
+Implementation constraints worth knowing: headers pass through untouched
+(`anthropic-beta`, `x-claude-code-session-id`/`-agent-id`/`-parent-agent-id` —
+dropping them changes behaviour or loses subagent attribution); response bytes
+are relayed verbatim (unknown fields such as thinking-block signatures must
+survive byte-exact); streaming is a passthrough with a side parser for usage, so
+the agent sees no added latency and frames are never modified; `/v1/models` must
+answer because Claude Code treats discovery failure as fatal. The agent only ever
+holds its own slot token — provider credentials stay in the routing table.
+
+Verdict-style rewriting is *not* here: tool-call policy belongs in the MCP proxy
+(L2) where a call is semantically addressable. This layer speaks HTTP and tokens.
 
 ## Not here yet
 
-- Orchestrator (registry / scheduling / budget enforcement / guaranteed
-  teardown) — currently one run per CLI invocation.
-- Inference gateway (model swap for eval matrices and RL serving). Keep
-  `base_url` configuration-driven so it can be inserted without code changes.
+- Orchestrator (registry / scheduling / concurrency / guaranteed teardown) —
+  currently one run per CLI invocation. Budget enforcement exists in the gateway.
 - Live behaviour probes in `contracts/ci_check.py` (need credentials).
-- Wiring `swebench/agent/checkpoints.py` into `RollbackLedger` for the three
-  slots — the ledger is ready, the `Checkpointer` bridge is not written.
+- An end-to-end fork against `--backend microvm` (needs a running AgentENV);
+  the pairing logic is covered by tests with a snapshot-capable fake session.

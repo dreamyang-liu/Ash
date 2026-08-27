@@ -10,9 +10,16 @@
     # against a long-lived Execution Server
     python -m harness run --slot codex --mcp-url http://localhost:8400/mcp ...
 
+    # through an inference gateway: model swap + wire tap + enforced budget
+    python -m harness run --slot claude-code --gateway --routes routes.json \
+        --budget-usd 2.50 --model ash-rl-ckpt-42 "..."
+
     python -m harness show   runs/<id>.jsonl        # event summary
     python -m harness atif   runs/<id>.jsonl -o t.json
     python -m harness fork-plan runs/<id>.jsonl --step 12
+
+    # stand a gateway up on its own (many runs, one gateway)
+    python -m harness gateway --routes routes.json --port 8787
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from harness.atif import export_file
 from harness.core.journal import JournalWriter, new_run_id, read_journal
 from harness.core.slot import TaskSpec
 from harness.execution.wiring import http_wiring, stdio_wiring
+from harness.gateway import GatewayServer, RoutingTable
 from harness.rollback import fork_plan
 from harness.slots import available, load_slot
 
@@ -50,6 +58,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # Eval hygiene: ignore the developer's local CLAUDE.md / .claude config
         # unless explicitly asked for (equivalent of `claude --bare`).
         extra.setdefault("setting_sources", [])
+    if args.resume_session:
+        extra["resume_session_id"] = args.resume_session
+        if args.fork:
+            extra["fork"] = True
 
     task = TaskSpec(
         prompt=args.prompt,
@@ -60,7 +72,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
 
     with JournalWriter(journal_path, run_id=run_id, agent_id=args.agent_id) as journal:
-        result = slot.run(task, journal, mcp)
+        gateway = None
+        if args.gateway or args.routes or args.budget_usd:
+            table = RoutingTable.from_file(args.routes) if args.routes else RoutingTable()
+            gateway = GatewayServer(table, journal=journal, port=args.gateway_port).start()
+            token = table.mint(
+                args.agent_id, run_id=run_id, budget_usd=args.budget_usd
+            )
+            task.env.update(gateway.env_for(token))
+            print("gateway     %s (budget %s)" % (gateway.base_url, args.budget_usd or "none"))
+        try:
+            result = slot.run(task, journal, mcp)
+        finally:
+            if gateway is not None:
+                gateway.stop()
 
     print("run_id      %s" % run_id)
     print("journal     %s" % journal_path)
@@ -101,6 +126,43 @@ def _cmd_atif(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_gateway(args: argparse.Namespace) -> int:
+    table = RoutingTable.from_file(args.routes) if args.routes else RoutingTable()
+    journal = (
+        JournalWriter(args.journal, run_id="gateway", agent_id="gateway")
+        if args.journal
+        else None
+    )
+    server = GatewayServer(
+        table,
+        journal=journal,
+        host=args.host,
+        port=args.port,
+        require_token=not args.open,
+    )
+    for agent_id in args.mint or []:
+        token = table.mint(agent_id, budget_usd=args.budget_usd)
+        print("token %-16s %s" % (agent_id, token.token))
+    print("gateway  %s" % server.base_url)
+    print("routes   %s" % (", ".join(table.models()) or "(default only)"))
+    if args.open:
+        print("WARNING  --open: no token required; do not expose this port")
+    print("env      ANTHROPIC_BASE_URL=%s" % server.base_url)
+    server.start()
+    try:
+        import time
+
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("\nstopping")
+    finally:
+        server.stop()
+        if journal is not None:
+            journal.close()
+    return 0
+
+
 def _cmd_fork_plan(args: argparse.Namespace) -> int:
     plan = fork_plan(args.journal, args.step)
     print(json.dumps(plan, indent=2))
@@ -130,6 +192,14 @@ def main(argv=None) -> int:
     run.add_argument("--mcp-stdio", help="args for `python -m swebench.mcp_server`")
     run.add_argument("--mcp-url", help="remote MCP endpoint")
     run.add_argument("--extra", help="JSON dict of slot-specific options")
+    run.add_argument("--gateway", action="store_true", help="route LLM traffic through a gateway")
+    run.add_argument("--routes", help="gateway routing table JSON (implies --gateway)")
+    run.add_argument("--gateway-port", type=int, default=0, help="0 = ephemeral")
+    run.add_argument(
+        "--budget-usd", type=float, help="hard ceiling enforced by the gateway (implies it)"
+    )
+    run.add_argument("--resume-session", help="native session id to continue")
+    run.add_argument("--fork", action="store_true", help="branch the resumed session")
     run.set_defaults(func=_cmd_run)
 
     show = sub.add_parser("show", help="summarize a journal")
@@ -146,6 +216,22 @@ def main(argv=None) -> int:
     fork.add_argument("journal")
     fork.add_argument("--step", type=int, required=True)
     fork.set_defaults(func=_cmd_fork_plan)
+
+    gw = sub.add_parser("gateway", help="run an inference gateway in the foreground")
+    gw.add_argument("--routes", help="routing table JSON")
+    gw.add_argument("--host", default="127.0.0.1")
+    gw.add_argument("--port", type=int, default=8787)
+    gw.add_argument("--journal", help="tap wire-level events into this journal")
+    gw.add_argument(
+        "--mint", action="append", metavar="AGENT_ID",
+        help="mint a slot token and print it (repeatable)",
+    )
+    gw.add_argument("--budget-usd", type=float)
+    gw.add_argument(
+        "--open", action="store_true",
+        help="accept unauthenticated requests (local debugging only)",
+    )
+    gw.set_defaults(func=_cmd_gateway)
 
     args = parser.parse_args(argv)
     return args.func(args)

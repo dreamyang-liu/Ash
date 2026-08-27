@@ -16,7 +16,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, List, Optional, Union
+from typing import Callable, Iterator, List, Optional, Union
 
 from harness.core.events import JOURNAL_SCHEMA_VERSION
 
@@ -32,7 +32,14 @@ def _now() -> str:
 
 
 class JournalWriter:
-    """Single-writer, thread-safe JSONL emitter."""
+    """Single-writer, thread-safe JSONL emitter.
+
+    Also the in-process event bus: :meth:`subscribe` lets components react to
+    events without the slots knowing they exist (checkpoint bridge, budget
+    enforcement, live dashboards). Subscribers are notified *after* the line is
+    durable, outside the write lock, and their failures are isolated -- an
+    observer must never be able to break the run it is watching.
+    """
 
     def __init__(
         self,
@@ -50,6 +57,13 @@ class JournalWriter:
         self._seq = 0
         self._lock = threading.Lock()
         self._fh = self.path.open("a", encoding="utf-8")
+        self._subscribers: List[Callable[[dict], None]] = []
+        self._notifying = threading.local()
+
+    def subscribe(self, callback: Callable[[dict], None]) -> Callable[[dict], None]:
+        """Register an observer of every subsequent event. Returns ``callback``."""
+        self._subscribers.append(callback)
+        return callback
 
     def emit(self, event_type: str, **payload) -> dict:
         """Append one event; returns the full record (including seq)."""
@@ -67,7 +81,26 @@ class JournalWriter:
             record.update(payload)
             self._fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
             self._fh.flush()
-            return record
+
+        self._notify(record)
+        return record
+
+    def _notify(self, record: dict) -> None:
+        if not self._subscribers:
+            return
+        # A subscriber that emits (the checkpoint bridge does) would otherwise
+        # recurse into its own notification.
+        if getattr(self._notifying, "active", False):
+            return
+        self._notifying.active = True
+        try:
+            for callback in list(self._subscribers):
+                try:
+                    callback(record)
+                except Exception:  # noqa: BLE001 - observers cannot break the run
+                    pass
+        finally:
+            self._notifying.active = False
 
     @property
     def seq(self) -> int:
