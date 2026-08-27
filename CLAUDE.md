@@ -230,6 +230,27 @@ python -m swebench -c swebench/configs/claude-opus.yaml --harness claude-code
 
 # Run the same harness on Firecracker microVMs instead of containers
 python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
+
+# A SWE-Marathon task with Claude Code as the agent (in-process MCP,
+# per-step checkpoints at the tool boundary). One -o per parallel run:
+# runs sharing an output dir race on preds.json and a rerun reports
+# "1 done, nothing to do" off the previous attempt's predictions.
+python -m swebench --harness marathon-claude-code \
+    -c swebench/configs/marathon-cc-sonnet.yaml \
+    --task-dir /tmp/swe-marathon/tasks/<task> -o results/<task>
+
+# Continue any marathon attempt from one of its checkpoints — the
+# environment carries the work; --resume-hint adds marching orders
+python -m swebench --harness marathon-claude-code -c ... --task-dir ... \
+    --resume-from <snapshot-id> --resume-hint "<direction>" -o results/<fresh>
+
+# Ask a model where to BRANCH an unfinished attempt, then fan the
+# directions out in parallel (see "Branching" below)
+python -m swebench.branching \
+    --trajectory results/<run>/trajectories/<task>.json \
+    --task-dir /tmp/swe-marathon/tasks/<task> -c <run-config> \
+    --branches 3 --plan-out plan.json          # review, then:
+python -m swebench.branching ... --plan-in plan.json --launch
 ```
 
 - **Sandbox backend** is config, not code (`swebench/backends.py`): `docker` (default),
@@ -247,10 +268,12 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
 - **Interceptors** are config too: `execution.interceptors: my_file.py`, where the file
   exports `PIPELINE = [MyInterceptor()]`. They mount outside the defaults, so they see a
   call before truncation spends anything on it and still see calls the inner ones reject.
-- Three harnesses today (`swebench/harnesses/__init__.py`): `litellm` (custom agent
+- Four harnesses today (`swebench/harnesses/__init__.py`): `litellm` (custom agent
   loop, any model), `claude-code` (Claude Code CLI via MCP, which reaches L2 as an
-  external agent and shares none of this layer), and `marathon` (SWE-Marathon's
-  ultra-long-horizon tasks). The marathon path differs in where work comes from and
+  external agent and shares none of this layer), `marathon` (SWE-Marathon's
+  ultra-long-horizon tasks), and `marathon-claude-code` (the marathon topology
+  with Claude Code as the agent — see its own bullet below). The marathon path
+  differs in where work comes from and
   how it is graded, not in the loop: a task is a **directory** (`swebench/marathon.py`
   reads `task.toml` / `instruction.md` / `environment/` / `tests/`), its image is
   **built locally** because several tasks bake encrypted verification assets in and no
@@ -264,7 +287,56 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
   registering in `HARNESSES`. `manager-worker` and `best-of-n` were removed while the
   single-agent path settles, along with Waggle, the write-arbitration interceptor they
   used; the mount they relied on (several agents, one shared chain) still works.
-- **Per-step checkpoints** (`swebench/agent/checkpoints.py`, `swebench/replay.py`):
+- **`marathon-claude-code`** (`swebench/harnesses/marathon_claude_code.py`): the
+  marathon topology — local image build, task resources, verifier grading — with
+  the Claude Code CLI as the agent, for scaffold comparisons against `marathon`
+  runs. The sandbox reaches Claude Code through an *in-process* MCP server
+  (`claude_agent_sdk.create_sdk_mcp_server`), not the `swebench.mcp_server`
+  subprocess the SWE-bench claude-code harness spawns: the subprocess owns its
+  sandbox and destroys it when the stream closes, which is exactly when grading
+  needs it. In-process, the harness owns the `AshSession`; the four exec tools
+  (schemas imported from `mcp_server.EXEC_TOOLS_SINGLE`, so the two entry points
+  cannot drift) are thin wrappers over `executor_for("agent", pipeline=…)` with
+  truncate + presenter mounted (no guardrail: its nudges shape *this repo's*
+  agent, and nudging Claude Code too measures a subtly different scaffold), and
+  the verifier runs on the same session after the stream ends — a deadline'd or
+  errored loop still grades, because the environment holds hours of work either
+  way. **Checkpoints fire at the tool boundary**: an external agent's only
+  channel into the environment is its tool calls, so the tool call IS its step —
+  the same `MutationTracker`/`Checkpointer` pair as `install()`, differently
+  triggered, and the step→snapshot map is keyed by tool-call index. Every
+  capture persists the map AND the event stream, so a killed run's in-progress
+  trajectory is directly analyzable and resumable. What this path does not have:
+  the context-window guard (Claude Code auto-compacts; state a non-default
+  window via `CLAUDE_CODE_MAX_CONTEXT_TOKENS` in the config's `env`).
+  Operational notes, each learned from a live run: the executor seam is
+  `(tool_name, args)` and nothing else (a third positional TypeErrored every
+  call, and the agent spent its run diagnosing our dispatcher); the CLI's `cwd`
+  must be a neutral directory, never this repo (it reads `.claude/` from cwd and
+  once found this repo's own `ash` skill mid-task); hard tasks can provoke
+  thinking sessions long enough that Bedrock's stream goes silent — the AGENTS.md
+  stall signature, unfixable from the client, so a task that dies there twice is
+  a park-it, not a retry-harder.
+- **Branching unfinished attempts** (`swebench/branching.py`): a failed marathon
+  attempt carries hours of environment and a transcript; per-step checkpoints
+  make any step resumable, and this module asks a model (default Sonnet 5 on
+  Bedrock, decoupled from the rollout model) *which* step and in *which
+  directions*. The plan picks one branch step — as late as possible (every step
+  kept is work preserved) but strictly before the decisive wrong turn — and
+  several genuinely diverse directions, each a self-contained `--resume-hint`
+  for an agent that has the environment but not the conversation. `--launch`
+  fans them out in parallel; snapshot names carry each run's own id, so
+  parallel branches from one snapshot cannot collide. Analysis is stochastic:
+  review with `--plan-out`, then launch exactly the reviewed plan with
+  `--plan-in`. **`--notes` makes branching iterative**, which matters when a
+  task's failures are invisible to the agent (a hidden holdout set): the agent
+  gets zero bits of feedback, but each finished branch's verifier delta is a
+  bit the *next* round can condition on — feed round N's
+  (direction → score change) summaries in and the analyst plans round N+1 in
+  the narrowed hypothesis space instead of re-guessing. Measured on live runs:
+  stripe-clone went 0/12 gates → reward 1.0 on a 3-branch round (the analyst's
+  deadlock diagnosis was correct, one direction of three hit), zstd-decoder
+  0.837 → 1.0 on two of three branches independently.
   `checkpoints.enabled: true` snapshots the environment each step so a rollout can
   be restarted from any of them. Only steps that could have mutated are captured
   (a `MutationTracker` interceptor decides; `shell` counts as mutating because a

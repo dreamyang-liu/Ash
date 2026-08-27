@@ -182,6 +182,11 @@ def main():
                              "instead of building its image fresh. The "
                              "environment keeps the work; the transcript does "
                              "not carry over.")
+    parser.add_argument("--resume-hint", dest="resume_hint", default=None,
+                        metavar="TEXT",
+                        help="With --resume-from: a direction appended to the "
+                             "resumed prompt (a branched rollout's marching "
+                             "orders, see swebench/branching.py).")
     parser.add_argument("--task-dir", default=None,
                         help="SWE-Marathon task directory, or a checkout whose "
                              "tasks/ holds several (--harness marathon). Tasks "
@@ -254,7 +259,7 @@ def main():
                 "step_limit", "cost_limit", "temperature", "reasoning_effort",
                 "prompt_cache", "max_budget", "timeout", "runtime_bin",
                 "image_template", "subset", "workers", "custom_tools_dir",
-                "backend", "resume_from", "resume_transcript",
+                "backend", "resume_from", "resume_hint", "resume_transcript",
                      "resume_at_step", "task_dir"]:
         cli_val = getattr(args, key.replace("-", "_"), None)
         if cli_val is not None:

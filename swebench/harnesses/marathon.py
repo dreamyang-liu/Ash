@@ -314,6 +314,13 @@ class MarathonHarness(BaseHarness):
                 "builds, what the visible tests say) and continue from there "
                 "rather than starting over. You do not have the earlier "
                 "conversation, only what is on disk.")
+            if config.get("resume_hint"):
+                # A branched rollout's direction (swebench/branching.py):
+                # analysis of the failed attempt, distilled. Self-contained,
+                # because the resumed agent has no other memory of it.
+                prompt += ("\n\nDIRECTION FOR THIS ATTEMPT (from an analysis "
+                           "of the earlier session):\n"
+                           + str(config["resume_hint"]))
 
         # The task's own wall clock is the ceiling the benchmark defines
         # (task.toml [agent] timeout_sec, 4 to 10 hours depending on the
