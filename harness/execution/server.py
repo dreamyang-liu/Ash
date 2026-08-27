@@ -8,9 +8,11 @@ Supports multiple sandboxes with ownership + group-based visibility:
 - Optionally routes exec tool calls through the L2 interceptor pipeline
   (docs/ARCHITECTURE.md): OFF by default; --guardrails mounts read-before-edit
   and edit-streak nudges, --plugins <file.py> supplies your own interceptors.
-- Knows nothing about what a run's *answer* is. Anything that has to inspect the
-  sandbox to produce one (SWE-bench's git diff, a verifier score) is a
-  SandboxObserver supplied with --observer; see harness/execution/observers.py.
+- Knows nothing about what a run's *answer* is, and needs no hook for it: the
+  caller that provisioned the sandbox owns it and can extract whatever it wants,
+  whenever it wants -- from a snapshot afterwards (harness/extract.py) or from the
+  live sandbox before teardown. A benchmark that must do something at sandbox
+  lifecycle points subclasses SandboxPool and passes `pool_cls` to main().
 
 Usage:
     # HTTP mode (multi-session):
@@ -20,7 +22,7 @@ Usage:
     python -m harness.execution.server --http --port 8400 --guardrails reject
 
     # Stdio mode (single-session, backwards-compat):
-    python -m harness.execution.server --image <docker-image> --observer swebench.patch:patch_observer
+    python -m harness.execution.server --image <docker-image>
 """
 
 import asyncio
@@ -37,7 +39,6 @@ from ash_sandbox.result import ToolResult as SdkToolResult
 from harness.core.result import ToolResult
 from harness.execution.backends import BACKENDS, BackendError, build_pool
 from harness.execution.interceptors import GuardrailInterceptor, TruncateInterceptor
-from harness.execution.observers import ObserverSet, load_observer
 from harness.execution.pipeline import CallContext, ToolPipeline, load_pipeline
 
 
@@ -52,9 +53,8 @@ class SandboxEntry:
     image: str
     groups: list[str]        # visibility = group intersection
     base_commit: str = ""
-    #: Per-sandbox scratch space for observers. The execution plane never reads
-    #: it; an observer stashes whatever it needs to produce a submission later
-    #: (SWE-bench's patch extractor keeps its untracked-file baseline here).
+    #: Scratch space for a SandboxPool subclass. The execution plane never
+    #: reads it.
     meta: dict = field(default_factory=dict)
 
     def visible_to(self, session_groups: list[str]) -> bool:
@@ -245,12 +245,8 @@ class SandboxPool:
     """Manages all sandboxes. Session-agnostic — visibility is enforced at the server layer."""
 
     def __init__(self, runtime_bin: str | None = None,
-                 backend: dict | None = None,
-                 observers: "ObserverSet | None" = None):
+                 backend: dict | None = None):
         self.runtime_bin = runtime_bin
-        #: Lifecycle hooks that turn a sandbox into a benchmark's answer. Empty
-        #: by default: the proxy runs tools and nothing else.
-        self.observers = observers or ObserverSet()
         #: Where sandboxes come from (``harness/execution/backends.py``); empty means
         #: local Docker. The proxy names no concrete pool, so every sandbox a
         #: client creates through it lands on the configured backend.
@@ -273,18 +269,13 @@ class SandboxPool:
         entry = SandboxEntry(id=sb_id, sandbox=sandbox, image=image,
                              groups=groups, base_commit=base_commit)
         self._sandboxes[sb_id] = entry
-        # Before any agent can touch it: an observer that needs a baseline has to
-        # take it now or it can never tell the image's state from the agent's.
-        await self.observers.on_created(entry)
         self._log(f"created {sb_id} groups={groups}")
         return entry
 
     async def destroy(self, sb_id: str) -> None:
-        """Destroy a sandbox, giving observers their last look at it."""
         entry = self._sandboxes.pop(sb_id, None)
         if not entry:
             return
-        await self.observers.on_destroy(entry)
         if self._pool:
             await self._pool.destroy(entry.sandbox)
         self._log(f"destroyed {sb_id}")
@@ -292,6 +283,16 @@ class SandboxPool:
     async def destroy_all(self):
         for sb_id in list(self._sandboxes):
             await self.destroy(sb_id)
+
+    async def after_mutating_call(self, entry: SandboxEntry, tool_name: str,
+                                  args: dict) -> None:
+        """A call that may have changed ``entry`` completed. No-op by default.
+
+        A subclass that keeps an artefact derived from the sandbox (a benchmark's
+        answer, say) refreshes it here. Nothing in the execution plane depends on
+        it, and a subclass that raises would surface as a tool error, so an
+        override should swallow its own failures.
+        """
 
     def get(self, sb_id: str) -> SandboxEntry | None:
         return self._sandboxes.get(sb_id)
@@ -318,17 +319,16 @@ class SandboxPool:
 class SessionHandler:
     """Handles tool calls scoped to a single session's visibility."""
 
-    # Exec tools that can mutate the filesystem — observers are told after these.
+    # Exec tools that can mutate the filesystem.
     _MUTATING = {"shell", "text_editor", "process"}
 
     def __init__(self, session: Session, pool: SandboxPool, notify_mutations: bool = False,
                  pipeline: "ToolPipeline | None" = None):
         self.session = session
         self.pool = pool
-        # notify_mutations: tell observers after every mutating call so their
-        # artefact is always current (single-sandbox mode). Removes any reliance
-        # on shutdown-time extraction, which races the reader under load and
-        # leaves a killed run with nothing.
+        # notify_mutations: call the pool's after_mutating_call (a SandboxPool
+        # subclass may override it) so a benchmark that keeps a running artefact
+        # can refresh it. Plain SandboxPool does nothing.
         self.notify_mutations = notify_mutations
         # pipeline: L2 interceptor chain (shared across sessions — coordination
         # state must span agents). None = dispatch exactly as before (default).
@@ -389,12 +389,10 @@ class SessionHandler:
         except Exception as e:
             return _err(str(e))
 
-        # Keep observers' artefacts current: a run killed mid-flight must still
-        # leave a usable submission behind.
-        if self.notify_mutations and self.pool.observers and name in self._MUTATING:
+        if self.notify_mutations and name in self._MUTATING:
             entry = self._resolve(args.get("sandbox_id"))
             if entry:
-                await self.pool.observers.after_mutating_call(entry, name, args)
+                await self.pool.after_mutating_call(entry, name, args)
 
         return content
 
@@ -665,7 +663,9 @@ def _build_pipeline(args) -> "ToolPipeline | None":
     return ToolPipeline(interceptors) if interceptors else None
 
 
-def main():
+def main(pool_cls=None):
+    """Run the proxy. ``pool_cls`` lets a caller supply a SandboxPool subclass
+    that hooks sandbox lifecycle (see swebench/mcp_server.py)."""
     import argparse
     parser = argparse.ArgumentParser(description="Ash sandbox MCP server")
     parser.add_argument("--http", action="store_true", help="Run as HTTP server (multi-session)")
@@ -678,13 +678,6 @@ def main():
                              "'microvm' needs AENV_SERVER_URL (+ AENV_API_KEY); "
                              "'k8s' needs ASH_CONTROL_PLANE_URL and "
                              "ASH_GATEWAY_URL.")
-    parser.add_argument("--observer", action="append", default=None,
-                        metavar="module:factory",
-                        help="Sandbox observer to mount (repeatable). The factory "
-                             "takes no arguments and returns a SandboxObserver; "
-                             "e.g. swebench.patch:patch_observer writes a git diff "
-                             "per sandbox. The proxy itself has no notion of what "
-                             "a run's answer is.")
     parser.add_argument("--guardrails", nargs="?", const="warn", default=None,
                         choices=["warn", "reject"],
                         help="Mount read-before-edit / edit-streak guardrails: "
@@ -708,17 +701,7 @@ def main():
         sys.stderr.write(f"[ash-mcp] {exc}\n")
         raise SystemExit(2)
 
-    try:
-        observers = ObserverSet([load_observer(spec) for spec in (args.observer or [])])
-    except Exception as exc:  # noqa: BLE001 - a bad spec must fail at startup
-        sys.stderr.write(f"[ash-exec] could not load observer: {exc}\n")
-        raise SystemExit(2)
-    if observers:
-        sys.stderr.write("[ash-exec] observers: %s\n" % ", ".join(observers.names()))
-        sys.stderr.flush()
-
-    pool = SandboxPool(runtime_bin=args.runtime_bin, backend=backend,
-                       observers=observers)
+    pool = (pool_cls or SandboxPool)(runtime_bin=args.runtime_bin, backend=backend)
     pipeline = _build_pipeline(args)
     if pipeline is not None:
         names = ", ".join(i.name for i in pipeline.interceptors) or "(empty)"

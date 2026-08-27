@@ -26,6 +26,10 @@
 
     # reclaim sandboxes/snapshots left behind by killed runs
     python -m harness reap --dry-run
+
+    # extract a run's answer from its snapshots, after the fact
+    python -m harness extract runs/<id>.jsonl --extractor swebench:patch
+    python -m harness extract runs/<id>.jsonl --every-step -o answers.json
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ from harness.batch import BatchRunner, load_tasks
 from harness.core.journal import JournalWriter, new_run_id, read_journal
 from harness.core.slot import TaskSpec
 from harness.execution.provision import provision_http
+from harness.extract import patch_extractor, run_extract
 from harness.execution.wiring import http_wiring, stdio_wiring
 from harness.gateway import GatewayServer, RoutingTable
 from harness.reap import AgentEnvClient, Reaper, parse_duration
@@ -152,6 +157,53 @@ def _cmd_atif(args: argparse.Namespace) -> int:
     else:
         print(payload)
     return 0
+
+
+def _cmd_extract(args: argparse.Namespace) -> int:
+    from harness.execution.backends import build_pool
+
+    if args.extractor != "swebench:patch":
+        print("unknown extractor %r (known: swebench:patch)" % args.extractor,
+              file=sys.stderr)
+        return 2
+    extractor = patch_extractor()
+
+    runtime_bin = Path(args.runtime_bin).expanduser()
+    pool = build_pool(
+        {"backend": args.backend},
+        runtime_bin=str(runtime_bin.resolve()) if runtime_bin.exists() else None,
+    )
+    if not getattr(pool, "supports_snapshot", lambda: False)():
+        print(
+            "backend %r cannot restore snapshots, so there is nothing to extract "
+            "from after the fact; extract from the live sandbox before teardown "
+            "instead (see swebench/mcp_server.py)." % args.backend,
+            file=sys.stderr,
+        )
+        return 2
+
+    results = run_extract(
+        pool, args.journal, extractor,
+        step=args.step, every_step=args.every_step, with_pristine=args.pristine,
+    )
+    if not results:
+        print("no checkpoints in %s -- was the run snapshotted?" % args.journal,
+              file=sys.stderr)
+        return 1
+
+    payload = [
+        {"step": r.step, "snapshot_id": r.snapshot_id,
+         "ok": r.ok, "error": r.error, "answer": r.answer}
+        for r in results
+    ]
+    if args.output:
+        Path(args.output).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print("wrote %s (%d step(s))" % (args.output, len(payload)))
+    for r in results:
+        size = len(r.answer or "") if isinstance(r.answer, str) else "-"
+        print("step %-4s %-28s %s %s" % (
+            r.step, r.snapshot_id, "ok" if r.ok else "FAILED", r.error or "%s chars" % size))
+    return 0 if all(r.ok for r in results) else 1
 
 
 def _cmd_gateway(args: argparse.Namespace) -> int:
@@ -345,6 +397,26 @@ def main(argv=None) -> int:
     fork.add_argument("journal")
     fork.add_argument("--step", type=int, required=True)
     fork.set_defaults(func=_cmd_fork_plan)
+
+    ext = sub.add_parser(
+        "extract",
+        help="extract a run's answer from its snapshots (re-runnable, any step)",
+    )
+    ext.add_argument("journal")
+    ext.add_argument(
+        "--extractor", default="swebench:patch",
+        help="what an answer is. 'swebench:patch' = this repo's git diff.",
+    )
+    ext.add_argument("--step", type=int, help="one step (default: the last)")
+    ext.add_argument("--every-step", action="store_true",
+                     help="walk every distinct snapshot -- a per-step curve")
+    ext.add_argument("--pristine", action="store_true",
+                     help="also restore step 0, so an extractor can diff against "
+                          "the untouched environment instead of guessing a baseline")
+    ext.add_argument("--backend", default="microvm", choices=("microvm", "docker", "k8s"))
+    ext.add_argument("--runtime-bin", default="runtime/ash-runtime")
+    ext.add_argument("-o", "--output", help="write results as JSON")
+    ext.set_defaults(func=_cmd_extract)
 
     gw = sub.add_parser("gateway", help="run an inference gateway in the foreground")
     gw.add_argument("--routes", help="routing table JSON")
