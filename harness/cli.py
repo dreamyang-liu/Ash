@@ -41,6 +41,7 @@ from harness.atif import export_file
 from harness.batch import BatchRunner, load_tasks
 from harness.core.journal import JournalWriter, new_run_id, read_journal
 from harness.core.slot import TaskSpec
+from harness.execution.provision import provision_http
 from harness.execution.wiring import http_wiring, stdio_wiring
 from harness.gateway import GatewayServer, RoutingTable
 from harness.reap import AgentEnvClient, Reaper, parse_duration
@@ -54,8 +55,24 @@ def _cmd_run(args: argparse.Namespace) -> int:
     slot = slot_cls()
 
     mcp = None
-    if args.mcp_url:
-        mcp = http_wiring(args.mcp_url, name=args.mcp_name, agent_id=args.agent_id)
+    provisioned = None
+    if args.mcp_url and args.sandbox_image:
+        # Orchestrator role: create the sandbox, then hand the slot a wiring
+        # bound to it. The agent is served the single-sandbox schema and never
+        # sees a sandbox_id argument.
+        provisioned = provision_http(
+            args.mcp_url,
+            image=args.sandbox_image,
+            agent_id=args.agent_id,
+            name=args.mcp_name,
+        )
+        mcp = provisioned.mcp
+        print("sandbox     %s (bound)" % provisioned.sandbox_id)
+    elif args.mcp_url:
+        mcp = http_wiring(
+            args.mcp_url, name=args.mcp_name, agent_id=args.agent_id,
+            sandbox_id=args.sandbox_id,
+        )
     elif args.mcp_stdio is not None:
         mcp = stdio_wiring(name=args.mcp_name, args=shlex.split(args.mcp_stdio))
 
@@ -95,6 +112,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         finally:
             if gateway is not None:
                 gateway.stop()
+            if provisioned is not None and not args.keep_sandbox:
+                provisioned.destroy()
 
     print("run_id      %s" % run_id)
     print("journal     %s" % journal_path)
@@ -288,6 +307,19 @@ def main(argv=None) -> int:
     run.add_argument("--mcp-name", default="ash")
     run.add_argument("--mcp-stdio", help="args for `python -m swebench.mcp_server`")
     run.add_argument("--mcp-url", help="remote MCP endpoint")
+    run.add_argument(
+        "--sandbox-image",
+        help="with --mcp-url: provision a sandbox from this image and bind the "
+             "slot to it (the agent then sees no sandbox_id argument)",
+    )
+    run.add_argument(
+        "--sandbox-id",
+        help="with --mcp-url: bind to an existing sandbox instead of creating one",
+    )
+    run.add_argument(
+        "--keep-sandbox", action="store_true",
+        help="do not destroy a provisioned sandbox on exit (grading, inspection)",
+    )
     run.add_argument("--extra", help="JSON dict of slot-specific options")
     run.add_argument("--gateway", action="store_true", help="route LLM traffic through a gateway")
     run.add_argument("--routes", help="gateway routing table JSON (implies --gateway)")

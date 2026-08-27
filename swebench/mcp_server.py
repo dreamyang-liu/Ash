@@ -63,9 +63,13 @@ class SandboxEntry:
 class Session:
     id: str
     groups: list[str] = field(default_factory=lambda: ["default"])
-    # Fixed single-sandbox binding, set once at startup in single-sandbox stdio
-    # mode. Multi-sandbox mode leaves this None and requires an explicit
-    # sandbox_id on every exec call — there is no switchable "active" state.
+    # Fixed single-sandbox binding. Set once at startup in single-sandbox stdio
+    # mode, or per session in HTTP mode from the `x-session-sandbox` header (an
+    # orchestrator that provisioned the sandbox states which one this slot owns).
+    # A bound session is served the single-sandbox tool schema, so the model
+    # never sees a `sandbox_id` parameter and cannot name another sandbox.
+    # Left None otherwise: an explicit sandbox_id is then required on every exec
+    # call — there is no switchable "active" state.
     bound_id: str | None = None
 
     @property
@@ -469,9 +473,15 @@ class HttpMcpServer:
         self._sessions: dict[str, Session] = {}
 
     #: Headers that identify the caller, most explicit first. ``mcp-session-id``
-    #: is the protocol's own mechanism: ``initialize`` returns ``sessionId`` and
-    #: a conforming client echoes it back on subsequent requests.
+    #: is the protocol's own mechanism: ``initialize`` returns it both as a
+    #: response header (which is what makes a conforming client echo it back)
+    #: and in the result body.
     SESSION_HEADERS = ("x-session-owner", "mcp-session-id")
+
+    #: Binds a session to one pre-provisioned sandbox. The caller that created
+    #: the sandbox states its id here; that session is then served the
+    #: single-sandbox schema and every exec call resolves to it implicitly.
+    SANDBOX_HEADER = "x-session-sandbox"
 
     def _get_or_create_session(self, headers: dict) -> Session:
         owner = next((headers[h] for h in self.SESSION_HEADERS if headers.get(h)), None)
@@ -487,7 +497,18 @@ class HttpMcpServer:
             # owner_group is always included — ensures private sandbox visibility
             session = Session(id=owner, groups=[f"owner:{owner}"] + explicit_groups)
             self._sessions[owner] = session
-        return self._sessions[owner]
+
+        session = self._sessions[owner]
+        bound = headers.get(self.SANDBOX_HEADER)
+        if bound:
+            # Re-read every request: the header is the caller's standing
+            # statement of which sandbox this slot owns, and a slot that is
+            # re-boarded onto a new sandbox (checkpoint restore) says so by
+            # changing it. Binding is a *default*, not a grant -- the visibility
+            # check in _resolve still applies, so naming someone else's sandbox
+            # here gains nothing.
+            session.bound_id = bound
+        return session
 
     async def run(self):
         from aiohttp import web
@@ -508,10 +529,22 @@ class HttpMcpServer:
                     "serverInfo": {"name": "ash-sandbox", "version": "2.0.0"},
                     "sessionId": session.id,
                 }
-                return web.json_response({"jsonrpc": "2.0", "id": id_, "result": result})
+                # The response *header* is what makes a conforming MCP client
+                # echo the id back on later requests; the body field alone is
+                # invisible to it, so without this every request looked like a
+                # new anonymous session and sandboxes created by an earlier one
+                # were no longer visible.
+                return web.json_response(
+                    {"jsonrpc": "2.0", "id": id_, "result": result},
+                    headers={"Mcp-Session-Id": session.id},
+                )
 
             elif method == "tools/list":
-                return web.json_response({"jsonrpc": "2.0", "id": id_, "result": {"tools": ALL_TOOLS}})
+                # A bound session gets the single-sandbox surface: no sandbox_id
+                # parameter to fill in, so the model cannot target another
+                # sandbox and cannot omit the argument either.
+                tools = EXEC_TOOLS_SINGLE if session.bound_id else ALL_TOOLS
+                return web.json_response({"jsonrpc": "2.0", "id": id_, "result": {"tools": tools}})
 
             elif method == "tools/call":
                 params = body.get("params", {})

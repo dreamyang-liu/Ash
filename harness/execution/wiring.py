@@ -41,17 +41,33 @@ def http_wiring(
     name: str = "ash",
     agent_id: Optional[str] = None,
     sandbox_id: Optional[str] = None,
+    groups: Optional[List[str]] = None,
     headers: Optional[Dict[str, str]] = None,
 ) -> McpWiring:
     """Remote MCP server.
 
-    ``agent_id`` / ``sandbox_id`` are passed as headers so the Execution Server
-    can attribute pipeline decisions and taps to the right slot (the
-    agent_id-passthrough requirement in the architecture diagram).
+    Header names are the ones ``swebench.mcp_server`` actually reads -- they are
+    a wire contract, not decoration:
+
+    ``X-Session-Owner``
+        Session identity. Without it every request is a fresh anonymous session,
+        so a sandbox created by one call is invisible to the next (its owner
+        group changed) and per-agent interceptor state can never accumulate.
+        Passing ``agent_id`` also makes pipeline decisions attributable to the
+        right slot.
+    ``X-Session-Sandbox``
+        Binds this session to a pre-provisioned sandbox: the orchestrator
+        created it and states which one this slot owns. The server then serves
+        the single-sandbox tool schema, so the model never sees a ``sandbox_id``
+        argument -- it cannot omit it and cannot name someone else's sandbox.
+    ``X-Session-Groups``
+        Extra visibility groups, for deliberately shared sandboxes.
     """
     hdrs = dict(headers or {})
     if agent_id:
-        hdrs.setdefault("X-Ash-Agent-Id", agent_id)
+        hdrs.setdefault("X-Session-Owner", agent_id)
     if sandbox_id:
-        hdrs.setdefault("X-Ash-Sandbox-Id", sandbox_id)
+        hdrs.setdefault("X-Session-Sandbox", sandbox_id)
+    if groups:
+        hdrs.setdefault("X-Session-Groups", ",".join(groups))
     return McpWiring(name=name, url=url, headers=hdrs)

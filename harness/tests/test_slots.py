@@ -56,12 +56,17 @@ def test_codex_mcp_stdio_becomes_config_overrides():
     assert 'mcp_servers.ash.env.K="v"' in joined
 
 
-def test_codex_mcp_remote_uses_url_and_headers():
-    mcp = http_wiring("http://h:8400/mcp", agent_id="a7")
+def test_codex_mcp_remote_uses_url_and_session_headers():
+    """The header names are a wire contract with swebench.mcp_server
+    (SESSION_HEADERS / SANDBOX_HEADER), not decoration: without X-Session-Owner
+    every request is a fresh anonymous session, so a sandbox created by one call
+    is invisible to the next."""
+    mcp = http_wiring("http://h:8400/mcp", agent_id="a7", sandbox_id="sb-1")
     command = CodexSlot().build_command(TaskSpec(prompt="p", cwd="/w"), mcp)
     joined = " ".join(command)
     assert 'mcp_servers.ash.url="http://h:8400/mcp"' in joined
-    assert 'mcp_servers.ash.http_headers.X-Ash-Agent-Id="a7"' in joined
+    assert 'mcp_servers.ash.http_headers.X-Session-Owner="a7"' in joined
+    assert 'mcp_servers.ash.http_headers.X-Session-Sandbox="sb-1"' in joined
 
 
 def test_codex_resume_inserts_subcommand():
