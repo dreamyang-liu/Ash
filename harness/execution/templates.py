@@ -483,13 +483,21 @@ def builder_from_backend(backend: dict) -> Optional[TemplateBuilder]:
     runtime_bin = section.get("runtime_bin") or backend.get("runtime_bin")
     if not runtime_bin:
         return None
-    server_url = section.get("server_url")
+    # Resolved exactly as `build_pool` resolves it, environment included. They used
+    # to disagree: the pool fell back to AENV_SERVER_URL / AENV_API_KEY while this
+    # required both in the config, so a configuration that spawned sandboxes fine
+    # failed here -- reported as "could not create a sandbox", which points at the
+    # image rather than at the missing setting.
+    from harness.execution.backends import resolve_microvm_endpoint
+
+    server_url, api_key = resolve_microvm_endpoint(section)
     if not server_url:
         raise TemplateError(
-            "microvm.runtime_bin is set but microvm.server_url is not")
+            "microvm.runtime_bin is set but no microvm.server_url and no "
+            "AENV_SERVER_URL: a per-image template has to be built somewhere")
     return TemplateBuilder(
         server_url=str(server_url).rstrip("/"),
-        api_key=str(section.get("api_key") or ""),
+        api_key=api_key,
         runtime_bin=Path(str(runtime_bin)),
         ripgrep_bin=ensure_ripgrep(),
         runtime_port=int(section.get("runtime_port", DEFAULT_RUNTIME_PORT)),

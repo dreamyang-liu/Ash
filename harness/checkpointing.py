@@ -162,6 +162,18 @@ class SnapshotBridge:
             return None
         return self.records[-1] if self.records else None
 
+    @property
+    def skipped_on_loop(self) -> int:
+        """Checkpoint opportunities dropped because a loop was already running.
+
+        Read this. It was private and read by nobody, which is how a run could
+        report checkpointing as enabled and record zero snapshots: an SDK slot
+        journals its turn from inside its event loop, every opportunity was skipped
+        here, and the count sat in a field no caller looked at. Whoever asked for
+        checkpoints is entitled to know they did not happen.
+        """
+        return self._skipped_on_loop
+
     # --- Checkpointer callback --------------------------------------------
     def _on_checkpoint(self, record: Any) -> None:
         snapshot_id = getattr(record, "snapshot_id", None)

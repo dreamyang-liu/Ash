@@ -44,11 +44,18 @@ opencode 1.18.5. Those versions are asserted by `contracts/ci_check.py`.
 # smallest run: agent works directly in --cwd, no sandbox wiring
 python -m harness run --slot opencode --cwd /tmp/work "is there a bug in calc.py?"
 
-# with the ash execution plane as a stdio MCP subprocess
+# the orchestrator owns the sandbox: it creates it, serves it, snapshots it,
+# destroys it. --transport says only how the agent talks to it.
 python -m harness run --slot claude-code --cwd /tmp/work \
-    --mcp-stdio "--image python:3.11" "fix the failing test"
+    --sandbox-image python:3.11-slim --tools default \
+    --backend microvm --runtime-bin runtime/ash-runtime \
+    --transport http --snapshot-every-step "fix the failing test"
 
-# against a long-lived Execution Server (multi-slot, agent_id passthrough)
+# same, with the server as a subprocess instead of in-process
+python -m harness run --slot claude-code --transport stdio --sandbox-image ... "..."
+
+# against a long-lived Execution Server somebody else runs (multi-slot,
+# agent_id passthrough). No session here, so no snapshots -- see below.
 python -m harness run --slot codex --mcp-url http://localhost:8400/mcp "..."
 
 python -m harness show      runs/<id>.jsonl        # event histogram
@@ -69,6 +76,9 @@ normalize/*.py     native events -> journal events. Pure mapping tables, no I/O.
 slots/cli_base.py  shared driver for JSONL-on-stdout CLIs (codex, opencode)
 slots/*.py         per-agent drivers: command construction, MCP wiring, capabilities
 execution/wiring.py  how a slot is told to reach the MCP proxy (stdio | http)
+execution/session.py sandbox lifecycle + snapshots + the (tool, args) executor seam
+execution/panel.py   the tool panel a model sees, compiled from a manifest
+orchestrator/run.py  the shape of one run: owns the sandbox, the transport, teardown
 checkpointing.py   bridge: swebench Checkpointer -> RollbackLedger, quiesce rule
 rollback.py        checkpoint pairing (env snapshot + session ref), fork plans
 gateway/           inference gateway: model swap, wire tap, enforced budget
@@ -274,19 +284,47 @@ disk-only checkpoint holds almost nothing of its own and the `chainSizeMB` the
 API reports is the *logical* chain including shared base layers. Unbounded
 snapshot growth is a count problem, not a capacity one.
 
+## Transports, and why they are not equivalent
+
+Both put the orchestrator in charge of the sandbox — it creates it, holds the
+handle, and destroys it after the last snapshot. They differ in **where the tool
+calls happen**, and that decides whether checkpointing works:
+
+| | `--transport http` | `--transport stdio` |
+|---|---|---|
+| server | in this process, ephemeral port | the slot's own subprocess |
+| sandbox handed over | the live handle (`pool.adopt`) | by id (`--attach`) |
+| backends | any, Docker included | needs `attach` → microvm only |
+| checkpoints with an SDK slot | **yes**, one per mutating tool call | **no** |
+
+The last row is the one that matters and is not obvious. An SDK slot journals its
+turn from inside its event loop, and a session drives its own loop with
+`run_until_complete`, which cannot be entered from a thread that already has one —
+so the turn-boundary trigger is unusable for it. A tool call is that agent's real
+step boundary anyway (its tool calls are its only channel into the environment),
+and with `http` this process serves them and snapshots at each one. With `stdio`
+that boundary happens in a subprocess nothing here can observe.
+
+A run in the second case says so — `checkpoint.unavailable` in the journal, and a
+line on stdout naming the remedy — rather than reporting success with no snapshots
+to show. Verified live: the same prompt records 3 complete pairs over http and 0
+over stdio.
+
 ## Threading rules (learned by breaking them)
 
-`AshSession` drives a private event loop via `run_until_complete`. Two rules
+`SandboxSession` drives a private event loop via `run_until_complete`. Two rules
 follow, and violating either fails *quietly* — tool calls or snapshots return
 `None` with an un-awaited coroutine warning:
 
 - **Call the executor from a worker thread** (`asyncio.to_thread`) when inside an
   SDK tool handler; that handler already runs on a loop, and loops cannot nest.
 - **Never checkpoint from a thread that has a running loop.** The bridge detects
-  this and declines (counted in `_skipped_on_loop`) instead of failing. For the
-  SDK slot the tool boundary — a worker thread — is the correct trigger anyway;
-  the turn-boundary trigger serves the CLI slots, whose journal writes come from
-  a plain reader thread.
+  this and declines instead of failing. That count is `bridge.skipped_on_loop`,
+  and it is now *read* — it was private and looked at by nobody, which is how an
+  orchestrator-owned run could report checkpointing as on and record zero
+  snapshots. For the SDK slot the tool boundary — a worker thread — is the correct
+  trigger anyway; the turn-boundary trigger serves the CLI slots, whose journal
+  writes come from a plain reader thread.
 
 ## Not here yet
 

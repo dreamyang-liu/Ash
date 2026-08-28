@@ -55,6 +55,30 @@ from harness.rollback import fork_plan
 from harness.slots import available, load_slot
 
 
+def _backend_section(name: "str | None", runtime_bin: "str | None") -> dict:
+    """A backend config from CLI flags. Empty means Docker, the pool's default.
+
+    ``server_url`` and ``api_key`` are left out on purpose: ``build_pool`` reads
+    AENV_SERVER_URL / AENV_API_KEY itself, so a key never has to be typed on a
+    command line where it would land in shell history.
+
+    microvm gets ``from_image``, because a name given on a command line is an OCI
+    image reference and only the cold-start path accepts one. With
+    ``--runtime-bin`` a per-image template is built instead, which is what a plain
+    image needs: the backend runs no startup command for one, so a cold-started
+    image comes up without the runtime and answers every tool call with a 502.
+    """
+    if not name:
+        return {}
+    config: dict = {"backend": name}
+    if name == "microvm":
+        section: dict = {"from_image": True}
+        if runtime_bin:
+            section["runtime_bin"] = runtime_bin
+        config["microvm"] = section
+    return config
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     """Translate flags into a RunSpec and let the orchestrator drive.
 
@@ -75,6 +99,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
         sandbox_image=args.sandbox_image,
         sandbox_id=args.sandbox_id,
         keep_sandbox=args.keep_sandbox,
+        transport=args.transport,
+        tools=args.tools,
+        backend=_backend_section(args.backend, args.runtime_bin),
+        runtime_bin=args.runtime_bin,
+        snapshot_every_step=args.snapshot_every_step,
         mcp_stdio_args=shlex.split(args.mcp_stdio) if args.mcp_stdio is not None else None,
         use_gateway=args.gateway,
         routes_file=args.routes,
@@ -88,11 +117,23 @@ def _cmd_run(args: argparse.Namespace) -> int:
     def report(kind: str, payload: dict) -> None:
         if kind == "sandbox":
             print("sandbox     %s (bound)" % payload["sandbox_id"])
+        elif kind == "mcp":
+            print("mcp         %s (%s)" % (payload["url"], payload["transport"]))
         elif kind == "gateway":
             print("gateway     %s (budget %s)"
                   % (payload["url"], payload.get("budget_usd") or "none"))
+        elif kind == "checkpoint.unavailable":
+            # Loud on purpose. A run that reports success while having recorded no
+            # snapshots cannot be branched later, and the person who finds that out
+            # is doing so from the outside, hours afterwards.
+            print("checkpoints NONE -- %d opportunities skipped: %s"
+                  % (payload["skipped"], payload["reason"]))
 
-    ledger = ResourceLedger() if args.mcp_url and args.sandbox_image else None
+    # Any sandbox this run acquires, however it acquires it: `harness reap` reads
+    # the ledger to reclaim what a killed process could not release. This used to
+    # be created only for a sandbox on a remote server, so an orchestrator-owned
+    # one -- the common case now -- was invisible to reap.
+    ledger = ResourceLedger() if args.sandbox_image else None
     outcome = Orchestrator(ledger=ledger, on_event=report).run(spec)
 
     print("run_id      %s" % outcome.run_id)
@@ -338,8 +379,35 @@ def main(argv=None) -> int:
     run.add_argument("--mcp-url", help="remote MCP endpoint")
     run.add_argument(
         "--sandbox-image",
-        help="with --mcp-url: provision a sandbox from this image and bind the "
-             "slot to it (the agent then sees no sandbox_id argument)",
+        help="create a sandbox from this image and bind the slot to it (the agent "
+             "then sees no sandbox_id argument). Without --mcp-url this process "
+             "owns the sandbox and runs the server itself, which is what makes "
+             "checkpoints available; with it, the sandbox is created on that server",
+    )
+    run.add_argument(
+        "--transport", default="stdio", choices=("stdio", "http"),
+        help="how the agent reaches a sandbox this process owns: a server "
+             "subprocess (stdio) or one in-process on an ephemeral port (http). "
+             "Ignored with --mcp-url",
+    )
+    run.add_argument(
+        "--tools", metavar="PANEL",
+        help="tool panel the agent is offered: a shipped name (default, full, "
+             "bash_only, no_web) or a path to a manifest",
+    )
+    run.add_argument(
+        "--backend", choices=sorted(("docker", "microvm", "k8s")),
+        help="where a sandbox this process creates comes from (default: docker). "
+             "microvm reads AENV_SERVER_URL / AENV_API_KEY and is the one that "
+             "can snapshot",
+    )
+    run.add_argument(
+        "--runtime-bin", default=None,
+        help="ash-runtime binary to provision into a bare image (microvm)",
+    )
+    run.add_argument(
+        "--snapshot-every-step", action="store_true",
+        help="checkpoint at every quiesce point, not only after a mutation",
     )
     run.add_argument(
         "--sandbox-id",

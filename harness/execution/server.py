@@ -57,6 +57,13 @@ class SandboxEntry:
     image: str
     groups: list[str]        # visibility = group intersection
     base_commit: str = ""
+    #: True when somebody else owns this sandbox's lifetime -- an orchestrator
+    #: that created it and will snapshot and tear it down itself. The pool then
+    #: serves calls into it but never destroys it: doing so would kill the
+    #: environment its owner still needs for grading and extraction, and a second
+    #: destroy from the real owner would then fail against a sandbox that is
+    #: already gone.
+    external: bool = False
     #: Scratch space for a SandboxPool subclass. The execution plane never
     #: reads it.
     meta: dict = field(default_factory=dict)
@@ -349,6 +356,10 @@ class SandboxPool:
         entry = self._sandboxes.pop(sb_id, None)
         if not entry:
             return
+        if entry.external:
+            # Stop serving it; leave it running. Its owner is still holding it.
+            self._log(f"released {sb_id} (owned elsewhere)")
+            return
         if self._pool:
             await self._pool.destroy(entry.sandbox)
         self._log(f"destroyed {sb_id}")
@@ -356,6 +367,33 @@ class SandboxPool:
     async def destroy_all(self):
         for sb_id in list(self._sandboxes):
             await self.destroy(sb_id)
+
+    def adopt(self, sandbox: Sandbox, groups: list[str], *,
+              sandbox_id: str | None = None, image: str = "",
+              base_commit: str = "") -> SandboxEntry:
+        """Serve calls into a sandbox this process already holds a handle to.
+
+        The in-process case, and the reason it is separate from :meth:`attach`:
+        attach re-derives a handle *from an id*, which needs a backend that can
+        (only microvm today) and yields a second handle to the same sandbox. This
+        takes the handle the caller already has, so any backend works -- Docker
+        included -- and there is exactly one of them.
+
+        Used by the orchestrator when it runs the MCP server itself: the session
+        and the server are then in the same process, so lending the sandbox needs
+        no round trip and no re-derivation. The entry is marked ``external``, so
+        this pool will not destroy it; the session that created it does that, after
+        it has taken its last snapshot and extracted whatever it needed.
+
+        Synchronous on purpose: there is nothing to await. ``attach`` probes the
+        sandbox because it knows nothing about it; here the caller already does.
+        """
+        sb_id = sandbox_id or getattr(sandbox, "sandbox_id", None) or self._next_id()
+        entry = SandboxEntry(id=sb_id, sandbox=sandbox, image=image, groups=groups,
+                             base_commit=base_commit, external=True)
+        self._sandboxes[sb_id] = entry
+        self._log(f"adopted {sb_id} groups={groups} (owner keeps it)")
+        return entry
 
     async def attach(self, sandbox_id: str, groups: list[str]) -> SandboxEntry:
         """Adopt a sandbox somebody else created, by id.
@@ -569,12 +607,18 @@ class HttpMcpServer:
 
     def __init__(self, pool: SandboxPool, host: str = "0.0.0.0", port: int = 8400,
                  pipeline: "ToolPipeline | None" = None,
-                 surface: "ExecSurface | None" = None):
+                 surface: "ExecSurface | None" = None,
+                 notify_mutations: bool = False):
         self.pool = pool
         self.host = host
         self.port = port
         self.pipeline = pipeline
         self.surface = surface or DEFAULT_SURFACE
+        # notify_mutations: call the pool's after_mutating_call after a call that
+        # could have changed the filesystem. Off by default; the orchestrator turns
+        # it on, because a tool call IS the step boundary for an external agent and
+        # that is where a checkpoint belongs.
+        self.notify_mutations = notify_mutations
         self._sessions: dict[str, Session] = {}
 
     #: Headers that identify the caller, most explicit first. ``mcp-session-id``
@@ -615,14 +659,22 @@ class HttpMcpServer:
             session.bound_id = bound
         return session
 
-    async def run(self):
+    @property
+    def base_url(self) -> str:
+        """Where a client should point. 0.0.0.0 is a bind address, not a
+        destination -- a wiring built from it fails on some stacks."""
+        host = "127.0.0.1" if self.host in ("0.0.0.0", "", "::") else self.host
+        return f"http://{host}:{self.port}/mcp"
+
+    def _build_app(self):
         from aiohttp import web
 
         async def handle_mcp(request: web.Request) -> web.Response:
             headers = {k.lower(): v for k, v in request.headers.items()}
             session = self._get_or_create_session(headers)
             handler = SessionHandler(session, self.pool, pipeline=self.pipeline,
-                                     surface=self.surface)
+                                     surface=self.surface,
+                                     notify_mutations=self.notify_mutations)
 
             body = await request.json()
             method = body.get("method", "")
@@ -674,17 +726,86 @@ class HttpMcpServer:
 
         app = web.Application()
         app.router.add_post("/mcp", handle_mcp)
+        return app
 
-        self._log(f"listening on {self.host}:{self.port}")
+    async def run(self, sock=None, stop: "asyncio.Event | None" = None):
+        """Serve until ``stop`` is set, or forever.
+
+        ``sock`` is a pre-bound listening socket, which is how :meth:`start`
+        knows the port before the loop exists: with ``port=0`` the kernel picks
+        one, and asking aiohttp for it afterwards means racing the caller that
+        wants to build a URL.
+        """
+        from aiohttp import web
+
+        app = self._build_app()
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, self.host, self.port)
+        site = (web.SockSite(runner, sock) if sock is not None
+                else web.TCPSite(runner, self.host, self.port))
         await site.start()
+        self._log(f"listening on {self.host}:{self.port}")
         try:
-            await asyncio.Event().wait()  # run forever
+            await (stop or asyncio.Event()).wait()
         finally:
+            # An adopted sandbox is *released* here, not destroyed: its owner is
+            # still holding it (see SandboxPool.adopt).
             await self.pool.destroy_all()
             await runner.cleanup()
+
+    # --- in-process transport ----------------------------------------------
+    def start(self) -> "HttpMcpServer":
+        """Run in a background thread; return once it is accepting connections.
+
+        The orchestrator needs this because it owns the session: an out-of-process
+        server would have to create its own sandbox, and the owner would then be
+        unable to snapshot the environment its agent actually worked in -- the
+        ownership inversion the ``--image`` flag used to cause. In-process, the
+        sandbox is handed over with :meth:`SandboxPool.adopt` and there is one
+        handle to it.
+
+        The socket is bound *here*, before the thread starts, so ``port=0``
+        resolves to a real port that :attr:`base_url` can report immediately.
+        """
+        import socket
+        import threading
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self.host, self.port))
+        sock.listen(128)
+        self.port = sock.getsockname()[1]
+
+        ready = threading.Event()
+        self._loop: "asyncio.AbstractEventLoop | None" = None
+        self._stop: "asyncio.Event | None" = None
+
+        def serve() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._loop = loop
+            self._stop = asyncio.Event()
+            ready.set()
+            try:
+                loop.run_until_complete(self.run(sock=sock, stop=self._stop))
+            finally:
+                loop.close()
+
+        self._thread = threading.Thread(target=serve, daemon=True,
+                                        name="ash-mcp-http")
+        self._thread.start()
+        ready.wait(timeout=10)
+        return self
+
+    def stop(self, timeout: float = 10.0) -> None:
+        """Stop serving and release the pool. Safe to call twice."""
+        loop, stop = getattr(self, "_loop", None), getattr(self, "_stop", None)
+        if loop is not None and stop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(stop.set)
+        thread = getattr(self, "_thread", None)
+        if thread is not None:
+            thread.join(timeout=timeout)
+            self._thread = None
 
     def _log(self, text: str):
         sys.stderr.write(f"[ash-mcp-http] {text}\n")

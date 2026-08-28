@@ -85,6 +85,12 @@ class SandboxSession:
         #: started (digest-pinned for a cold start). Unchanged by re-boarding.
         self._base_image: str = ""
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        #: Why the last :meth:`create` returned False. Kept because ``create``
+        #: reports through a bool and the reason through ``_warn`` -- and a quiet
+        #: caller (the orchestrator is one) then had nothing to put in its own
+        #: error, so "could not create a sandbox from <image>" pointed at the image
+        #: when the actual cause was a missing setting.
+        self.create_error: str = ""
 
     # --- reporting ---------------------------------------------------------
     def _note(self, label: str, text: str) -> None:
@@ -137,6 +143,7 @@ class SandboxSession:
 
     async def _create_async(self, image: str,
                             resources: "Optional[dict]" = None) -> bool:
+        self.create_error = ""
         try:
             self._pool = build_pool(self.backend, runtime_bin=self.runtime_bin)
             self._requested_image = image
@@ -179,6 +186,7 @@ class SandboxSession:
             await self._after_create(self._sandbox)
             return True
         except Exception as e:  # noqa: BLE001 - create reports, it does not raise
+            self.create_error = "%s: %s" % (type(e).__name__, e)
             self._warn("Failed to create sandbox: %s" % e)
             return False
 

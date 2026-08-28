@@ -34,7 +34,7 @@ from typing import Any
 from ash_sandbox import DockerPool, MicroVMPool, Pool, SandboxPool
 
 __all__ = ["build_pool", "backend_config", "backend_name", "BACKENDS",
-           "BackendError"]
+           "BackendError", "resolve_microvm_endpoint"]
 
 
 class BackendError(ValueError):
@@ -117,8 +117,25 @@ def _docker(config: dict, section: dict) -> Pool:
                       port=int(section.get("port", 3000)))
 
 
+def resolve_microvm_endpoint(section: dict) -> "tuple[str, str]":
+    """Where AgentENV is and how to authenticate, as (server_url, api_key).
+
+    One resolver so the pool and the template builder cannot disagree. They did:
+    the pool fell back to the environment while the builder required both settings
+    in the config, so a configuration that spawned sandboxes failed to build a
+    template -- and the failure surfaced as "could not create a sandbox", which
+    points at the image rather than at the missing setting.
+
+    ``server_url`` comes back empty when neither config nor environment names one;
+    each caller phrases its own error, because what is impossible without it
+    differs.
+    """
+    server_url = section.get("server_url") or os.environ.get("AENV_SERVER_URL") or ""
+    return str(server_url), _read_api_key(section, "AENV_API_KEY")
+
+
 def _microvm(config: dict, section: dict) -> Pool:
-    server_url = section.get("server_url") or os.environ.get("AENV_SERVER_URL")
+    server_url, api_key = resolve_microvm_endpoint(section)
     if not server_url:
         raise BackendError(
             "backend 'microvm' needs microvm.server_url (or AENV_SERVER_URL), "
@@ -127,7 +144,7 @@ def _microvm(config: dict, section: dict) -> Pool:
         server_url=str(server_url),
         default_template=str(section.get("template", "ash-base")),
         runtime_port=int(section.get("runtime_port", 3000)),
-        api_key=_read_api_key(section, "AENV_API_KEY"),
+        api_key=api_key,
         request_timeout=float(section.get("request_timeout", 120)),
         sandbox_ttl=int(section.get("sandbox_ttl", 600)),
         auto_resume=bool(section.get("auto_resume", True)),

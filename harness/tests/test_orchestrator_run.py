@@ -328,3 +328,315 @@ def test_no_panel_named_leaves_the_wiring_alone():
     _, mcp = Orchestrator()._wire_sandbox(
         RunSpec(prompt="x", mcp_stdio_args=["--attach", "sb-1"]), None)
     assert "--tools" not in mcp.command
+
+
+# --- owning the sandbox ----------------------------------------------------
+#
+# The orchestrator used to require its caller to build a sandbox and a session
+# and pass them in, which is the opposite of owning a run: a caller that merely
+# named an image got no environment half of a rollback pair, because nothing here
+# held a handle to snapshot through. These pin the ownership, both transports, and
+# the teardown order.
+
+class _FakeSession:
+    """A SandboxSession-shaped object: create, snapshot, destroy."""
+
+    def __init__(self, sandbox_id="sb-owned", create_ok=True):
+        self._id = sandbox_id
+        self.create_ok = create_ok
+        self.create_error = "backend said no" if not create_ok else ""
+        self.created = None
+        self.destroyed = False
+        self.order = []
+        self.sandbox = object()
+
+    @property
+    def sandbox_id(self):
+        # Mirrors the real one: a destroyed session cannot name itself.
+        return "unknown" if self.destroyed else self._id
+
+    def create(self, image, resources=None):
+        self.created = image
+        self.order.append("create")
+        return self.create_ok
+
+    def supports_snapshot(self):
+        return False
+
+    def destroy(self):
+        self.order.append("destroy")
+        self.destroyed = True
+
+
+def _own(monkeypatch, session, **spec_kwargs):
+    """Drive _own_sandbox with a fake session, returning (orchestrator, owned)."""
+    import harness.execution.session as session_module
+
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    monkeypatch.setattr(session_module, "SandboxSession", lambda **kw: session)
+    spec = RunSpec(prompt="x", sandbox_image="img", **spec_kwargs)
+    orch = Orchestrator()
+    return orch, orch._own_sandbox(spec, None), spec
+
+
+def test_naming_an_image_makes_the_orchestrator_create_the_sandbox(monkeypatch):
+    session = _FakeSession()
+    _, owned, _ = _own(monkeypatch, session)
+    assert session.created == "img"
+    assert owned.session is session
+
+
+def test_stdio_transport_lends_the_sandbox_by_id(monkeypatch):
+    """--attach, not --image: the subprocess serves calls into a sandbox this
+    process owns, so the handle needed for snapshots stays here."""
+    session = _FakeSession()
+    _, owned, _ = _own(monkeypatch, session, transport="stdio", tools="default")
+    command = owned.mcp.command
+    assert "--attach" in command and "sb-owned" in command
+    assert "--image" not in command
+    assert command[command.index("--tools") + 1] == "default"
+    assert owned.server is None, "stdio's server is the slot's own subprocess"
+
+
+def test_http_transport_serves_the_sandbox_in_process(monkeypatch):
+    """In-process because the session lives here. An out-of-process server would
+    have to create its own sandbox, and the owner could then not snapshot the
+    environment its agent actually worked in."""
+    session = _FakeSession()
+    _, owned, spec = _own(monkeypatch, session, transport="http", tools="default")
+    try:
+        assert owned.server is not None
+        assert owned.mcp.url.startswith("http://127.0.0.1:")
+        assert owned.mcp.url.endswith("/mcp")
+        # The sandbox is bound by header, so the model is served the
+        # single-sandbox schema and never sees a sandbox_id argument.
+        headers = {k.lower(): v for k, v in (owned.mcp.headers or {}).items()}
+        assert headers.get("x-session-sandbox") == "sb-owned"
+    finally:
+        owned.release()
+
+
+def test_the_in_process_pool_does_not_own_what_it_was_handed(monkeypatch):
+    """adopt, not attach: the entry is marked external, so stopping the server
+    releases the sandbox instead of destroying the environment its owner still
+    needs for grading and extraction."""
+    session = _FakeSession()
+    _, owned, _ = _own(monkeypatch, session, transport="http")
+    try:
+        entry = owned.server.pool.get("sb-owned")
+        assert entry is not None and entry.external is True
+    finally:
+        owned.release()
+    assert session.destroyed, "the owner destroys it -- once, and here"
+
+
+def test_an_unknown_transport_is_refused(monkeypatch):
+    import pytest
+
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    with pytest.raises(ValueError, match="unknown transport"):
+        Orchestrator()._own_sandbox(
+            RunSpec(prompt="x", sandbox_image="img", transport="carrier-pigeon"),
+            None)
+
+
+def test_a_failed_create_does_not_leave_a_half_wired_run(monkeypatch):
+    import pytest
+
+    session = _FakeSession(create_ok=False)
+    with pytest.raises(RuntimeError, match="could not create a sandbox") as exc:
+        _own(monkeypatch, session)
+    # The reason travels with it: the session is quiet, so its own warning went
+    # nowhere, and "could not create a sandbox from <image>" alone points at the
+    # image when the cause is usually a missing setting.
+    assert "backend said no" in str(exc.value)
+
+
+def test_a_sandbox_is_not_leaked_when_wiring_fails(monkeypatch):
+    """The sandbox exists but nothing can reach it. Raising without releasing
+    would leave it running with the caller seeing only an exception."""
+    import pytest
+
+    import harness.orchestrator.run as run_module
+
+    session = _FakeSession()
+    monkeypatch.setattr("harness.execution.session.SandboxSession",
+                        lambda **kw: session)
+    monkeypatch.setattr(run_module.Orchestrator, "_serve_in_process",
+                        lambda self, spec, owned: (_ for _ in ()).throw(
+                            RuntimeError("port in use")))
+    with pytest.raises(RuntimeError, match="port in use"):
+        run_module.Orchestrator()._own_sandbox(
+            run_module.RunSpec(prompt="x", sandbox_image="img",
+                               transport="http"), None)
+    assert session.destroyed, "a sandbox nothing can reach must not be left running"
+
+
+def test_owning_the_sandbox_gives_checkpoints_without_the_caller_asking(monkeypatch):
+    """The payoff. Rollback pairs used to need the caller to build a session and
+    hand it down; a run that named an image got no environment half at all."""
+    from harness.orchestrator.run import Orchestrator, OwnedSandbox, RunSpec
+
+    installed = []
+
+    class FakeBridge:
+        ledger = type("L", (), {"checkpoints": []})()
+
+    monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
+                        classmethod(lambda cls, journal, session, always=False:
+                                    installed.append(session) or FakeBridge()))
+    session = _FakeSession()
+    owned = OwnedSandbox(session=session, sandbox_id="sb-owned")
+    Orchestrator()._wire_checkpoints(RunSpec(prompt="x"), object(), owned)
+    assert installed == [session]
+
+
+def test_a_remote_sandbox_has_no_session_to_snapshot(monkeypatch):
+    """Not an error: a sandbox on somebody else's server cannot be snapshotted
+    from here, which is precisely the limitation owning one removes."""
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    class Remote:
+        sandbox_id = "sb-remote"          # no `session` attribute
+
+    assert Orchestrator()._wire_checkpoints(
+        RunSpec(prompt="x"), object(), Remote()) is None
+
+
+def test_the_outcome_can_still_name_its_sandbox_after_teardown():
+    """Teardown runs before the outcome is assembled, and a destroyed session
+    answers "unknown" -- so reading the id lazily left every completed run unable
+    to say which sandbox produced it."""
+    from harness.orchestrator.run import OwnedSandbox
+
+    session = _FakeSession()
+    owned = OwnedSandbox(session=session, sandbox_id=session.sandbox_id)
+    owned.release()
+    assert session.destroyed
+    assert owned.sandbox_id == "sb-owned"
+
+
+def test_the_server_stops_even_when_the_sandbox_is_kept(monkeypatch):
+    """--keep leaves the sandbox for grading. A server still serving it is a
+    process nobody will stop, holding a port nobody will reuse."""
+    session = _FakeSession()
+    _, owned, _ = _own(monkeypatch, session, transport="http", keep_sandbox=True)
+    server = owned.server
+    owned.release()
+    assert owned.server is None
+    assert not session.destroyed, "--keep means the sandbox survives"
+
+
+# --- checkpoints at the tool boundary --------------------------------------
+def test_the_in_process_server_checkpoints_at_each_mutating_call():
+    """The payoff of owning the sandbox AND serving it: an SDK slot cannot be
+    checkpointed at its turn boundary (it journals from inside its event loop, and
+    the session's own loop cannot be entered from there), but its tool calls are
+    its only channel into the environment -- and this process sees each one finish."""
+    import asyncio
+
+    from harness.orchestrator.run import _CheckpointingPool
+
+    boundaries = []
+
+    class Bridge:
+        def on_tool_boundary(self, index):
+            boundaries.append(index)
+
+    class Pool(_CheckpointingPool):
+        pass
+
+    pool = Pool()
+    pool.bridge = Bridge()
+    asyncio.run(pool.after_mutating_call(object(), "shell", {"command": "x"}))
+    asyncio.run(pool.after_mutating_call(object(), "text_editor", {"path": "y"}))
+    assert boundaries == [1, 2], "one step per mutating call, in order"
+
+
+def test_no_bridge_means_no_notification():
+    """The pool is built before the bridge exists -- the sandbox has to precede
+    the thing that snapshots it -- so a call landing in between must be harmless."""
+    import asyncio
+
+    from harness.orchestrator.run import _CheckpointingPool
+
+    class Pool(_CheckpointingPool):
+        pass
+
+    asyncio.run(Pool().after_mutating_call(object(), "shell", {}))   # no raise
+
+
+def test_the_bridge_is_handed_to_the_pool_after_it_exists(monkeypatch):
+    from harness.orchestrator.run import (Orchestrator, OwnedSandbox, RunSpec,
+                                          _CheckpointingPool)
+
+    class FakeBridge:
+        ledger = type("L", (), {"checkpoints": []})()
+
+    monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
+                        classmethod(lambda cls, journal, session, always=False:
+                                    FakeBridge()))
+
+    class Pool(_CheckpointingPool):
+        pass
+
+    pool = Pool()
+    owned = OwnedSandbox(session=_FakeSession(), pool=pool, sandbox_id="sb-1")
+    bridge = Orchestrator()._wire_checkpoints(RunSpec(prompt="x"), object(), owned)
+    assert pool.bridge is bridge
+
+
+# --- saying so when checkpointing produced nothing --------------------------
+class _RecordingJournal:
+    def __init__(self):
+        self.events = []
+
+    def emit(self, kind, **payload):
+        self.events.append((kind, payload))
+
+
+def test_a_run_that_recorded_no_checkpoints_says_so():
+    """Silence about a capability that did not happen is worse than the absence:
+    it is discovered later, from the outside, by someone trying to branch a run
+    that cannot be branched."""
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    class Bridge:
+        skipped_on_loop = 4
+        ledger = type("L", (), {"checkpoints": []})()
+
+    seen = []
+    journal = _RecordingJournal()
+    orch = Orchestrator(on_event=lambda k, p: seen.append((k, p)))
+    orch._report_missing_checkpoints(
+        RunSpec(prompt="x", transport="stdio"), journal, Bridge())
+
+    kinds = [k for k, _ in journal.events]
+    assert "checkpoint.unavailable" in kinds
+    payload = dict(journal.events[0][1])
+    assert payload["skipped"] == 4 and payload["transport"] == "stdio"
+    assert "http" in payload["reason"], "the message must name the remedy"
+    assert seen and seen[0][0] == "checkpoint.unavailable"
+
+
+def test_a_run_that_did_checkpoint_stays_quiet():
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    class Bridge:
+        skipped_on_loop = 3          # some skips, but snapshots were taken anyway
+        ledger = type("L", (), {"checkpoints": [object()]})()
+
+    journal = _RecordingJournal()
+    Orchestrator()._report_missing_checkpoints(RunSpec(prompt="x"), journal, Bridge())
+    assert journal.events == []
+
+
+def test_no_checkpointing_requested_is_not_a_warning():
+    """Nothing was asked for, so nothing is missing."""
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    journal = _RecordingJournal()
+    Orchestrator()._report_missing_checkpoints(RunSpec(prompt="x"), journal, None)
+    assert journal.events == []

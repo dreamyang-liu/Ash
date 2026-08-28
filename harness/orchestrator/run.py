@@ -50,6 +50,17 @@ class RunSpec:
     journal_path: Optional[Union[str, Path]] = None
 
     # --- sandbox ---
+    #: How the agent reaches the sandbox when *this* process runs the server:
+    #: ``"stdio"`` spawns it as a subprocess, ``"http"`` runs it in-process on an
+    #: ephemeral port. Both end up with the orchestrator owning the sandbox, which
+    #: is the point -- the choice is only about how the agent talks to it. Ignored
+    #: when ``mcp_url`` names a server somebody else is already running.
+    transport: str = "stdio"
+    #: Where sandboxes come from, when this orchestrator creates one:
+    #: ``{"backend": "microvm", "microvm": {...}}``. Empty means local Docker.
+    backend: Dict[str, Any] = field(default_factory=dict)
+    #: ash-runtime binary to provision into a bare image (microvm templates).
+    runtime_bin: Optional[str] = None
     #: A running Execution Server. Required for any sandbox wiring.
     mcp_url: Optional[str] = None
     #: Provision a sandbox from this image and bind the slot to it.
@@ -64,11 +75,12 @@ class RunSpec:
     #: bash_only, no_web) or a path to a manifest. None leaves the server on its
     #: built-in four.
     #:
-    #: Only meaningful for stdio, where this process starts the server and can
-    #: pass `--tools`. Over HTTP the panel belongs to the already-running server,
-    #: so naming one here is refused rather than ignored: a tool surface that
-    #: silently differs from what was asked for is how a run's numbers stop
-    #: describing the configuration someone thinks they ran.
+    #: Honoured whenever *this* process runs the server, which is both transports:
+    #: stdio passes `--tools`, http compiles the panel and hands it to the
+    #: in-process server. It is refused, not ignored, only when ``mcp_url`` names a
+    #: server somebody else started -- that process already has whatever panel it
+    #: was given, and accepting the argument would report a tool surface the run
+    #: did not have.
     tools: Optional[str] = None
 
     # --- gateway ---
@@ -88,6 +100,86 @@ class RunSpec:
     fork: bool = False
 
     extra: Dict[str, Any] = field(default_factory=dict)
+
+
+class _CheckpointingPool:
+    """Mixin turning "a call that could have mutated finished" into a checkpoint.
+
+    Why this hook and not ``turn.completed``: an SDK slot journals its turn from
+    *inside* its event loop, and a session drives its own loop with
+    ``run_until_complete``, which cannot be entered from a thread that already has
+    one running. The bridge detects that and skips -- silently, counting the skips
+    where nobody read them -- so an orchestrator-owned run with an SDK slot recorded
+    zero snapshots while appearing to have checkpointing on.
+
+    A tool call is the step boundary for an external agent anyway: its tool calls
+    are its only channel into the environment. This server sees each one complete,
+    on a thread it controls, which is exactly where a snapshot can be taken.
+
+    The bridge is attached after the fact because ordering demands it -- the sandbox
+    must exist before the bridge that snapshots it.
+    """
+
+    bridge: Any = None
+    _steps: int = 0
+
+    async def after_mutating_call(self, entry, tool_name: str, args: dict) -> None:
+        import asyncio
+
+        if self.bridge is None:
+            return
+        self._steps += 1
+        # to_thread: the session's private loop cannot be entered from this one,
+        # and blocking here would stall every other request the server is serving.
+        await asyncio.to_thread(self.bridge.on_tool_boundary, self._steps)
+
+
+@dataclass
+class OwnedSandbox:
+    """A sandbox this orchestrator created, plus whatever serves it.
+
+    Deliberately the same shape as
+    :class:`~harness.execution.provision.Provisioned` where the run sequence
+    touches it (``sandbox_id``, ``destroy``), so teardown does not branch on which
+    kind it got. The difference is what it holds: ``Provisioned`` is a sandbox on
+    somebody else's server, this is a session in *this* process -- which is what
+    lets the checkpoint bridge snapshot the environment the agent is working in.
+    """
+
+    session: Any
+    mcp: Optional[McpWiring] = None
+    #: An in-process HTTP server, when the transport is http. None for stdio, where
+    #: the server is the slot's own subprocess and dies with it.
+    server: Any = None
+    #: The pool that server serves from, when it is a checkpointing one. The
+    #: orchestrator hands it the bridge once the bridge exists.
+    pool: Any = None
+    keep: bool = False
+    #: Recorded at creation, NOT read from the session on demand. Teardown runs
+    #: before the outcome is assembled, and a destroyed session answers "unknown"
+    #: -- so a lazy property left every completed run unable to say which sandbox
+    #: produced it, which is the reproducibility gap `environment()` exists to
+    #: close.
+    sandbox_id: str = ""
+
+    def stop_server(self) -> None:
+        """Stop serving. Always safe, and always correct to do at teardown: the
+        sandbox may outlive the run (``--keep``), the server serving it must not."""
+        if self.server is not None:
+            self.server.stop()
+            self.server = None
+
+    def destroy(self) -> None:
+        self.session.destroy()
+
+    def release(self) -> None:
+        """Give everything back. Used when wiring fails halfway: the sandbox
+        exists but nothing can reach it, so leaking it buys nobody anything."""
+        try:
+            self.stop_server()
+        finally:
+            if not self.keep:
+                self.destroy()
 
 
 @dataclass
@@ -167,13 +259,17 @@ class Orchestrator:
                 # process then has no way to reclaim.
                 if claim is not None:
                     claim.attach(journal)
-                bridge = self._wire_checkpoints(spec, journal)
+                bridge = self._wire_checkpoints(spec, journal, provisioned)
 
                 result = slot.run(task, journal, mcp)
             except Exception as exc:  # noqa: BLE001 - a run reports, it does not raise
                 error = "%s: %s" % (type(exc).__name__, exc)
                 journal.emit("run.finished", status="error", error=error)
             finally:
+                # Before teardown, so the journal says what happened while the
+                # journal is still open; and in `finally`, because a run that died
+                # is exactly one whose missing snapshots matter most.
+                self._report_missing_checkpoints(spec, journal, bridge)
                 self._teardown(spec, gateway, provisioned, claim)
 
         return RunOutcome(
@@ -235,6 +331,13 @@ class Orchestrator:
             return None, http_wiring(
                 spec.mcp_url, agent_id=spec.agent_id, sandbox_id=spec.sandbox_id,
             )
+
+        # No remote server named. If an image is, this orchestrator creates the
+        # sandbox and runs the server itself -- see _own_sandbox.
+        if spec.sandbox_image and spec.session is None:
+            owned = self._own_sandbox(spec, claim)
+            return owned, owned.mcp
+
         if spec.mcp_stdio_args is not None:
             args = list(spec.mcp_stdio_args)
             if spec.tools and "--tools" not in args:
@@ -242,6 +345,104 @@ class Orchestrator:
                 args += ["--tools", spec.tools]
             return None, stdio_wiring(args=args)
         return None, None
+
+    def _own_sandbox(self, spec: RunSpec, claim) -> "OwnedSandbox":
+        """Create the sandbox, then serve it over the requested transport.
+
+        This is what makes the orchestrator an entry point rather than a function
+        you hand an environment to. One owner, both transports:
+
+            create session -> stdio: subprocess server --attach <id>
+                           -> http:  in-process server, pool.adopt(sandbox)
+
+        Either way the session stays here, which is what the checkpoint bridge
+        needs (it snapshots through this handle) and what teardown needs (the
+        sandbox dies after the last snapshot, not when a stream closes).
+
+        The transports differ in exactly one thing that matters: stdio hands the
+        sandbox over *by id*, so the subprocess re-derives its own handle and the
+        backend must support ``attach`` -- only microvm does. http hands over the
+        handle itself, so any backend works. A stdio request on a backend that
+        cannot attach is therefore refused here, with the alternative named,
+        rather than failing later as an unexplained tool error.
+        """
+        from harness.execution.session import SandboxSession
+        from harness.execution.wiring import stdio_wiring
+
+        if spec.transport not in ("stdio", "http"):
+            raise ValueError("unknown transport %r; expected 'stdio' or 'http'"
+                             % spec.transport)
+
+        session = SandboxSession(runtime_bin=spec.runtime_bin,
+                                 backend=dict(spec.backend), quiet=True)
+        if not session.create(spec.sandbox_image):
+            # The session is quiet here (its progress lines are not this run's
+            # output), so the reason has to travel in the exception or it is lost.
+            # getattr: any session-shaped object may be substituted here, and not
+            # every one records a reason.
+            reason = getattr(session, "create_error", "")
+            raise RuntimeError("could not create a sandbox from %s%s" % (
+                spec.sandbox_image, ": %s" % reason if reason else ""))
+        owned = OwnedSandbox(session=session, keep=spec.keep_sandbox,
+                             sandbox_id=session.sandbox_id)
+        try:
+            if claim is not None:
+                # Claimed before the run does anything with it: a process killed
+                # mid-run releases nothing, and `harness reap` reads this.
+                claim.sandbox(session.sandbox_id, keep=spec.keep_sandbox)
+            self.on_event("sandbox", {"sandbox_id": session.sandbox_id})
+
+            if spec.transport == "stdio":
+                args = ["--attach", session.sandbox_id]
+                if spec.runtime_bin:
+                    args += ["--runtime-bin", spec.runtime_bin]
+                name = spec.backend.get("backend")
+                if name:
+                    args += ["--backend", name]
+                if spec.tools:
+                    args += ["--tools", spec.tools]
+                owned.mcp = stdio_wiring(args=args)
+            else:
+                owned.mcp = self._serve_in_process(spec, owned)
+            return owned
+        except Exception:
+            # The sandbox exists but nothing can reach it; do not leak it while
+            # the caller sees only an exception.
+            owned.release()
+            raise
+
+    def _serve_in_process(self, spec: RunSpec, owned: "OwnedSandbox") -> McpWiring:
+        """An MCP server in this process, serving the sandbox we already hold.
+
+        ``adopt``, not ``attach``: attach re-derives a handle from an id, which
+        needs a backend that can and yields a second handle to the same sandbox.
+        We have the handle -- so any backend works here, Docker included, and the
+        pool is told not to destroy what it did not create.
+        """
+        from harness.execution.panel import load_panel
+        from harness.execution.server import (ExecSurface, HttpMcpServer,
+                                              SandboxPool)
+        from harness.execution.wiring import http_wiring
+
+        surface = (ExecSurface(load_panel(spec.tools, format="raw"))
+                   if spec.tools else None)
+
+        class _Pool(_CheckpointingPool, SandboxPool):
+            pass
+
+        pool = _Pool(runtime_bin=spec.runtime_bin, backend=dict(spec.backend))
+        owned.pool = pool
+        entry = pool.adopt(owned.session.sandbox, [f"owner:{spec.agent_id}"],
+                           sandbox_id=owned.session.sandbox_id,
+                           image=spec.sandbox_image or "")
+        server = HttpMcpServer(pool, host="127.0.0.1", port=0, surface=surface,
+                               notify_mutations=True).start()
+        owned.server = server
+        self.on_event("mcp", {"url": server.base_url, "transport": "http"})
+        # X-Session-Sandbox binds the slot's session to this sandbox, so the model
+        # is served the single-sandbox schema and never sees a sandbox_id at all.
+        return http_wiring(server.base_url, agent_id=spec.agent_id,
+                           sandbox_id=entry.id)
 
     def _wire_gateway(self, spec: RunSpec, journal, task: TaskSpec, run_id: str):
         """Start a gateway and point the agent at it, when this run needs one."""
@@ -258,13 +459,66 @@ class Orchestrator:
         self.on_event("gateway", {"url": gateway.base_url, "budget_usd": spec.budget_usd})
         return gateway
 
-    def _wire_checkpoints(self, spec: RunSpec, journal):
-        if spec.session is None:
+    def _wire_checkpoints(self, spec: RunSpec, journal, owned=None):
+        """Install the checkpoint bridge on whichever session this run has.
+
+        The caller may hand one in (``spec.session``); otherwise it is the one this
+        orchestrator created. That second case is the point of owning the sandbox:
+        rollback pairs used to require the caller to build a session and pass it
+        down, so a run that merely named an image got no environment half at all.
+
+        A backend that cannot snapshot needs no special case -- ``session.snapshot``
+        returns None and the bridge records nothing.
+        """
+        # getattr: `owned` is whatever _wire_sandbox returned, and only one of the
+        # two kinds holds a session. A `Provisioned` sandbox lives on somebody
+        # else's server, so there is no handle here to snapshot through -- which is
+        # exactly the limitation owning the sandbox removes, and not an error.
+        session = spec.session or getattr(owned, "session", None)
+        if session is None:
             return None
         from harness.checkpointing import SnapshotBridge
 
-        return SnapshotBridge.install(journal, spec.session,
-                                     always=spec.snapshot_every_step)
+        bridge = SnapshotBridge.install(journal, session,
+                                        always=spec.snapshot_every_step)
+        # The in-process server now has something to notify. Attached here rather
+        # than at wiring time because the sandbox has to exist before the bridge
+        # that snapshots it does.
+        pool = getattr(owned, "pool", None)
+        if pool is not None:
+            pool.bridge = bridge
+        return bridge
+
+    def _report_missing_checkpoints(self, spec: RunSpec, journal, bridge) -> None:
+        """Say so when checkpointing was on and produced nothing.
+
+        The case this exists for: an SDK slot journals its turn from inside its
+        event loop, the bridge cannot enter the session's own loop from there, and
+        every opportunity is skipped. That used to be invisible -- the run reported
+        success, the count sat in a private field, and the snapshots a fork needs
+        simply were not there. Silence about a capability that did not happen is
+        worse than the absence itself, because it is discovered later, from the
+        outside, by someone trying to branch a run that cannot be branched.
+
+        The remedy is a transport, which is why the advice is phrased here rather
+        than in the bridge: with ``transport="http"`` this process serves the tool
+        calls and checkpoints at each one. With stdio the server is the slot's own
+        subprocess, so the tool boundary happens where nothing here can see it.
+        """
+        if bridge is None:
+            return
+        skipped = getattr(bridge, "skipped_on_loop", 0)
+        recorded = len(getattr(getattr(bridge, "ledger", None), "checkpoints", ()))
+        if recorded or not skipped:
+            return
+        advice = ("this slot journals from inside its event loop, so the turn "
+                  "boundary cannot be used; run with transport=\"http\" and the "
+                  "orchestrator checkpoints at each tool call instead")
+        journal.emit("checkpoint.unavailable", skipped=skipped,
+                     transport=spec.transport, slot=spec.slot, reason=advice)
+        self.on_event("checkpoint.unavailable",
+                      {"skipped": skipped, "transport": spec.transport,
+                       "reason": advice})
 
     def _teardown(self, spec: RunSpec, gateway, provisioned, claim) -> None:
         """Release in reverse. Each step is independent: one failure must not
@@ -272,6 +526,14 @@ class Orchestrator:
         if gateway is not None:
             try:
                 gateway.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        # Stops regardless of --keep, and before the sandbox goes: a server left
+        # serving a destroyed sandbox answers every call with a transport error.
+        stop_server = getattr(provisioned, "stop_server", None)
+        if stop_server is not None:
+            try:
+                stop_server()
             except Exception:  # noqa: BLE001
                 pass
         if provisioned is not None and not spec.keep_sandbox:
