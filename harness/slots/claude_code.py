@@ -257,7 +257,19 @@ class ClaudeCodeSlot(AgentSlot):
         if extra.get("max_turns"):
             kwargs["max_turns"] = extra["max_turns"]
         if task.env:
-            kwargs["env"] = dict(task.env)
+            env = dict(task.env)
+            if "ANTHROPIC_BASE_URL" in env:
+                # The run routed this agent's LLM traffic somewhere -- a gateway,
+                # a vLLM, an RL checkpoint. The CLI's provider-direct modes
+                # (Bedrock/Vertex, usually turned on by the developer's own
+                # ~/.claude settings) IGNORE the base URL entirely, so the run
+                # completes against the wrong provider while the gateway records
+                # nothing: a silently bypassed gateway is worse than a failed
+                # run, because the budget it was supposed to enforce was not.
+                # Explicit settings in the task env still win.
+                env.setdefault("CLAUDE_CODE_USE_BEDROCK", "0")
+                env.setdefault("CLAUDE_CODE_USE_VERTEX", "0")
+            kwargs["env"] = env
 
         for key in list(kwargs):
             # Tolerate SDK version differences rather than crashing on an

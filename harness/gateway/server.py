@@ -19,8 +19,10 @@ Implementation notes that are not obvious:
   accumulates ``message_start`` / ``message_delta`` usage for the journal. We do
   not buffer whole responses, and we do not modify frames -- verdict-style
   rewriting on the model stream is not this layer's job.
-- **Budget is checked before forwarding**, refused with 429 and a JSON error the
-  agent can read. Enforcement here is real, unlike asking an agent to stop.
+- **Budget is checked before forwarding**, refused with a NON-RETRYABLE 400 and
+  a JSON error the agent can read. Enforcement here is real, unlike asking an
+  agent to stop; and it must be terminal -- a 429 reads as "retry later" to
+  every SDK, and an agent then burns wall-clock retrying the unwinnable.
 - ``GET /v1/models`` must answer: Claude Code probes it for model discovery and
   treats failure (including any redirect) as fatal.
 """
@@ -80,6 +82,7 @@ class GatewayServer:
         self._httpd = ThreadingHTTPServer((host, port), _make_handler(self))
         self._httpd.daemon_threads = True
         self._thread: Optional[threading.Thread] = None
+        self._warned_unpriced = False
 
     # --- lifecycle ---------------------------------------------------------
     @property
@@ -198,11 +201,17 @@ def _make_handler(gateway: GatewayServer):
                     spent_usd=round(token.spent_usd, 6),
                     budget_usd=token.budget_usd,
                 )
+                # 400/invalid_request, NOT 429/rate_limit: an exhausted budget
+                # is terminal, and 429 tells every SDK "back off and retry" --
+                # measured live, the agent then burned minutes retrying a
+                # request that could never succeed. A non-retryable error fails
+                # the run NOW, which is what a kill switch is for.
                 self._error(
-                    429,
-                    "run budget exhausted: spent $%.4f of $%.4f"
+                    400,
+                    "run budget exhausted: spent $%.4f of $%.4f -- this will "
+                    "not succeed on retry"
                     % (token.spent_usd, token.budget_usd),
-                    "rate_limit_error",
+                    "invalid_request_error",
                 )
                 return
 
@@ -289,13 +298,31 @@ def _make_handler(gateway: GatewayServer):
             self.end_headers()
 
         def _tap(self, token, requested_model, upstream_model, route, status, usage, streaming):
+            cost = usage.cost_usd or route.price(usage)
             if token is not None:
                 gateway.table.charge(
                     token,
-                    cost_usd=usage.cost_usd,
+                    cost_usd=cost,
                     input_tokens=usage.input_tokens,
                     output_tokens=usage.output_tokens,
                 )
+                if (token.budget_usd is not None and cost == 0.0
+                        and (usage.input_tokens or usage.output_tokens)
+                        and not gateway._warned_unpriced):
+                    # A budget over a route with no pricing can never bind: the
+                    # provider reports tokens, nobody converts them to dollars,
+                    # spent stays 0 forever. Found live -- the "enforced budget"
+                    # was decorative on every real Anthropic upstream. Once per
+                    # gateway, because once is a diagnosis and per-request is
+                    # noise.
+                    gateway._warned_unpriced = True
+                    gateway.record(
+                        status="budget_unenforceable",
+                        agent_id=getattr(token, "agent_id", None),
+                        base_url=route.base_url,
+                        reason="route has no pricing; budget_usd cannot bind "
+                               "-- add pricing to the route",
+                    )
             gateway.record(
                 agent_id=getattr(token, "agent_id", None),
                 status="ok" if status < 400 else "upstream_%d" % status,
@@ -303,7 +330,7 @@ def _make_handler(gateway: GatewayServer):
                 upstream_model=upstream_model or route.upstream_model or requested_model,
                 base_url=route.base_url,
                 streaming=streaming,
-                usage=usage.as_dict(),
+                usage=dict(usage.as_dict(), cost_usd=round(cost, 6)),
                 spent_usd=round(token.spent_usd, 6) if token else None,
             )
 

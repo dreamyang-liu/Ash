@@ -49,6 +49,28 @@ class ModelRoute:
     upstream_model: Optional[str] = None
     #: Extra headers to add upstream (e.g. a gateway of your own downstream).
     headers: Dict[str, str] = field(default_factory=dict)
+    #: USD per million tokens, e.g. ``{"input": 3.0, "output": 15.0,
+    #: "cache_read": 0.30, "cache_write": 3.75}``. The provider's responses
+    #: carry token counts but no price, so without this the gateway can count
+    #: everything and charge nothing -- ``budget_usd`` then never binds. Config,
+    #: not code: prices change and differ per route (an RL checkpoint is free).
+    pricing: Dict[str, float] = field(default_factory=dict)
+
+    def price(self, usage) -> float:
+        """USD for one request's usage, 0.0 when this route has no pricing.
+
+        ``input`` rates apply to uncached input only: providers bill cache reads
+        at their own (much lower) rate, and ``cached_input_tokens`` is a subset
+        of ``input_tokens``.
+        """
+        if not self.pricing:
+            return 0.0
+        rate = {k: float(v) / 1_000_000 for k, v in self.pricing.items()}
+        uncached = max(0, usage.input_tokens - usage.cached_input_tokens)
+        return (uncached * rate.get("input", 0.0)
+                + usage.output_tokens * rate.get("output", 0.0)
+                + usage.cached_input_tokens * rate.get("cache_read", 0.0)
+                + usage.cache_creation_tokens * rate.get("cache_write", 0.0))
 
     def resolve_key(self) -> Optional[str]:
         if self.api_key:
@@ -65,6 +87,7 @@ class ModelRoute:
             api_key_env=payload.get("api_key_env"),
             upstream_model=payload.get("upstream_model"),
             headers=dict(payload.get("headers") or {}),
+            pricing=dict(payload.get("pricing") or {}),
         )
 
 

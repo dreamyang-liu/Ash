@@ -219,7 +219,9 @@ Three things no slot can provide:
   `{"ash-rl-ckpt-42": {"base_url": "http://10.0.0.5:8000", "upstream_model": "checkpoint-42"}}`.
 - **Wire-level tap** — exact token counts and the real request, independent of
   what the agent reports. Journaled as `gateway.request`.
-- **Enforced budget** — 429 once a slot is over its ceiling. Slot-side accounting
+- **Enforced budget** — a non-retryable 400 once a slot is over its ceiling
+  (429 reads as "retry later" to every SDK; measured live, the agent then spent
+  minutes in backoff against the unwinnable). Slot-side accounting
   can only *ask* an agent to stop.
 
 Implementation constraints worth knowing: headers pass through untouched

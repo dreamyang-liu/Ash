@@ -269,8 +269,11 @@ def test_budget_is_enforced_not_merely_reported(gateway):
     table.charge(token, cost_usd=0.002)          # simulate prior spend
 
     response = post(server, token.token, {"model": "m", "messages": []})
-    assert response.status_code == 429
-    assert response.json()["error"]["type"] == "rate_limit_error"
+    # 400, not 429: an exhausted budget is terminal, and 429 invites the SDK to
+    # back off and retry a request that can never succeed (measured live).
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert "budget exhausted" in response.json()["error"]["message"]
     assert "budget" in response.json()["error"]["message"]
     assert token.blocked == 1
 
@@ -345,3 +348,64 @@ def test_tokens_are_unguessable_and_distinct():
     assert table.lookup(a.token).agent_id == "agent-a"
     assert table.lookup("Bearer " + b.token).agent_id == "agent-b"
     assert table.lookup(None) is None
+
+
+# --- pricing: what makes budget_usd real -------------------------------------
+def test_a_route_prices_usage_and_uncached_input_is_not_double_billed():
+    """The provider reports token counts but no price; without a conversion the
+    budget never binds. cache reads bill at their own rate and are a SUBSET of
+    input_tokens, so they must come out of the input bucket."""
+    from harness.core.events import Usage
+    from harness.gateway.routing import ModelRoute
+
+    route = ModelRoute(pricing={"input": 3.0, "output": 15.0,
+                                "cache_read": 0.30, "cache_write": 3.75})
+    usage = Usage(input_tokens=1000, output_tokens=100,
+                  cached_input_tokens=400, cache_creation_tokens=200)
+    # 600 uncached * 3 + 100 * 15 + 400 * 0.30 + 200 * 3.75 (per mtok)
+    assert abs(route.price(usage) - 0.00417) < 1e-9
+    assert ModelRoute().price(usage) == 0.0, "no pricing -> no invented cost"
+
+
+def test_pricing_survives_the_routes_file():
+    from harness.gateway.routing import ModelRoute
+
+    route = ModelRoute.from_dict({"base_url": "http://up", "api_key": "k",
+                                  "pricing": {"input": 3.0}})
+    assert route.pricing == {"input": 3.0}
+
+
+def test_an_unpriced_budget_says_so_once(tmp_path):
+    """A budget over a route with no pricing can never bind -- spent stays 0
+    forever. Found live: the 'enforced budget' was decorative on every real
+    Anthropic upstream. The gateway must say so, once, rather than silently
+    enforcing nothing."""
+    import json
+    import urllib.request
+
+    from harness.core.journal import JournalWriter, read_journal
+    from harness.gateway.routing import ModelRoute, RoutingTable
+    from harness.gateway.server import GatewayServer
+
+    upstream = _Upstream()           # anthropic-shaped, reports tokens, no cost
+    table = RoutingTable()
+    table.add_route("default", ModelRoute(base_url=upstream.base_url, api_key="k"))
+    journal_path = tmp_path / "j.jsonl"
+    with JournalWriter(journal_path, run_id="r", agent_id="a") as journal:
+        gateway = GatewayServer(table, journal=journal, port=0).start()
+        try:
+            token = table.mint("agent-1", run_id="r", budget_usd=1.0)
+            for _ in range(2):       # twice: the warning must not repeat
+                body = json.dumps({"model": "m", "max_tokens": 8,
+                                   "messages": [{"role": "user", "content": "hi"}]}).encode()
+                req = urllib.request.Request(
+                    gateway.base_url + "/v1/messages", data=body,
+                    headers={"Content-Type": "application/json",
+                             "Authorization": "Bearer %s" % token.token})
+                urllib.request.urlopen(req, timeout=10).read()
+        finally:
+            gateway.stop()
+            upstream.stop()
+    warnings = [r for r in read_journal(journal_path)
+                if r.get("status") == "budget_unenforceable"]
+    assert len(warnings) == 1, "say it once; per-request is noise"

@@ -433,3 +433,34 @@ def test_codex_sdk_answers_mcp_elicitation_in_its_own_vocabulary():
     slot.policy = lambda kind, payload: ("deny", "test")
     reply = slot._on_approval("mcpServer/elicitation/request", {})
     assert reply == {"action": "decline"}
+
+
+def test_a_routed_run_disables_the_clis_provider_direct_modes():
+    """ANTHROPIC_BASE_URL in the task env means the run routed the traffic (a
+    gateway, a vLLM, an RL checkpoint). The CLI's Bedrock/Vertex modes ignore
+    the base URL entirely -- measured live: a --gateway run completed against
+    Bedrock with the gateway recording zero events and enforcing nothing."""
+    class Opts:
+        # named parameter, because the slot's kwarg filter reads the signature
+        # and drops anything the options class does not declare
+        def __init__(self, env=None, **kw):
+            self.env = env
+            self.__dict__.update(kw)
+
+    slot = ClaudeCodeSlot()
+
+    def build(env):
+        task = TaskSpec(prompt="p", cwd="/w", env=env)
+        return slot._build_options(Opts, task, {}, []).env
+
+    env = build({"ANTHROPIC_BASE_URL": "http://gw:1", "ANTHROPIC_AUTH_TOKEN": "t"})
+    assert env["CLAUDE_CODE_USE_BEDROCK"] == "0"
+    assert env["CLAUDE_CODE_USE_VERTEX"] == "0"
+
+    # explicit wins: a run that WANTS bedrock behind its own url keeps it
+    env = build({"ANTHROPIC_BASE_URL": "http://gw:1", "CLAUDE_CODE_USE_BEDROCK": "1"})
+    assert env["CLAUDE_CODE_USE_BEDROCK"] == "1"
+
+    # no base url: nothing injected, the CLI keeps its own configuration
+    env = build({"X": "1"})
+    assert "CLAUDE_CODE_USE_BEDROCK" not in env
