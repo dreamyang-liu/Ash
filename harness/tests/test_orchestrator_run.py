@@ -707,63 +707,285 @@ def test_a_backend_that_cannot_snapshot_is_not_asked_to(monkeypatch, tmp_path):
     assert owned.checkpoint_log is None
 
 
-class _FoldBridge:
+class _TailBridge:
+    """Records record_pair calls; enough bridge for the tailer."""
+
     def __init__(self):
         self.recorded = []
-        self.ledger = self
 
-    @property
-    def checkpoints(self):
-        return self.recorded
-
-    def record(self, step, snapshot_id, *, session_ckpt=None, reason="", **extra):
+    def record_pair(self, step, snapshot_id, *, captured=True, reason="",
+                    **extra):
         self.recorded.append({"step": step, "snapshot_id": snapshot_id,
-                              "session_ckpt": session_ckpt, "reason": reason,
-                              **extra})
+                              "captured": captured, "reason": reason})
 
 
-def test_the_map_is_folded_into_the_journal_with_the_session_ref(tmp_path):
-    """Each snapshot pairs with the conversation ref, so load_checkpoints reads a
-    stdio run exactly as it reads an http one."""
-    from harness.core.slot import SlotResult
-    from harness.orchestrator.run import Orchestrator, OwnedSandbox
+def test_the_tail_folds_lines_while_the_run_is_still_going(tmp_path):
+    """The point of tailing instead of folding at the end: a pair lands in the
+    journal when it happens. On a marathon-length run, "the map exists only
+    after a clean finish" is the 300-snapshots-no-record failure wearing a
+    different hat."""
+    import time
+
+    from harness.orchestrator.run import CheckpointTail
 
     log = tmp_path / "map.jsonl"
-    log.write_text(
-        '{"step": 1, "snapshot_id": "snap-a", "captured": true, "reason": "mutated"}\n'
-        '{"step": 2, "snapshot_id": "snap-a", "captured": false, "reason": "clean"}\n')
-    owned = OwnedSandbox(session=_FakeSession(), checkpoint_log=log)
-    bridge = _FoldBridge()
-    result = SlotResult(status="completed", final_text="", usage={},
-                        native_session_id="conv-9")
-    Orchestrator()._fold_checkpoint_log(owned, bridge, result)
-    assert [r["snapshot_id"] for r in bridge.recorded] == ["snap-a", "snap-a"]
-    assert all(r["session_ckpt"] == "conv-9" for r in bridge.recorded)
-    # a clean step folds as a reuse record, not a fake capture
-    assert bridge.recorded[1]["captured"] is False
-    assert bridge.recorded[1]["reason"] == "clean"
+    bridge = _TailBridge()
+    tail = CheckpointTail(log, bridge, poll_s=0.05).start()
+    try:
+        # The file does not even exist yet -- the subprocess creates it on the
+        # first capture. The tailer must cope, then pick the line up.
+        time.sleep(0.1)
+        assert bridge.recorded == []
+        with open(log, "a") as fh:
+            fh.write('{"step": 1, "snapshot_id": "snap-a", "captured": true, '
+                     '"reason": "mutated"}\n')
+        deadline = time.time() + 2
+        while not bridge.recorded and time.time() < deadline:
+            time.sleep(0.02)
+        assert [r["snapshot_id"] for r in bridge.recorded] == ["snap-a"], \
+            "the pair must land during the run, not at stop()"
+    finally:
+        tail.stop()
+
+
+def test_stop_drains_what_landed_after_the_last_poll(tmp_path):
+    """A capture younger than one poll interval must not be lost: the
+    missing-checkpoint report reads the ledger right after stop() returns."""
+    from harness.orchestrator.run import CheckpointTail
+
+    log = tmp_path / "map.jsonl"
+    bridge = _TailBridge()
+    tail = CheckpointTail(log, bridge, poll_s=3600).start()   # never polls
+    log.write_text('{"step": 1, "snapshot_id": "snap-a"}\n')
+    tail.stop()
+    assert [r["snapshot_id"] for r in bridge.recorded] == ["snap-a"]
 
 
 def test_a_torn_last_line_from_a_killed_subprocess_is_skipped(tmp_path):
-    """A killed run is exactly the one whose surviving snapshots matter; the lines
-    already whole must fold even when the final write was cut mid-JSON."""
-    from harness.orchestrator.run import Orchestrator, OwnedSandbox
+    """The whole lines before it fold; the line the kill cut mid-write does not
+    -- and a line that is merely *late* (no newline yet) is not misread as torn:
+    it stays buffered until its newline arrives."""
+    from harness.orchestrator.run import CheckpointTail
 
     log = tmp_path / "map.jsonl"
+    bridge = _TailBridge()
+    tail = CheckpointTail(log, bridge, poll_s=3600)
     log.write_text('{"step": 1, "snapshot_id": "snap-a"}\n{"step": 2, "snap')
-    owned = OwnedSandbox(session=_FakeSession(), checkpoint_log=log)
-    bridge = _FoldBridge()
-    Orchestrator()._fold_checkpoint_log(owned, bridge, None)   # result=None: it died
-    assert [r["snapshot_id"] for r in bridge.recorded] == ["snap-a"]
-    assert bridge.recorded[0]["session_ckpt"] is None
+    tail.drain()
+    assert [r["step"] for r in bridge.recorded] == [1]
+    # the writer finishes the line: it must fold now, not be lost
+    with open(log, "a") as fh:
+        fh.write('shot_id": "snap-b"}\n')
+    tail.drain()
+    assert [r["snapshot_id"] for r in bridge.recorded] == ["snap-a", "snap-b"]
 
 
-def test_no_log_or_no_bridge_folds_nothing(tmp_path):
-    from harness.orchestrator.run import Orchestrator, OwnedSandbox
+def test_no_file_and_stop_before_start_are_harmless(tmp_path):
+    from harness.orchestrator.run import CheckpointTail
 
-    orch = Orchestrator()
-    orch._fold_checkpoint_log(OwnedSandbox(session=_FakeSession()), _FoldBridge(), None)
-    missing = OwnedSandbox(session=_FakeSession(),
-                           checkpoint_log=tmp_path / "never-written.jsonl")
-    orch._fold_checkpoint_log(missing, _FoldBridge(), None)   # no raise
-    orch._fold_checkpoint_log(missing, None, None)            # no bridge: no raise
+    tail = CheckpointTail(tmp_path / "never-written.jsonl", _TailBridge())
+    tail.drain()        # no file: nothing
+    tail.stop()         # never started: no crash
+
+
+def test_a_pair_tailed_before_the_session_ref_is_backfilled(tmp_path):
+    """The tailer may fold a pair before the slot has disclosed its session id.
+    record_pair reuses the bridge's backfill: when session.ref arrives, the
+    half-pair is corrected retroactively instead of staying half forever."""
+    from harness.checkpointing import SnapshotBridge
+    from harness.core.journal import JournalWriter, read_journal
+
+    class NoSnapSession:
+        def supports_snapshot(self):
+            return False
+
+    journal_path = tmp_path / "j.jsonl"
+    with JournalWriter(journal_path, run_id="r1", agent_id="a") as journal:
+        bridge = SnapshotBridge.install(journal, NoSnapSession())
+        bridge.record_pair(1, "snap-a", captured=True, reason="mutated")
+        assert bridge.ledger.checkpoints[0].session_ckpt is None
+        journal.emit("session.ref", native_session_id="conv-42")
+
+    records = [r for r in read_journal(journal_path)
+               if r["type"] == "checkpoint.captured"]
+    assert records[0]["session_ckpt"] is None, "recorded before the ref existed"
+    backfills = [r for r in records if r.get("reason") == "session_ref_backfill"]
+    assert backfills and backfills[0]["session_ckpt"] == "conv-42"
+    assert backfills[0]["snapshot_id"] == "snap-a"
+
+
+# --- checkpoints at the tool boundary: one tracker, one trigger ---------------
+def test_http_mounts_the_tracker_on_the_serving_pipeline(monkeypatch):
+    """The interceptor half of checkpointing must watch the pipeline that serves
+    the calls. The bridge used to build its own tracker, which nothing fed --
+    dirty stayed False, and every step after the first was recorded as clean
+    reuse of snapshot 1 while the agent was writing files."""
+    from harness.execution.interceptors import MutationTracker
+
+    session = _FakeSession()
+    _, owned, _ = _own(monkeypatch, session, transport="http")
+    try:
+        assert isinstance(owned.tracker, MutationTracker)
+        mounted = owned.server.pipeline.interceptors
+        assert owned.tracker in mounted, "the tracker must sit on the serving pipeline"
+    finally:
+        owned.release()
+
+
+def test_the_bridge_reads_the_same_tracker_the_pipeline_feeds(monkeypatch):
+    from harness.orchestrator.run import Orchestrator, OwnedSandbox, RunSpec
+
+    seen = {}
+
+    class FakeBridge:
+        ledger = type("L", (), {"checkpoints": []})()
+
+        def on_tool_boundary(self, index):
+            pass
+
+    def fake_install(cls, journal, session, always=False, tracker=None):
+        seen["tracker"] = tracker
+        return FakeBridge()
+
+    monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
+                        classmethod(fake_install))
+    tracker = object()
+    owned = OwnedSandbox(session=_FakeSession(), tracker=tracker, sandbox_id="sb")
+    Orchestrator()._wire_checkpoints(RunSpec(prompt="x"), object(), owned)
+    assert seen["tracker"] is tracker, \
+        "two trackers is the unfed-tracker bug in miniature"
+
+
+def test_the_boundary_lands_on_the_server_after_the_bridge_exists(monkeypatch):
+    from harness.orchestrator.run import Orchestrator, OwnedSandbox, RunSpec
+
+    class FakeBridge:
+        ledger = type("L", (), {"checkpoints": []})()
+
+        def on_tool_boundary(self, index):
+            self.fired = index
+
+    bridge = FakeBridge()
+    monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
+                        classmethod(lambda cls, journal, session, always=False,
+                                    tracker=None: bridge))
+
+    class FakeServer:
+        boundary = None
+
+    server = FakeServer()
+    owned = OwnedSandbox(session=_FakeSession(), server=server, sandbox_id="sb")
+    Orchestrator()._wire_checkpoints(RunSpec(prompt="x"), object(), owned)
+    assert server.boundary is not None
+    import asyncio
+
+    asyncio.run(server.boundary.after_call())
+    assert bridge.fired == 1, "the trigger must reach the bridge's checkpointer"
+
+
+# --- saying so when checkpointing produced nothing --------------------------
+class _RecordingJournal:
+    def __init__(self):
+        self.events = []
+
+    def emit(self, kind, **payload):
+        self.events.append((kind, payload))
+
+
+def test_a_run_that_recorded_no_checkpoints_says_so():
+    """Silence about a capability that did not happen is worse than the absence:
+    it is discovered later, from the outside, by someone trying to branch a run
+    that cannot be branched."""
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    class Bridge:
+        skipped_on_loop = 4
+        ledger = type("L", (), {"checkpoints": []})()
+
+    seen = []
+    journal = _RecordingJournal()
+    orch = Orchestrator(on_event=lambda k, p: seen.append((k, p)))
+    orch._report_missing_checkpoints(
+        RunSpec(prompt="x", transport="stdio"), journal, Bridge())
+
+    kinds = [k for k, _ in journal.events]
+    assert "checkpoint.unavailable" in kinds
+    payload = dict(journal.events[0][1])
+    assert payload["skipped"] == 4 and payload["transport"] == "stdio"
+    assert "http" in payload["reason"], "the message must name the remedy"
+    assert seen and seen[0][0] == "checkpoint.unavailable"
+
+
+def test_a_run_that_did_checkpoint_stays_quiet():
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    class Bridge:
+        skipped_on_loop = 3          # some skips, but snapshots were taken anyway
+        ledger = type("L", (), {"checkpoints": [object()]})()
+
+    journal = _RecordingJournal()
+    Orchestrator()._report_missing_checkpoints(RunSpec(prompt="x"), journal, Bridge())
+    assert journal.events == []
+
+
+def test_no_checkpointing_requested_is_not_a_warning():
+    """Nothing was asked for, so nothing is missing."""
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    journal = _RecordingJournal()
+    Orchestrator()._report_missing_checkpoints(RunSpec(prompt="x"), journal, None)
+    assert journal.events == []
+
+
+# --- stdio: the shutter is pressed in the subprocess -------------------------
+#
+# The checkpoint machinery sits at the tool path, in whichever process serves the
+# calls. Over stdio that is the server subprocess: it sees every tool boundary
+# (its loop is strictly sequential, so the hook always runs quiesced) and it has
+# its own handle to the sandbox (attach). What travels back to this process is
+# only the step->snapshot map, one JSON line per capture.
+
+def test_the_stdio_command_asks_the_subprocess_to_checkpoint(monkeypatch, tmp_path):
+    session = _FakeSession()
+    session.supports_snapshot = lambda: True
+    import harness.execution.session as session_module
+
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    monkeypatch.setattr(session_module, "SandboxSession", lambda **kw: session)
+    orch = Orchestrator(out_dir=tmp_path)
+    owned = orch._own_sandbox(
+        RunSpec(prompt="x", sandbox_image="img", transport="stdio"), None)
+    command = owned.mcp.command
+    assert "--checkpoint-log" in command
+    assert owned.checkpoint_log is not None
+    assert str(owned.checkpoint_log) == command[command.index("--checkpoint-log") + 1]
+    assert "--checkpoint-always" not in command
+
+
+def test_snapshot_every_step_reaches_the_subprocess(monkeypatch, tmp_path):
+    session = _FakeSession()
+    session.supports_snapshot = lambda: True
+    import harness.execution.session as session_module
+
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    monkeypatch.setattr(session_module, "SandboxSession", lambda **kw: session)
+    owned = Orchestrator(out_dir=tmp_path)._own_sandbox(
+        RunSpec(prompt="x", sandbox_image="img", transport="stdio",
+                snapshot_every_step=True), None)
+    assert "--checkpoint-always" in owned.mcp.command
+
+
+def test_a_backend_that_cannot_snapshot_is_not_asked_to(monkeypatch, tmp_path):
+    """Docker: the flag would only produce a one-line complaint per run."""
+    session = _FakeSession()          # supports_snapshot() is False
+    import harness.execution.session as session_module
+
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    monkeypatch.setattr(session_module, "SandboxSession", lambda **kw: session)
+    owned = Orchestrator(out_dir=tmp_path)._own_sandbox(
+        RunSpec(prompt="x", sandbox_image="img", transport="stdio"), None)
+    assert "--checkpoint-log" not in owned.mcp.command
+    assert owned.checkpoint_log is None

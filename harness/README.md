@@ -296,7 +296,7 @@ calls happen**, and that decides whether checkpointing works:
 | sandbox handed over | the live handle (`pool.adopt`) | by id (`--attach`) |
 | backends | any, Docker included | needs `attach` → microvm only |
 | who constructs the machinery | the orchestrator | the server's own `main` |
-| where records land | the journal, directly | `--checkpoint-log` JSONL, folded after the run |
+| where records land | the journal, directly | `--checkpoint-log` JSONL, tailed into the journal live |
 
 **One mechanism, mounted in whichever process serves the calls.** The machinery
 is the `MutationTracker` interceptor (on the serving pipeline, so it sees every
@@ -319,9 +319,20 @@ sequential so the boundary always fires quiesced, and `--attach` gives it its ow
 handle (microvm, which is also the only backend that can snapshot at all). Each
 record is appended as one JSON line when it happens, not on exit: a killed run
 keeps every line already written, which is the 300-snapshots-no-map lesson. The
-parent folds the file into the journal afterwards and pairs it with the
-conversation ref, so `load_checkpoints` and `fork_plan` read both transports
-identically.
+parent **tails** the file during the run (`CheckpointTail`), so each pair lands
+in the journal within a poll interval of the capture -- measured live: pairs at
+t=17s and t=25s of a run that finished at t=30s. Pairing with the conversation
+ref uses the bridge's backfill, so a pair tailed before the slot disclosed its
+session id is corrected retroactively. `load_checkpoints` and `fork_plan` read
+both transports identically.
+
+This is also the answer to "should the journal be a server": for reading it
+already is one (the file -- anyone can tail it, and it survives every kind of
+death); for writing, each process appends to its own file and the owner tails
+it. One writer, one reader, the file is the pipe. A socket-based journal server
+would add a second write path at the cost of the property that makes the journal
+worth trusting -- a killed run still leaves its record -- so that waits until
+subagents genuinely need many-to-one.
 
 Verified live with `always` off: write → capture, view → clean reuse, write →
 new capture; identical records on both transports. `checkpoint.unavailable`

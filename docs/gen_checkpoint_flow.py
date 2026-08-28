@@ -176,11 +176,12 @@ def main() -> int:
                      "（同进程，journal 就在手边）",
                      color=VIOLET)
     sink_s = c.panel("sink-s", sink_h["right"] + 200, ky,
-                     400, "分岔② stdio：JSONL → run 后折回",
+                     400, "分岔② stdio：JSONL → 父进程实时 tail",
                      "子进程手边没有 journal → 每步追加一行\n"
                      "  到 --checkpoint-log（当场写，被 kill 保住已写的）\n"
-                     "run 结束后父进程 _fold_checkpoint_log：\n"
-                     "  读文件 → 配上会话 ref → 写进 journal",
+                     "父进程 CheckpointTail 边跑边读：行一出现就折进\n"
+                     "  journal（实测 run 进行到 17s 时 pair 已在），\n"
+                     "  会话 ref 晚到就走 bridge 的回填",
                      color=VIOLET)
     c.arrow("rec-sh", record["cx"] - 60, record["bottom"] + 4,
             [[0, 0], [sink_h["cx"] - record["cx"] + 60, ky - record["bottom"] - 8]],

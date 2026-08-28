@@ -26,6 +26,7 @@ return value only: a run that dies still leaves a record.
 
 from __future__ import annotations
 
+import threading
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -102,6 +103,90 @@ class RunSpec:
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
+class CheckpointTail:
+    """Follow the stdio server's checkpoint log into the journal, live.
+
+    The "journal as a server" question, answered with a file: the subprocess
+    keeps writing its own JSONL (each line durable the moment it lands, whoever
+    dies), and this thread is the read side -- each complete line becomes a
+    journal pair within a poll interval instead of after the run. One writer,
+    one reader, the file is the pipe. What a real journal server would add on
+    top of this is a second writer path over a socket, which trades away the
+    property that makes the journal worth trusting: a killed run still leaves
+    its record. Revisit when subagents need many-to-one.
+
+    A partial last line stays in the buffer until its newline arrives; if it
+    never does (a killed subprocess mid-write), it is dropped -- the whole lines
+    before it were folded the moment they appeared.
+    """
+
+    def __init__(self, path: "Path | str", bridge: Any, poll_s: float = 0.5):
+        self.path = Path(path)
+        self.bridge = bridge
+        self.poll_s = poll_s
+        self._offset = 0
+        self._buffer = ""
+        self._halt = threading.Event()
+        self._thread: "threading.Thread | None" = None
+
+    def start(self) -> "CheckpointTail":
+        self._thread = threading.Thread(target=self._loop, daemon=True,
+                                        name="ckpt-tail")
+        self._thread.start()
+        return self
+
+    def _loop(self) -> None:
+        while not self._halt.wait(self.poll_s):
+            self.drain()
+
+    def drain(self) -> None:
+        """Fold every complete line that appeared since the last look."""
+        import json as _json
+
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                fh.seek(self._offset)
+                chunk = fh.read()
+                self._offset = fh.tell()
+        except FileNotFoundError:
+            return          # the subprocess has not captured anything yet
+        except OSError:
+            return
+        if not chunk:
+            return
+        self._buffer += chunk
+        lines = self._buffer.split("\n")
+        self._buffer = lines.pop()          # partial tail, or ""
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                entry = _json.loads(line)
+            except ValueError:
+                continue
+            if not entry.get("snapshot_id"):
+                continue
+            self.bridge.record_pair(
+                int(entry.get("step", 0)),
+                entry["snapshot_id"],
+                captured=bool(entry.get("captured", True)),
+                reason=entry.get("reason") or "tool_boundary_stdio",
+            )
+
+    def stop(self) -> None:
+        """Stop polling and drain whatever landed since the last poll.
+
+        The final drain runs in the caller's thread, after the join: a run that
+        just ended may have a capture younger than one poll interval, and the
+        missing-checkpoint report reads the ledger right after this returns.
+        """
+        self._halt.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+        self.drain()
+
+
 @dataclass
 class OwnedSandbox:
     """A sandbox this orchestrator created, plus whatever serves it.
@@ -128,9 +213,9 @@ class OwnedSandbox:
     #: "clean" reuse of the first snapshot -- while the agent was writing files.
     tracker: Any = None
     #: stdio only: where the server subprocess appends its step->snapshot map.
-    #: The orchestrator folds this into the journal after the run -- the snapshots
-    #: are taken in that subprocess (it is the one that sees the tool boundary),
-    #: but the journal lives here.
+    #: A CheckpointTail follows it live -- the snapshots are taken in that
+    #: subprocess (it is the one that sees the tool boundary), but the journal
+    #: lives here, and a pair should land when it happens, not when the run ends.
     checkpoint_log: Optional[Path] = None
     keep: bool = False
     #: Recorded at creation, NOT read from the session on demand. Teardown runs
@@ -211,6 +296,7 @@ class Orchestrator:
         provisioned = None
         gateway = None
         bridge = None
+        tail = None
         result: Optional[SlotResult] = None
         error: Optional[str] = None
 
@@ -238,6 +324,13 @@ class Orchestrator:
                 if claim is not None:
                     claim.attach(journal)
                 bridge = self._wire_checkpoints(spec, journal, provisioned)
+                if bridge is not None and \
+                        getattr(provisioned, "checkpoint_log", None):
+                    # stdio: the subprocess streams its step->snapshot map as
+                    # JSONL; tail it live so the pairs land in the journal as
+                    # they happen, not after the run.
+                    tail = CheckpointTail(provisioned.checkpoint_log,
+                                          bridge).start()
 
                 result = slot.run(task, journal, mcp)
             except Exception as exc:  # noqa: BLE001 - a run reports, it does not raise
@@ -246,8 +339,11 @@ class Orchestrator:
             finally:
                 # Before teardown, so the journal says what happened while the
                 # journal is still open; and in `finally`, because a run that died
-                # is exactly one whose missing snapshots matter most.
-                self._fold_checkpoint_log(provisioned, bridge, result)
+                # is exactly one whose missing snapshots matter most. The tail's
+                # stop() drains what landed since the last poll, so the
+                # missing-checkpoint report reads a complete ledger.
+                if tail is not None:
+                    tail.stop()
                 self._report_missing_checkpoints(spec, journal, bridge)
                 self._teardown(spec, gateway, provisioned, claim)
 
@@ -384,8 +480,8 @@ class Orchestrator:
                     # The tool boundary happens in the server subprocess, so the
                     # snapshot is taken there too -- the checkpoint machinery sits
                     # at the tool path, in whichever process serves the calls.
-                    # What comes back is the step->snapshot map, folded into the
-                    # journal by _fold_checkpoint_log after the run.
+                    # What comes back is the step->snapshot map, tailed into the
+                    # journal live by CheckpointTail.
                     self.out_dir.mkdir(parents=True, exist_ok=True)
                     owned.checkpoint_log = self.out_dir / (
                         "%s.ckpt.jsonl" % session.sandbox_id[:12])
@@ -487,45 +583,6 @@ class Orchestrator:
 
             server.boundary = ToolBoundary(bridge.on_tool_boundary)
         return bridge
-
-    def _fold_checkpoint_log(self, owned, bridge, result) -> None:
-        """Fold the stdio server's step->snapshot map into the journal.
-
-        The subprocess took the snapshots (it serves the tool calls, so it is the
-        one standing at the boundary); it wrote one JSON line per capture. This
-        pairs each with the conversation ref the slot disclosed and records it
-        through the bridge's ledger, so ``load_checkpoints`` and ``fork_plan``
-        read a stdio run exactly as they read an http one.
-
-        Runs in the ``finally`` on purpose: a run that was killed mid-task is
-        precisely the one whose surviving snapshots must not be orphaned -- a map
-        that only lands on clean exits repeats the 300-snapshots-no-map failure.
-        """
-        import json as _json
-
-        path = getattr(owned, "checkpoint_log", None)
-        if not path or bridge is None or not Path(path).exists():
-            return
-        session_ckpt = result.native_session_id if result is not None else None
-        for line in Path(path).read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                entry = _json.loads(line)
-            except ValueError:
-                continue          # a torn last line from a killed subprocess
-            if not entry.get("snapshot_id"):
-                continue
-            bridge.ledger.record(
-                int(entry.get("step", 0)),
-                entry["snapshot_id"],
-                session_ckpt=session_ckpt,
-                reason=entry.get("reason") or "tool_boundary_stdio",
-                captured=bool(entry.get("captured", True)),
-            )
-        self.on_event("checkpoints",
-                      {"count": len(bridge.ledger.checkpoints),
-                       "source": str(path)})
 
     def _report_missing_checkpoints(self, spec: RunSpec, journal, bridge) -> None:
         """Say so when checkpointing was on and produced nothing.

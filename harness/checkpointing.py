@@ -174,6 +174,23 @@ class SnapshotBridge:
         """
         return self._skipped_on_loop
 
+    def record_pair(self, step: int, snapshot_id: Optional[str], *,
+                    captured: bool = True, reason: str = "captured",
+                    **extra) -> None:
+        """Record a pair whose snapshot somebody ELSE took.
+
+        The stdio server captures in its own process and streams the map back as
+        JSONL; the tailer feeds each line here. Pairing is the same as for a
+        snapshot this bridge took itself: the current conversation ref if the
+        slot has disclosed one, and the backfill machinery otherwise -- a ref
+        that arrives after the pair was recorded corrects it retroactively
+        rather than leaving half a pair.
+        """
+        self.ledger.record(step, snapshot_id, session_ckpt=self.session_ref,
+                           reason=reason, captured=captured, **extra)
+        if snapshot_id and not self.session_ref:
+            self._pending = True
+
     # --- Checkpointer callback --------------------------------------------
     def _on_checkpoint(self, record: Any) -> None:
         snapshot_id = getattr(record, "snapshot_id", None)
