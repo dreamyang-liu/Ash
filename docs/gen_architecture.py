@@ -6,7 +6,7 @@ two ways worth avoiding: typos that made the file unopenable, and -- worse -- te
 that silently overflowed its box or boxes that overlapped, so the picture looked
 fine to whoever wrote it and was unreadable to whoever opened it.
 
-Everything here is laid out from a declared grid, and :func:`validate` refuses to
+Everything is laid out from measured geometry, and exgen's validator refuses to
 write a file whose boxes overlap, whose text escapes its box, or whose labels sit
 on top of each other. Run it after changing the architecture:
 
@@ -19,124 +19,18 @@ so the checker over-estimates width rather than passing something that will clip
 
 from __future__ import annotations
 
-import json
 import sys
-import unicodedata
 from pathlib import Path
 
 OUT = Path(__file__).resolve().parent / "architecture-current.excalidraw"
 
-# --- palette ---------------------------------------------------------------
-BLUE = "#4dabf7"      # callers / titles
-GREEN = "#51cf66"     # execution plane
-ORANGE = "#ffa94d"    # state
-YELLOW = "#ffd43b"    # benchmark boundary
-GREY = "#a0a0a0"      # prose
-WHITE = "#e8e8e8"     # body text, solid arrows
-VIOLET = "#b197fc"    # the two transports
-RED = "#ff8787"        # the asymmetry / warnings
+# The element builders, font metrics and geometry validation live in exgen.py,
+# shared with gen_checkpoint_flow.py -- two copies of the validator is how the
+# two diagrams would come to disagree about what "fits" means.
+from exgen import (BLUE, GREEN, GREY, ORANGE, PAD, RED, VIOLET,  # noqa: E402
+                   WHITE, YELLOW, Canvas, text_size)
 
-_seed = [0]
-
-
-def _next_seed() -> int:
-    _seed[0] += 1
-    return _seed[0]
-
-
-def _char_w(ch: str, size: int) -> float:
-    """Approximate advance width of one character."""
-    if unicodedata.east_asian_width(ch) in ("W", "F"):
-        return size * 1.0
-    return size * 0.58
-
-
-def text_size(body: str, size: int) -> "tuple[float, float]":
-    lines = body.split("\n")
-    width = max((sum(_char_w(c, size) for c in line) for line in lines), default=0)
-    return width, len(lines) * size * 1.25
-
-
-def text(id_: str, x: float, y: float, body: str, *, size: int = 13,
-         color: str = WHITE, group: "str | None" = None) -> dict:
-    width, height = text_size(body, size)
-    return {
-        "id": id_, "type": "text", "x": x, "y": y,
-        "width": round(width, 1), "height": round(height, 1),
-        "angle": 0, "strokeColor": color, "backgroundColor": "transparent",
-        "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "solid",
-        "roughness": 1, "opacity": 100, "groupIds": [group] if group else [],
-        "roundness": None, "seed": _next_seed(), "version": 1,
-        "isDeleted": False, "text": body, "fontSize": size, "fontFamily": 1,
-        "textAlign": "left", "verticalAlign": "top", "containerId": None,
-        "originalText": body, "lineHeight": 1.25, "boundElements": [],
-        "link": None, "locked": False, "autoResize": True,
-    }
-
-
-def box(id_: str, x: float, y: float, w: float, h: float, *, color: str = BLUE,
-        dashed: bool = False, group: "str | None" = None) -> dict:
-    return {
-        "id": id_, "type": "rectangle", "x": x, "y": y, "width": w, "height": h,
-        "angle": 0, "strokeColor": color, "backgroundColor": "transparent",
-        "fillStyle": "solid", "strokeWidth": 1,
-        "strokeStyle": "dashed" if dashed else "solid",
-        "roughness": 1, "opacity": 100, "groupIds": [group] if group else [],
-        "roundness": {"type": 3}, "seed": _next_seed(), "version": 1,
-        "isDeleted": False, "boundElements": [], "link": None, "locked": False,
-    }
-
-
-def arrow(id_: str, x: float, y: float, points: list, *, color: str = WHITE,
-          dashed: bool = False) -> dict:
-    xs = [p[0] for p in points]
-    ys = [p[1] for p in points]
-    return {
-        "id": id_, "type": "arrow", "x": x, "y": y,
-        "width": max(xs) - min(xs), "height": max(1, max(ys) - min(ys)),
-        "angle": 0, "strokeColor": color, "backgroundColor": "transparent",
-        "fillStyle": "solid", "strokeWidth": 1,
-        "strokeStyle": "dashed" if dashed else "solid",
-        "roughness": 1, "opacity": 100, "groupIds": [], "roundness": {"type": 2},
-        "seed": _next_seed(), "version": 1, "isDeleted": False,
-        "points": points, "lastCommittedPoint": None, "startBinding": None,
-        "endBinding": None, "startArrowhead": None, "endArrowhead": "arrow",
-        "boundElements": [], "link": None, "locked": False,
-    }
-
-
-# --- the diagram -----------------------------------------------------------
-PAD = 14          # inner padding between a box edge and its text
-els: list = []
-# (box_id, [text_id, ...]) -- validate() checks each text fits its box
-CONTAINS: list = []
-
-
-def panel(id_: str, x: float, y: float, w: float, title: str, body: str, *,
-          color: str = BLUE, dashed: bool = False, title_size: int = 14,
-          body_size: int = 12) -> dict:
-    """A titled box sized to its contents. Returns its geometry.
-
-    ``w`` is a *minimum*: the box widens to whatever its text needs. Trusting a
-    hand-picked width is how the previous diagram ended up with clipped lines --
-    the width looked plausible, and nothing checked.
-    """
-    tw, th = text_size(title, title_size)
-    bw, bh = text_size(body, body_size) if body else (0, 0)
-    w = max(w, tw + 2 * PAD + 6, bw + 2 * PAD + 6)
-    h = PAD + th + (6 + bh if body else 0) + PAD
-    els.append(box(id_, x, y, w, h, color=color, dashed=dashed))
-    ids = []
-    els.append(text(id_ + "-t", x + PAD, y + PAD, title, size=title_size,
-                    color=color))
-    ids.append(id_ + "-t")
-    if body:
-        els.append(text(id_ + "-b", x + PAD, y + PAD + th + 6, body,
-                        size=body_size))
-        ids.append(id_ + "-b")
-    CONTAINS.append((id_, ids))
-    return {"id": id_, "x": x, "y": y, "w": w, "h": h,
-            "right": x + w, "bottom": y + h}
+_c = Canvas()
 
 
 def build() -> None:
@@ -148,8 +42,8 @@ def build() -> None:
     """
     GAP = 16
     COL = 20          # gap between columns
-    els.append(text("title", 40, 24,
-                    "Ash 架构（feat/harness-v1，本轮改动后）", size=20, color=BLUE))
+    _c.text("title", 40, 24,
+                    "Ash 架构（feat/harness-v1，本轮改动后）", size=20, color=BLUE)
     legend = ("绿 = 执行平面 · 蓝 = 调用方 · 橙 = 状态 · 黄 = benchmark 插件 · "
               "紫 = 两条 transport · 红 = 不对称\n"
               "★ = 本轮新增或搬迁 · 三条分层规则由测试守着：\n"
@@ -157,18 +51,18 @@ def build() -> None:
               "  ② 「什么算答案」不进执行平面 —— 沙箱归 orchestrator，提取归 benchmark\n"
               "  ③ 粒度决定位置：每次工具调用 → interceptor，每步 → checkpoint，"
               "每个 run → orchestrator")
-    els.append(text("legend", 40, 58, legend, size=12, color=GREY))
+    _c.text("legend", 40, 58, legend, size=12, color=GREY)
     top = 58 + text_size(legend, 12)[1] + 40
 
     # ---------------- row 1: callers | harness runtime ----------------
-    cli = panel("cli", 40, top, 340, "调用方（L4）",
+    cli = _c.panel("cli", 40, top, 340, "调用方（L4）",
                 "harness/cli.py —— 只解析参数，不含逻辑\n"
                 "  run --transport {stdio,http} ★ --tools <panel> ★\n"
                 "      --sandbox-image --backend ★ --runtime-bin ★\n"
                 "  batch · show · atif · fork-plan · extract · reap\n"
                 "swebench/__main__.py —— 另一个调用方",
                 color=BLUE)
-    swb = panel("swb", 40, cli["bottom"] + GAP, 340,
+    swb = _c.panel("swb", 40, cli["bottom"] + GAP, 340,
                 "swebench/ —— 一个插件（L4）",
                 "只留「什么算答案」这一件事：\n"
                 "  patch.py    答案 = 一个 git diff\n"
@@ -182,7 +76,7 @@ def build() -> None:
 
     hx = max(cli["right"], swb["right"]) + 40
     inner = hx + 16
-    orch = panel("orch", inner, top + 34, 640,
+    orch = _c.panel("orch", inner, top + 34, 640,
                  "orchestrator/run.py —— 一个 run 的一生 ★现在真的是入口",
                  "以前：调用方自己建沙箱和 session 再传进来\n"
                  "      → 只名了个镜像的 run 拿不到任何快照\n"
@@ -196,7 +90,7 @@ def build() -> None:
                  "  batch.py 并发上限 · 重试分类 · 可续跑\n"
                  "  resources.py 写前账本 → harness reap 回收",
                  color=GREEN)
-    slots = panel("slots", inner, orch["bottom"] + GAP, 310,
+    slots = _c.panel("slots", inner, orch["bottom"] + GAP, 310,
                   "slots/ + normalize/",
                   "claude-code  Agent SDK · hooks · fork_session\n"
                   "codex        SDK over app-server JSON-RPC\n"
@@ -204,7 +98,7 @@ def build() -> None:
                   "normalize/   原生事件 → journal，纯映射\n"
                   "slot 是黑盒：run / kill / version",
                   color=GREEN)
-    rb = panel("rb", slots["right"] + COL, orch["bottom"] + GAP, 310,
+    rb = _c.panel("rb", slots["right"] + COL, orch["bottom"] + GAP, 310,
                "rollback / extract ★真机验证过",
                "checkpointing.py SnapshotBridge 配对两半\n"
                "  skipped_on_loop ★ 现在有人读（见红框）\n"
@@ -213,7 +107,7 @@ def build() -> None:
                "core/journal.py 真源；嵌套事件排队分发",
                color=ORANGE)
     gwtop = max(slots["bottom"], rb["bottom"]) + GAP
-    gw = panel("gw", inner, gwtop, max(orch["w"], rb["right"] - inner),
+    gw = _c.panel("gw", inner, gwtop, max(orch["w"], rb["right"] - inner),
                "gateway/ —— 模型缝（已实现且测过，按需接入）",
                "routing.py 模型名 → 任意 endpoint（RL ckpt / vLLM / 供应商）· 每 slot 一个 token\n"
                "server.py  wire tap 落 journal · 预算超了直接 429，不是事后算账",
@@ -222,30 +116,30 @@ def build() -> None:
     # the container is sized from what it actually holds
     l3w = max(orch["right"], rb["right"], gw["right"]) - hx + 16
     l3h = gw["bottom"] - (top) + 16
-    els.append(box("l3", hx, top, l3w, l3h, color=GREEN, dashed=True))
-    els.append(text("l3-t", hx + PAD, top + 8,
-                    "harness/ —— agent 运行时（L3）", size=15, color=GREEN))
-    CONTAINS.append(("l3", ["l3-t"]))
+    _c.box("l3", hx, top, l3w, l3h, color=GREEN, dashed=True)
+    _c.text("l3-t", hx + PAD, top + 8,
+                    "harness/ —— agent 运行时（L3）", size=15, color=GREEN)
+    _c.contains.append(("l3", ["l3-t"]))
 
     row1_bottom = max(swb["bottom"], top + l3h)
 
     # ---------------- row 2: the two transports ----------------
     ty = row1_bottom + 46
-    els.append(text("tr-t", 40, ty,
+    _c.text("tr-t", 40, ty,
                     "★ 本轮核心：沙箱归 orchestrator，transport 只决定 agent 怎么跟它说话",
-                    size=15, color=VIOLET))
+                    size=15, color=VIOLET)
     sub = "两条路是同一个所有者 —— 它建沙箱、持 handle、拍快照、最后销毁。差别只在「工具调用发生在哪个进程」。"
-    els.append(text("tr-b", 40, ty + 26, sub, size=12, color=GREY))
+    _c.text("tr-b", 40, ty + 26, sub, size=12, color=GREY)
     tby = ty + 26 + text_size(sub, 12)[1] + 18
 
-    http = panel("http", 40, tby, 520, "--transport http ★",
+    http = _c.panel("http", 40, tby, 520, "--transport http ★",
                  "server 在本进程内（socket 先绑好，port=0 也能立刻报 URL）\n"
                  "沙箱用 handle 交出：pool.adopt(sandbox) ★\n"
                  "  entry 标 external：pool 只服务，绝不销毁（销毁归 session）\n"
                  "checkpoint 机制由 orchestrator 构造：\n"
                  "  tracker 挂 server 的 pipeline，bridge 直接写 journal",
                  color=VIOLET)
-    stdio = panel("stdio", http["right"] + COL, tby, 500, "--transport stdio",
+    stdio = _c.panel("stdio", http["right"] + COL, tby, 500, "--transport stdio",
                   "server 是 slot 自己的子进程：\n"
                   "  --attach <id> --tools <panel> --checkpoint-log <file>\n"
                   "沙箱按 id 交出（attach → 只有 microvm，恰好也是\n"
@@ -254,7 +148,7 @@ def build() -> None:
                   "  同样的 tracker + Checkpointer，记录写 JSONL，\n"
                   "  run 结束后父进程折回 journal、配上会话 ref",
                   color=VIOLET)
-    asym = panel("asym", 40, max(http["bottom"], stdio["bottom"]) + GAP,
+    asym = _c.panel("asym", 40, max(http["bottom"], stdio["bottom"]) + GAP,
                  stdio["right"] - 40,
                  "一套机制 ★：MutationTracker（interceptor）+ Checkpointer，挂在服务工具调用的那条 pipeline 上",
                  "tracker 判断这步改没改（view/grep 不算），Checkpointer 每个 exec 调用后跑一次：\n"
@@ -268,7 +162,7 @@ def build() -> None:
     # ---------------- row 3: execution plane ----------------
     ey = asym["bottom"] + 46
     inner2 = 56
-    sess = panel("sess", inner2, ey + 34, 500,
+    sess = _c.panel("sess", inner2, ey + 34, 500,
                  "① session.py ★本轮从 swebench 搬下来",
                  "SandboxSession —— 一个 run 一个沙箱，同步接口\n"
                  "  create / destroy / upload / environment\n"
@@ -281,7 +175,7 @@ def build() -> None:
                  "templates.py ★ 一起搬下来：按需给每个镜像建 microVM\n"
                  "  模板（裸镜像冷启动起不来 runtime）",
                  color=GREEN)
-    pnl = panel("panel", sess["right"] + COL, ey + 34, 500,
+    pnl = _c.panel("panel", sess["right"] + COL, ey + 34, 500,
                 "② panel.py ★本轮从 swebench 搬下来",
                 "manifest + runtime/schema/tools.json → 编译出面板\n"
                 "  format=openai/anthropic → agent loop 用\n"
@@ -293,7 +187,7 @@ def build() -> None:
                 "swebench 显式钉 full：把跑分工具面从 7 个悄悄缩到 2 个，\n"
                 "  会让 results/ 里所有成绩不可比，而没有一行配置变过",
                 color=GREEN)
-    srv = panel("srv", inner2, max(sess["bottom"], pnl["bottom"]) + GAP, 500,
+    srv = _c.panel("srv", inner2, max(sess["bottom"], pnl["bottom"]) + GAP, 500,
                 "③ server.py —— MCP 代理（stdio | HTTP）",
                 "ExecSurface ★ = 面板 + 面板不懂的那部分：sandbox_id\n"
                 "  single 视图去掉它（绑定会话 → 模型根本看不到）\n"
@@ -304,7 +198,7 @@ def build() -> None:
                 "身份 X-Session-Owner / Mcp-Session-Id（响应头）\n"
                 "绑定 X-Session-Sandbox",
                 color=GREEN)
-    onion = panel("onion", srv["right"] + COL,
+    onion = _c.panel("onion", srv["right"] + COL,
                   max(sess["bottom"], pnl["bottom"]) + GAP, 500,
                   "④ 洋葱 · 何时拍 · 沙箱从哪来",
                   "pipeline.py 四种裁决 Continue/Rewrite/Reject/ShortCircuit\n"
@@ -318,22 +212,22 @@ def build() -> None:
                   color=GREEN)
     l2w = max(pnl["right"], onion["right"]) - 40 + 16
     l2h = max(srv["bottom"], onion["bottom"]) - ey + 16
-    els.append(box("l2", 40, ey, l2w, l2h, color=GREEN, dashed=True))
-    els.append(text("l2-t", 40 + PAD, ey + 8,
+    _c.box("l2", 40, ey, l2w, l2h, color=GREEN, dashed=True)
+    _c.text("l2-t", 40 + PAD, ey + 8,
                     "harness/execution/ —— 执行平面（L2）：对「答案」零认知，AST 测试保证不 import swebench",
-                    size=15, color=GREEN))
-    CONTAINS.append(("l2", ["l2-t"]))
+                    size=15, color=GREEN)
+    _c.contains.append(("l2", ["l2-t"]))
 
     # ---------------- row 4: L1 + state ----------------
     ly = ey + l2h + 40
-    rt = panel("rt", 40, ly, 520, "沙箱（L1）",
+    rt = _c.panel("rt", 40, ly, 520, "沙箱（L1）",
                "ash-runtime（Go 静态二进制，跑在沙箱里）\n"
                "  8 个工具：shell · process · text_editor · grep_files\n"
                "    web_fetch · web_search · artifact · wait_for_events\n"
                "  --dump-schema → runtime/schema/tools.json（面板拿它编译）\n"
                "工具集只在 Go 里声明一次，下游全是派生的",
                color=BLUE)
-    aenv = panel("aenv", rt["right"] + COL, ly, 520,
+    aenv = _c.panel("aenv", rt["right"] + COL, ly, 520,
                  "AgentENV + firecracker fork",
                  "全量 VM 快照：内存 + vmstate · 增量 overlaybd 层\n"
                  "restore / fork（COW）· pause / resume\n"
@@ -341,7 +235,7 @@ def build() -> None:
                  "disk_only 快照会冷启动 → 模板必须声明启动命令，\n"
                  "  否则 restore 出来的沙箱没有 runtime，每个工具调用都 502",
                  color=ORANGE)
-    panel("state", 40, max(rt["bottom"], aenv["bottom"]) + GAP,
+    _c.panel("state", 40, max(rt["bottom"], aenv["bottom"]) + GAP,
           aenv["right"] - 40, "状态",
           "793 测试通过 · 7 跳过 · 117 contract 检查\n"
           "真机跑过（Firecracker，共享实例只碰自己建的沙箱）：真 Claude Code 走两条 transport ·\n"
@@ -351,23 +245,23 @@ def build() -> None:
           color=ORANGE)
 
     # ---------------- arrows ----------------
-    els.append(arrow("a1", cli["right"] + 4, cli["y"] + 40,
-                     [[0, 0], [hx - cli["right"] - 8, 0]]))
-    els.append(text("a1l", cli["right"] + 8, cli["y"] + 16, "RunSpec",
-                    size=11, color=GREY))
-    els.append(arrow("a2", swb["right"] + 4, swb["y"] + 60,
-                     [[0, 0], [hx - swb["right"] - 8, 0]], dashed=True))
-    els.append(text("a2l", swb["right"] + 6, swb["y"] + 34, "提取器",
-                    size=11, color=GREY))
-    els.append(arrow("a3", 300, tby - 14, [[0, 0], [0, 12]], color=VIOLET))
-    els.append(arrow("a4", stdio["x"] + 260, tby - 14, [[0, 0], [0, 12]],
-                     color=VIOLET))
-    els.append(arrow("a5", 300, asym["y"] - 14, [[0, 0], [0, 12]], color=RED))
-    els.append(arrow("a6", stdio["x"] + 260, asym["y"] - 14, [[0, 0], [0, 12]],
-                     color=RED))
-    els.append(arrow("a7", 400, ly - 34, [[0, 0], [0, 28]]))
-    els.append(text("a7l", 410, ly - 30, "JSON-RPC / build_pool", size=11,
-                    color=GREY))
+    _c.arrow("a1", cli["right"] + 4, cli["y"] + 40,
+                     [[0, 0], [hx - cli["right"] - 8, 0]])
+    _c.text("a1l", cli["right"] + 8, cli["y"] + 16, "RunSpec",
+                    size=11, color=GREY)
+    _c.arrow("a2", swb["right"] + 4, swb["y"] + 60,
+                     [[0, 0], [hx - swb["right"] - 8, 0]], dashed=True)
+    _c.text("a2l", swb["right"] + 6, swb["y"] + 34, "提取器",
+                    size=11, color=GREY)
+    _c.arrow("a3", 300, tby - 14, [[0, 0], [0, 12]], color=VIOLET)
+    _c.arrow("a4", stdio["x"] + 260, tby - 14, [[0, 0], [0, 12]],
+                     color=VIOLET)
+    _c.arrow("a5", 300, asym["y"] - 14, [[0, 0], [0, 12]], color=RED)
+    _c.arrow("a6", stdio["x"] + 260, asym["y"] - 14, [[0, 0], [0, 12]],
+                     color=RED)
+    _c.arrow("a7", 400, ly - 34, [[0, 0], [0, 28]])
+    _c.text("a7l", 410, ly - 30, "JSON-RPC / build_pool", size=11,
+                    color=GREY)
 
 
 # --- validation ------------------------------------------------------------
@@ -438,19 +332,8 @@ def validate() -> list:
 
 def main() -> int:
     build()
-    problems = validate()
-    if problems:
-        print("REFUSING to write -- %d geometry problem(s):" % len(problems))
-        for p in problems:
-            print("  -", p)
-        return 1
-    document = {
-        "type": "excalidraw", "version": 2, "source": "claude",
-        "appState": {"gridSize": None, "viewBackgroundColor": "#121212"},
-        "files": {}, "elements": els,
-    }
-    OUT.write_text(json.dumps(document, ensure_ascii=False, indent=1))
-    print("wrote %s (%d elements, geometry checks passed)" % (OUT, len(els)))
+    # l2/l3 are containers: panels legitimately sit inside them.
+    _c.write(OUT, containers={"l2", "l3"})
     return 0
 
 
