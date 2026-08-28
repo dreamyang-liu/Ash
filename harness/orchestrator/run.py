@@ -102,38 +102,6 @@ class RunSpec:
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
-class _CheckpointingPool:
-    """Mixin turning "a call that could have mutated finished" into a checkpoint.
-
-    Why this hook and not ``turn.completed``: an SDK slot journals its turn from
-    *inside* its event loop, and a session drives its own loop with
-    ``run_until_complete``, which cannot be entered from a thread that already has
-    one running. The bridge detects that and skips -- silently, counting the skips
-    where nobody read them -- so an orchestrator-owned run with an SDK slot recorded
-    zero snapshots while appearing to have checkpointing on.
-
-    A tool call is the step boundary for an external agent anyway: its tool calls
-    are its only channel into the environment. This server sees each one complete,
-    on a thread it controls, which is exactly where a snapshot can be taken.
-
-    The bridge is attached after the fact because ordering demands it -- the sandbox
-    must exist before the bridge that snapshots it.
-    """
-
-    bridge: Any = None
-    _steps: int = 0
-
-    async def after_mutating_call(self, entry, tool_name: str, args: dict) -> None:
-        import asyncio
-
-        if self.bridge is None:
-            return
-        self._steps += 1
-        # to_thread: the session's private loop cannot be entered from this one,
-        # and blocking here would stall every other request the server is serving.
-        await asyncio.to_thread(self.bridge.on_tool_boundary, self._steps)
-
-
 @dataclass
 class OwnedSandbox:
     """A sandbox this orchestrator created, plus whatever serves it.
@@ -151,9 +119,14 @@ class OwnedSandbox:
     #: An in-process HTTP server, when the transport is http. None for stdio, where
     #: the server is the slot's own subprocess and dies with it.
     server: Any = None
-    #: The pool that server serves from, when it is a checkpointing one. The
-    #: orchestrator hands it the bridge once the bridge exists.
-    pool: Any = None
+    #: The MutationTracker mounted on the in-process server's pipeline (http).
+    #: Created with the server -- the pipeline must exist before the first call --
+    #: and handed to the bridge later, so both read ONE tracker: the bridge's
+    #: Checkpointer consults exactly the interceptor that watched the calls.
+    #: Two trackers here is the bug this replaced, in miniature: the bridge built
+    #: its own, nothing fed it, and every step after the first was recorded as
+    #: "clean" reuse of the first snapshot -- while the agent was writing files.
+    tracker: Any = None
     #: stdio only: where the server subprocess appends its step->snapshot map.
     #: The orchestrator folds this into the journal after the run -- the snapshots
     #: are taken in that subprocess (it is the one that sees the tool boundary),
@@ -417,6 +390,8 @@ class Orchestrator:
                     owned.checkpoint_log = self.out_dir / (
                         "%s.ckpt.jsonl" % session.sandbox_id[:12])
                     args += ["--checkpoint-log", str(owned.checkpoint_log)]
+                    if spec.snapshot_every_step:
+                        args += ["--checkpoint-always"]
                 owned.mcp = stdio_wiring(args=args)
             else:
                 owned.mcp = self._serve_in_process(spec, owned)
@@ -435,24 +410,28 @@ class Orchestrator:
         We have the handle -- so any backend works here, Docker included, and the
         pool is told not to destroy what it did not create.
         """
+        from harness.execution.interceptors import MutationTracker
         from harness.execution.panel import load_panel
+        from harness.execution.pipeline import ToolPipeline
         from harness.execution.server import (ExecSurface, HttpMcpServer,
                                               SandboxPool)
         from harness.execution.wiring import http_wiring
 
         surface = (ExecSurface(load_panel(spec.tools, format="raw"))
                    if spec.tools else None)
-
-        class _Pool(_CheckpointingPool, SandboxPool):
-            pass
-
-        pool = _Pool(runtime_bin=spec.runtime_bin, backend=dict(spec.backend))
-        owned.pool = pool
+        pool = SandboxPool(runtime_bin=spec.runtime_bin,
+                           backend=dict(spec.backend))
         entry = pool.adopt(owned.session.sandbox, [f"owner:{spec.agent_id}"],
                            sandbox_id=owned.session.sandbox_id,
                            image=spec.sandbox_image or "")
+        # The tracker is the interceptor half of checkpointing, and it must sit
+        # on THIS pipeline -- the one that serves the calls. It is created here
+        # (the pipeline cannot be retrofitted once the server is running) and
+        # handed to the bridge in _wire_checkpoints (the bridge cannot exist yet:
+        # the journal opens later). Nothing flows between the two moments.
+        owned.tracker = MutationTracker()
         server = HttpMcpServer(pool, host="127.0.0.1", port=0, surface=surface,
-                               notify_mutations=True).start()
+                               pipeline=ToolPipeline([owned.tracker])).start()
         owned.server = server
         self.on_event("mcp", {"url": server.base_url, "transport": "http"})
         # X-Session-Sandbox binds the slot's session to this sandbox, so the model
@@ -496,13 +475,17 @@ class Orchestrator:
         from harness.checkpointing import SnapshotBridge
 
         bridge = SnapshotBridge.install(journal, session,
-                                        always=spec.snapshot_every_step)
-        # The in-process server now has something to notify. Attached here rather
-        # than at wiring time because the sandbox has to exist before the bridge
-        # that snapshots it does.
-        pool = getattr(owned, "pool", None)
-        if pool is not None:
-            pool.bridge = bridge
+                                        always=spec.snapshot_every_step,
+                                        tracker=getattr(owned, "tracker", None))
+        # The in-process server now has something to fire at each tool boundary.
+        # Attached here rather than at server construction because the bridge
+        # cannot exist before the journal, and the journal opens after the
+        # sandbox; no tool call flows until the slot runs, later still.
+        server = getattr(owned, "server", None)
+        if server is not None:
+            from harness.execution.server import ToolBoundary
+
+            server.boundary = ToolBoundary(bridge.on_tool_boundary)
         return bridge
 
     def _fold_checkpoint_log(self, owned, bridge, result) -> None:
@@ -537,8 +520,8 @@ class Orchestrator:
                 int(entry.get("step", 0)),
                 entry["snapshot_id"],
                 session_ckpt=session_ckpt,
-                reason="tool_boundary_stdio",
-                tool=entry.get("tool"),
+                reason=entry.get("reason") or "tool_boundary_stdio",
+                captured=bool(entry.get("captured", True)),
             )
         self.on_event("checkpoints",
                       {"count": len(bridge.ledger.checkpoints),

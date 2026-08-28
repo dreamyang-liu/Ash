@@ -485,7 +485,8 @@ def test_owning_the_sandbox_gives_checkpoints_without_the_caller_asking(monkeypa
         ledger = type("L", (), {"checkpoints": []})()
 
     monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
-                        classmethod(lambda cls, journal, session, always=False:
+                        classmethod(lambda cls, journal, session, always=False,
+                                    tracker=None:
                                     installed.append(session) or FakeBridge()))
     session = _FakeSession()
     owned = OwnedSandbox(session=session, sandbox_id="sb-owned")
@@ -529,63 +530,73 @@ def test_the_server_stops_even_when_the_sandbox_is_kept(monkeypatch):
     assert not session.destroyed, "--keep means the sandbox survives"
 
 
-# --- checkpoints at the tool boundary --------------------------------------
-def test_the_in_process_server_checkpoints_at_each_mutating_call():
-    """The payoff of owning the sandbox AND serving it: an SDK slot cannot be
-    checkpointed at its turn boundary (it journals from inside its event loop, and
-    the session's own loop cannot be entered from there), but its tool calls are
-    its only channel into the environment -- and this process sees each one finish."""
-    import asyncio
+# --- checkpoints at the tool boundary: one tracker, one trigger ---------------
+def test_http_mounts_the_tracker_on_the_serving_pipeline(monkeypatch):
+    """The interceptor half of checkpointing must watch the pipeline that serves
+    the calls. The bridge used to build its own tracker, which nothing fed --
+    dirty stayed False, and every step after the first was recorded as clean
+    reuse of snapshot 1 while the agent was writing files."""
+    from harness.execution.interceptors import MutationTracker
 
-    from harness.orchestrator.run import _CheckpointingPool
-
-    boundaries = []
-
-    class Bridge:
-        def on_tool_boundary(self, index):
-            boundaries.append(index)
-
-    class Pool(_CheckpointingPool):
-        pass
-
-    pool = Pool()
-    pool.bridge = Bridge()
-    asyncio.run(pool.after_mutating_call(object(), "shell", {"command": "x"}))
-    asyncio.run(pool.after_mutating_call(object(), "text_editor", {"path": "y"}))
-    assert boundaries == [1, 2], "one step per mutating call, in order"
+    session = _FakeSession()
+    _, owned, _ = _own(monkeypatch, session, transport="http")
+    try:
+        assert isinstance(owned.tracker, MutationTracker)
+        mounted = owned.server.pipeline.interceptors
+        assert owned.tracker in mounted, "the tracker must sit on the serving pipeline"
+    finally:
+        owned.release()
 
 
-def test_no_bridge_means_no_notification():
-    """The pool is built before the bridge exists -- the sandbox has to precede
-    the thing that snapshots it -- so a call landing in between must be harmless."""
-    import asyncio
+def test_the_bridge_reads_the_same_tracker_the_pipeline_feeds(monkeypatch):
+    from harness.orchestrator.run import Orchestrator, OwnedSandbox, RunSpec
 
-    from harness.orchestrator.run import _CheckpointingPool
-
-    class Pool(_CheckpointingPool):
-        pass
-
-    asyncio.run(Pool().after_mutating_call(object(), "shell", {}))   # no raise
-
-
-def test_the_bridge_is_handed_to_the_pool_after_it_exists(monkeypatch):
-    from harness.orchestrator.run import (Orchestrator, OwnedSandbox, RunSpec,
-                                          _CheckpointingPool)
+    seen = {}
 
     class FakeBridge:
         ledger = type("L", (), {"checkpoints": []})()
 
+        def on_tool_boundary(self, index):
+            pass
+
+    def fake_install(cls, journal, session, always=False, tracker=None):
+        seen["tracker"] = tracker
+        return FakeBridge()
+
     monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
-                        classmethod(lambda cls, journal, session, always=False:
-                                    FakeBridge()))
+                        classmethod(fake_install))
+    tracker = object()
+    owned = OwnedSandbox(session=_FakeSession(), tracker=tracker, sandbox_id="sb")
+    Orchestrator()._wire_checkpoints(RunSpec(prompt="x"), object(), owned)
+    assert seen["tracker"] is tracker, \
+        "two trackers is the unfed-tracker bug in miniature"
 
-    class Pool(_CheckpointingPool):
-        pass
 
-    pool = Pool()
-    owned = OwnedSandbox(session=_FakeSession(), pool=pool, sandbox_id="sb-1")
-    bridge = Orchestrator()._wire_checkpoints(RunSpec(prompt="x"), object(), owned)
-    assert pool.bridge is bridge
+def test_the_boundary_lands_on_the_server_after_the_bridge_exists(monkeypatch):
+    from harness.orchestrator.run import Orchestrator, OwnedSandbox, RunSpec
+
+    class FakeBridge:
+        ledger = type("L", (), {"checkpoints": []})()
+
+        def on_tool_boundary(self, index):
+            self.fired = index
+
+    bridge = FakeBridge()
+    monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
+                        classmethod(lambda cls, journal, session, always=False,
+                                    tracker=None: bridge))
+
+    class FakeServer:
+        boundary = None
+
+    server = FakeServer()
+    owned = OwnedSandbox(session=_FakeSession(), server=server, sandbox_id="sb")
+    Orchestrator()._wire_checkpoints(RunSpec(prompt="x"), object(), owned)
+    assert server.boundary is not None
+    import asyncio
+
+    asyncio.run(server.boundary.after_call())
+    assert bridge.fired == 1, "the trigger must reach the bridge's checkpointer"
 
 
 # --- saying so when checkpointing produced nothing --------------------------
@@ -665,6 +676,21 @@ def test_the_stdio_command_asks_the_subprocess_to_checkpoint(monkeypatch, tmp_pa
     assert "--checkpoint-log" in command
     assert owned.checkpoint_log is not None
     assert str(owned.checkpoint_log) == command[command.index("--checkpoint-log") + 1]
+    assert "--checkpoint-always" not in command
+
+
+def test_snapshot_every_step_reaches_the_subprocess(monkeypatch, tmp_path):
+    session = _FakeSession()
+    session.supports_snapshot = lambda: True
+    import harness.execution.session as session_module
+
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    monkeypatch.setattr(session_module, "SandboxSession", lambda **kw: session)
+    owned = Orchestrator(out_dir=tmp_path)._own_sandbox(
+        RunSpec(prompt="x", sandbox_image="img", transport="stdio",
+                snapshot_every_step=True), None)
+    assert "--checkpoint-always" in owned.mcp.command
 
 
 def test_a_backend_that_cannot_snapshot_is_not_asked_to(monkeypatch, tmp_path):
@@ -704,16 +730,18 @@ def test_the_map_is_folded_into_the_journal_with_the_session_ref(tmp_path):
 
     log = tmp_path / "map.jsonl"
     log.write_text(
-        '{"step": 1, "snapshot_id": "snap-a", "tool": "text_editor"}\n'
-        '{"step": 2, "snapshot_id": "snap-b", "tool": "shell"}\n')
+        '{"step": 1, "snapshot_id": "snap-a", "captured": true, "reason": "mutated"}\n'
+        '{"step": 2, "snapshot_id": "snap-a", "captured": false, "reason": "clean"}\n')
     owned = OwnedSandbox(session=_FakeSession(), checkpoint_log=log)
     bridge = _FoldBridge()
     result = SlotResult(status="completed", final_text="", usage={},
                         native_session_id="conv-9")
     Orchestrator()._fold_checkpoint_log(owned, bridge, result)
-    assert [r["snapshot_id"] for r in bridge.recorded] == ["snap-a", "snap-b"]
+    assert [r["snapshot_id"] for r in bridge.recorded] == ["snap-a", "snap-a"]
     assert all(r["session_ckpt"] == "conv-9" for r in bridge.recorded)
-    assert bridge.recorded[0]["step"] == 1 and bridge.recorded[1]["tool"] == "shell"
+    # a clean step folds as a reuse record, not a fake capture
+    assert bridge.recorded[1]["captured"] is False
+    assert bridge.recorded[1]["reason"] == "clean"
 
 
 def test_a_torn_last_line_from_a_killed_subprocess_is_skipped(tmp_path):

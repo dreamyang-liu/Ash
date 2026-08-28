@@ -247,70 +247,118 @@ def test_the_handler_defaults_to_the_literals_when_given_no_surface():
     assert handler.surface is DEFAULT_SURFACE
 
 
-# --- the checkpoint log: the shutter in the serving process ------------------
-def test_a_mutating_call_snapshots_and_appends_the_map(tmp_path):
-    """One line per capture, appended -- a killed run keeps every line already
-    written, which is the whole reason the map is a file and not process state."""
-    import asyncio
+# --- checkpoints: ONE mechanism, mounted in the serving process --------------
+#
+# The machinery is MutationTracker (an interceptor, on the serving pipeline) plus
+# Checkpointer (fired at every tool boundary). Both transports mount exactly this;
+# they differ only in which process constructs it and where the records land.
+# These tests drive it the way the stdio server does: tracker in a ToolPipeline,
+# Checkpointer over a fake session, records appended as JSONL.
+
+def _machinery(tmp_path, always=False):
     import json
 
-    from harness.execution.server import CheckpointLogMixin, SandboxPool
+    from harness.execution.checkpoints import Checkpointer
+    from harness.execution.interceptors import MutationTracker
+    from harness.execution.pipeline import CallContext, Continue, ToolPipeline
+    from harness.execution.server import ToolBoundary
 
-    class Pool(CheckpointLogMixin, SandboxPool):
-        checkpoint_log = str(tmp_path / "map.jsonl")
+    class FakeSnapSession:
+        def __init__(self):
+            self.captures = 0
 
-    class AshPool:
         def supports_snapshot(self):
             return True
 
-        async def snapshot(self, sandbox, name=None, disk_only=True):
-            assert disk_only, "per-step checkpoints must not pay for memory"
-            return type("Snap", (), {"id": "snap-77"})()
+        def snapshot(self, name=None, disk_only=True):
+            self.captures += 1
+            return type("Snap", (), {"id": "snap-%d" % self.captures,
+                                     "rootfs_layers": None,
+                                     "memory_layers": None,
+                                     "chain_size_mb": None})()
 
-    pool = Pool()
-    pool._pool = AshPool()
-    entry = type("E", (), {"id": "sb-1", "sandbox": object()})()
-    asyncio.run(pool.after_mutating_call(entry, "shell", {"command": "rm x"}))
-    asyncio.run(pool.after_mutating_call(entry, "text_editor", {"path": "y"}))
+    log = tmp_path / "map.jsonl"
 
-    lines = [json.loads(l) for l in
-             (tmp_path / "map.jsonl").read_text().splitlines()]
-    assert [(l["step"], l["snapshot_id"], l["tool"]) for l in lines] == \
-        [(1, "snap-77", "shell"), (2, "snap-77", "text_editor")]
+    def append(record):
+        with open(log, "a") as fh:
+            fh.write(json.dumps({"step": record.turn,
+                                 "snapshot_id": record.snapshot_id,
+                                 "captured": bool(record.captured),
+                                 "reason": record.reason}) + "\n")
+
+    tracker = MutationTracker()
+    session = FakeSnapSession()
+    checkpointer = Checkpointer(session=session, tracker=tracker,
+                                always=always, on_checkpoint=append)
+    boundary = ToolBoundary(checkpointer.after_step)
+    pipeline = ToolPipeline([tracker])
+
+    def call(tool, args):
+        """One exec call as the handler runs it: through the pipeline (feeding
+        the tracker), then the boundary."""
+        import asyncio
+
+        from harness.core.result import ToolResult
+
+        ctx = CallContext(agent_id="a", sandbox_id="sb", tool_name=tool,
+                          args=dict(args))
+        pipeline.execute(ctx, lambda t, a: ToolResult(success=True, output="ok"))
+        asyncio.run(boundary.after_call())
+
+    def lines():
+        import json as _json
+
+        return [_json.loads(l) for l in log.read_text().splitlines()]
+
+    return call, lines, session
 
 
-def test_a_failed_capture_is_skipped_not_raised(tmp_path):
-    """A checkpoint is an optimisation for later analysis; failing the agent's
-    tool call over it would be strictly worse than a gap in the history."""
+def test_a_clean_step_reuses_the_previous_snapshot(tmp_path):
+    """THE regression this unification fixes, in both directions. The old stdio
+    path snapshotted on `text_editor view` (a read paid for a capture); the old
+    http path had an unfed tracker, so every step after the first was recorded as
+    "clean" reuse of snapshot 1 -- while the agent was writing files. With the
+    tracker on the serving pipeline, a write captures and a view reuses."""
+    call, lines, session = _machinery(tmp_path)
+    call("text_editor", {"command": "write", "path": "/a", "file_text": "x"})
+    call("text_editor", {"command": "view", "path": "/a"})
+    call("text_editor", {"command": "write", "path": "/b", "file_text": "y"})
+
+    got = [(l["step"], l["snapshot_id"], l["captured"]) for l in lines()]
+    assert got == [(1, "snap-1", True),
+                   (2, "snap-1", False),      # view: mapped, not paid for
+                   (3, "snap-2", True)]       # write: a NEW snapshot, not reuse
+    assert session.captures == 2, "two writes, two captures, no more"
+
+
+def test_every_step_gets_a_map_entry(tmp_path):
+    """A fork at a read-only step must have something to restore from. The old
+    _MUTATING pre-filter skipped grep_files entirely, so that step had no entry."""
+    call, lines, _ = _machinery(tmp_path)
+    call("shell", {"command": "echo hi > f"})
+    call("grep_files", {"pattern": "hi"})
+    assert [l["step"] for l in lines()] == [1, 2]
+    assert lines()[1]["snapshot_id"] == lines()[0]["snapshot_id"]
+    assert lines()[1]["captured"] is False and lines()[1]["reason"] == "clean"
+
+
+def test_checkpoint_always_captures_every_step(tmp_path):
+    call, lines, session = _machinery(tmp_path, always=True)
+    call("text_editor", {"command": "view", "path": "/a"})
+    call("text_editor", {"command": "view", "path": "/a"})
+    assert session.captures == 2, "always means a distinct snapshot per step"
+
+
+def test_a_failing_checkpointer_does_not_fail_the_tool_call():
+    """The boundary swallows: a checkpoint is an optimisation for later analysis,
+    and failing the agent's call over it is strictly worse than a gap."""
     import asyncio
 
-    from harness.execution.server import CheckpointLogMixin, SandboxPool
+    from harness.execution.server import ToolBoundary
 
-    class Pool(CheckpointLogMixin, SandboxPool):
-        checkpoint_log = str(tmp_path / "map.jsonl")
+    def explode(step):
+        raise RuntimeError("backend said no")
 
-    class AshPool:
-        def supports_snapshot(self):
-            return True
-
-        async def snapshot(self, sandbox, name=None, disk_only=True):
-            raise RuntimeError("backend said no")
-
-    pool = Pool()
-    pool._pool = AshPool()
-    entry = type("E", (), {"id": "sb-1", "sandbox": object()})()
-    asyncio.run(pool.after_mutating_call(entry, "shell", {}))   # no raise
-    assert not (tmp_path / "map.jsonl").exists()
-
-
-def test_no_log_path_means_the_mixin_is_inert():
-    import asyncio
-
-    from harness.execution.server import CheckpointLogMixin, SandboxPool
-
-    class Pool(CheckpointLogMixin, SandboxPool):
-        pass                     # checkpoint_log stays None
-
-    pool = Pool()
-    entry = type("E", (), {"id": "sb-1", "sandbox": object()})()
-    asyncio.run(pool.after_mutating_call(entry, "shell", {}))   # no raise, no file
+    boundary = ToolBoundary(explode)
+    asyncio.run(boundary.after_call())        # no raise
+    assert boundary.step == 1, "the step still counts; the map has a gap, not a shift"

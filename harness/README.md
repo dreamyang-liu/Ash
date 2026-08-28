@@ -295,30 +295,38 @@ calls happen**, and that decides whether checkpointing works:
 | server | in this process, ephemeral port | the slot's own subprocess |
 | sandbox handed over | the live handle (`pool.adopt`) | by id (`--attach`) |
 | backends | any, Docker included | needs `attach` → microvm only |
-| who presses the shutter | this process, per mutating call | the subprocess, per mutating call |
-| how the map reaches the journal | directly (same process) | `--checkpoint-log` JSONL, folded after the run |
+| who constructs the machinery | the orchestrator | the server's own `main` |
+| where records land | the journal, directly | `--checkpoint-log` JSONL, folded after the run |
 
-Both checkpoint at the tool boundary, because that is where the checkpoint
-machinery was designed to sit — at the tool path, **in whichever process serves
-the calls**. The turn-boundary trigger is unusable for an SDK slot (it journals
-its turn from inside its event loop, and a session's own loop cannot be entered
-from a thread that already has one), but a tool call is that agent's real step
-anyway: its tool calls are its only channel into the environment.
+**One mechanism, mounted in whichever process serves the calls.** The machinery
+is the `MutationTracker` interceptor (on the serving pipeline, so it sees every
+call and knows a `text_editor view` changed nothing) plus `Checkpointer` fired
+after every exec call: capture when something could have mutated, map a clean
+step to the previous snapshot without paying for a capture, re-board when the
+layer chain was compacted, squash at 128 layers. The transports differ only in
+who constructs it and where the records land.
 
-Over stdio the serving process is the slot's subprocess, so *it* takes the
-snapshot — its loop is strictly sequential, so the hook always fires quiesced,
-and `--attach` gives it its own handle to the same sandbox (microvm, which is
-also the only backend that can snapshot at all). What travels back is only the
-step→snapshot **map**: one JSON line per capture, appended, folded into the
-journal after the run and paired with the conversation ref there. A killed
-subprocess keeps every line already written — the map lands per capture, not on
-clean exit, because 300 snapshots with no record of which step each was is the
-failure this design exists to rule out.
+It was briefly two hand-rolled shortcuts instead, and each was wrong in its own
+way — worth recording because both failures were *silent*: the http path built a
+tracker nothing fed, so with `always` off every step after the first was recorded
+as "clean" reuse of snapshot 1 while the agent was writing files (wrong pairs
+that look complete); the stdio path re-implemented capture inline, so a `view`
+paid for a snapshot, a `grep_files` step got no map entry at all, and none of the
+chain upkeep ran. The tracker must sit on the pipeline that serves the calls.
 
-Verified live: the same prompt records 3 complete pairs over both transports, and
-restoring the step-1 snapshot shows exactly the first file and not the second.
-`checkpoint.unavailable` still fires on wirings with no boundary to stand at
-(hand-rolled `mcp_stdio_args` without `--checkpoint-log`).
+Over stdio that serving process is the slot's subprocess — its loop is strictly
+sequential so the boundary always fires quiesced, and `--attach` gives it its own
+handle (microvm, which is also the only backend that can snapshot at all). Each
+record is appended as one JSON line when it happens, not on exit: a killed run
+keeps every line already written, which is the 300-snapshots-no-map lesson. The
+parent folds the file into the journal afterwards and pairs it with the
+conversation ref, so `load_checkpoints` and `fork_plan` read both transports
+identically.
+
+Verified live with `always` off: write → capture, view → clean reuse, write →
+new capture; identical records on both transports. `checkpoint.unavailable`
+still fires on wirings with no boundary to stand at (hand-rolled
+`mcp_stdio_args` without `--checkpoint-log`).
 
 ## Threading rules (learned by breaking them)
 

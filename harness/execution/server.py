@@ -451,54 +451,145 @@ class SandboxPool:
         sys.stderr.flush()
 
 
-class CheckpointLogMixin:
-    """Snapshot after each mutating call; append the step->snapshot map to a file.
+class AttachedSandboxSession:
+    """The Checkpointer's session surface, over a sandbox this server serves.
 
-    This is the checkpoint firing where it was always designed to fire -- at the
-    tool path, in the process that serves the calls. When this server is a stdio
-    subprocess, the caller that owns the sandbox never sees a tool call go by, so
-    it cannot know when to capture; this process sees every one. The stdio loop is
-    strictly sequential (one request is fully handled before the next is read), so
-    the hook always runs at a quiesce point -- no call is in flight.
+    :class:`~harness.execution.checkpoints.Checkpointer` duck-types on
+    ``supports_snapshot / snapshot / squash_snapshot / swap_sandbox`` and calls
+    them synchronously from a worker thread. This server's pool is async and its
+    client is bound to the server's event loop, so each method schedules the
+    coroutine onto that loop and blocks the worker on the result -- safe because
+    the loop itself is awaiting the worker (``asyncio.to_thread``) and is free to
+    serve the scheduled work.
 
-    What travels back is the *map*, not the snapshots: snapshots live on the
-    backend under server-generated ids, and without "step 3 -> snapshot X" beside
-    them they are unusable -- the same lesson that moved trajectory-saving into
-    checkpointing after a killed 5-hour run left 300 snapshots and no record of
-    which step each was. One JSON line per capture, appended, fsync-free: a killed
-    run keeps every line already written.
-
-    A capture failure is logged and skipped, never raised: a checkpoint is an
-    optimisation for later analysis, and failing the agent's tool call over it
-    would be strictly worse than a gap in the history.
+    Exists so the *same* Checkpointer runs in both serving processes: the
+    orchestrator's own (which has a real SandboxSession) and this one (which has
+    only a pool and an entry). Before this, the stdio path re-implemented capture
+    inline and silently lost everything Checkpointer does beyond it -- clean-step
+    reuse, compaction detection, re-board, the 128-layer squash.
     """
 
-    #: Where the map goes. None disables the mixin entirely.
-    checkpoint_log = None
-    _ckpt_step = 0
+    def __init__(self, loop: asyncio.AbstractEventLoop, pool: "SandboxPool",
+                 entry: SandboxEntry):
+        self._loop = loop
+        self._server_pool = pool
+        self._entry = entry
 
-    async def after_mutating_call(self, entry, tool_name: str, args: dict) -> None:
-        await super().after_mutating_call(entry, tool_name, args)
-        if not self.checkpoint_log or not self._pool:
-            return
-        if not self._pool.supports_snapshot():
-            if not self._ckpt_step:
-                self._ckpt_step = -1  # say it once, not per call
-                self._log("checkpoint-log set but backend cannot snapshot; "
-                          "recording nothing")
-            return
-        self._ckpt_step += 1
+    def _run(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+
+    def supports_snapshot(self) -> bool:
+        inner = self._server_pool._pool
+        return bool(inner) and inner.supports_snapshot()
+
+    def snapshot(self, name: "str | None" = None, disk_only: bool = True):
+        """None on failure, like SandboxSession: a checkpoint is an optimisation,
+        never a reason to fail the episode in progress."""
         try:
-            snapshot = await self._pool.snapshot(entry.sandbox, disk_only=True)
-        except Exception as e:  # noqa: BLE001 - see docstring
-            self._log(f"checkpoint at step {self._ckpt_step} failed: {e}")
-            return
-        line = json.dumps({"step": self._ckpt_step,
-                           "snapshot_id": getattr(snapshot, "id", None),
-                           "tool": tool_name,
-                           "sandbox_id": entry.id})
-        with open(self.checkpoint_log, "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+            return self._run(self._server_pool._pool.snapshot(
+                self._entry.sandbox, name=name, disk_only=disk_only))
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[ash-ckpt] snapshot failed: {e}\n")
+            return None
+
+    def squash_snapshot(self, snapshot, name: "str | None" = None):
+        """The input unchanged on failure: a deep chain still works, it just
+        makes its children's checkpoints more expensive."""
+        try:
+            return self._run(self._server_pool._pool.squash(snapshot, name=name))
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[ash-ckpt] squash failed: {e}\n")
+            return snapshot
+
+    def swap_sandbox(self, snapshot) -> bool:
+        """Continue serving on a sandbox started from ``snapshot``.
+
+        Same probe-before-adopt rule as SandboxSession: a disk-only snapshot
+        cold-boots, so a replacement without a runtime would turn every later
+        tool call into a transport error. The swap lands in ``entry.sandbox``,
+        which every executor resolves per call, so it is invisible mid-run.
+        """
+        inner = self._server_pool._pool
+        snapshot_id = getattr(snapshot, "id", snapshot)
+        previous = self._entry.sandbox
+        try:
+            replacement = self._run(inner.spawn(
+                image=snapshot_id, agent_id=getattr(previous, "agent_id", "")))
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[ash-ckpt] re-board failed, keeping sandbox: {e}\n")
+            return False
+
+        async def _reachable(sandbox) -> bool:
+            for attempt in range(8):
+                try:
+                    result = await sandbox.call("shell", command="true", timeout=10)
+                    if not result.is_error:
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
+                if attempt < 7:
+                    await asyncio.sleep(0.5)
+            return False
+
+        if not self._run(_reachable(replacement)):
+            sys.stderr.write("[ash-ckpt] re-board target has no runtime; "
+                             "keeping sandbox\n")
+            try:
+                self._run(inner.destroy(replacement))
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+        self._entry.sandbox = replacement
+        try:
+            self._run(inner.destroy(previous))
+        except Exception:  # noqa: BLE001 - a stranded old sandbox is a TTL leak,
+            pass                        # not a run failure
+        return True
+
+
+class ToolBoundary:
+    """Drives the checkpointer after every exec call this server completes.
+
+    ONE mechanism for both transports. The checkpoint machinery is the
+    ``MutationTracker`` interceptor (mounted on the serving pipeline, so it sees
+    every call and knows a ``text_editor view`` changed nothing) plus
+    ``Checkpointer.after_step`` (capture when dirty, map to the previous snapshot
+    when clean, layer-chain upkeep either way). This class is only the trigger:
+    count the step, run the sync checkpointer on a worker thread, swallow its
+    failures.
+
+    Fires after *every* exec call, not just apparently-mutating ones. The old
+    trigger pre-filtered on a hand-written ``{shell, text_editor, process}`` set,
+    which was wrong twice over: a ``text_editor view`` paid for a snapshot it did
+    not need, and a ``grep_files`` step got no map entry at all -- so a fork at
+    that step had nothing to restore from. The tracker decides; the map is
+    complete either way.
+
+    The reason the machinery must sit HERE and not with the sandbox's owner: the
+    owner cannot see a tool boundary that happens in another process, and an SDK
+    slot's turn events fire inside its event loop where the session's own loop
+    cannot be entered. Whoever serves the calls is standing on the boundary --
+    the http server in the orchestrator's process, the stdio server in its own.
+    """
+
+    def __init__(self, after_step: "Any", label: str = "ckpt"):
+        self._after_step = after_step
+        self._label = label
+        self.step = 0
+
+    async def after_call(self) -> None:
+        self.step += 1
+        try:
+            # A worker thread, for two reasons: the checkpointer is synchronous
+            # and may block for seconds, and its session drives its own loop via
+            # run_until_complete, which cannot be entered from a thread that
+            # already has a running loop -- this one.
+            await asyncio.to_thread(self._after_step, self.step)
+        except Exception as e:  # noqa: BLE001
+            # A checkpoint is an optimisation for later analysis. Failing the
+            # agent's tool call over it would be strictly worse than a gap.
+            sys.stderr.write(f"[ash-{self._label}] checkpoint at step "
+                             f"{self.step} failed: {e}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -513,7 +604,8 @@ class SessionHandler:
 
     def __init__(self, session: Session, pool: SandboxPool, notify_mutations: bool = False,
                  pipeline: "ToolPipeline | None" = None,
-                 surface: "ExecSurface | None" = None):
+                 surface: "ExecSurface | None" = None,
+                 boundary: "ToolBoundary | None" = None):
         self.session = session
         self.pool = pool
         # surface: which exec tools exist and how they route. Defaults to the
@@ -526,6 +618,9 @@ class SessionHandler:
         # pipeline: L2 interceptor chain (shared across sessions — coordination
         # state must span agents). None = dispatch exactly as before (default).
         self.pipeline = pipeline
+        # boundary: checkpoint trigger, fired after every exec call. Lives on
+        # the server (its step counter spans requests), passed per handler.
+        self.boundary = boundary
 
     def _resolve(self, sandbox_id: str | None) -> SandboxEntry | None:
         """Resolve the target sandbox by explicit id, falling back to the fixed
@@ -606,6 +701,14 @@ class SessionHandler:
             # hooking mutations was never called at all.
             await self.pool.after_mutating_call(entry, name, args)
 
+        if self.boundary is not None:
+            # Every exec call, mutating or not: the tracker on the pipeline
+            # decides capture vs reuse, and a read-only step still needs its map
+            # entry -- see ToolBoundary. After `content`, so the call is complete
+            # and nothing is in flight (the stdio loop is sequential; the http
+            # in-process server serves one bound slot).
+            await self.boundary.after_call()
+
         return content
 
     async def _exec_via_pipeline(self, entry: SandboxEntry, name: str,
@@ -658,12 +761,17 @@ class HttpMcpServer:
     def __init__(self, pool: SandboxPool, host: str = "0.0.0.0", port: int = 8400,
                  pipeline: "ToolPipeline | None" = None,
                  surface: "ExecSurface | None" = None,
-                 notify_mutations: bool = False):
+                 notify_mutations: bool = False,
+                 boundary: "ToolBoundary | None" = None):
         self.pool = pool
         self.host = host
         self.port = port
         self.pipeline = pipeline
         self.surface = surface or DEFAULT_SURFACE
+        #: Checkpoint trigger shared by every handler this server creates. May be
+        #: set after start(): the sandbox and the bridge exist in that order, and
+        #: no tool call flows until the slot runs, which is later still.
+        self.boundary = boundary
         # notify_mutations: call the pool's after_mutating_call after a call that
         # could have changed the filesystem. Off by default; the orchestrator turns
         # it on, because a tool call IS the step boundary for an external agent and
@@ -724,7 +832,8 @@ class HttpMcpServer:
             session = self._get_or_create_session(headers)
             handler = SessionHandler(session, self.pool, pipeline=self.pipeline,
                                      surface=self.surface,
-                                     notify_mutations=self.notify_mutations)
+                                     notify_mutations=self.notify_mutations,
+                                     boundary=self.boundary)
 
             body = await request.json()
             method = body.get("method", "")
@@ -871,12 +980,14 @@ class StdioMcpServer:
 
     def __init__(self, pool: SandboxPool, single_sandbox: bool = False,
                  pipeline: "ToolPipeline | None" = None,
-                 surface: "ExecSurface | None" = None):
+                 surface: "ExecSurface | None" = None,
+                 boundary: "ToolBoundary | None" = None):
         self.pool = pool
         self.session = Session(id="stdio", groups=["owner:stdio", "default"])
         self.surface = surface or DEFAULT_SURFACE
         self.handler = SessionHandler(self.session, pool, notify_mutations=single_sandbox,
-                                      pipeline=pipeline, surface=self.surface)
+                                      pipeline=pipeline, surface=self.surface,
+                                      boundary=boundary)
         # single_sandbox: expose only exec tools bound to the active sandbox
         # (lifecycle tools hidden — the harness pre-provisions the sandbox).
         self.single_sandbox = single_sandbox
@@ -997,11 +1108,17 @@ def main(pool_cls=None):
                         help="Python file exporting PIPELINE: list[ToolInterceptor]; "
                              "replaces the default pipeline assembly")
     parser.add_argument("--checkpoint-log", default=None, metavar="PATH",
-                        help="With --attach: snapshot the sandbox after every "
-                             "mutating tool call and append {step, snapshot_id} "
-                             "lines here. The caller that owns the sandbox folds "
-                             "this into its journal -- it cannot see the tool "
-                             "boundary itself, this process can.")
+                        help="With --attach: mount the checkpoint machinery "
+                             "(MutationTracker on the pipeline + Checkpointer at "
+                             "the tool boundary) and append one {step, "
+                             "snapshot_id} JSON line per step here. The caller "
+                             "that owns the sandbox folds this into its journal "
+                             "-- it cannot see a tool boundary that happens in "
+                             "this process.")
+    parser.add_argument("--checkpoint-always", action="store_true",
+                        help="With --checkpoint-log: a distinct snapshot per "
+                             "step, instead of letting clean steps reuse the "
+                             "previous one.")
     parser.add_argument("--tools", default=None, metavar="PANEL",
                         help="Serve a compiled tool panel instead of the built-in "
                              "four: a shipped name (default, full, bash_only, "
@@ -1045,14 +1162,21 @@ def main(pool_cls=None):
                          "--attach\n")
         raise SystemExit(2)
 
-    base_cls = pool_cls or SandboxPool
-    if args.checkpoint_log:
-        # A mixin, so a pool_cls a caller injected keeps its own behaviour.
-        class base_cls(CheckpointLogMixin, base_cls):  # noqa: N801
-            checkpoint_log = args.checkpoint_log
-
-    pool = base_cls(runtime_bin=args.runtime_bin, backend=backend)
+    pool = (pool_cls or SandboxPool)(runtime_bin=args.runtime_bin, backend=backend)
     pipeline = _build_pipeline(args)
+
+    tracker = None
+    if args.checkpoint_log:
+        # The SAME machinery both serving processes mount, constructed here
+        # because this is the process standing on the tool boundary. The tracker
+        # goes on the pipeline (outermost, so it sees every call and knows a
+        # `text_editor view` changed nothing); the Checkpointer is built after
+        # attach, once there is a sandbox to snapshot.
+        from harness.execution.interceptors import MutationTracker
+
+        tracker = MutationTracker()
+        pipeline = ToolPipeline([tracker]
+                                + list(pipeline.interceptors if pipeline else ())) 
     if pipeline is not None:
         names = ", ".join(i.name for i in pipeline.interceptors) or "(empty)"
         sys.stderr.write(f"[ash-mcp] interceptor pipeline: {names}\n")
@@ -1085,8 +1209,43 @@ def main(pool_cls=None):
                     sys.stderr.flush()
                     raise SystemExit(1)
                 stdio.session.bound_id = entry.id
+                if args.checkpoint_log:
+                    stdio.handler.boundary = _stdio_checkpoints(
+                        args, tracker, pool, entry)
             await stdio.run()
         asyncio.run(run_stdio())
+
+
+def _stdio_checkpoints(args, tracker, pool: SandboxPool,
+                       entry: SandboxEntry) -> ToolBoundary:
+    """The checkpoint machinery, mounted in this (the serving) process.
+
+    Identical construction to the orchestrator's http path -- MutationTracker on
+    the pipeline, Checkpointer at the boundary -- except for what only genuinely
+    differs here: the session is an adapter over this server's pool (this process
+    holds no SandboxSession), and each record lands as a JSONL line for the owner
+    to fold into its journal (this process holds no journal).
+    """
+    import json as _json
+
+    from harness.execution.checkpoints import Checkpointer
+
+    session = AttachedSandboxSession(asyncio.get_running_loop(), pool, entry)
+
+    def append(record) -> None:
+        # Every step gets a line, reused ones included: the map must be complete,
+        # and it must land per capture so a killed run keeps what it earned.
+        line = _json.dumps({"step": record.turn,
+                            "snapshot_id": record.snapshot_id,
+                            "captured": bool(record.captured),
+                            "reason": record.reason})
+        with open(args.checkpoint_log, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+    checkpointer = Checkpointer(session=session, tracker=tracker,
+                                always=bool(args.checkpoint_always),
+                                disk_only=True, on_checkpoint=append)
+    return ToolBoundary(checkpointer.after_step)
 
 
 if __name__ == "__main__":
