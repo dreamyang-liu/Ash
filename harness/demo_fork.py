@@ -1,28 +1,48 @@
 """Fork demo: run a task, branch it at step N, drive K divergent continuations.
 
 This is the acceptance test for the whole stack -- the one capability no other
-harness offers today. Existing tools can *resume* a run (and only for a couple of
-agents); none can take one run and fan out several branches from a chosen step,
-which is what counterfactual analysis, best-of-N and tree-search elicitation all
-need.
+harness offers today. Existing tools can *resume* a run; none can take one run
+and fan out several branches from a chosen step, which is what counterfactual
+analysis, best-of-N and tree-search elicitation all need.
 
-    python -m harness.demo_fork --slot opencode --cwd /tmp/demo \
-        --prompt "..." --branch-at 1 \
+    python -m harness.demo_fork --slot opencode --image python:3.11-slim \\
+        --prompt "..." --branch-at 2 \\
         --direction "try X" --direction "try Y"
 
 What it exercises end to end:
 
-1. a parent run, journaled, with checkpoint pairs recorded at each quiesce point;
+1. a parent run with a rollback pair recorded at every step;
 2. ``fork_plan`` resolving the pair (env snapshot + conversation ref) at a step;
-3. K children, each continuing from that pair with a different instruction;
-4. each child exported to ATIF with ``is_copied_context`` set on the inherited
-   prefix -- so the shared prefix is not counted K times in training data.
+3. K children, each an ordinary orchestrator run whose sandbox *image* is the
+   parent's snapshot and whose conversation resumes (forked, where the agent
+   supports it) from the parent's session;
+4. each child's journal opening with ``fork.origin`` and exported to ATIF with
+   ``is_copied_context`` on the inherited prefix -- so the shared prefix is not
+   counted K times in training data.
 
-Without a sandbox session (``--session-backend none``) the environment half is
-absent and only the conversation branches; the demo says so rather than pretending
-the pair is complete. With opencode the conversation half is native
-(``--session --fork``); with claude-code it is ``resume`` + ``fork_session``;
-codex has no native fork, so its children replay the prompt against the snapshot.
+This file used to build all of that by hand -- its own JournalWriter, its own
+AshSession per branch, an in-process MCP server for the SDK slot, hand-rolled
+``--attach`` argv -- because the orchestrator could not do it. Now every run
+here, parent and branch alike, is one :class:`RunSpec`; what remains is only
+what makes this a *fork* demo: choosing the branch point, wiring each branch to
+the pair, and the ATIF export. If this file grows plumbing again, the
+orchestrator is missing a feature.
+
+Two facts worth knowing before reading on:
+
+- **The environment half forks at the chosen step; the conversation half forks
+  at its tip.** opencode's fork takes an optional ``fork_message_id`` to branch
+  mid-conversation, but the checkpoint pair records a session *id*, not a
+  per-step message id -- so a branch at step N gets step N's filesystem and the
+  whole parent conversation. Fine when branching near the end (the common
+  case); a mid-run branch's agent may believe it did things the restored
+  filesystem lacks. The prompt each branch gets says the environment is
+  authoritative.
+- **opencode branches must share the parent's ``data_home``** -- its sessions
+  live in SQLite there, and a fork of a session nobody can see is just a new
+  session. The orchestrator defaults to per-run state dirs (concurrent lanes
+  sharing SQLite fail with "database is locked"), so this demo pins one shared
+  dir; the runs here are sequential.
 """
 
 from __future__ import annotations
@@ -33,421 +53,198 @@ from pathlib import Path
 from typing import List, Optional
 
 from harness.atif import journal_to_atif
-from harness.checkpointing import SnapshotBridge
-from harness.core.journal import JournalWriter, new_run_id, read_journal
-from harness.core.slot import TaskSpec
-from harness.execution.wiring import stdio_wiring
-from harness.rollback import fork_plan, load_checkpoints
-from harness.slots import load_slot
+from harness.core.journal import new_run_id, read_journal
+from harness.orchestrator.run import Orchestrator, RunOutcome, RunSpec
+from harness.rollback import fork_plan
+from harness.slots import available, load_slot
 
 
-def run_parent(
-    slot_name: str,
-    prompt: str,
-    cwd: str,
-    out_dir: Path,
-    *,
-    model: Optional[str] = None,
-    timeout_s: float = 600.0,
-    session=None,
-    mcp=None,
-    in_process: bool = False,
-) -> dict:
-    slot = load_slot(slot_name)()
-    run_id = "parent-" + new_run_id()[:8]
-    journal_path = out_dir / ("%s.jsonl" % run_id)
-    extra = {"setting_sources": []} if slot_name == "claude-code" else {}
-
-    print("== parent run (%s) ==" % slot_name)
-    with JournalWriter(journal_path, run_id=run_id, agent_id="parent") as journal:
-        bridge = None
-        if session is not None:
-            # Environment half of the pair: snapshots at every quiesce point.
-            bridge = SnapshotBridge.install(journal, session, always=True)
-        if in_process and session is not None:
-            # Harness keeps sandbox ownership, so snapshots describe the
-            # environment the agent actually worked in.
-            extra["sdk_mcp_server"] = in_process_tools(session, bridge)
-            mcp = None
-        result = slot.run(
-            TaskSpec(prompt=prompt, cwd=cwd, model=model, timeout_s=timeout_s, extra=extra),
-            journal,
-            mcp,
-        )
-    print("   status  %s" % result.status)
-    print("   session %s" % result.native_session_id)
-    print("   journal %s" % journal_path)
-    return {
-        "run_id": run_id,
-        "journal": journal_path,
-        "session": result.native_session_id,
-        "status": result.status,
-        "final_text": result.final_text,
-    }
+def _backend_section(name: str, runtime_bin: Optional[str]) -> dict:
+    """Same shape the CLI builds; AENV_SERVER_URL/_API_KEY come from the env."""
+    if not name or name == "docker":
+        return {}
+    config: dict = {"backend": name}
+    if name == "microvm":
+        section: dict = {"from_image": True}
+        if runtime_bin:
+            section["runtime_bin"] = runtime_bin
+        config["microvm"] = section
+    return config
 
 
-def run_branch(
-    slot_name: str,
-    parent: dict,
-    plan: dict,
-    direction: str,
-    index: int,
-    cwd: str,
-    out_dir: Path,
-    *,
-    model: Optional[str] = None,
-    timeout_s: float = 600.0,
-    mcp=None,
-    session=None,
-    in_process: bool = False,
-) -> dict:
-    slot_cls = load_slot(slot_name)
-    slot = slot_cls()
-    run_id = "branch%d-%s" % (index, new_run_id()[:8])
-    journal_path = out_dir / ("%s.jsonl" % run_id)
+def _spec(args, *, prompt: str, run_id: str, image: str,
+          shared_extra: dict, resume: Optional[str] = None,
+          fork: bool = False, origin: Optional[dict] = None) -> RunSpec:
+    """One run of this demo. Parent and branches differ only in the arguments."""
+    runtime_bin = str(Path(args.runtime_bin).resolve()) if args.runtime_bin else None
+    return RunSpec(
+        prompt=prompt,
+        slot=args.slot,
+        cwd=args.cwd,
+        model=args.model,
+        timeout_s=args.timeout,
+        run_id=run_id,
+        journal_path=Path(args.out) / ("%s.jsonl" % run_id),
+        transport=args.transport,
+        backend=_backend_section(args.backend, runtime_bin),
+        runtime_bin=runtime_bin,
+        sandbox_image=image,
+        tools=args.tools,
+        # False on purpose: the map is complete anyway -- the tracker maps a
+        # read-only step to the previous capture -- so every step is a valid
+        # branch point without paying for a snapshot per step.
+        snapshot_every_step=False,
+        resume_session_id=resume,
+        fork=fork,
+        origin=origin,
+        extra=dict(shared_extra),
+    )
 
-    session_ref = plan.get("session_ckpt") or parent.get("session")
-    extra: dict = {}
-    if slot_name == "claude-code":
-        extra["setting_sources"] = []
-    if session_ref and slot_cls.capabilities.resume:
-        extra["resume_session_id"] = session_ref
-        if slot_cls.capabilities.fork:
-            # Branch instead of continuing in place, so siblings cannot
-            # contaminate each other's conversation.
-            extra["fork"] = True
-    if plan.get("snapshot_id"):
-        extra["resume_from_snapshot"] = plan["snapshot_id"]
 
-    print("\n== branch %d: %s ==" % (index, direction[:60]))
-    print("   from step %s  snapshot=%s  session=%s"
-          % (plan.get("step"), plan.get("snapshot_id"), session_ref))
-    with JournalWriter(journal_path, run_id=run_id, agent_id="branch%d" % index) as journal:
-        if in_process and session is not None:
-            bridge = SnapshotBridge.install(journal, session, always=True)
-            extra["sdk_mcp_server"] = in_process_tools(session, bridge)
-        journal.emit(
-            "fork.origin",
-            parent_run_id=parent["run_id"],
-            parent_journal=str(parent["journal"]),
-            branch_step=plan.get("step"),
-            snapshot_id=plan.get("snapshot_id"),
-            session_ckpt=session_ref,
-            copied_through_seq=plan.get("copied_through_seq"),
-            direction=direction,
-        )
-        result = slot.run(
-            TaskSpec(prompt=direction, cwd=cwd, model=model, timeout_s=timeout_s, extra=extra),
-            journal,
-            mcp,
-        )
-    print("   status  %s" % result.status)
-    print("   answer  %s" % (result.final_text or "")[:120].replace("\n", " "))
+def _export_atif(branch: RunOutcome, parent: RunOutcome, plan: dict,
+                 out_dir: Path) -> Path:
+    """The child's ATIF, with the parent prefix prepended and marked copied.
 
-    # ATIF for the child: prepend the parent's prefix, force-marked copied, so
-    # the document is self-contained for training while an SFT consumer can
-    # filter the shared prefix instead of learning it once per branch.
+    Self-contained for training, while an SFT consumer can filter the shared
+    prefix instead of learning it once per branch.
+    """
     boundary = plan.get("copied_through_seq") or 0
     inherited = [
-        r for r in read_journal(parent["journal"])
+        r for r in read_journal(parent.journal_path)
         if r.get("seq", 0) <= boundary and r.get("type") != "run.finished"
     ]
     document = journal_to_atif(
-        read_journal(journal_path),
+        list(read_journal(branch.journal_path)),
         inherited=inherited,
-        continued_from=parent["run_id"],
+        continued_from=parent.run_id,
     )
-    atif_path = out_dir / ("%s.atif.json" % run_id)
-    atif_path.write_text(json.dumps(document, indent=2), encoding="utf-8")
-
-    return {
-        "run_id": run_id,
-        "journal": journal_path,
-        "atif": atif_path,
-        "direction": direction,
-        "status": result.status,
-        "final_text": result.final_text,
-        "session": result.native_session_id,
-        "usage": result.usage,
-    }
-
-
-def in_process_tools(session, bridge=None, workdir: Optional[str] = None) -> object:
-    """An in-process SDK MCP server over ``session``'s executor.
-
-    Why not the stdio ``swebench.mcp_server``: that subprocess creates and owns
-    its *own* sandbox, so the session we snapshot would not be the one the agent
-    works in -- the pair would reference an environment nobody touched. The
-    marathon-claude-code harness hit the same wall; in-process keeps sandbox
-    ownership here, which is what makes the environment half meaningful.
-
-    Two constraints, both learned by breaking them:
-
-    - the executor must run in a **worker thread** (``asyncio.to_thread``).
-      ``AshSession`` drives a private event loop via ``run_until_complete``, and
-      the SDK tool handler is already inside a running loop; calling it directly
-      leaves coroutines un-awaited ("coroutine ... was never awaited") and every
-      tool call fails, including the snapshot the bridge takes afterwards.
-    - calls are **serialized** with a lock: two concurrent calls must not enter
-      that private loop at once. The bridge's checkpoint runs inside the same
-      lock, after the executor returned, so step -> snapshot order matches call
-      order even when the agent issues tool calls concurrently.
-    """
-    import asyncio as _asyncio
-    import threading
-
-    from claude_agent_sdk import create_sdk_mcp_server, tool
-
-    from swebench.agent.interceptors import OutcomePresenter, TruncateInterceptor
-    from swebench.agent.pipeline import ToolPipeline
-    from swebench.mcp_server import EXEC_TOOLS_SINGLE
-
-    chain = [TruncateInterceptor(max_len=12000), OutcomePresenter()]
-    checkpointer = getattr(bridge, "checkpointer", None)
-    tracker = getattr(checkpointer, "tracker", None)
-    if tracker is not None:
-        chain.insert(0, tracker)   # outermost: also sees rejected calls
-    executor = session.executor_for("agent", pipeline=ToolPipeline(chain))
-    lock = threading.Lock()
-    counter = {"n": 0}
-
-    def make(spec: dict):
-        name = spec["name"]
-
-        # EXEC_TOOLS_SINGLE uses MCP's camelCase "inputSchema".
-        @tool(name, spec.get("description", name), spec.get("inputSchema", {}))
-        async def handler(args: dict) -> dict:
-            payload = dict(args or {})
-            if workdir and name == "shell" and "working_dir" not in payload:
-                # Only inject when asked: defaulting to a directory the task has
-                # not created yet makes every shell call exit 1.
-                payload["working_dir"] = workdir
-
-            def blocking():
-                with lock:
-                    # Seam is (tool_name, args) and nothing else.
-                    result = executor(name, payload)
-                    counter["n"] += 1
-                    if bridge is not None:
-                        # Tool boundary = step boundary for an external agent.
-                        bridge.on_tool_boundary(counter["n"])
-                    return result
-
-            result = await _asyncio.to_thread(blocking)
-            text = getattr(result, "output", None) or getattr(result, "error", "") or ""
-            return {"content": [{"type": "text", "text": str(text)}]}
-
-        return handler
-
-    tools = [make(spec) for spec in EXEC_TOOLS_SINGLE]
-    return create_sdk_mcp_server(name="ash", version="1.0.0", tools=tools)
-
-
-def _backend_config(backend: str, runtime_bin: Optional[str]) -> dict:
-    """Backend section for AshSession (see swebench/backends.py).
-
-    microvm reads AENV_SERVER_URL / AENV_API_KEY; ``from_image`` plus
-    ``runtime_bin`` makes it build a template per image on demand, uploading the
-    runtime through envd (the runtime cannot install itself).
-    """
-    import os
-
-    if backend != "microvm":
-        return {"backend": backend}
-    section = {
-        "server_url": os.environ.get("AENV_SERVER_URL", "http://127.0.0.1:8000"),
-        "from_image": True,
-    }
-    api_key = os.environ.get("AENV_API_KEY")
-    if api_key:
-        section["api_key"] = api_key
-    if runtime_bin:
-        section["runtime_bin"] = runtime_bin
-    return {"backend": "microvm", "microvm": section}
+    path = out_dir / ("%s.atif.json" % branch.run_id)
+    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    return path
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--slot", default="opencode")
-    parser.add_argument("--cwd", required=True)
+    parser.add_argument("--slot", default="opencode", choices=available())
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--direction", action="append", required=True,
                         help="one continuation instruction per branch (repeatable)")
-    parser.add_argument("--branch-at", type=int, default=1)
+    parser.add_argument("--branch-at", type=int, default=1,
+                        help="branch from the latest pair at or before this step")
+    parser.add_argument("--image", default="python:3.11-slim",
+                        help="sandbox image for the parent run")
+    parser.add_argument("--backend", default="microvm",
+                        choices=("docker", "microvm", "k8s"),
+                        help="microvm is the one that can snapshot; docker "
+                             "cannot, and this demo is about the pair")
+    parser.add_argument("--runtime-bin", default="runtime/ash-runtime")
+    parser.add_argument("--transport", default="http", choices=("http", "stdio"))
+    parser.add_argument("--tools", default="default")
+    parser.add_argument("--cwd", default="/tmp",
+                        help="host cwd for the agent process; neutral on purpose "
+                             "(never this repo -- the CLI reads .claude/ from it)")
     parser.add_argument("--model")
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--out", default="runs/fork-demo")
-    parser.add_argument(
-        "--sandbox-image",
-        help="spawn an ash sandbox from this image and give the agent MCP tools "
-             "into it; enables the environment half of the rollback pair",
-    )
-    parser.add_argument(
-        "--runtime-bin", default="runtime/ash-runtime",
-        help="ash-runtime binary uploaded into a bare image (build: cd runtime && go build)",
-    )
-    parser.add_argument(
-        "--in-process", action="store_true",
-        help="claude-code only: expose the sandbox via an in-process SDK MCP "
-             "server so the harness keeps sandbox ownership (required for the "
-             "environment half to describe the agent's own sandbox)",
-    )
-    parser.add_argument(
-        "--backend", default="docker", choices=("docker", "microvm", "k8s"),
-        help="docker cannot snapshot; microvm (AgentENV) is what gives the env half",
-    )
     args = parser.parse_args(argv)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    orch = Orchestrator(out_dir=out_dir)
 
-    session = None
-    mcp = None
-    base_mcp_args: List[str] = []
-    if args.sandbox_image:
-        from swebench.sandbox import AshSession
+    shared_extra: dict = {}
+    if args.slot.startswith("opencode"):
+        # One state dir for parent AND branches: opencode's sessions live in
+        # SQLite there, and a fork of a session the branch cannot see is just a
+        # new session. Sequential runs, so the shared-DB lock issue that made
+        # the orchestrator default to per-run dirs does not apply.
+        shared_extra["data_home"] = str(out_dir / "state" / "shared")
 
-        # Absolute: docker mounts this into the container, and a relative path is
-        # interpreted as a volume *name* ("invalid characters for a local volume").
-        runtime_path = Path(args.runtime_bin).expanduser()
-        runtime_bin = str(runtime_path.resolve()) if runtime_path.exists() else None
-        session = AshSession(
-            runtime_bin=runtime_bin,
-            quiet=True,
-            backend=_backend_config(args.backend, runtime_bin),
-        )
-        print("== sandbox (%s, %s) ==" % (args.sandbox_image, args.backend))
-        if runtime_bin is None:
-            print("   note: %s missing -- image must already ship ash-runtime"
-                  % args.runtime_bin)
-        if not session.create(args.sandbox_image):
-            print("   failed to create sandbox; continuing without the env half")
-            session = None
-        else:
-            snapshots = session.supports_snapshot()
-            print("   snapshot support: %s" % snapshots)
-            if not snapshots:
-                # Docker cannot snapshot; only MicroVMPool (AgentENV) can. Say so
-                # plainly -- each branch then gets a *fresh* sandbox, which is
-                # isolation but not restoration, and the pair stays incomplete.
-                print("   note: this backend cannot snapshot -- branches get fresh")
-                print("         sandboxes, not restored ones. Use --backend microvm")
-                print("         (AENV_SERVER_URL) for the real environment half.")
-            # --attach, not --image: the session above owns this sandbox, so it
-            # keeps the handle it needs to snapshot and to extract afterwards.
-            # Letting the proxy create its own would leave this demo unable to
-            # checkpoint the very environment it is branching.
-            sandbox_id = session.sandbox_id
-            mcp_args = ["--attach", str(sandbox_id)]
-            if runtime_bin:
-                mcp_args += ["--runtime-bin", runtime_bin]
-            if args.backend != "docker":
-                mcp_args += ["--backend", args.backend]
-            mcp = stdio_wiring(args=mcp_args)
-            base_mcp_args = list(mcp_args)
+    # --- parent --------------------------------------------------------------
+    parent_id = "parent-" + new_run_id()[:8]
+    print("== parent (%s, %s, %s) ==" % (args.slot, args.backend, args.transport))
+    parent = orch.run(_spec(args, prompt=args.prompt, run_id=parent_id,
+                            image=args.image, shared_extra=shared_extra))
+    print("   status      %s%s" % (parent.status,
+                                   " (%s)" % parent.error if parent.error else ""))
+    print("   session     %s" % parent.native_session_id)
+    print("   checkpoints %d" % parent.checkpoints)
+    print("   journal     %s" % parent.journal_path)
+    if not parent.checkpoints:
+        print("!! no rollback pairs recorded -- nothing to branch from")
+        return 2
 
-    try:
-        parent = run_parent(
-            args.slot, args.prompt, args.cwd, out_dir,
-            model=args.model, timeout_s=args.timeout, session=session, mcp=mcp,
-            in_process=args.in_process,
-        )
-    finally:
-        pass
+    plan = fork_plan(parent.journal_path, args.branch_at)
+    print("\n== branch point ==")
+    print("   step %s  snapshot %s  session %s  complete=%s"
+          % (plan["step"], plan["snapshot_id"], plan["session_ckpt"],
+             plan["complete"]))
 
-    checkpoints = load_checkpoints(parent["journal"])
-    if checkpoints:
-        plan = fork_plan(parent["journal"], args.branch_at)
-    else:
-        # No sandbox session was attached, so no environment snapshots exist.
-        # Say so: the conversation still branches, the filesystem does not.
-        print("\n!! no checkpoints in parent journal -- conversation-only branching")
-        print("   (attach a SnapshotBridge with an AshSession for the env half)")
-        plan = {
-            "step": args.branch_at,
-            "snapshot_id": None,
-            "session_ckpt": parent["session"],
-            "copied_through_seq": 0,
-            "complete": False,
-        }
+    # --- branches ------------------------------------------------------------
+    caps = load_slot(args.slot).capabilities
+    branches: List[RunOutcome] = []
+    for index, direction in enumerate(args.direction, 1):
+        branch_id = "branch%d-%s" % (index, new_run_id()[:8])
+        print("\n== branch %d: %s ==" % (index, direction[:60]))
+        outcome = orch.run(_spec(
+            args, prompt=direction, run_id=branch_id,
+            # The environment half: an ordinary run whose image is the pair's
+            # snapshot. The orchestrator creates a FRESH sandbox from it per
+            # branch, which is what keeps siblings from corrupting each other's
+            # filesystem -- the failure this demo exists to rule out.
+            image=plan["snapshot_id"],
+            shared_extra=shared_extra,
+            # The conversation half, where the agent supports it. fork=True
+            # branches instead of continuing in place, so siblings cannot
+            # contaminate each other's conversation either.
+            resume=plan["session_ckpt"] if caps.resume else None,
+            fork=bool(caps.fork and plan["session_ckpt"]),
+            origin={
+                "parent_run_id": parent.run_id,
+                "parent_journal": str(parent.journal_path),
+                "branch_step": plan["step"],
+                "snapshot_id": plan["snapshot_id"],
+                "session_ckpt": plan["session_ckpt"],
+                "copied_through_seq": plan["copied_through_seq"],
+                "direction": direction,
+            },
+        ))
+        print("   status   %s%s" % (outcome.status,
+                                    " (%s)" % outcome.error if outcome.error else ""))
+        print("   sandbox  %s" % outcome.sandbox_id)
+        print("   session  %s" % outcome.native_session_id)
+        print("   answer   %s" % (outcome.final_text or "")[:120].replace("\n", " "))
+        atif_path = _export_atif(outcome, parent, plan, out_dir)
+        print("   atif     %s" % atif_path)
+        branches.append(outcome)
 
-    branches = []
-    branch_sessions = []
-    for i, direction in enumerate(args.direction):
-        branch_mcp = mcp
-        branch_session = None
-
-        if plan.get("snapshot_id"):
-            # Restore the environment half. Each branch gets its OWN sandbox off
-            # the same snapshot, which is what keeps siblings from corrupting
-            # each other's filesystem (the failure this demo exists to rule out).
-            if args.in_process:
-                from swebench.sandbox import AshSession
-
-                branch_session = AshSession(
-                    runtime_bin=runtime_bin, quiet=True,
-                    backend=_backend_config(args.backend, runtime_bin),
-                )
-                if branch_session.create(plan["snapshot_id"]):
-                    branch_sessions.append(branch_session)
-                    print("   restored sandbox from %s" % plan["snapshot_id"][:20])
-                else:
-                    print("   !! could not restore %s" % plan["snapshot_id"])
-                    branch_session = None
-            elif base_mcp_args:
-                # Create this branch's sandbox here and lend it to the proxy by
-                # id. --image would have the proxy create its own, which is the
-                # inversion that left the owner unable to snapshot what the agent
-                # actually worked in.
-                from swebench.sandbox import AshSession
-
-                branch_session = AshSession(
-                    runtime_bin=runtime_bin, quiet=True,
-                    backend=_backend_config(args.backend, runtime_bin),
-                )
-                if branch_session.create(plan["snapshot_id"]):
-                    branch_sessions.append(branch_session)
-                    restored = (["--attach",
-                                 str(branch_session.sandbox_id)]
-                                + base_mcp_args[2:])
-                    branch_mcp = stdio_wiring(args=restored)
-                    print("   restored sandbox from %s" % plan["snapshot_id"][:20])
-                else:
-                    print("   !! could not restore %s" % plan["snapshot_id"])
-                    branch_session = None
-
-        branches.append(
-            run_branch(
-                args.slot, parent, plan, direction, i + 1, args.cwd, out_dir,
-                model=args.model, timeout_s=args.timeout, mcp=branch_mcp,
-                session=branch_session, in_process=args.in_process,
-            )
-        )
-
-    for handle in branch_sessions:
-        handle.destroy()
-    if session is not None:
-        session.destroy()
-
+    # --- summary ---------------------------------------------------------------
     print("\n== summary ==")
-    print("parent      %s (%s)" % (parent["run_id"], parent["status"]))
-    print("branch step %s  pair complete: %s" % (plan.get("step"), plan.get("complete")))
-    print("  env half         %s" % (plan.get("snapshot_id") or "ABSENT (no snapshot backend)"))
-    print("  conversation half %s" % (plan.get("session_ckpt") or "ABSENT"))
-    sessions = {b["session"] for b in branches if b["session"]}
+    print("parent   %s (%s), %d pairs" % (parent.run_id, parent.status,
+                                          parent.checkpoints))
     for branch in branches:
-        print("  %-22s %-10s session=%s" % (branch["run_id"], branch["status"], branch["session"]))
-    if len(sessions) == len(branches) and len(branches) > 1:
-        print("distinct child sessions: yes (siblings are isolated)")
-    elif len(branches) > 1:
-        print("distinct child sessions: NO -- siblings may share conversation state")
+        print("  %-22s %-10s sandbox=%s session=%s"
+              % (branch.run_id, branch.status, branch.sandbox_id,
+                 branch.native_session_id))
+    sandboxes = {b.sandbox_id for b in branches if b.sandbox_id}
+    sessions = {b.native_session_id for b in branches if b.native_session_id}
+    if len(branches) > 1:
+        print("distinct sandboxes: %s   distinct sessions: %s"
+              % ("yes" if len(sandboxes) == len(branches) else "NO",
+                 "yes" if len(sessions) == len(branches) else "NO"))
 
     summary = {
-        "parent": {k: str(v) for k, v in parent.items()},
+        "parent": {"run_id": parent.run_id, "status": parent.status,
+                   "journal": str(parent.journal_path),
+                   "checkpoints": parent.checkpoints},
         "plan": plan,
-        "branches": [{k: str(v) for k, v in b.items()} for b in branches],
+        "branches": [{"run_id": b.run_id, "status": b.status,
+                      "sandbox_id": b.sandbox_id,
+                      "session": b.native_session_id,
+                      "journal": str(b.journal_path)} for b in branches],
     }
-    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2),
+                                          encoding="utf-8")
     print("\nwrote %s" % (out_dir / "summary.json"))
     return 0
 

@@ -31,6 +31,7 @@ Usage:
 import asyncio
 import copy
 import json
+import os
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -743,6 +744,22 @@ class SessionHandler:
         return {"type": "text", "text": text, "isError": not result.success}
 
 
+def _tool_response(id_, content: dict) -> dict:
+    """One tools/call response, spec-shaped.
+
+    ``isError`` belongs on the *result*, not inside the content block. It used
+    to be in both places, and codex's rmcp client -- which deserializes content
+    items strictly -- dropped the whole block over the unknown field: the tool
+    executed, the model received empty output, and reported its calls as
+    "rejected". Claude's client tolerated the extra field, which is why this
+    server appeared to work.
+    """
+    block = {k: v for k, v in content.items() if k != "isError"}
+    return {"jsonrpc": "2.0", "id": id_,
+            "result": {"content": [block],
+                       "isError": bool(content.get("isError", False))}}
+
+
 def _ok(text: str) -> dict:
     return {"type": "text", "text": text}
 
@@ -829,6 +846,12 @@ class HttpMcpServer:
 
         async def handle_mcp(request: web.Request) -> web.Response:
             headers = {k.lower(): v for k, v in request.headers.items()}
+            if os.environ.get("ASH_MCP_DEBUG"):
+                body_preview = (await request.text())[:160]
+                self._log("REQ %s owner=%s sandbox=%s mcp-session=%s body=%s" % (
+                    request.method, headers.get("x-session-owner"),
+                    headers.get("x-session-sandbox"),
+                    headers.get("mcp-session-id"), body_preview))
             session = self._get_or_create_session(headers)
             handler = SessionHandler(session, self.pool, pipeline=self.pipeline,
                                      surface=self.surface,
@@ -838,6 +861,17 @@ class HttpMcpServer:
             body = await request.json()
             method = body.get("method", "")
             id_ = body.get("id")
+
+            if method.startswith("notifications/") or id_ is None:
+                # A notification. JSON-RPC forbids answering one at all, and a
+                # strict client treats an answer -- especially our old
+                # {"error": "Unknown method"} -- as a broken server and drops
+                # it. codex's rmcp client did exactly that: it connected, sent
+                # notifications/initialized, got an error object back, and
+                # silently gave the model zero MCP tools while everything else
+                # about the run looked fine. Claude's client tolerated the
+                # violation, which is why this server appeared to work.
+                return web.Response(status=202)
 
             if method == "initialize":
                 result = {
@@ -869,10 +903,7 @@ class HttpMcpServer:
                 # Stateless: every exec call carries its own sandbox_id, so
                 # concurrent same-session requests share no mutable routing state.
                 content = await handler.call_tool(params.get("name", ""), params.get("arguments", {}))
-                return web.json_response({
-                    "jsonrpc": "2.0", "id": id_,
-                    "result": {"content": [content], "isError": content.get("isError", False)},
-                })
+                return web.json_response(_tool_response(id_, content))
 
             elif method == "ping":
                 return web.json_response({"jsonrpc": "2.0", "id": id_, "result": {}})
@@ -1035,8 +1066,7 @@ class StdioMcpServer:
         elif method == "tools/call":
             params = msg.get("params", {})
             content = await self.handler.call_tool(params.get("name", ""), params.get("arguments", {}))
-            return {"jsonrpc": "2.0", "id": id_,
-                    "result": {"content": [content], "isError": content.get("isError", False)}}
+            return _tool_response(id_, content)
         elif method == "ping":
             return {"jsonrpc": "2.0", "id": id_, "result": {}}
         else:

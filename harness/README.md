@@ -362,6 +362,11 @@ follow, and violating either fails *quietly* — tool calls or snapshots return
   isolation; the gateway covers budget; `reap` covers cleanup. What remains is
   only needed once RL rollout defines the recovery semantics.
 - Live behaviour probes in `contracts/ci_check.py` (need credentials).
-- Fork for the CLI slots against microvm: `opencode` has native session fork and
-  `codex` replays its prompt, but neither has been run through the full pair
-  end to end (the SDK slot has).
+- Fork verified live for all three protocol drivers on microvm: claude-code
+  (resume + fork_session), opencode (`/session/{id}/fork`), codex
+  (`thread_fork`) -- each through the orchestrator, full pair, sibling isolation
+  on both halves. The `-cli` fallback drivers remain unverified end to end.
+- The ATIF inherited-prefix boundary is the checkpoint's own journal seq, which
+  can under-include same-step events that journal after the boundary fires
+  (slot-dependent ordering). The environment half is exact; the copied-context
+  marking of the conversation prefix is approximate near the branch step.

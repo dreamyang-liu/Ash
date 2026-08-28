@@ -99,6 +99,12 @@ class RunSpec:
     # --- resume / fork ---
     resume_session_id: Optional[str] = None
     fork: bool = False
+    #: Lineage of a forked run, emitted as the journal's FIRST event
+    #: (``fork.origin``): parent run id, branch step, the pair it grew from.
+    #: In the journal rather than a sidecar because the journal is the record a
+    #: killed run leaves behind -- a branch whose ancestry lives anywhere else
+    #: is unattributable exactly when attribution matters.
+    origin: Optional[Dict[str, Any]] = None
 
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -305,6 +311,10 @@ class Orchestrator:
         with ExitStack() as stack:
             journal = stack.enter_context(
                 JournalWriter(journal_path, run_id=run_id, agent_id=spec.agent_id))
+            if spec.origin:
+                # First, before anything subscribes or runs: whatever else this
+                # journal ends up holding, it says where the run came from.
+                journal.emit("fork.origin", **spec.origin)
             claim = (stack.enter_context(self.ledger.run(run_id))
                      if self.ledger is not None else None)
             try:

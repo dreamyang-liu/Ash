@@ -989,3 +989,24 @@ def test_a_backend_that_cannot_snapshot_is_not_asked_to(monkeypatch, tmp_path):
         RunSpec(prompt="x", sandbox_image="img", transport="stdio"), None)
     assert "--checkpoint-log" not in owned.mcp.command
     assert owned.checkpoint_log is None
+
+
+# --- lineage -----------------------------------------------------------------
+def test_a_forked_runs_journal_opens_with_its_origin(tmp_path):
+    """First event, before anything else: whatever else the journal ends up
+    holding -- including nothing, for a run killed immediately -- it says where
+    the run came from."""
+    Orchestrator(out_dir=tmp_path).run(spec(
+        tmp_path,
+        origin={"parent_run_id": "p1", "branch_step": 2,
+                "snapshot_id": "snap-x", "direction": "try Y"}))
+    records = list(read_journal(tmp_path / "j.jsonl"))
+    assert records[0]["type"] == "fork.origin"
+    assert records[0]["parent_run_id"] == "p1"
+    assert records[0]["branch_step"] == 2
+
+
+def test_a_run_with_no_origin_emits_none(tmp_path):
+    Orchestrator(out_dir=tmp_path).run(spec(tmp_path))
+    assert all(r["type"] != "fork.origin"
+               for r in read_journal(tmp_path / "j.jsonl"))

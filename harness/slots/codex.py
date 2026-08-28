@@ -35,6 +35,30 @@ def _toml_str_array(values: List[str]) -> str:
     return "[%s]" % ",".join(_toml_str(v) for v in values)
 
 
+def _mcp_config_pairs(mcp: Optional[McpWiring]) -> List[str]:
+    """One TOML assignment per leaf of the MCP server definition.
+
+    Shared by both codex slots -- the CLI passes each as ``-c <pair>``, the SDK
+    as ``config_overrides`` (which its client turns into ``--config <pair>``).
+    One serializer, because the quoting rules are the part that drifts.
+    """
+    if mcp is None:
+        return []
+    prefix = "mcp_servers.%s" % mcp.name
+    out: List[str] = []
+    if mcp.command:
+        out.append("%s.command=%s" % (prefix, _toml_str(mcp.command[0])))
+        if len(mcp.command) > 1:
+            out.append("%s.args=%s" % (prefix, _toml_str_array(mcp.command[1:])))
+        for key, value in (mcp.env or {}).items():
+            out.append("%s.env.%s=%s" % (prefix, key, _toml_str(value)))
+    elif mcp.url:
+        out.append("%s.url=%s" % (prefix, _toml_str(mcp.url)))
+        for key, value in (mcp.headers or {}).items():
+            out.append("%s.http_headers.%s=%s" % (prefix, key, _toml_str(value)))
+    return out
+
+
 class CodexSlot(JsonlCliSlot):
     name = "codex"
     binary = "codex"
@@ -81,18 +105,7 @@ class CodexSlot(JsonlCliSlot):
 
     @staticmethod
     def _mcp_overrides(mcp: Optional[McpWiring]) -> List[str]:
-        if mcp is None:
-            return []
-        prefix = "mcp_servers.%s" % mcp.name
         out: List[str] = []
-        if mcp.command:
-            out += ["-c", "%s.command=%s" % (prefix, _toml_str(mcp.command[0]))]
-            if len(mcp.command) > 1:
-                out += ["-c", "%s.args=%s" % (prefix, _toml_str_array(mcp.command[1:]))]
-            for key, value in (mcp.env or {}).items():
-                out += ["-c", "%s.env.%s=%s" % (prefix, key, _toml_str(value))]
-        elif mcp.url:
-            out += ["-c", "%s.url=%s" % (prefix, _toml_str(mcp.url))]
-            for key, value in (mcp.headers or {}).items():
-                out += ["-c", "%s.http_headers.%s=%s" % (prefix, key, _toml_str(value))]
+        for pair in _mcp_config_pairs(mcp):
+            out += ["-c", pair]
         return out

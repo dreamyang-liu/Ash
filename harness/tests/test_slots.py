@@ -359,3 +359,77 @@ def test_can_use_tool_not_registered_under_bypass(monkeypatch):
         FakeOptions, TaskSpec(prompt="p", cwd="/w", extra={"permission_mode": "default"}), {}, []
     )
     assert strict.can_use_tool is not None
+
+
+def test_codex_sdk_overrides_are_toml_assignment_strings():
+    """CodexConfig.config_overrides is iterated verbatim into `--config <kv>`,
+    so each element must already be a `key=value` TOML assignment. This used to
+    return a dict, whose iteration yields its KEYS: codex got
+    `--config mcp_servers.ash` with no `=` and refused to start -- but only when
+    a wiring was present, which is why every bare run passed and the first
+    orchestrator-wired one did not."""
+    from harness.slots.codex_sdk import CodexSdkSlot
+
+    slot = CodexSdkSlot()
+    http = http_wiring("http://h:8400/mcp", agent_id="a7", sandbox_id="sb-1")
+    overrides = slot._config_overrides(http, {})
+    assert isinstance(overrides, tuple)
+    assert all(isinstance(kv, str) and "=" in kv for kv in overrides), overrides
+    joined = " ".join(overrides)
+    assert 'mcp_servers.ash.url="http://h:8400/mcp"' in joined
+    assert 'http_headers.X-Session-Owner="a7"' in joined
+    assert 'http_headers.X-Session-Sandbox="sb-1"' in joined
+
+
+def test_both_codex_slots_share_one_mcp_serializer():
+    """Two copies of the TOML quoting rules is a second place for them to
+    drift; the SDK slot imports the CLI slot's."""
+    import inspect
+
+    from harness.slots import codex_sdk
+
+    assert "_mcp_config_pairs" in inspect.getsource(codex_sdk)
+
+
+def test_codex_sdk_defaults_the_host_sandbox_to_read_only():
+    """Same default as the CLI slot, same reason: side effects belong in the
+    ash sandbox via MCP. With codex's own policy (None), a live fork demo had
+    codex write the task's files to the HOST -- the run looked perfect while
+    both "isolated" branches mutated the same real machine."""
+    import enum
+
+    from harness.slots.codex_sdk import CodexSdkSlot
+
+    class Sandbox(enum.Enum):
+        READ_ONLY = "read-only"
+        WORKSPACE_WRITE = "workspace-write"
+
+    slot = CodexSdkSlot()
+    assert slot._sandbox(Sandbox, {}) is Sandbox.READ_ONLY
+    assert slot._sandbox(Sandbox, {"sandbox": "workspace-write"}) is \
+        Sandbox.WORKSPACE_WRITE
+    assert slot._sandbox(Sandbox, {"sandbox": "no-such-mode"}) is \
+        Sandbox.READ_ONLY, "an unknown mode must fail closed, not open"
+
+
+def test_codex_sdk_answers_mcp_elicitation_in_its_own_vocabulary():
+    """MCP tool approvals arrive as `mcpServer/elicitation/request`, whose reply
+    is {action, content} -- NOT the {decision} every other approval method takes.
+    Answering {decision: accept} parses as neither accept nor decline, and codex
+    cancels the call: the model reported its ash calls "rejected" while our
+    journal showed verdict=allow and no tools/call ever reached the server."""
+    from harness.slots.codex_sdk import CodexSdkSlot
+
+    class J:
+        def emit(self, *a, **k):
+            pass
+
+    slot = CodexSdkSlot()
+    slot._journal = J()
+    reply = slot._on_approval("mcpServer/elicitation/request",
+                              {"serverName": "ash", "mode": "form"})
+    assert reply == {"action": "accept", "content": {}}
+
+    slot.policy = lambda kind, payload: ("deny", "test")
+    reply = slot._on_approval("mcpServer/elicitation/request", {})
+    assert reply == {"action": "decline"}

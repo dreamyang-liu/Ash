@@ -143,15 +143,19 @@ def test_the_session_module_knows_nothing_about_patches_or_benchmarks():
             "%s belongs to the layer that knows what the answer is" % forbidden
 
 
-def test_the_execution_plane_does_not_import_the_benchmark_layer():
-    """The direction of the dependency is the whole point of the move. Swept over
-    the package rather than a list of names, because a list goes quiet the moment
-    a module is added."""
-    plane = REPO / "harness" / "execution"
-    for path in sorted(plane.rglob("*.py")):
+def test_the_harness_package_does_not_import_the_benchmark_layer():
+    """The direction of the dependency is the whole point of the layering. Swept
+    over the WHOLE package (demo_fork.py used to slip through because only
+    execution/ was checked), with one documented exception: extract.py lazily
+    imports swebench's patch extractor inside the convenience helper that exists
+    precisely to hand a benchmark's own extractor back to it."""
+    allowed = {REPO / "harness" / "extract.py"}
+    for path in sorted((REPO / "harness").rglob("*.py")):
+        if "tests" in path.parts or path in allowed:
+            continue
         offenders = {m for m in _imported_modules(path)
                      if m == "swebench" or m.startswith("swebench.")}
-        assert not offenders, "%s imports %s" % (path.name, ", ".join(offenders))
+        assert not offenders, "%s imports %s" % (path, ", ".join(offenders))
 
 
 # --- the subclass relationship ---------------------------------------------

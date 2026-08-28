@@ -210,6 +210,17 @@ class CodexSdkSlot(ServerSlot):
             return {"decision": "accept"}
 
         verdict, reason = self.decide(kind, dict(payload, method=method), journal)
+        if method == "mcpServer/elicitation/request":
+            # MCP elicitation speaks its own vocabulary: {action, content}, with
+            # content answering `requestedSchema` (an empty form for a plain
+            # approval). Answering {"decision": "accept"} here -- what every
+            # other approval method takes -- parses as neither accept nor
+            # decline, and codex cancels the tool call: the model then reported
+            # its ash calls "rejected" while our journal showed verdict=allow,
+            # and no tools/call ever reached the MCP server.
+            if verdict == DENY:
+                return {"action": "decline"}
+            return {"action": "accept", "content": {}}
         if verdict == DENY:
             if method == "item/permissions/requestApproval":
                 # This request asks for a permission *profile*; refusing means
@@ -227,45 +238,52 @@ class CodexSdkSlot(ServerSlot):
         env.setdefault("NO_COLOR", "1")
         return env
 
-    def _config_overrides(self, mcp: Optional[McpWiring], extra: dict) -> Dict[str, Any]:
-        """``-c key=value`` equivalents, including the MCP server definition."""
-        overrides: Dict[str, Any] = {}
+    def _config_overrides(self, mcp: Optional[McpWiring],
+                          extra: dict) -> "tuple[str, ...]":
+        """``key=value`` strings, one per leaf -- the shape the SDK expects.
+
+        ``CodexConfig.config_overrides`` is iterated verbatim into ``--config
+        <kv>`` arguments, so each element must already be a TOML assignment.
+        This used to return a dict, whose iteration yields its *keys*: codex got
+        ``--config mcp_servers.ash`` with no ``=`` and refused to start -- but
+        only when a wiring was present, which is why every bare run passed and
+        the first orchestrator-wired one did not.
+
+        Serialization is the CLI slot's, imported rather than restated: the two
+        slots configure the same binary, and a second copy of the quoting rules
+        is a second place for them to drift.
+        """
+        from harness.slots.codex import _mcp_config_pairs
+
+        overrides: list[str] = []
         base = extra.get("config_overrides")
         if isinstance(base, dict):
-            overrides.update(base)
-
-        if mcp is not None:
-            key = "mcp_servers.%s" % mcp.name
-            if mcp.command:
-                entry: Dict[str, Any] = {
-                    "command": mcp.command[0],
-                    "args": list(mcp.command[1:]),
-                }
-                if mcp.env:
-                    entry["env"] = dict(mcp.env)
-            elif mcp.url:
-                entry = {"url": mcp.url}
-                if mcp.headers:
-                    entry["http_headers"] = dict(mcp.headers)
-            else:
-                entry = {}
-            if entry:
-                overrides[key] = entry
-        return overrides
+            # Convenience: a dict of pre-serialized TOML values.
+            overrides += ["%s=%s" % (k, v) for k, v in base.items()]
+        elif base:
+            overrides += [str(v) for v in base]
+        overrides += _mcp_config_pairs(mcp)
+        return tuple(overrides)
 
     def _sandbox(self, Sandbox, extra: dict):
         """Map ``extra["sandbox"]`` onto the SDK's preset enum.
 
-        Default: leave it unset so codex applies its own configured policy. The
-        harness's isolation boundary is the ash sandbox, not this setting.
+        Default: ``read-only`` -- the same default the CLI slot has always set,
+        and for the same reason: side effects belong in the ash sandbox via MCP,
+        not on the host. This used to be None ("codex's own policy"), and a live
+        fork demo showed what that policy does: codex preferred its built-in
+        local shell over the MCP tools it was given and wrote the task's files
+        to the HOST's /tmp. The run then looked perfect -- distinct sandboxes,
+        distinct forked threads, "isolated" answers -- while the sandboxes sat
+        unused and both branches were mutating the same real machine. Read-only
+        makes the host write fail, which is what pushes the model onto the ash
+        tools.
         """
-        wanted = extra.get("sandbox")
-        if not wanted:
-            return None
+        wanted = extra.get("sandbox") or "read-only"
         try:
             return Sandbox(str(wanted))
         except ValueError:
-            return None
+            return Sandbox("read-only")
 
     # --- extra protocol capabilities ---------------------------------------
     def interrupt(self) -> None:
@@ -296,6 +314,10 @@ _APPROVAL_KINDS = {
     "item/fileChange/requestApproval": "patch",
     "item/permissions/requestApproval": "permission",
     "item/tool/requestUserInput": "tool",
+    # MCP tool calls arrive as an *elicitation* -- codex asks its client to fill
+    # a (usually empty) approval form. Different protocol, different reply
+    # vocabulary: see _on_approval.
+    "mcpServer/elicitation/request": "tool",
 }
 
 
