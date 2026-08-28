@@ -451,6 +451,56 @@ class SandboxPool:
         sys.stderr.flush()
 
 
+class CheckpointLogMixin:
+    """Snapshot after each mutating call; append the step->snapshot map to a file.
+
+    This is the checkpoint firing where it was always designed to fire -- at the
+    tool path, in the process that serves the calls. When this server is a stdio
+    subprocess, the caller that owns the sandbox never sees a tool call go by, so
+    it cannot know when to capture; this process sees every one. The stdio loop is
+    strictly sequential (one request is fully handled before the next is read), so
+    the hook always runs at a quiesce point -- no call is in flight.
+
+    What travels back is the *map*, not the snapshots: snapshots live on the
+    backend under server-generated ids, and without "step 3 -> snapshot X" beside
+    them they are unusable -- the same lesson that moved trajectory-saving into
+    checkpointing after a killed 5-hour run left 300 snapshots and no record of
+    which step each was. One JSON line per capture, appended, fsync-free: a killed
+    run keeps every line already written.
+
+    A capture failure is logged and skipped, never raised: a checkpoint is an
+    optimisation for later analysis, and failing the agent's tool call over it
+    would be strictly worse than a gap in the history.
+    """
+
+    #: Where the map goes. None disables the mixin entirely.
+    checkpoint_log = None
+    _ckpt_step = 0
+
+    async def after_mutating_call(self, entry, tool_name: str, args: dict) -> None:
+        await super().after_mutating_call(entry, tool_name, args)
+        if not self.checkpoint_log or not self._pool:
+            return
+        if not self._pool.supports_snapshot():
+            if not self._ckpt_step:
+                self._ckpt_step = -1  # say it once, not per call
+                self._log("checkpoint-log set but backend cannot snapshot; "
+                          "recording nothing")
+            return
+        self._ckpt_step += 1
+        try:
+            snapshot = await self._pool.snapshot(entry.sandbox, disk_only=True)
+        except Exception as e:  # noqa: BLE001 - see docstring
+            self._log(f"checkpoint at step {self._ckpt_step} failed: {e}")
+            return
+        line = json.dumps({"step": self._ckpt_step,
+                           "snapshot_id": getattr(snapshot, "id", None),
+                           "tool": tool_name,
+                           "sandbox_id": entry.id})
+        with open(self.checkpoint_log, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+
 # ---------------------------------------------------------------------------
 # Session handler (per-connection tool dispatch)
 # ---------------------------------------------------------------------------
@@ -946,6 +996,12 @@ def main(pool_cls=None):
     parser.add_argument("--plugins", default=None,
                         help="Python file exporting PIPELINE: list[ToolInterceptor]; "
                              "replaces the default pipeline assembly")
+    parser.add_argument("--checkpoint-log", default=None, metavar="PATH",
+                        help="With --attach: snapshot the sandbox after every "
+                             "mutating tool call and append {step, snapshot_id} "
+                             "lines here. The caller that owns the sandbox folds "
+                             "this into its journal -- it cannot see the tool "
+                             "boundary itself, this process can.")
     parser.add_argument("--tools", default=None, metavar="PANEL",
                         help="Serve a compiled tool panel instead of the built-in "
                              "four: a shipped name (default, full, bash_only, "
@@ -982,7 +1038,20 @@ def main(pool_cls=None):
         sys.stderr.write(f"[ash-mcp] {exc}\n")
         raise SystemExit(2)
 
-    pool = (pool_cls or SandboxPool)(runtime_bin=args.runtime_bin, backend=backend)
+    if args.checkpoint_log and not args.attach:
+        # In multi-sandbox mode there is no single sandbox to checkpoint, and
+        # guessing one would record a map that describes nobody's run.
+        sys.stderr.write("[ash-mcp] --checkpoint-log is only meaningful with "
+                         "--attach\n")
+        raise SystemExit(2)
+
+    base_cls = pool_cls or SandboxPool
+    if args.checkpoint_log:
+        # A mixin, so a pool_cls a caller injected keeps its own behaviour.
+        class base_cls(CheckpointLogMixin, base_cls):  # noqa: N801
+            checkpoint_log = args.checkpoint_log
+
+    pool = base_cls(runtime_bin=args.runtime_bin, backend=backend)
     pipeline = _build_pipeline(args)
     if pipeline is not None:
         names = ", ".join(i.name for i in pipeline.interceptors) or "(empty)"

@@ -295,20 +295,30 @@ calls happen**, and that decides whether checkpointing works:
 | server | in this process, ephemeral port | the slot's own subprocess |
 | sandbox handed over | the live handle (`pool.adopt`) | by id (`--attach`) |
 | backends | any, Docker included | needs `attach` → microvm only |
-| checkpoints with an SDK slot | **yes**, one per mutating tool call | **no** |
+| who presses the shutter | this process, per mutating call | the subprocess, per mutating call |
+| how the map reaches the journal | directly (same process) | `--checkpoint-log` JSONL, folded after the run |
 
-The last row is the one that matters and is not obvious. An SDK slot journals its
-turn from inside its event loop, and a session drives its own loop with
-`run_until_complete`, which cannot be entered from a thread that already has one —
-so the turn-boundary trigger is unusable for it. A tool call is that agent's real
-step boundary anyway (its tool calls are its only channel into the environment),
-and with `http` this process serves them and snapshots at each one. With `stdio`
-that boundary happens in a subprocess nothing here can observe.
+Both checkpoint at the tool boundary, because that is where the checkpoint
+machinery was designed to sit — at the tool path, **in whichever process serves
+the calls**. The turn-boundary trigger is unusable for an SDK slot (it journals
+its turn from inside its event loop, and a session's own loop cannot be entered
+from a thread that already has one), but a tool call is that agent's real step
+anyway: its tool calls are its only channel into the environment.
 
-A run in the second case says so — `checkpoint.unavailable` in the journal, and a
-line on stdout naming the remedy — rather than reporting success with no snapshots
-to show. Verified live: the same prompt records 3 complete pairs over http and 0
-over stdio.
+Over stdio the serving process is the slot's subprocess, so *it* takes the
+snapshot — its loop is strictly sequential, so the hook always fires quiesced,
+and `--attach` gives it its own handle to the same sandbox (microvm, which is
+also the only backend that can snapshot at all). What travels back is only the
+step→snapshot **map**: one JSON line per capture, appended, folded into the
+journal after the run and paired with the conversation ref there. A killed
+subprocess keeps every line already written — the map lands per capture, not on
+clean exit, because 300 snapshots with no record of which step each was is the
+failure this design exists to rule out.
+
+Verified live: the same prompt records 3 complete pairs over both transports, and
+restoring the step-1 snapshot shows exactly the first file and not the second.
+`checkpoint.unavailable` still fires on wirings with no boundary to stand at
+(hand-rolled `mcp_stdio_args` without `--checkpoint-log`).
 
 ## Threading rules (learned by breaking them)
 

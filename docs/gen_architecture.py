@@ -239,31 +239,31 @@ def build() -> None:
     tby = ty + 26 + text_size(sub, 12)[1] + 18
 
     http = panel("http", 40, tby, 520, "--transport http ★",
-                 "server 在本进程内（socket 先绑好，所以 port=0 也能立刻报 URL）\n"
+                 "server 在本进程内（socket 先绑好，port=0 也能立刻报 URL）\n"
                  "沙箱用 handle 交出：pool.adopt(sandbox) ★\n"
-                 "  不是 attach —— attach 要从 id 重推 handle，只有 microvm 行，\n"
-                 "  而且会造出第二个 handle；adopt 用手里那个，任何 backend 都行\n"
-                 "  entry 标 external ★：pool 只服务，绝不销毁（销毁归 session）\n"
-                 "checkpoint：每次可能改动的工具调用后一次 ★\n"
-                 "  after_mutating_call → to_thread(bridge.on_tool_boundary)",
+                 "  entry 标 external：pool 只服务，绝不销毁（销毁归 session）\n"
+                 "快门：本进程按 —— 每次改动型调用后\n"
+                 "  after_mutating_call → bridge.on_tool_boundary\n"
+                 "map 进 journal：同进程，直接写",
                  color=VIOLET)
     stdio = panel("stdio", http["right"] + COL, tby, 500, "--transport stdio",
                   "server 是 slot 自己的子进程：\n"
-                  "  --attach <sandbox_id> --tools <panel>\n"
-                  "沙箱按 id 交出 → 需要 backend 支持 attach → 只有 microvm\n"
-                  "checkpoint：做不到 —— 工具边界发生在子进程里，这边看不见\n"
-                  "  所以现在会明说，不再假装成功\n"
-                  "（还有第三条路 --mcp-url：别人跑的 server。\n"
-                  " 那条路这边没有 session，也就没有快照）",
+                  "  --attach <id> --tools <panel> --checkpoint-log <file> ★\n"
+                  "沙箱按 id 交出（attach → 只有 microvm，恰好也是\n"
+                  "  唯一能拍快照的 backend）\n"
+                  "快门：子进程按 ★ —— 边界在它那，串行处理所以必然静止\n"
+                  "map 进 journal：每拍一张追加一行 JSONL，run 结束后\n"
+                  "  父进程折回 journal，配上会话 ref ★",
                   color=VIOLET)
     asym = panel("asym", 40, max(http["bottom"], stdio["bottom"]) + GAP,
                  stdio["right"] - 40,
-                 "红线：为什么两条 transport 不等价（撞出来的，不是设计选的）",
-                 "SDK slot 在自己的 event loop 里写 journal；session 用 run_until_complete 驱动私有 loop，\n"
-                 "从已有 loop 的线程进不去 → bridge 每次都跳过，计数写进一个没人读的私有字段。\n"
-                 "结果：orchestrator 拥有沙箱的 claude-code 报「成功」而 checkpoint = 0，和「快照免费」正相反。\n"
-                 "修在真正的边界上：工具调用才是外部 agent 的一步，http 模式下这些调用由本进程服务。\n"
-                 "真机同一个 prompt：http = 3 个完整 pair（快照 + 会话 ref），stdio = 0 且报 checkpoint.unavailable。",
+                 "原则：checkpoint 挂在工具路径上，谁服务工具调用谁按快门",
+                 "turn 边界对 SDK slot 不可用（它在自己的 event loop 里写 journal，进不去 session 的私有 loop）——\n"
+                 "以前 bridge 静默跳过、计数没人读，跑完报「成功」而快照是 0。\n"
+                 "但工具调用本来就是外部 agent 的一步：它跟环境的唯一通道就是工具调用。\n"
+                 "所以快门跟着服务进程走：http 在本进程，stdio 在子进程 —— 回传的只是「第几步→哪个快照」的对照表。\n"
+                 "真机同一个 prompt：两条 transport 各 3 个完整 pair；restore 第 1 步快照只见第一个文件，顺序也对。\n"
+                 "checkpoint.unavailable 只剩真没边界可站的 wiring 才会报（自己拼 mcp_stdio_args 又不带 --checkpoint-log）。",
                  color=RED)
 
     # ---------------- row 3: execution plane ----------------
@@ -344,11 +344,11 @@ def build() -> None:
                  color=ORANGE)
     panel("state", 40, max(rt["bottom"], aenv["bottom"]) + GAP,
           aenv["right"] - 40, "状态",
-          "783 测试通过 · 7 跳过 · 117 contract 检查\n"
+          "791 测试通过 · 7 跳过 · 117 contract 检查\n"
           "真机跑过（Firecracker，共享实例只碰自己建的沙箱）：真 Claude Code 走两条 transport ·\n"
-          "  2 工具面板到位 · 工具调用打进沙箱 · http 拿到 3 个 rollback pair · stdio 报出为什么没有 · 无泄漏\n"
-          "还没做：subagent / IAC（先不管）· stdio 的 checkpoint（要新通道）·\n"
-          "  contracts 活体探针（缺凭据）· CLI slot 对 microvm 的 fork 端到端",
+          "  两条各 3 个完整 rollback pair ★ · restore 验证了 map 顺序 · fork_plan 两种 journal 都能读 · 无泄漏\n"
+          "还没做：subagent / IAC（先不管）· contracts 活体探针（缺凭据）·\n"
+          "  CLI slot 对 microvm 的 fork 端到端",
           color=ORANGE)
 
     # ---------------- arrows ----------------

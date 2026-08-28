@@ -640,3 +640,102 @@ def test_no_checkpointing_requested_is_not_a_warning():
     journal = _RecordingJournal()
     Orchestrator()._report_missing_checkpoints(RunSpec(prompt="x"), journal, None)
     assert journal.events == []
+
+
+# --- stdio: the shutter is pressed in the subprocess -------------------------
+#
+# The checkpoint machinery sits at the tool path, in whichever process serves the
+# calls. Over stdio that is the server subprocess: it sees every tool boundary
+# (its loop is strictly sequential, so the hook always runs quiesced) and it has
+# its own handle to the sandbox (attach). What travels back to this process is
+# only the step->snapshot map, one JSON line per capture.
+
+def test_the_stdio_command_asks_the_subprocess_to_checkpoint(monkeypatch, tmp_path):
+    session = _FakeSession()
+    session.supports_snapshot = lambda: True
+    import harness.execution.session as session_module
+
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    monkeypatch.setattr(session_module, "SandboxSession", lambda **kw: session)
+    orch = Orchestrator(out_dir=tmp_path)
+    owned = orch._own_sandbox(
+        RunSpec(prompt="x", sandbox_image="img", transport="stdio"), None)
+    command = owned.mcp.command
+    assert "--checkpoint-log" in command
+    assert owned.checkpoint_log is not None
+    assert str(owned.checkpoint_log) == command[command.index("--checkpoint-log") + 1]
+
+
+def test_a_backend_that_cannot_snapshot_is_not_asked_to(monkeypatch, tmp_path):
+    """Docker: the flag would only produce a one-line complaint per run."""
+    session = _FakeSession()          # supports_snapshot() is False
+    import harness.execution.session as session_module
+
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    monkeypatch.setattr(session_module, "SandboxSession", lambda **kw: session)
+    owned = Orchestrator(out_dir=tmp_path)._own_sandbox(
+        RunSpec(prompt="x", sandbox_image="img", transport="stdio"), None)
+    assert "--checkpoint-log" not in owned.mcp.command
+    assert owned.checkpoint_log is None
+
+
+class _FoldBridge:
+    def __init__(self):
+        self.recorded = []
+        self.ledger = self
+
+    @property
+    def checkpoints(self):
+        return self.recorded
+
+    def record(self, step, snapshot_id, *, session_ckpt=None, reason="", **extra):
+        self.recorded.append({"step": step, "snapshot_id": snapshot_id,
+                              "session_ckpt": session_ckpt, "reason": reason,
+                              **extra})
+
+
+def test_the_map_is_folded_into_the_journal_with_the_session_ref(tmp_path):
+    """Each snapshot pairs with the conversation ref, so load_checkpoints reads a
+    stdio run exactly as it reads an http one."""
+    from harness.core.slot import SlotResult
+    from harness.orchestrator.run import Orchestrator, OwnedSandbox
+
+    log = tmp_path / "map.jsonl"
+    log.write_text(
+        '{"step": 1, "snapshot_id": "snap-a", "tool": "text_editor"}\n'
+        '{"step": 2, "snapshot_id": "snap-b", "tool": "shell"}\n')
+    owned = OwnedSandbox(session=_FakeSession(), checkpoint_log=log)
+    bridge = _FoldBridge()
+    result = SlotResult(status="completed", final_text="", usage={},
+                        native_session_id="conv-9")
+    Orchestrator()._fold_checkpoint_log(owned, bridge, result)
+    assert [r["snapshot_id"] for r in bridge.recorded] == ["snap-a", "snap-b"]
+    assert all(r["session_ckpt"] == "conv-9" for r in bridge.recorded)
+    assert bridge.recorded[0]["step"] == 1 and bridge.recorded[1]["tool"] == "shell"
+
+
+def test_a_torn_last_line_from_a_killed_subprocess_is_skipped(tmp_path):
+    """A killed run is exactly the one whose surviving snapshots matter; the lines
+    already whole must fold even when the final write was cut mid-JSON."""
+    from harness.orchestrator.run import Orchestrator, OwnedSandbox
+
+    log = tmp_path / "map.jsonl"
+    log.write_text('{"step": 1, "snapshot_id": "snap-a"}\n{"step": 2, "snap')
+    owned = OwnedSandbox(session=_FakeSession(), checkpoint_log=log)
+    bridge = _FoldBridge()
+    Orchestrator()._fold_checkpoint_log(owned, bridge, None)   # result=None: it died
+    assert [r["snapshot_id"] for r in bridge.recorded] == ["snap-a"]
+    assert bridge.recorded[0]["session_ckpt"] is None
+
+
+def test_no_log_or_no_bridge_folds_nothing(tmp_path):
+    from harness.orchestrator.run import Orchestrator, OwnedSandbox
+
+    orch = Orchestrator()
+    orch._fold_checkpoint_log(OwnedSandbox(session=_FakeSession()), _FoldBridge(), None)
+    missing = OwnedSandbox(session=_FakeSession(),
+                           checkpoint_log=tmp_path / "never-written.jsonl")
+    orch._fold_checkpoint_log(missing, _FoldBridge(), None)   # no raise
+    orch._fold_checkpoint_log(missing, None, None)            # no bridge: no raise

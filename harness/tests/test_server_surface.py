@@ -245,3 +245,72 @@ def test_the_handler_defaults_to_the_literals_when_given_no_surface():
     session = Session(id="s", groups=["owner:s"], bound_id="sb-1")
     handler = SessionHandler(session, FakePool(FakeEntry(id="sb-1", sandbox=None)))
     assert handler.surface is DEFAULT_SURFACE
+
+
+# --- the checkpoint log: the shutter in the serving process ------------------
+def test_a_mutating_call_snapshots_and_appends_the_map(tmp_path):
+    """One line per capture, appended -- a killed run keeps every line already
+    written, which is the whole reason the map is a file and not process state."""
+    import asyncio
+    import json
+
+    from harness.execution.server import CheckpointLogMixin, SandboxPool
+
+    class Pool(CheckpointLogMixin, SandboxPool):
+        checkpoint_log = str(tmp_path / "map.jsonl")
+
+    class AshPool:
+        def supports_snapshot(self):
+            return True
+
+        async def snapshot(self, sandbox, name=None, disk_only=True):
+            assert disk_only, "per-step checkpoints must not pay for memory"
+            return type("Snap", (), {"id": "snap-77"})()
+
+    pool = Pool()
+    pool._pool = AshPool()
+    entry = type("E", (), {"id": "sb-1", "sandbox": object()})()
+    asyncio.run(pool.after_mutating_call(entry, "shell", {"command": "rm x"}))
+    asyncio.run(pool.after_mutating_call(entry, "text_editor", {"path": "y"}))
+
+    lines = [json.loads(l) for l in
+             (tmp_path / "map.jsonl").read_text().splitlines()]
+    assert [(l["step"], l["snapshot_id"], l["tool"]) for l in lines] == \
+        [(1, "snap-77", "shell"), (2, "snap-77", "text_editor")]
+
+
+def test_a_failed_capture_is_skipped_not_raised(tmp_path):
+    """A checkpoint is an optimisation for later analysis; failing the agent's
+    tool call over it would be strictly worse than a gap in the history."""
+    import asyncio
+
+    from harness.execution.server import CheckpointLogMixin, SandboxPool
+
+    class Pool(CheckpointLogMixin, SandboxPool):
+        checkpoint_log = str(tmp_path / "map.jsonl")
+
+    class AshPool:
+        def supports_snapshot(self):
+            return True
+
+        async def snapshot(self, sandbox, name=None, disk_only=True):
+            raise RuntimeError("backend said no")
+
+    pool = Pool()
+    pool._pool = AshPool()
+    entry = type("E", (), {"id": "sb-1", "sandbox": object()})()
+    asyncio.run(pool.after_mutating_call(entry, "shell", {}))   # no raise
+    assert not (tmp_path / "map.jsonl").exists()
+
+
+def test_no_log_path_means_the_mixin_is_inert():
+    import asyncio
+
+    from harness.execution.server import CheckpointLogMixin, SandboxPool
+
+    class Pool(CheckpointLogMixin, SandboxPool):
+        pass                     # checkpoint_log stays None
+
+    pool = Pool()
+    entry = type("E", (), {"id": "sb-1", "sandbox": object()})()
+    asyncio.run(pool.after_mutating_call(entry, "shell", {}))   # no raise, no file

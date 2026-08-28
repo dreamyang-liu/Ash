@@ -154,6 +154,11 @@ class OwnedSandbox:
     #: The pool that server serves from, when it is a checkpointing one. The
     #: orchestrator hands it the bridge once the bridge exists.
     pool: Any = None
+    #: stdio only: where the server subprocess appends its step->snapshot map.
+    #: The orchestrator folds this into the journal after the run -- the snapshots
+    #: are taken in that subprocess (it is the one that sees the tool boundary),
+    #: but the journal lives here.
+    checkpoint_log: Optional[Path] = None
     keep: bool = False
     #: Recorded at creation, NOT read from the session on demand. Teardown runs
     #: before the outcome is assembled, and a destroyed session answers "unknown"
@@ -269,6 +274,7 @@ class Orchestrator:
                 # Before teardown, so the journal says what happened while the
                 # journal is still open; and in `finally`, because a run that died
                 # is exactly one whose missing snapshots matter most.
+                self._fold_checkpoint_log(provisioned, bridge, result)
                 self._report_missing_checkpoints(spec, journal, bridge)
                 self._teardown(spec, gateway, provisioned, claim)
 
@@ -401,6 +407,16 @@ class Orchestrator:
                     args += ["--backend", name]
                 if spec.tools:
                     args += ["--tools", spec.tools]
+                if session.supports_snapshot():
+                    # The tool boundary happens in the server subprocess, so the
+                    # snapshot is taken there too -- the checkpoint machinery sits
+                    # at the tool path, in whichever process serves the calls.
+                    # What comes back is the step->snapshot map, folded into the
+                    # journal by _fold_checkpoint_log after the run.
+                    self.out_dir.mkdir(parents=True, exist_ok=True)
+                    owned.checkpoint_log = self.out_dir / (
+                        "%s.ckpt.jsonl" % session.sandbox_id[:12])
+                    args += ["--checkpoint-log", str(owned.checkpoint_log)]
                 owned.mcp = stdio_wiring(args=args)
             else:
                 owned.mcp = self._serve_in_process(spec, owned)
@@ -489,6 +505,45 @@ class Orchestrator:
             pool.bridge = bridge
         return bridge
 
+    def _fold_checkpoint_log(self, owned, bridge, result) -> None:
+        """Fold the stdio server's step->snapshot map into the journal.
+
+        The subprocess took the snapshots (it serves the tool calls, so it is the
+        one standing at the boundary); it wrote one JSON line per capture. This
+        pairs each with the conversation ref the slot disclosed and records it
+        through the bridge's ledger, so ``load_checkpoints`` and ``fork_plan``
+        read a stdio run exactly as they read an http one.
+
+        Runs in the ``finally`` on purpose: a run that was killed mid-task is
+        precisely the one whose surviving snapshots must not be orphaned -- a map
+        that only lands on clean exits repeats the 300-snapshots-no-map failure.
+        """
+        import json as _json
+
+        path = getattr(owned, "checkpoint_log", None)
+        if not path or bridge is None or not Path(path).exists():
+            return
+        session_ckpt = result.native_session_id if result is not None else None
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = _json.loads(line)
+            except ValueError:
+                continue          # a torn last line from a killed subprocess
+            if not entry.get("snapshot_id"):
+                continue
+            bridge.ledger.record(
+                int(entry.get("step", 0)),
+                entry["snapshot_id"],
+                session_ckpt=session_ckpt,
+                reason="tool_boundary_stdio",
+                tool=entry.get("tool"),
+            )
+        self.on_event("checkpoints",
+                      {"count": len(bridge.ledger.checkpoints),
+                       "source": str(path)})
+
     def _report_missing_checkpoints(self, spec: RunSpec, journal, bridge) -> None:
         """Say so when checkpointing was on and produced nothing.
 
@@ -500,10 +555,12 @@ class Orchestrator:
         worse than the absence itself, because it is discovered later, from the
         outside, by someone trying to branch a run that cannot be branched.
 
-        The remedy is a transport, which is why the advice is phrased here rather
-        than in the bridge: with ``transport="http"`` this process serves the tool
-        calls and checkpoints at each one. With stdio the server is the slot's own
-        subprocess, so the tool boundary happens where nothing here can see it.
+        Both owned transports checkpoint at the tool boundary now -- http notifies
+        the bridge in-process, stdio's subprocess snapshots itself and the map is
+        folded back -- so this fires only on the wirings that genuinely have no
+        boundary to stand at: a hand-rolled ``mcp_stdio_args`` without
+        ``--checkpoint-log``, or a caller-supplied session with no sandbox wiring
+        at all.
         """
         if bridge is None:
             return
@@ -512,8 +569,10 @@ class Orchestrator:
         if recorded or not skipped:
             return
         advice = ("this slot journals from inside its event loop, so the turn "
-                  "boundary cannot be used; run with transport=\"http\" and the "
-                  "orchestrator checkpoints at each tool call instead")
+                  "boundary cannot be used; give the orchestrator the sandbox "
+                  "(sandbox_image + transport stdio|http) and it checkpoints at "
+                  "each tool call instead -- or add --checkpoint-log to your own "
+                  "mcp_stdio_args")
         journal.emit("checkpoint.unavailable", skipped=skipped,
                      transport=spec.transport, slot=spec.slot, reason=advice)
         self.on_event("checkpoint.unavailable",
