@@ -188,9 +188,10 @@ def test_no_call_site_names_a_concrete_pool():
     """The point of this module: one place decides, so switching a backend is a
     config change rather than an edit in several files."""
     repo = Path(__file__).resolve().parents[2]
-    # The MCP proxy now lives in the execution plane; both call sites must still
-    # go through build_pool.
-    for path in (repo / "swebench" / "sandbox.py",
+    # Both call sites now live in the execution plane -- the session's sandbox half
+    # moved down so the orchestrator could own one -- and both must still go
+    # through build_pool.
+    for path in (repo / "harness" / "execution" / "session.py",
                  repo / "harness" / "execution" / "server.py"):
         source = path.read_text()
         assert "DockerPool(" not in source, f"{path.name} still constructs a DockerPool"

@@ -2,7 +2,7 @@
 
 import pytest
 
-from swebench.templates import (RUNTIME_PATH, TemplateBuilder, TemplateError,
+from harness.execution.templates import (RUNTIME_PATH, TemplateBuilder, TemplateError,
                                 builder_from_backend, template_name)
 
 
@@ -99,7 +99,7 @@ def runtime_bin(tmp_path):
 
 
 def builder(monkeypatch, client, runtime_bin):
-    import swebench.templates as templates
+    import harness.execution.templates as templates
     monkeypatch.setattr(templates.httpx, "Client", lambda **kw: client)
     monkeypatch.setattr(templates.time, "sleep", lambda _s: None)
     return TemplateBuilder(server_url="http://server", api_key="k",
@@ -276,7 +276,7 @@ def test_ripgrep_is_staged_and_part_of_the_identity(monkeypatch, runtime_bin,
     b_with.ripgrep_bin = None  # rebuild fingerprints via a fresh instance
     b_with = TemplateBuilder(server_url="http://server", api_key="k",
                              runtime_bin=runtime_bin, ripgrep_bin=rg)
-    import swebench.templates as templates
+    import harness.execution.templates as templates
     monkeypatch.setattr(templates.httpx, "Client", lambda **kw: client)
     b_with.template_for(IMAGE)
 
@@ -331,7 +331,7 @@ class _FakeClient:
 def bare_builder():
     """A TemplateBuilder with no I/O wiring: these tests exercise lookup
     logic, which must not need a server or a runtime binary."""
-    from swebench.templates import TemplateBuilder
+    from harness.execution.templates import TemplateBuilder
     return TemplateBuilder.__new__(TemplateBuilder)
 
 
@@ -380,7 +380,7 @@ def test_an_existing_good_template_is_reused_without_building():
 def test_the_search_for_a_name_is_bounded():
     """Needing many variants means something fails repeatably, and a loud
     error beats a longer search."""
-    from swebench.templates import MAX_TEMPLATE_ATTEMPTS, TemplateError
+    from harness.execution.templates import MAX_TEMPLATE_ATTEMPTS, TemplateError
     import pytest
 
     b = bare_builder()

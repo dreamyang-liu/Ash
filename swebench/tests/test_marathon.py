@@ -357,9 +357,12 @@ def test_the_shape_reaches_the_template_not_the_spawn():
     has to be part of the template's identity: a 16 GB task must not land on
     the 1 GB template an earlier run built from the same image."""
     import inspect
-    from swebench import sandbox, templates
 
-    source = inspect.getsource(sandbox)
+    from harness.execution import session, templates
+
+    # The spawn path moved into the execution plane with the session's sandbox
+    # half; the shape-vs-template rule travelled with it.
+    source = inspect.getsource(session)
     assert "builder.template_for(image, resources)" in source
     assert "self._pool.spawn(image=image)" in source, (
         "no resources on the template path")

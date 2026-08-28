@@ -492,11 +492,12 @@ def test_the_loop_and_the_executor_read_one_registry():
     import swebench.agent as agent_module
     from swebench.agent import tools as tools_module
     from swebench.harnesses import litellm
-    from swebench import rollout_server, sandbox
+    from harness.execution import session as session_module
+    from swebench import rollout_server
 
     assert "self.panel.is_custom_tool(" in inspect.getsource(agent_module), \
         "the loop should ask its panel, not a module-level global"
-    assert "registry=self.tools" in inspect.getsource(sandbox), \
+    assert "registry=self.tools" in inspect.getsource(session_module), \
         "the session should dispatch from its own registry"
     for module in (litellm, rollout_server):
         assert "registry=session.tools" in inspect.getsource(module), \

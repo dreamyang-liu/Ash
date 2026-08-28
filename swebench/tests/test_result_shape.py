@@ -53,16 +53,19 @@ def test_no_module_hand_rolls_the_sdk_conversion():
     the moment one is added or removed."""
     from pathlib import Path
 
-    root = Path(__file__).resolve().parents[1]
-    for path in sorted(root.rglob("*.py")):
-        if "tests" in path.parts:
-            continue
-        source = path.read_text()
-        assert "error=r.output" not in source and \
-               "error=sdk_result.output" not in source, \
-               f"{path.name} duplicates the output into error; use ToolResult.from_sdk"
-    assert "from_sdk" in (root / "sandbox.py").read_text(), \
-        "sandbox.py should convert via ToolResult.from_sdk"
+    repo = Path(__file__).resolve().parents[2]
+    # Both packages: the conversion site (the session's tool seam) moved into the
+    # execution plane, and a sweep of one package alone would no longer see it.
+    for root in (repo / "swebench", repo / "harness"):
+        for path in sorted(root.rglob("*.py")):
+            if "tests" in path.parts:
+                continue
+            source = path.read_text()
+            assert "error=r.output" not in source and \
+                   "error=sdk_result.output" not in source, \
+                   f"{path} duplicates the output into error; use ToolResult.from_sdk"
+    assert "from_sdk" in (repo / "harness" / "execution" / "session.py").read_text(), \
+        "the session's tool seam should convert via ToolResult.from_sdk"
 
 
 # --------------------------------------------------------------------------- #
