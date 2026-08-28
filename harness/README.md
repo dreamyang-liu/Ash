@@ -366,6 +366,13 @@ follow, and violating either fails *quietly* — tool calls or snapshots return
   (resume + fork_session), opencode (`/session/{id}/fork`), codex
   (`thread_fork`) -- each through the orchestrator, full pair, sibling isolation
   on both halves. The `-cli` fallback drivers remain unverified end to end.
+- Verified on a real SWE-bench Verified instance (django__django-11848,
+  claude-code, microvm, http transport): a pair per mutating step; a FRESH
+  microVM resumed from the step-1 snapshot shows a clean tree and one resumed
+  from step-2 shows exactly the fix; branching at step 2 produced one branch
+  that validated the parent's fix (45 tests OK, no code change) and one that
+  reverted it and shipped a different implementation -- distinct sandboxes,
+  distinct forked sessions, two different final diffs.
 - The ATIF inherited-prefix boundary is the checkpoint's own journal seq, which
   can under-include same-step events that journal after the boundary fires
   (slot-dependent ordering). The environment half is exact; the copied-context

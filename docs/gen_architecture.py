@@ -239,7 +239,9 @@ def build() -> None:
           aenv["right"] - 40, "状态",
           "793 测试通过 · 7 跳过 · 117 contract 检查\n"
           "真机跑过（Firecracker，共享实例只碰自己建的沙箱）：真 Claude Code 走两条 transport ·\n"
-          "  两条各 3 个完整 rollback pair · capture/clean 逐条一致 ★ · restore 验证了 map 顺序 · 无泄漏\n"
+          "  两条各 3 个完整 rollback pair · capture/clean 逐条一致 · restore 验证了 map 顺序 · 无泄漏\n"
+          "SWE-bench Verified 真实实例过链 ★：每个改动步一对 pair · 新 microVM 从任一步恢复 ·\n"
+          "  第 2 步分岔出「验证原修法(45 测试过)」和「推翻重写」两个隔离分支,最终 diff 各异\n"
           "还没做：subagent / IAC（先不管）· contracts 活体探针（缺凭据）·\n"
           "  CLI slot 对 microvm 的 fork 端到端",
           color=ORANGE)
