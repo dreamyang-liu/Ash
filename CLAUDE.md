@@ -54,7 +54,7 @@ There are four independently-versioned pieces:
 │   │                        #     mutation (+ pipeline.py = default_pipeline)
 │   │   └── tools.py         #   panel compilation + routing (ToolPanel)
 │   ├── harnesses/           # L3 topologies: litellm, claude-code (base.py = the API)
-│   ├── configs/             # Per-model YAML (`extends:`) + tool_panels/
+│   ├── configs/             # Per-model YAML (`extends:`); panels live in harness/tool_panels/
 │   ├── sandbox.py           # AshSession: sandbox lifecycle + the executor seam
 │   ├── mcp_server.py        # MCP proxy: the same chain, for external agents
 │   ├── submission.py        # L4: asking the agent for its own patch
@@ -167,7 +167,7 @@ runtime/tools/*.go  Schema()          ← authoritative; it executes the calls
         │  ash-runtime --dump-schema
         ▼
 runtime/schema/tools.json             ← checked in, so a panel compiles with no sandbox
-        │  + swebench/configs/tool_panels/*.yaml   (what to offer, and how)
+        │  + harness/tool_panels/*.yaml            (what to offer, and how)
         ▼
 the panel a model sees                ← compiled; see docs/TOOL_PANEL.md
 ```
@@ -269,7 +269,9 @@ python -m swebench.branching ... --plan-in plan.json --launch
   override file values which override defaults. See `swebench/__main__.py` for the flag/section
   mapping.
 - **The tool panel** is compiled, not written (`docs/TOOL_PANEL.md`): `agent.tools`
-  names a manifest — a shipped one (`swebench/configs/tool_panels/bash_only.yaml`) or a path to your own.
+  names a manifest — a shipped one (`harness/tool_panels/bash_only.yaml`) or a path to your own.
+  Four ship: `default` (shell + text_editor, the plain default), `full` (all seven
+  runtime tools, what the SWE-bench configs name), `bash_only`, `no_web`.
   A manifest declares views of runtime tools (rename, offer a subset of parameters,
   reword them) and, under `custom_tools:`, external binaries. `custom_tools_dir` still
   loads a directory of one-tool manifests.

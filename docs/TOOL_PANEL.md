@@ -69,8 +69,18 @@ parameters under names of your choosing, and describe both the tool and those
 parameters for the task rather than for the runtime. `bash_only` mode is one such view:
 a single tool with only `command`.
 
-Three panels ship. `default` offers all seven runtime tools; `bash_only` offers one;
-`no_web` is `default` without `web_fetch` and `web_search`. That last one exists
+Four panels ship, under `harness/tool_panels/`. `default` is what a caller gets without
+asking: `shell` and `text_editor` — enough to run commands and to read, write and modify
+files, which is the whole job for most tasks. It withholds `background` (and so also
+`process`), because a backgrounded command outlives the call that started it while a
+disk-only checkpoint captures the filesystem and not processes, so replaying such a step
+diverges. `full` offers all seven runtime tools and is what the SWE-bench configs name;
+`bash_only` offers one; `no_web` is `full` without `web_fetch` and `web_search`.
+
+Note that `swebench` pins `full` explicitly rather than inheriting `default`. Narrowing
+a benchmark's tool surface changes what it measures, so old and new numbers would stop
+being comparable with no config having changed — the sort of silent move a panel exists
+to prevent. `no_web` exists
 because those two tools are served by the model provider rather than by the sandbox,
 so they reach the network even when the environment cannot — SWE-Marathon's own runner
 withholds them from the 16 of 20 tasks whose environments are network-restricted, and

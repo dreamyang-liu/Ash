@@ -60,6 +60,16 @@ class RunSpec:
     keep_sandbox: bool = False
     #: stdio wiring instead: args for `python -m harness.execution.server`.
     mcp_stdio_args: Optional[List[str]] = None
+    #: Which tool panel the agent is offered -- a shipped name (default, full,
+    #: bash_only, no_web) or a path to a manifest. None leaves the server on its
+    #: built-in four.
+    #:
+    #: Only meaningful for stdio, where this process starts the server and can
+    #: pass `--tools`. Over HTTP the panel belongs to the already-running server,
+    #: so naming one here is refused rather than ignored: a tool surface that
+    #: silently differs from what was asked for is how a run's numbers stop
+    #: describing the configuration someone thinks they ran.
+    tools: Optional[str] = None
 
     # --- gateway ---
     use_gateway: bool = False
@@ -201,6 +211,15 @@ class Orchestrator:
         from harness.execution.provision import provision_http
         from harness.execution.wiring import http_wiring, stdio_wiring
 
+        if spec.tools and spec.mcp_url:
+            # The panel is compiled by the server process, and over HTTP that
+            # process is already running with whatever `--tools` it was given.
+            # Accepting this silently would report a surface the run did not have.
+            raise ValueError(
+                "RunSpec.tools is stdio-only: over HTTP the tool panel belongs to "
+                "the server at %s -- start it with `--tools %s`"
+                % (spec.mcp_url, spec.tools))
+
         if spec.mcp_url and spec.sandbox_image:
             provisioned = provision_http(
                 spec.mcp_url, image=spec.sandbox_image, agent_id=spec.agent_id,
@@ -217,7 +236,11 @@ class Orchestrator:
                 spec.mcp_url, agent_id=spec.agent_id, sandbox_id=spec.sandbox_id,
             )
         if spec.mcp_stdio_args is not None:
-            return None, stdio_wiring(args=list(spec.mcp_stdio_args))
+            args = list(spec.mcp_stdio_args)
+            if spec.tools and "--tools" not in args:
+                # This process starts the server, so it can say what to serve.
+                args += ["--tools", spec.tools]
+            return None, stdio_wiring(args=args)
         return None, None
 
     def _wire_gateway(self, spec: RunSpec, journal, task: TaskSpec, run_id: str):

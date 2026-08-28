@@ -23,6 +23,9 @@ Usage:
 
     # Stdio mode (single-session, backwards-compat):
     python -m harness.execution.server --attach <sandbox-id>
+
+    # Serve a compiled tool panel instead of the built-in four:
+    python -m harness.execution.server --attach <sandbox-id> --tools default
 """
 
 import asyncio
@@ -32,6 +35,7 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ash_sandbox import Pool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
@@ -237,6 +241,75 @@ EXEC_TOOLS_MULTI = _multi_sandbox_tools()
 ALL_TOOLS = LIFECYCLE_TOOLS + EXEC_TOOLS_MULTI
 
 
+class ExecSurface:
+    """The exec tools one server offers, and how a call on them routes.
+
+    Two sources, one shape:
+
+    - **the literals above** (default). Four tools, hand-written, kept because they
+      are what every caller of this module has been served and what the in-process
+      harnesses import to stay in step with it.
+    - **a compiled panel** (``--tools <manifest>``). The manifest says which runtime
+      tools to offer, under which names, with which parameters -- compiled against
+      ``runtime/schema/tools.json``, so a manifest naming something the runtime does
+      not serve fails at startup instead of at the model's first call.
+
+    The panel format is ``"raw"``, which is already MCP's ``{name, description,
+    inputSchema}``; nothing converts. What this class adds is the part a panel has
+    no concept of: ``sandbox_id``. A panel describes one sandbox's tools, while this
+    server may front many, so the multi-sandbox variant injects the argument and the
+    single-sandbox variant leaves it out -- exactly as the literals are derived.
+
+    Routing goes through the panel too, so a renamed view (``run_tests`` over
+    ``shell``) reaches the runtime under its real name and interceptors keyed on
+    ``shell`` do not go blind.
+    """
+
+    def __init__(self, panel: Any = None):
+        self.panel = panel
+        base = list(panel.schema) if panel is not None else EXEC_TOOLS
+        if panel is None:
+            self.single, self.multi = EXEC_TOOLS_SINGLE, EXEC_TOOLS_MULTI
+        else:
+            self.single = copy.deepcopy(base)
+            self.multi = _with_sandbox_id(copy.deepcopy(base))
+
+    @property
+    def names(self) -> set:
+        return {t["name"] for t in self.single}
+
+    def route(self, name: str, args: dict) -> "tuple[str, dict]":
+        """An agent-facing call as a runtime call. Identity without a panel."""
+        if self.panel is None:
+            return name, args
+        return self.panel.route(name, args)
+
+    def all_tools(self) -> list:
+        return LIFECYCLE_TOOLS + self.multi
+
+
+def _with_sandbox_id(tools: list) -> list:
+    """Add the required ``sandbox_id`` argument to compiled tools.
+
+    The literals declare it and ``_multi_sandbox_tools`` only promotes it; a panel
+    never mentions it, because a panel is written about a sandbox's tools and not
+    about a server that fronts several.
+    """
+    for tool in tools:
+        schema = tool.setdefault("inputSchema", {"type": "object"})
+        props = schema.setdefault("properties", {})
+        props["sandbox_id"] = {"type": "string",
+                               "description": "Target sandbox ID (required)"}
+        required = schema.setdefault("required", [])
+        if "sandbox_id" not in required:
+            required.append("sandbox_id")
+    return tools
+
+
+#: What a server serves when no manifest is named: the literals, unchanged.
+DEFAULT_SURFACE = ExecSurface()
+
+
 # ---------------------------------------------------------------------------
 # Sandbox Pool (shared across all sessions)
 # ---------------------------------------------------------------------------
@@ -351,9 +424,13 @@ class SessionHandler:
     _MUTATING = {"shell", "text_editor", "process"}
 
     def __init__(self, session: Session, pool: SandboxPool, notify_mutations: bool = False,
-                 pipeline: "ToolPipeline | None" = None):
+                 pipeline: "ToolPipeline | None" = None,
+                 surface: "ExecSurface | None" = None):
         self.session = session
         self.pool = pool
+        # surface: which exec tools exist and how they route. Defaults to the
+        # literals, so a caller that never heard of manifests is unaffected.
+        self.surface = surface or DEFAULT_SURFACE
         # notify_mutations: call the pool's after_mutating_call (a SandboxPool
         # subclass may override it) so a benchmark that keeps a running artefact
         # can refresh it. Plain SandboxPool does nothing.
@@ -407,6 +484,21 @@ class SessionHandler:
             return _err("sandbox_id is required and must reference a sandbox visible "
                         "to you (see sandbox_create / sandbox_list).")
 
+        # Route BEFORE anything else looks at the call, so a renamed view reaches
+        # the runtime under its real name -- and so the pipeline, the mutation
+        # notification and the sandbox all agree on which tool ran. Routing after
+        # any of them is how a panel's rename made interceptors keyed on `shell`
+        # go blind.
+        try:
+            name, args = self.surface.route(name, args)
+        except KeyError:
+            return _err("unknown tool: %s" % name)
+        except ValueError as exc:
+            # The view does not offer that argument. Say so rather than dropping
+            # it: a silently ignored parameter has the model believe a setting
+            # took effect.
+            return _err(str(exc))
+
         try:
             if self.pipeline is not None:
                 content = await self._exec_via_pipeline(entry, name, args)
@@ -418,9 +510,13 @@ class SessionHandler:
             return _err(str(e))
 
         if self.notify_mutations and name in self._MUTATING:
-            entry = self._resolve(args.get("sandbox_id"))
-            if entry:
-                await self.pool.after_mutating_call(entry, name, args)
+            # `entry` is the sandbox the call just ran in -- reuse it. This used to
+            # re-resolve from `args.get("sandbox_id")`, which is always None here
+            # because sandbox_id was popped above: in single-sandbox mode the
+            # fallback to `bound_id` covered for it, but in multi-sandbox mode
+            # nothing is bound, so the resolve failed and a SandboxPool subclass
+            # hooking mutations was never called at all.
+            await self.pool.after_mutating_call(entry, name, args)
 
         return content
 
@@ -472,11 +568,13 @@ class HttpMcpServer:
     """HTTP/SSE transport — one SandboxPool, multiple concurrent sessions."""
 
     def __init__(self, pool: SandboxPool, host: str = "0.0.0.0", port: int = 8400,
-                 pipeline: "ToolPipeline | None" = None):
+                 pipeline: "ToolPipeline | None" = None,
+                 surface: "ExecSurface | None" = None):
         self.pool = pool
         self.host = host
         self.port = port
         self.pipeline = pipeline
+        self.surface = surface or DEFAULT_SURFACE
         self._sessions: dict[str, Session] = {}
 
     #: Headers that identify the caller, most explicit first. ``mcp-session-id``
@@ -523,7 +621,8 @@ class HttpMcpServer:
         async def handle_mcp(request: web.Request) -> web.Response:
             headers = {k.lower(): v for k, v in request.headers.items()}
             session = self._get_or_create_session(headers)
-            handler = SessionHandler(session, self.pool, pipeline=self.pipeline)
+            handler = SessionHandler(session, self.pool, pipeline=self.pipeline,
+                                     surface=self.surface)
 
             body = await request.json()
             method = body.get("method", "")
@@ -550,7 +649,8 @@ class HttpMcpServer:
                 # A bound session gets the single-sandbox surface: no sandbox_id
                 # parameter to fill in, so the model cannot target another
                 # sandbox and cannot omit the argument either.
-                tools = EXEC_TOOLS_SINGLE if session.bound_id else ALL_TOOLS
+                tools = (self.surface.single if session.bound_id
+                         else self.surface.all_tools())
                 return web.json_response({"jsonrpc": "2.0", "id": id_, "result": {"tools": tools}})
 
             elif method == "tools/call":
@@ -599,11 +699,13 @@ class StdioMcpServer:
     """Stdio transport — single session, backwards-compatible."""
 
     def __init__(self, pool: SandboxPool, single_sandbox: bool = False,
-                 pipeline: "ToolPipeline | None" = None):
+                 pipeline: "ToolPipeline | None" = None,
+                 surface: "ExecSurface | None" = None):
         self.pool = pool
         self.session = Session(id="stdio", groups=["owner:stdio", "default"])
+        self.surface = surface or DEFAULT_SURFACE
         self.handler = SessionHandler(self.session, pool, notify_mutations=single_sandbox,
-                                      pipeline=pipeline)
+                                      pipeline=pipeline, surface=self.surface)
         # single_sandbox: expose only exec tools bound to the active sandbox
         # (lifecycle tools hidden — the harness pre-provisions the sandbox).
         self.single_sandbox = single_sandbox
@@ -645,7 +747,8 @@ class StdioMcpServer:
         elif method == "notifications/initialized":
             return None
         elif method == "tools/list":
-            tools = EXEC_TOOLS_SINGLE if self.single_sandbox else ALL_TOOLS
+            tools = (self.surface.single if self.single_sandbox
+                     else self.surface.all_tools())
             return {"jsonrpc": "2.0", "id": id_, "result": {"tools": tools}}
         elif method == "tools/call":
             params = msg.get("params", {})
@@ -722,7 +825,31 @@ def main(pool_cls=None):
     parser.add_argument("--plugins", default=None,
                         help="Python file exporting PIPELINE: list[ToolInterceptor]; "
                              "replaces the default pipeline assembly")
+    parser.add_argument("--tools", default=None, metavar="PANEL",
+                        help="Serve a compiled tool panel instead of the built-in "
+                             "four: a shipped name (default, full, bash_only, "
+                             "no_web) or a path to your own manifest. Compiled "
+                             "against runtime/schema/tools.json, so a manifest the "
+                             "runtime cannot serve fails here rather than at the "
+                             "model's first call.")
     args = parser.parse_args()
+
+    # Same reason as the backend check below: a panel that cannot compile must stop
+    # startup. Serving a stale or partial tool list instead is precisely the drift
+    # compiling the panel exists to prevent.
+    surface = DEFAULT_SURFACE
+    if args.tools:
+        from harness.execution.panel import load_panel
+
+        try:
+            panel = load_panel(args.tools, format="raw")
+        except Exception as exc:
+            sys.stderr.write(f"[ash-mcp] cannot load tool panel {args.tools!r}: {exc}\n")
+            raise SystemExit(2)
+        surface = ExecSurface(panel)
+        sys.stderr.write("[ash-mcp] tool panel %s: %s\n"
+                         % (args.tools, ", ".join(sorted(surface.names))))
+        sys.stderr.flush()
 
     # Fail at startup, not on the first sandbox_create: a proxy that accepted a
     # backend it cannot build would report the misconfiguration as a tool error
@@ -748,14 +875,16 @@ def main(pool_cls=None):
         sys.stderr.flush()
 
     if args.http:
-        server = HttpMcpServer(pool, host=args.host, port=args.port, pipeline=pipeline)
+        server = HttpMcpServer(pool, host=args.host, port=args.port,
+                               pipeline=pipeline, surface=surface)
         asyncio.run(server.run())
     else:
         async def run_stdio():
             # A bound session is served the single-sandbox schema, so the model
             # never sees a sandbox_id argument to fill in.
             single = bool(args.attach)
-            stdio = StdioMcpServer(pool, single_sandbox=single, pipeline=pipeline)
+            stdio = StdioMcpServer(pool, single_sandbox=single,
+                                   pipeline=pipeline, surface=surface)
             if args.attach:
                 try:
                     entry = await pool.attach(args.attach,

@@ -283,3 +283,48 @@ def test_caller_supplied_extra_wins_over_the_defaults(tmp_path):
         spec(tmp_path, slot="claude-code",
              extra={"setting_sources": ["project"]}))
     assert RecordingSlot.calls[0]["extra"]["setting_sources"] == ["project"]
+
+
+# --- naming a tool panel ---------------------------------------------------
+def test_stdio_wiring_carries_the_named_panel():
+    """The orchestrator starts this server, so it can say what to serve."""
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    _, mcp = Orchestrator()._wire_sandbox(
+        RunSpec(prompt="x", mcp_stdio_args=["--attach", "sb-1"], tools="default"),
+        None)
+    assert mcp.command[-2:] == ["--tools", "default"]
+
+
+def test_an_explicit_tools_arg_is_not_duplicated():
+    """A caller that already spelled it out wins; two --tools flags would leave
+    argparse silently keeping the last, which is not obviously the intended one."""
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    _, mcp = Orchestrator()._wire_sandbox(
+        RunSpec(prompt="x", mcp_stdio_args=["--tools", "bash_only"], tools="default"),
+        None)
+    assert mcp.command.count("--tools") == 1
+    assert "bash_only" in mcp.command
+
+
+def test_naming_a_panel_over_http_is_refused_not_ignored():
+    """The panel is compiled by the server process, and over HTTP that process is
+    already running with whatever --tools it was given. Accepting this quietly
+    would have the run report a tool surface it did not have."""
+    import pytest
+
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    with pytest.raises(ValueError) as exc:
+        Orchestrator()._wire_sandbox(
+            RunSpec(prompt="x", mcp_url="http://h:8400", tools="default"), None)
+    assert "stdio-only" in str(exc.value)
+
+
+def test_no_panel_named_leaves_the_wiring_alone():
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    _, mcp = Orchestrator()._wire_sandbox(
+        RunSpec(prompt="x", mcp_stdio_args=["--attach", "sb-1"]), None)
+    assert "--tools" not in mcp.command

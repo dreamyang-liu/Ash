@@ -136,7 +136,7 @@ def test_two_views_may_not_share_a_name():
 def test_provider_hostile_schema_keys_are_stripped():
     """`shell.env` is declared with additionalProperties; some providers reject it,
     and the hand-written panel dropped it silently. Now it is dropped on purpose."""
-    panel = load_panel("default").schema
+    panel = load_panel("full").schema
     env = next(t["function"] for t in panel
                if t["function"]["name"] == "shell")["parameters"]["properties"]["env"]
     assert "additionalProperties" not in env
@@ -305,7 +305,7 @@ def test_an_agents_panel_is_its_own(tmp_path):
 
     a = AshAgent(AgentConfig(), executor=lambda t, args: ToolResult(True, "ok"))
     b = AshAgent(AgentConfig(), executor=lambda t, args: ToolResult(True, "ok"))
-    a.use_panel("default")
+    a.use_panel("full")
     b.use_panel("bash_only")
 
     assert len(a.tools_schema) == 7

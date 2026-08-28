@@ -1,0 +1,42 @@
+# The default panel: run commands, read and write files. Nothing else.
+#
+# Two tools cover the job for most tasks -- `shell` reaches everything a command
+# can (searching, building, testing) and `text_editor` does the edits a command
+# is clumsy at. Adding more is a manifest away; starting wide is not reversible,
+# because a benchmark's numbers stop being comparable when its tool surface moves.
+#
+# `background` is deliberately NOT offered. A backgrounded command outlives the
+# call that started it, and a disk-only checkpoint captures the filesystem but not
+# processes -- so a replay of a step taken while one ran diverges: the process is
+# gone, its pid answers errors, and its unflushed output never reached disk. The
+# `process` tool is absent for the same reason: with no way to start one, there is
+# nothing to read or kill.
+#
+# Compiled against runtime/schema/tools.json; a parameter the runtime does not
+# accept fails at startup rather than being silently ignored.
+
+agent_tools:
+  - name: shell
+    description: |-
+      Execute a shell command. Use it for everything a command can do: searching,
+      reading, building, running tests. Runs in the sandbox's working directory
+      unless `working_dir` says otherwise -- run `pwd` if you need to know which.
+      Pipe long output through `tail`/`head`, or use the `tail` parameter, to keep
+      the transcript small.
+    arguments: [command, working_dir, timeout, tail]
+    required: [command]
+    # not offered: background (see above), env, stdin, max_output_bytes,
+    #              truncate_mode -- the last two are the host's business, and the
+    #              interceptor pipeline already bounds one result.
+
+  - name: text_editor
+    description: |-
+      View or edit a file. `view` reads it (optionally a line range), `str_replace`
+      swaps an exact string, `insert` adds text at a line, `write` replaces the
+      whole file. Prefer this over shell heredocs for edits: an exact-string
+      replacement fails loudly when the file is not what you expected, which a
+      redirect does not.
+    arguments: [command, path, view_range, old_str, new_str, insert_line,
+                insert_text, file_text]
+    required: [command, path]
+    # not offered: max_output_bytes, truncate_mode -- as above.

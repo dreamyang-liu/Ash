@@ -8,7 +8,11 @@ generation:
 agent:
   # A panel manifest: a shipped name (configs/tool_panels/*.yaml) or a path to
   # your own. See docs/TOOL_PANEL.md.
-  tools: default
+  # `full`, not `default`: the panel default is now shell+text_editor
+  # (harness/tool_panels/default.yaml), and quietly narrowing this from
+  # seven tools to two would move every score in results/ without a
+  # single config changing. Benchmark surfaces get named explicitly.
+  tools: full
   system_template: |
     You are a helpful assistant that can interact with a computer to solve software engineering tasks.
   instance_template: |
