@@ -374,15 +374,17 @@ follow, and violating either fails *quietly* — tool calls or snapshots return
   (`thread_fork`) -- each through the orchestrator, full pair, sibling isolation
   on both halves. The `-cli` fallback drivers remain unverified end to end.
 - Verified on a real SWE-bench Verified instance (django__django-11848,
-  microvm, http transport) with BOTH claude-code (Opus 5 on Bedrock) and codex
-  (gpt-5.6-sol, thread_fork): a pair per mutating step -- codex's run also
-  exercised the clean-reuse path, its final turn-boundary pair mapping to the
-  previous snapshot without a capture; a FRESH microVM resumed from the
-  pre-edit snapshot shows a clean tree and one from the post-edit snapshot
-  shows exactly the fix; branching at the edit step produced one branch that
-  validated the parent's fix against the full test module and one that
-  reverted it and shipped a different implementation -- distinct sandboxes,
-  distinct forked sessions/threads, two different final diffs, no leaks.
+  microvm, http transport) with ALL THREE protocol drivers: claude-code (Opus 5
+  on Bedrock), codex (gpt-5.6-sol, thread_fork), opencode (session fork). A
+  pair per step with mutation gating live on real workloads -- opencode's run
+  recorded 17 pairs of which 11 were clean reuses (its `view` steps cost no
+  capture but kept the map complete); codex's turn-boundary pair reused too. On
+  every agent: a FRESH microVM resumed from the pre-edit snapshot shows a clean
+  tree and one from the post-edit snapshot shows exactly the fix; branching at
+  the edit step produced one branch that validated the parent's fix against the
+  full test module and one that reverted it and shipped a different
+  implementation -- distinct sandboxes, distinct forked sessions, two different
+  final diffs, no leaks.
 - The ATIF inherited-prefix boundary is the checkpoint's own journal seq, which
   can under-include same-step events that journal after the boundary fires
   (slot-dependent ordering). The environment half is exact; the copied-context
