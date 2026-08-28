@@ -90,7 +90,8 @@ class Canvas:
         return element
 
     def arrow(self, id_: str, x: float, y: float, points: list, *,
-              color: str = WHITE, dashed: bool = False) -> dict:
+              color: str = WHITE, dashed: bool = False,
+              head: "str | None" = "arrow") -> dict:
         xs = [p[0] for p in points]
         ys = [p[1] for p in points]
         element = {
@@ -103,7 +104,7 @@ class Canvas:
             "roundness": {"type": 2}, "seed": self._next_seed(), "version": 1,
             "isDeleted": False, "points": points, "lastCommittedPoint": None,
             "startBinding": None, "endBinding": None, "startArrowhead": None,
-            "endArrowhead": "arrow", "boundElements": [], "link": None,
+            "endArrowhead": head, "boundElements": [], "link": None,
             "locked": False,
         }
         self.els.append(element)
