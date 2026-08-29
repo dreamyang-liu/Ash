@@ -200,6 +200,37 @@ Two requirements for that result, both of which fail loudly if unmet:
   be the one the agent worked in — the pair would reference an environment nobody
   touched. In-process keeps sandbox ownership in the harness.
 
+## codex on Bedrock (no ChatGPT login)
+
+codex speaks only the OpenAI **Responses** API (0.145 dropped `wire_api="chat"`),
+and its custom providers authenticate with an env var -- no login needed. Bedrock
+does not speak Responses, so a translator sits in between; and codex sends a
+codex-only field (`client_metadata`) that litellm 1.97/1.98 forwards verbatim
+into Bedrock's Anthropic backend, which rejects it -- hence the scrub shim:
+
+```bash
+# 1. translator: Responses -> Bedrock (any Bedrock model)
+AWS_BEARER_TOKEN_BEDROCK=... AWS_REGION=us-west-2 \
+  litellm --model bedrock/us.anthropic.claude-sonnet-4-6 --port 4477
+
+# 2. shim: strip client_metadata (delete the day litellm handles it)
+python3 scripts/responses_scrub.py --port 4478 --upstream http://127.0.0.1:4477
+
+# 3. codex, no login:
+LITELLM_KEY=anything codex exec \
+  -c 'model_providers.bedrock.base_url="http://127.0.0.1:4478/v1"' \
+  -c 'model_providers.bedrock.env_key="LITELLM_KEY"' \
+  -c 'model_providers.bedrock.wire_api="responses"' \
+  -c 'model_provider="bedrock"' \
+  -c 'model="bedrock/us.anthropic.claude-sonnet-4-6"' "..."
+```
+
+Through the harness, the same settings ride in `RunSpec.extra["config_overrides"]`
+(pre-serialized TOML values) plus `model=` -- verified live with sandbox tools and
+checkpoints. Bedrock also has a native OpenAI-compat endpoint
+(`/openai/v1/chat/completions`, bearer auth) but it serves only gpt-oss models
+and speaks chat, which codex no longer does.
+
 ## Inference gateway
 
 The model seam (`harness/gateway/`). Wiring is one environment variable, which is
