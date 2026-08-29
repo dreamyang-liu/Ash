@@ -46,22 +46,24 @@ def main() -> int:
                  "理论上直接能用;跑过之前不算数",
                  color=ORANGE)
     cx = c.panel("ag-cx", oc["right"] + 18, top, 400,
-                 "codex —— 过不了 gateway ❌(协议不同)",
-                 "只说 OpenAI Responses 协议(0.145 起 chat 也不说了)\n"
-                 "gateway 只会 Anthropic Messages → 接不上\n"
-                 "现状:provider-direct(原生 amazon-bedrock / ChatGPT)\n"
-                 "  → 预算和记账对 codex 不生效,这是已知缺口\n"
-                 "要接入:gateway 学 Responses 协议(等真需要再做)",
-                 color=RED)
+                 "codex —— 过 gateway ✅(已真机验证)",
+                 "只说 OpenAI Responses 协议 → gateway 现在两种都会:\n"
+                 "  /v1/messages(Anthropic)+ /v1/responses(OpenAI)\n"
+                 "接法:自定义 provider,base_url=gateway/v1,\n"
+                 "  env_key 装 slot-token(codex 发 Bearer)\n"
+                 "已验:codex→gateway→Bedrock Mantle GPT-5.6,\n"
+                 "  模型改写(要 terra 跑 luna)· usage 计到 token",
+                 color=GREEN)
     bar_bottom = max(cc["bottom"], oc["bottom"], cx["bottom"])
     c.text("seq-cap", 40, bar_bottom + 18,
-           "下面的时序对「说 Anthropic 协议的 agent」成立(claude-code 已验,opencode 待验):",
+           "下面的时序对三家同构;差别只在协议:messages 上游用 x-api-key,"
+           "responses 上游用 Bearer,usage 形状各自解析:",
            size=13, color=GREY)
 
     seq = Sequence(c, 40, bar_bottom + 44, [
         ("cfg", "routes.json\n(模型→上游的表)", ORANGE),
         ("orch", "Orchestrator", GREEN),
-        ("agent", "Agent\n(claude✅ / opencode?)", BLUE),
+        ("agent", "Agent\n(claude✅ codex✅ oc?)", BLUE),
         ("gw", "Gateway\n(进程内 HTTP)", GREEN),
         ("up", "上游\n(provider/vLLM/ckpt)", VIOLET),
         ("journal", "Journal", ORANGE),
@@ -91,8 +93,8 @@ def main() -> int:
 
     seq.note("换模型 = routes.json 改一行(agent 要 opus-5,上游跑 sonnet-4-6,实测无感);"
              "RL rollout = base_url 指向自己的 checkpoint", color=VIOLET)
-    seq.note("codex 不在这张时序里:它的流量今天走 provider-direct,不经过任何一个框——"
-             "统一预算/记账要覆盖 codex,先给 gateway 加 Responses 协议", color=RED)
+    seq.note("Responses 的坑(已修):usage 在终结帧里、和整个响应体一起,必被 chunk 切开——"
+             "扫描器跨 chunk 缓冲行,否则 codex 的预算又是装饰品", color=RED)
     seq.note("路由没配单价而又设了 budget → journal 记一次 budget_unenforceable,"
              "绝不静默假装在管账", color=RED)
     seq.lifelines()

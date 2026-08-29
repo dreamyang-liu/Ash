@@ -176,7 +176,17 @@ def _make_handler(gateway: GatewayServer):
             self._error(404, "unknown path %s" % self.path)
 
         def do_POST(self) -> None:  # noqa: N802
-            if not self.path.startswith("/v1/messages"):
+            # Two wire shapes, one gateway. `/v1/messages` is Anthropic Messages
+            # (claude-code, opencode's anthropic provider); `/v1/responses` is
+            # OpenAI Responses, which is the ONLY protocol codex speaks -- its
+            # custom providers exist precisely to point at a base_url like this
+            # one, so the protocol was the entire reason codex could not be
+            # budgeted or accounted here.
+            if self.path.startswith("/v1/responses"):
+                shape = "responses"
+            elif self.path.startswith("/v1/messages"):
+                shape = "messages"
+            else:
                 self._error(404, "unknown path %s" % self.path)
                 return
 
@@ -226,7 +236,8 @@ def _make_handler(gateway: GatewayServer):
                 token.requests += 1
 
             try:
-                self._forward(route, body, streaming, token, requested_model)
+                self._forward(route, body, streaming, token, requested_model,
+                              shape)
             except Exception as exc:  # noqa: BLE001 - report, never crash the server
                 gateway.record(
                     agent_id=getattr(token, "agent_id", None),
@@ -240,7 +251,7 @@ def _make_handler(gateway: GatewayServer):
                     pass
 
         # --- forwarding -------------------------------------------------
-        def _upstream_headers(self, route) -> dict:
+        def _upstream_headers(self, route, shape: str) -> dict:
             headers = {
                 key: value
                 for key, value in self.headers.items()
@@ -249,16 +260,24 @@ def _make_handler(gateway: GatewayServer):
             headers.update(route.headers)
             key = route.resolve_key()
             if key:
-                headers["x-api-key"] = key
-            headers.setdefault("anthropic-version", "2023-06-01")
+                # Each protocol's own convention -- an Anthropic upstream reads
+                # x-api-key, an OpenAI-shaped one reads a bearer. Sending the
+                # wrong one is a 401 that looks like a bad key.
+                if shape == "responses":
+                    headers["Authorization"] = "Bearer %s" % key
+                else:
+                    headers["x-api-key"] = key
+            if shape == "messages":
+                headers.setdefault("anthropic-version", "2023-06-01")
             headers["Content-Type"] = "application/json"
             return headers
 
-        def _forward(self, route, body: bytes, streaming: bool, token, requested_model) -> None:
+        def _forward(self, route, body: bytes, streaming: bool, token,
+                     requested_model, shape: str = "messages") -> None:
             import httpx
 
-            url = route.base_url.rstrip("/") + "/v1/messages"
-            headers = self._upstream_headers(route)
+            url = route.base_url.rstrip("/") + "/v1/" + shape
+            headers = self._upstream_headers(route, shape)
 
             with httpx.Client(timeout=gateway.timeout_s) as client:
                 if not streaming:
@@ -273,13 +292,14 @@ def _make_handler(gateway: GatewayServer):
                     self._relay_head(upstream.status_code, upstream.headers, None)
                     usage = Usage()
                     model = None
+                    scanner = _SseScanner()
                     for chunk in upstream.iter_raw():
                         if not chunk:
                             continue
                         # Chunked framing: relay immediately, no buffering.
                         self.wfile.write(b"%X\r\n%s\r\n" % (len(chunk), chunk))
                         self.wfile.flush()
-                        found = _scan_sse(chunk, usage)
+                        found = scanner.feed(chunk, usage)
                         model = model or found
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
@@ -352,24 +372,62 @@ def _usage_from_response(response) -> Tuple[Usage, Optional[str]]:
 
 
 def _absorb_usage(native, usage: Usage) -> None:
+    """Fold a provider usage block into ours. Both dialects:
+
+    Anthropic: input_tokens / output_tokens / cache_read_input_tokens /
+    cache_creation_input_tokens. OpenAI Responses: input_tokens / output_tokens
+    with the cache and reasoning splits nested under *_tokens_details.
+    """
     if not isinstance(native, dict):
         return
     usage.input_tokens += int(native.get("input_tokens") or 0)
     usage.output_tokens += int(native.get("output_tokens") or 0)
     usage.cached_input_tokens += int(native.get("cache_read_input_tokens") or 0)
     usage.cache_creation_tokens += int(native.get("cache_creation_input_tokens") or 0)
+    details = native.get("input_tokens_details")
+    if isinstance(details, dict):
+        usage.cached_input_tokens += int(details.get("cached_tokens") or 0)
+    details = native.get("output_tokens_details")
+    if isinstance(details, dict):
+        usage.reasoning_output_tokens += int(details.get("reasoning_tokens") or 0)
+
+
+class _SseScanner:
+    """Accumulate usage from relayed SSE bytes. Never touches what is relayed.
+
+    Stateful, because a chunk can split a frame and the split must be
+    reassembled: the first version simply skipped partial lines, which was fine
+    for Anthropic streams (the usage frames -- message_start/message_delta --
+    are tiny and arrive whole) and silently wrong for OpenAI Responses streams,
+    whose usage rides in the terminal ``response.completed`` event TOGETHER
+    with the entire response body: a frame that big is split by the transport
+    essentially always, so a streaming codex run recorded zero tokens and the
+    budget was decorative again. The tail buffer is capped; a single line
+    beyond the cap is dropped, not the stream.
+    """
+
+    MAX_TAIL = 4 * 1024 * 1024
+
+    def __init__(self) -> None:
+        self._tail = b""
+
+    def feed(self, chunk: bytes, usage: Usage) -> Optional[str]:
+        data = self._tail + chunk
+        lines = data.split(b"\n")
+        self._tail = lines.pop()          # partial last line, or b""
+        if len(self._tail) > self.MAX_TAIL:
+            self._tail = b""
+        return _scan_sse_lines(lines, usage)
 
 
 def _scan_sse(chunk: bytes, usage: Usage) -> Optional[str]:
-    """Accumulate usage from relayed SSE bytes. Best-effort by design.
+    """One-shot scan of complete lines (tests and non-split callers)."""
+    return _scan_sse_lines(chunk.split(b"\n"), usage)
 
-    A chunk can split a frame; a partial JSON line is simply skipped rather than
-    reassembled, because this tap must never affect what the agent receives.
-    ``message_start`` carries input/cache counts, ``message_delta`` the output
-    total, so the important numbers arrive in single small frames.
-    """
+
+def _scan_sse_lines(lines, usage: Usage) -> Optional[str]:
     model = None
-    for line in chunk.split(b"\n"):
+    for line in lines:
         line = line.strip()
         if not line.startswith(b"data:"):
             continue
@@ -387,6 +445,12 @@ def _scan_sse(chunk: bytes, usage: Usage) -> Optional[str]:
             message = event.get("message") or {}
             model = message.get("model") or model
             _absorb_usage(message.get("usage"), usage)
+        elif etype == "response.completed":
+            # OpenAI Responses stream: the terminal event carries the whole
+            # request's usage and the model that actually served it.
+            response = event.get("response") or {}
+            model = response.get("model") or model
+            _absorb_usage(response.get("usage"), usage)
         elif etype == "message_delta":
             native = event.get("usage") or {}
             # output_tokens in message_delta is cumulative for the message.

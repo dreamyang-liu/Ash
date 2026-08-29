@@ -228,6 +228,15 @@ put other Bedrock models behind the codex scaffold.
 
 ## Inference gateway
 
+Speaks BOTH wire shapes now: `/v1/messages` (Anthropic -- claude-code, verified
+live) and `/v1/responses` (OpenAI -- codex, verified live against Bedrock
+Mantle GPT-5.6 through a custom provider whose env_key carries the slot token).
+Per-shape upstream auth (x-api-key vs Bearer) and per-shape usage parsing; the
+Responses stream carries its usage in the terminal event together with the
+whole response body, so the SSE scanner buffers split lines across chunks --
+stateless scanning recorded zero tokens for every streaming codex request.
+
+
 The model seam (`harness/gateway/`). Wiring is one environment variable, which is
 why it works for any agent:
 

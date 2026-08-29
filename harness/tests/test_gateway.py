@@ -409,3 +409,173 @@ def test_an_unpriced_budget_says_so_once(tmp_path):
     warnings = [r for r in read_journal(journal_path)
                 if r.get("status") == "budget_unenforceable"]
     assert len(warnings) == 1, "say it once; per-request is noise"
+
+
+# --- the Responses shape: what lets codex through -----------------------------
+def _responses_upstream():
+    """An OpenAI-Responses-shaped upstream that records what it received."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    state = type("S", (), {"requests": [], "headers": []})()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: A003
+            pass
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            state.requests.append((self.path, _json.loads(body)))
+            state.headers.append(dict(self.headers))
+            payload = _json.dumps({
+                "id": "resp_1", "model": "served-model",
+                "output": [{"type": "message", "content": [
+                    {"type": "output_text", "text": "ok"}]}],
+                "usage": {"input_tokens": 100,
+                          "input_tokens_details": {"cached_tokens": 40},
+                          "output_tokens": 20,
+                          "output_tokens_details": {"reasoning_tokens": 5}},
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    state.base_url = "http://127.0.0.1:%d" % httpd.server_address[1]
+    state.stop = lambda: (httpd.shutdown(), httpd.server_close())
+    return state
+
+
+def test_a_responses_request_is_routed_rewritten_and_priced(tmp_path):
+    """codex speaks only the Responses protocol, and its custom providers exist
+    to point at a base_url like this gateway -- the missing half was ours. One
+    request must get everything the messages shape gets: auth swap (as a BEARER,
+    which is that protocol's convention -- x-api-key reads as a bad key), model
+    rewrite, usage with the nested cache/reasoning splits, pricing, wire tap."""
+    import json as _json
+    import urllib.request
+
+    from harness.core.journal import JournalWriter, read_journal
+    from harness.gateway.routing import ModelRoute, RoutingTable
+    from harness.gateway.server import GatewayServer
+
+    upstream = _responses_upstream()
+    table = RoutingTable()
+    table.add_route("default", ModelRoute(
+        base_url=upstream.base_url, api_key="real-key",
+        upstream_model="served-model",
+        pricing={"input": 2.0, "output": 8.0, "cache_read": 0.20}))
+    journal_path = tmp_path / "j.jsonl"
+    with JournalWriter(journal_path, run_id="r", agent_id="a") as journal:
+        gateway = GatewayServer(table, journal=journal, port=0).start()
+        try:
+            token = table.mint("codex-slot", run_id="r", budget_usd=1.0)
+            body = _json.dumps({"model": "gpt-5.6-terra",
+                                "input": "hi"}).encode()
+            request = urllib.request.Request(
+                gateway.base_url + "/v1/responses", data=body,
+                headers={"Content-Type": "application/json",
+                         "Authorization": "Bearer %s" % token.token})
+            reply = _json.loads(urllib.request.urlopen(request, timeout=10).read())
+        finally:
+            gateway.stop()
+            upstream.stop()
+
+    assert reply["model"] == "served-model"
+    path, sent = upstream.requests[0]
+    assert path == "/v1/responses"
+    assert sent["model"] == "served-model", "rewritten before forwarding"
+    sent_headers = {k.lower(): v for k, v in upstream.headers[0].items()}
+    assert sent_headers.get("authorization") == "Bearer real-key"
+    assert "x-api-key" not in sent_headers
+    assert "anthropic-version" not in sent_headers, \
+        "anthropic headers do not belong on an OpenAI-shaped upstream"
+
+    taps = [r for r in read_journal(journal_path) if r["type"] == "gateway.request"]
+    assert taps, "the wire tap must fire for responses too"
+    usage = taps[0]["usage"]
+    assert usage["input_tokens"] == 100
+    assert usage["cached_input_tokens"] == 40, "nested cached_tokens absorbed"
+    assert usage["reasoning_output_tokens"] == 5
+    # 60 uncached * 2 + 20 * 8 + 40 * 0.20 per mtok
+    assert abs(usage["cost_usd"] - 0.000288) < 1e-9
+
+
+def test_responses_streaming_usage_comes_from_response_completed():
+    """The Responses stream carries its totals in the terminal event, not in
+    message_start/delta -- without handling it, a streaming codex run would be
+    another decorative budget."""
+    from harness.core.events import Usage
+    from harness.gateway.server import _scan_sse
+
+    usage = Usage()
+    chunk = (b'data: {"type":"response.created","response":{"model":"m1"}}\n\n'
+             b'data: {"type":"response.completed","response":{"model":"m1",'
+             b'"usage":{"input_tokens":50,"output_tokens":10,'
+             b'"input_tokens_details":{"cached_tokens":20},'
+             b'"output_tokens_details":{"reasoning_tokens":3}}}}\n\n')
+    model = _scan_sse(chunk, usage)
+    assert model == "m1"
+    assert (usage.input_tokens, usage.output_tokens) == (50, 10)
+    assert usage.cached_input_tokens == 20
+    assert usage.reasoning_output_tokens == 3
+
+
+def test_budget_gate_applies_to_the_responses_shape_too(tmp_path):
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    from harness.core.journal import JournalWriter
+    from harness.gateway.routing import ModelRoute, RoutingTable
+    from harness.gateway.server import GatewayServer
+
+    upstream = _responses_upstream()
+    table = RoutingTable()
+    table.add_route("default", ModelRoute(base_url=upstream.base_url, api_key="k"))
+    with JournalWriter(tmp_path / "j.jsonl", run_id="r", agent_id="a") as journal:
+        gateway = GatewayServer(table, journal=journal, port=0).start()
+        try:
+            token = table.mint("codex-slot", run_id="r", budget_usd=0.01)
+            token.spent_usd = 0.02          # already over
+            body = _json.dumps({"model": "m", "input": "hi"}).encode()
+            request = urllib.request.Request(
+                gateway.base_url + "/v1/responses", data=body,
+                headers={"Content-Type": "application/json",
+                         "Authorization": "Bearer %s" % token.token})
+            try:
+                urllib.request.urlopen(request, timeout=10)
+                raise AssertionError("must be refused")
+            except urllib.error.HTTPError as err:
+                assert err.code == 400
+                assert "budget exhausted" in err.read().decode()
+            assert upstream.requests == [], "refused BEFORE forwarding"
+        finally:
+            gateway.stop()
+            upstream.stop()
+
+
+def test_a_usage_frame_split_across_chunks_is_still_counted():
+    """Responses streams carry usage in the terminal event together with the
+    whole response body -- a frame that big is split by the transport essentially
+    always. The stateless scanner skipped split lines, so a streaming codex run
+    recorded zero tokens (measured live) and the budget was decorative again."""
+    from harness.core.events import Usage
+    from harness.gateway.server import _SseScanner
+
+    frame = (b'data: {"type":"response.completed","response":{"model":"m1",'
+             b'"output":[{"type":"message","content":[{"type":"output_text",'
+             b'"text":"' + b'x' * 3000 + b'"}]}],'
+             b'"usage":{"input_tokens":77,"output_tokens":11}}}\n\n')
+    scanner = _SseScanner()
+    usage = Usage()
+    model = None
+    for i in range(0, len(frame), 100):          # brutal 100-byte chunking
+        model = scanner.feed(frame[i:i + 100], usage) or model
+    assert model == "m1"
+    assert (usage.input_tokens, usage.output_tokens) == (77, 11)
