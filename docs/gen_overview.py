@@ -61,6 +61,15 @@ class Sequence:
         self._row += 1
         y = self._y(self._row)
         x0, x1 = self._x[src], self._x[dst]
+        if src == dst:
+            # Self-message: a zero-length arrow is invisible, so draw a small
+            # out-and-back loop to the right of the lifeline.
+            self.c.arrow("seq-m%d" % self._row, x0, y - 8,
+                         [[0, 0], [26, 0], [26, 12], [0, 12]],
+                         color=color, dashed=dashed)
+            self.c.text("seq-l%d" % self._row, x0 + 34, y - 12, label,
+                        size=size, color=color)
+            return
         self.c.arrow("seq-m%d" % self._row, x0, y, [[0, 0], [x1 - x0, 0]],
                      color=color, dashed=dashed)
         width, _ = text_size(label, size)
