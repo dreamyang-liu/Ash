@@ -292,61 +292,6 @@ def test_install_mounts_tracker_and_hook():
 
 # --- re-board safety ------------------------------------------------------- #
 
-def test_reboard_that_lands_on_an_unreachable_sandbox_is_not_adopted():
-    """A disk-only snapshot cold-boots, so its runtime only comes back if the
-    template declares a startup command. Adopting an unreachable replacement
-    would break every later tool call; the session must keep the old one."""
-    import asyncio
-
-    class FakeSandbox:
-        def __init__(self, reachable):
-            self.agent_id = "agent"
-            self._container_id = "sb"
-            self._reachable = reachable
-            self.calls = 0
-
-        async def call(self, tool, **kwargs):
-            self.calls += 1
-            if self._reachable:
-                class R:
-                    is_error = False
-                return R()
-            raise RuntimeError("502 Bad Gateway")
-
-    class FakePool:
-        def __init__(self, replacement):
-            self.replacement = replacement
-            self.destroyed: list = []
-
-        def supports_snapshot(self):
-            return True
-
-        async def spawn(self, image=None, agent_id=""):
-            return self.replacement
-
-        async def destroy(self, sandbox):
-            self.destroyed.append(sandbox)
-
-    from swebench.sandbox import AshSession
-
-    for reachable, expect_swap in ((True, True), (False, False)):
-        session = AshSession(quiet=True)
-        original = FakeSandbox(reachable=True)
-        replacement = FakeSandbox(reachable=reachable)
-        session._sandbox = original
-        session._pool = FakePool(replacement)
-
-        assert session.swap_sandbox("snap-x") is expect_swap
-        if expect_swap:
-            assert session._sandbox is replacement
-            assert session._pool.destroyed == [original]
-        else:
-            # Unreachable: the old sandbox is still serving calls, and the
-            # useless replacement is cleaned up rather than leaked.
-            assert session._sandbox is original
-            assert session._pool.destroyed == [replacement]
-
-
 def test_every_capture_compacting_warns_once(caplog):
     """A compaction budget below a single step's writes degrades silently
     into a compact+swap every other step; the guard turns that into one

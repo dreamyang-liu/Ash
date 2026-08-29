@@ -127,8 +127,14 @@ def test_late_session_ref_is_backfilled(tmp_path):
     journal.close()
 
 
-def test_clean_steps_reuse_the_previous_snapshot(tmp_path):
-    """Read-only steps map to the last capture, so the step map stays complete."""
+def test_the_journal_pairs_a_clean_step_with_the_previous_snapshot(tmp_path):
+    """Read-only steps map to the last capture, so the step map stays complete.
+
+    Named for the LEDGER, not the Checkpointer: swebench/tests/test_checkpoints.py
+    has a same-shaped test one layer down, asserting that only the mutating step
+    was captured. Two identical names for two different layers reads as a
+    duplicate and invites deleting the wrong one.
+    """
     journal, bridge, checkpointer = make(tmp_path, clean_steps=(2,))
     journal.emit(E.SESSION_REF, native_session_id="ses_1")
     journal.emit(E.TURN_COMPLETED, usage={})
