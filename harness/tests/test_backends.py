@@ -1,4 +1,4 @@
-"""Backend selection (swebench/backends.py).
+"""Backend selection (harness/execution/backends.py).
 
 The SDK's `Pool` was always the abstraction a harness wants; what was missing was
 the step that picks one. Every call site named `DockerPool` outright, so the
@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from ash_sandbox import DockerPool, MicroVMPool, SandboxPool
-from swebench.backends import (
+from harness.execution.backends import (
     BackendError,
     backend_config,
     backend_name,
@@ -218,7 +218,7 @@ def test_microvm_accepts_from_image():
     Unknown keys are rejected rather than ignored, so this has to be declared
     or a config that sets it would look like it worked.
     """
-    from swebench.backends import build_pool
+    from harness.execution.backends import build_pool
 
     pool = build_pool({"backend": "microvm",
                        "microvm": {"server_url": "http://127.0.0.1:8000",

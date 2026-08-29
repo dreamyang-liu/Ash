@@ -195,7 +195,7 @@ def _cmd_extract(args: argparse.Namespace) -> int:
         print(
             "backend %r cannot restore snapshots, so there is nothing to extract "
             "from after the fact; extract from the live sandbox before teardown "
-            "instead (see swebench/mcp_server.py)." % args.backend,
+            "instead (see harness/execution/server.py)." % args.backend,
             file=sys.stderr,
         )
         return 2

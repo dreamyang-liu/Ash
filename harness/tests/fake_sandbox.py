@@ -13,7 +13,7 @@ import hashlib
 import shlex
 import threading
 
-from swebench.models import ToolResult
+from harness.core.result import ToolResult
 
 
 class FakeSandbox:

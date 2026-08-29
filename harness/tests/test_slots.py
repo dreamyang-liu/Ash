@@ -73,7 +73,7 @@ def test_codex_mcp_stdio_becomes_config_overrides():
 
 
 def test_codex_mcp_remote_uses_url_and_session_headers():
-    """The header names are a wire contract with swebench.mcp_server
+    """The header names are a wire contract with harness.execution.server
     (SESSION_HEADERS / SANDBOX_HEADER), not decoration: without X-Session-Owner
     every request is a fresh anonymous session, so a sandbox created by one call
     is invisible to the next."""

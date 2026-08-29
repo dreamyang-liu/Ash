@@ -1108,7 +1108,7 @@ def _build_pipeline(args) -> "ToolPipeline | None":
 
 def main(pool_cls=None):
     """Run the proxy. ``pool_cls`` lets a caller supply a SandboxPool subclass
-    that hooks sandbox lifecycle (see swebench/mcp_server.py)."""
+    that hooks sandbox lifecycle (see harness/execution/server.py)."""
     import argparse
     parser = argparse.ArgumentParser(description="Ash sandbox MCP server")
     parser.add_argument("--http", action="store_true", help="Run as HTTP server (multi-session)")

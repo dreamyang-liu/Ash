@@ -216,11 +216,10 @@ harness/          agent runtime — see harness/README.md
   core/journal.py append-only JSONL, the canonical state
   rollback.py     checkpoint pairing and fork plans
   tool_panels/    default (shell+text_editor), full, bash_only, no_web
-swebench/         the eval layer: what counts as an answer
+swebench/         the eval layer: what counts as an answer. Four files.
   fork_eval.py    run -> grade -> branch on failure (the loop above)
   dataset.py      instances, test commands, the bare-name runner
-  harnesses/      litellm, claude-code, marathon, marathon-claude-code
-  branching.py    the marathon-flavoured analyst (fork_eval has its own)
+  patch.py        what belongs in a diff
 k8s-scaffold/     Go control plane + gateway for fleet-scale sandboxes
 docs/             generated diagrams (gen_*.py) — geometry-validated
 results/          benchmark output. Generated data.

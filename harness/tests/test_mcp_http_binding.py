@@ -1,6 +1,6 @@
 """Integration: HTTP session identity and orchestrator-provisioned binding.
 
-Runs a real ``swebench.mcp_server --http`` against real Docker sandboxes,
+Runs a real ``harness.execution.server --http`` against real Docker sandboxes,
 because the failure this pins down was invisible to every unit test: the stdio
 path (which the demo and slot tests use) binds its sandbox at startup and hides
 the ``sandbox_id`` parameter, so nothing exercised the header contract.
@@ -56,7 +56,7 @@ class Server:
         self.url = "http://127.0.0.1:%d/mcp" % port
         env = dict(os.environ, PYTHONPATH=str(REPO))
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "swebench.mcp_server", "--http",
+            [sys.executable, "-m", "harness.execution.server", "--http",
              "--host", "127.0.0.1", "--port", str(port),
              "--runtime-bin", str(RUNTIME_BIN)],
             cwd=str(REPO), env=env,

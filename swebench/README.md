@@ -33,16 +33,14 @@ One instance at a time. The loop is attempt → grade → branch on failure; see
 swebench/
 ├── fork_eval.py     the loop: attempt, grade from a snapshot, branch on failure
 ├── dataset.py       instances, test commands, the runner bare test ids need
-├── patch.py         what belongs in a diff: staged + untracked-minus-baseline
-├── models.py        shim -> harness.core.result
-├── backends.py      shim -> harness.execution.backends
-├── templates.py     shim -> harness.execution.templates
-├── mcp_server.py    shim -> harness.execution.server
-└── style.py         terminal colours
+└── patch.py         what belongs in a diff: staged + untracked-minus-baseline
 ```
 
-The four shims exist because the modules moved into the execution plane during the
-layering inversion, and documented import paths should keep working.
+Three files. The re-export shims (models, backends, templates, mcp_server) and
+style.py went once nothing imported them: a shim with no importer is a path for
+code to drift back across a layer boundary. Import from `harness.core.result`,
+`harness.execution.backends`, `harness.execution.templates` and
+`harness.execution.server` directly.
 
 ## Grading, and why it is easy to get wrong
 
