@@ -194,3 +194,54 @@ def test_no_config_carries_a_literal_secret():
     assert not offenders, (
         "literal credentials in %s -- source them from the environment instead"
         % ", ".join(offenders))
+
+
+# --------------------------------------------------------------------------- #
+#  The top-level README
+# --------------------------------------------------------------------------- #
+#  Nothing guarded it, and it showed: it advertised "7 tool implementations", a
+#  `swebench/agent.py` that had become a package and then been deleted, and
+#  `ash_sandbox/` at the repository root two moves after it went into sdk/.
+
+TOP_README = REPO / "README.md"
+
+
+def test_top_readme_tool_table_matches_the_runtime():
+    import json
+
+    served = {t["name"] for t in
+              json.loads((REPO / "runtime" / "schema" / "tools.json").read_text())["tools"]}
+    rows = set(re.findall(r"^\| `(\w+)` \|", TOP_README.read_text(), re.M))
+    assert rows == served, (
+        "README tool table vs runtime: only in README %s, only in runtime %s"
+        % (sorted(rows - served), sorted(served - rows)))
+
+
+def test_top_readme_project_tree_names_files_that_exist():
+    """Nested entries belong to the directory above them, so the tree is walked
+    rather than grepped -- a bare `slots/` is `harness/slots/`."""
+    block = re.search(r"```\n\.\n(.*?)```", TOP_README.read_text(), re.S)
+    assert block, "the README has no project tree"
+    parent, missing = "", []
+    for line in block.group(1).splitlines():
+        entry = re.search(r"^(\s*)[├└]── ([\w/.-]+)", line)
+        if not entry:
+            continue
+        indent, name = len(entry.group(1)), entry.group(2)
+        if indent == 0:
+            parent = name if name.endswith("/") else ""
+            path = name
+        else:
+            path = parent + name
+        if not (REPO / path.rstrip("/")).exists():
+            missing.append(path)
+    assert not missing, "the README tree names %s, which do not exist" % missing
+
+
+def test_top_readme_does_not_advertise_deleted_entry_points():
+    """`python -m swebench`, the harnesses and the YAML configs are gone. A README
+    whose Quick Start does not run is worse than one that says less."""
+    text = TOP_README.read_text()
+    for gone in ("python -m swebench -c", "--harness ", "swebench/configs/",
+                 "swebench/agent"):
+        assert gone not in text, "README still advertises %r" % gone
