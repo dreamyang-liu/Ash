@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Generate docs/architecture-current.excalidraw.
+"""The layered-architecture half of docs/architecture-overview.excalidraw.
+
+Not a diagram of its own any more: it rendered a strict subset of the overview
+(0 text blocks that the overview lacked), so the two were one picture stored
+twice -- 56KB of generated JSON that could only drift. ``build()`` is imported by
+gen_overview.py, which draws this above its sequence diagram.
 
 Checked in because the previous diagram was hand-written JSON, which went wrong in
 two ways worth avoiding: typos that made the file unopenable, and -- worse -- text
@@ -22,7 +27,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parent / "architecture-current.excalidraw"
+#: Only used when this file is run directly, as a way to check the layout of the
+#: architecture half alone. The committed artefact is architecture-overview.
+OUT = Path(__file__).resolve().parent / "architecture-only.excalidraw"
 
 # The element builders, font metrics and geometry validation live in exgen.py,
 # shared with gen_checkpoint_flow.py -- two copies of the validator is how the

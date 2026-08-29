@@ -66,7 +66,6 @@ python -m harness fork-plan runs/<id>.jsonl --step 12
 ## Diagrams
 
 - `docs/architecture-overview.excalidraw` — 一张图:分层架构 + 一次 run/fork 的时序图
-- `docs/architecture-current.excalidraw` — 架构单独一张
 - `docs/checkpoint-flow.excalidraw` — checkpoint 机制的流程图
 - 都由 `docs/gen_*.py` 生成(几何校验:重叠/溢出直接拒绝写文件),改架构后重跑即可
 
