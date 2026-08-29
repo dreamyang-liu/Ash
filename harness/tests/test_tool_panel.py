@@ -25,10 +25,9 @@ from ash_sandbox.panel import (  # noqa: E402
     parse_agent_tool,
 )
 
-from swebench.agent.tools import (  # noqa: E402
+from harness.execution.panel import (  # noqa: E402
     PANEL_DIR,
     RUNTIME_SCHEMA,
-    build_panel,
     load_panel,
     resolve_panel,
 )
@@ -36,22 +35,6 @@ from swebench.agent.tools import (  # noqa: E402
 DECL = load_declaration(RUNTIME_SCHEMA)
 
 
-@pytest.fixture(autouse=True)
-def clean_registry():
-    """Custom tools register on a process-default registry, so a test that adds one
-    leaks into every test after it -- which is how this module's first assertion about
-    a panel's contents started failing in the suite while passing alone.
-
-    Autouse rather than opt-in: the leak is invisible until some later test happens to
-    count the tools in a panel, and by then the culprit is several files away. Worth
-    noting that the registry being a process global is the same shape as the panel
-    global fixed in this branch; custom tools still have it."""
-    from swebench.agent.custom_tools import DEFAULT_REGISTRY
-
-    before = dict(DEFAULT_REGISTRY.custom_specs)
-    yield
-    DEFAULT_REGISTRY.custom_specs.clear()
-    DEFAULT_REGISTRY.custom_specs.update(before)
 
 
 # --------------------------------------------------------------------------- #
@@ -225,31 +208,6 @@ def test_every_shipped_panel_compiles():
         assert load_panel(name).schema, f"{name} compiled to an empty panel"
 
 
-def test_the_prompt_for_bash_only_names_the_tool_it_offers():
-    """The prompt said `bash` while the panel offers `shell`; a model told to call a
-    tool that is not there wastes turns discovering that."""
-    config = (Path(__file__).resolve().parents[1] / "configs" / "default-bash.yaml").read_text()
-    assert "`shell`" in config
-    assert "`bash`" not in config
-
-
-def test_reserved_names_cover_every_tool_the_runtime_serves():
-    """`ToolRegistry.RESERVED_NAMES` is hardcoded, which is what BUILTIN_ROUTES was --
-    so it needs the check that table never had.
-
-    It cannot be derived: registration happens while manifests load, before any
-    sandbox exists, so there is no declaration to consult. A custom tool named `shell`
-    would shadow the real one (dispatch checks is_custom_tool first) and every shell
-    call would silently become a binary invocation, so the list has to be right.
-    """
-    from ash_sandbox import ToolRegistry
-
-    served = {t["name"] for t in json.loads(RUNTIME_SCHEMA.read_text())["tools"]}
-    missing = served - ToolRegistry.RESERVED_NAMES
-    assert not missing, (
-        f"the runtime serves {sorted(missing)} and a custom tool could take those "
-        f"names, shadowing them; add them to ToolRegistry.RESERVED_NAMES")
-
 
 def test_reserved_names_are_real_tools_or_documented_aliases():
     """A stale entry would forbid a name for no reason. `bash` is kept on purpose:
@@ -295,54 +253,6 @@ def test_a_missing_path_is_reported_as_such(tmp_path):
 #  Schema and routing travel together
 # --------------------------------------------------------------------------- #
 
-def test_an_agents_panel_is_its_own(tmp_path):
-    """Two agents in one process must be able to offer different panels. Routing used
-    to resolve against a module-level global that `use_panel()` mutated, so the second
-    agent silently changed the first one's routing. Batch mode runs several workers in
-    one process."""
-    from swebench.agent import AshAgent
-    from swebench.models import AgentConfig, ToolResult
-
-    a = AshAgent(AgentConfig(), executor=lambda t, args: ToolResult(True, "ok"))
-    b = AshAgent(AgentConfig(), executor=lambda t, args: ToolResult(True, "ok"))
-    a.use_panel("full")
-    b.use_panel("bash_only")
-
-    assert len(a.tools_schema) == 7
-    assert len(b.tools_schema) == 1
-    assert a._panel.route("shell", {"command": "ls", "tail": 5})[1] == \
-        {"command": "ls", "tail": 5}, "b's panel leaked into a"
-
-
-def test_build_panel_includes_manifest_defined_tools(tmp_path):
-    """The rollout server set the schema directly and so never loaded custom tools: a
-    manifest-defined tool existed for a benchmark run and not for a rollout. One
-    builder now, so a caller cannot do half of it."""
-    (tmp_path / "t.json").write_text(json.dumps({
-        "name": "fast_search", "description": "search",
-        "binary": {"path": "/usr/bin/rg"},
-        "parameters": {"pattern": {"type": "string", "required": True,
-                                   "map": {"positional": 0}}}}))
-    panel = build_panel("default", str(tmp_path))
-    names = [t["function"]["name"] for t in panel.schema]
-    assert "fast_search" in names
-    assert "shell" in names, "the builtin views must survive alongside custom tools"
-    assert "fast_search" not in panel.views, \
-        "custom tools dispatch via artifact+shell, not through a view"
-
-
-def test_both_consumers_use_the_one_builder():
-    """Guards the split that caused it: two call sites assembling this by hand."""
-    import inspect
-    from swebench import rollout_server
-    from swebench.harnesses import litellm
-
-    for module in (litellm, rollout_server):
-        source = inspect.getsource(module)
-        assert "build_panel(" in source, f"{module.__name__} assembles its own panel"
-        assert "set_tools_schema" not in source, \
-            f"{module.__name__} sets a raw schema, bypassing routing"
-
 
 # --------------------------------------------------------------------------- #
 #  One file for the whole tool surface
@@ -372,69 +282,6 @@ custom_tools:
 """
 
 
-def test_one_manifest_can_declare_both_kinds(tmp_path):
-    """Views and external binaries in one file: it is one question -- what is this
-    model offered -- and it used to need two files to answer."""
-    path = tmp_path / "complete.yaml"
-    path.write_text(COMPLETE)
-    panel = build_panel(str(path))
-
-    names = [t["function"]["name"] for t in panel.schema]
-    assert names == ["shell", "run_tests", "lint"]
-    assert set(panel.views) == {"shell", "run_tests"}, \
-        "a custom tool is dispatched as a binary, so it gets no routing view"
-
-
-def test_a_view_may_reword_an_argument_but_not_retype_it(tmp_path):
-    """The type is the runtime's: a view that could restate it could contradict the
-    tool it dispatches to. The description is not, because a renamed argument
-    otherwise inherits prose about the original -- `run_tests(target=…)` came out
-    described as "Shell command to execute"."""
-    path = tmp_path / "complete.yaml"
-    path.write_text(COMPLETE)
-    target = next(t["function"] for t in build_panel(str(path)).schema
-                  if t["function"]["name"] == "run_tests")["parameters"]["properties"]["target"]
-
-    assert target["description"] == "A pytest node id, or the whole command."
-    assert target["type"] == "string", "the runtime's type must survive the rewording"
-
-    with pytest.raises(PanelError) as caught:
-        parse_agent_tool({"name": "run", "runtime_tool": "shell",
-                          "arguments": {"target": {"name": "command",
-                                                   "type": "integer"}}})
-    assert "type" in str(caught.value)
-
-
-def test_a_custom_tool_defined_twice_is_an_error(tmp_path):
-    """The registry keys by name, so the second load would quietly replace the first."""
-    path = tmp_path / "complete.yaml"
-    path.write_text(COMPLETE)
-    directory = tmp_path / "drop_in"
-    directory.mkdir()
-    (directory / "lint.yaml").write_text(
-        "name: lint\ndescription: another lint\n"
-        "binary: {path: /usr/bin/other}\n"
-        "parameters: {target: {type: string, map: {positional: 0}}}\n")
-
-    with pytest.raises(ValueError) as caught:
-        build_panel(str(path), str(directory))
-    assert "lint" in str(caught.value)
-
-
-def test_both_sources_load_together(tmp_path):
-    """A panel's own tools plus a shared drop-in directory."""
-    path = tmp_path / "complete.yaml"
-    path.write_text(COMPLETE)
-    directory = tmp_path / "drop_in"
-    directory.mkdir()
-    (directory / "fmt.yaml").write_text(
-        "name: fmt\ndescription: format\nbinary: {path: /usr/bin/black}\n"
-        "parameters: {target: {type: string, map: {positional: 0}}}\n")
-
-    names = [t["function"]["name"] for t in build_panel(str(path), str(directory)).schema]
-    assert "lint" in names and "fmt" in names
-
-
 # --------------------------------------------------------------------------- #
 #  Custom tools belong to a session, not to the process
 # --------------------------------------------------------------------------- #
@@ -448,64 +295,3 @@ def _tool_dir(root, name, binary):
     return str(d)
 
 
-def test_two_configurations_do_not_see_each_others_custom_tools(tmp_path):
-    """The registry used to be a process global that build_panel wrote into, so a
-    manifest loaded for one configuration stayed visible to the next. A benchmark run
-    never noticed -- one configuration, all workers alike -- but the rollout server
-    builds a configuration per request."""
-    from ash_sandbox.toolset import ToolRegistry
-
-    a = build_panel("default", _tool_dir(tmp_path, "lint", "/usr/bin/ruff"),
-                    registry=ToolRegistry())
-    b = build_panel("default", _tool_dir(tmp_path, "fmt", "/usr/bin/black"),
-                    registry=ToolRegistry())
-
-    assert a.is_custom_tool("lint") and not a.is_custom_tool("fmt")
-    assert b.is_custom_tool("fmt") and not b.is_custom_tool("lint")
-    assert "fmt" not in [t["function"]["name"] for t in a.schema]
-
-
-def test_a_session_owns_its_tool_surface(tmp_path):
-    """One sandbox is one tool surface, so the session is the scope -- and it holds the
-    registry from construction, before any sandbox is spawned, so a panel can be
-    compiled into it whenever the harness gets there."""
-    from swebench.sandbox import AshSession
-
-    one, two = AshSession(quiet=True), AshSession(quiet=True)
-    assert one.tools is not two.tools
-
-    build_panel("default", _tool_dir(tmp_path, "lint", "/usr/bin/ruff"),
-                registry=one.tools)
-    build_panel("default", _tool_dir(tmp_path, "fmt", "/usr/bin/black"),
-                registry=two.tools)
-
-    assert sorted(one.tools.custom_specs) == ["lint"]
-    assert sorted(two.tools.custom_specs) == ["fmt"]
-
-
-def test_the_loop_and_the_executor_read_one_registry():
-    """The loop asks the panel what is custom; the session executor dispatches from its
-    registry. Two registries would mean the loop passing a tool through as custom that
-    the executor cannot expand -- so the panel carries the one it was built with."""
-    import inspect
-
-    import swebench.agent as agent_module
-    from swebench.agent import tools as tools_module
-    from swebench.harnesses import litellm
-    from harness.execution import session as session_module
-    from swebench import rollout_server
-
-    assert "self.panel.is_custom_tool(" in inspect.getsource(agent_module), \
-        "the loop should ask its panel, not a module-level global"
-    assert "registry=self.tools" in inspect.getsource(session_module), \
-        "the session should dispatch from its own registry"
-    for module in (litellm, rollout_server):
-        assert "registry=session.tools" in inspect.getsource(module), \
-            f"{module.__name__} should build the panel into the session's registry"
-    # The method on ToolPanel is the one to keep; a module-level function is not,
-    # because it could only read the process registry. Matched at column 0.
-    assert not any(line.startswith("def is_custom_tool")
-                   for line in inspect.getsource(tools_module).splitlines()), \
-        "a module-level is_custom_tool would read the process registry again"
-    assert "def is_custom_tool(self" in inspect.getsource(tools_module), \
-        "ToolPanel should answer this, so the loop asks the panel it was given"

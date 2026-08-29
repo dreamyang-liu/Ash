@@ -1,114 +1,82 @@
-# SWE-bench evaluation harness
+# SWE-bench evaluation
 
-Runs an LLM agent against SWE-bench instances in isolated sandboxes — containers,
-Firecracker microVMs, or Kubernetes pods, chosen by config rather than by code.
+This layer knows two things the rest of the repository deliberately does not:
+that the answer to a SWE-bench instance is a **patch**, and that a patch is right
+when the instance's `FAIL_TO_PASS` tests pass without breaking `PASS_TO_PASS`.
+Everything about *running* an agent lives in [`harness/`](../harness/README.md).
 
 ## Quick start
 
 ```bash
-pip install litellm pyyaml datasets
-pip install ./sdk                      # the ash-sandbox client
-export ANTHROPIC_API_KEY=sk-...        # or AWS creds for Bedrock, etc.
+pip install ./sdk pyyaml datasets
+cd runtime && go build -o ash-runtime . && cd ..
+export AENV_SERVER_URL=http://127.0.0.1:8000   # microvm: the only snapshot backend
+export AENV_API_KEY=...
+export AWS_BEARER_TOKEN_BEDROCK=...            # for codex on Bedrock
 
-# One instance
-python -m swebench -c swebench/configs/bedrock-sonnet46.yaml -i django__django-11848
+# no config files: fork_eval takes its arguments on the command line. The 24
+# per-model YAMLs went with the batch runner that was their only reader.
 
-# A full run (workers come from the config, or -w)
-python -m swebench -c swebench/configs/bedrock-sonnet46.yaml
-
-# The same config on Firecracker microVMs instead of containers
-python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
-
-# A different harness (topology)
-python -m swebench -c swebench/configs/claude-opus.yaml --harness claude-code
+python -m swebench.fork_eval \
+    --instance sympy__sympy-13091 \
+    --slot codex --model openai.gpt-5.6-luna \
+    --rounds 2 --branches 3 \
+    -o runs/fork-eval
 ```
 
-`python -m swebench` is the only entry point. Configs are YAML and compose via
-`extends:`; CLI flags override file values, which override defaults. See
-`__main__.py` for the flag-to-section mapping, and `configs/` for examples.
+One instance at a time. The loop is attempt → grade → branch on failure; see
+[`../CLAUDE.md`](../CLAUDE.md) for what each step does and why.
 
-## Prerequisites
-
-- Python ≥ 3.10, plus the `ash-sandbox` SDK (`pip install ./sdk`)
-- A sandbox backend, selected with `--backend` or `execution.backend`:
-  - `docker` (default) — Docker running, SWE-bench images pullable
-  - `microvm` — an AgentENV server; settings under `execution.microvm`, or
-    `AENV_SERVER_URL` / `AENV_API_KEY`
-  - `k8s` — the control plane and gateway from `k8s-scaffold/`
-- Nothing needs installing inside the image: the `ash-runtime` binary is either
-  mounted (`--runtime-bin`) or fetched by `bootstrap.sh` at startup.
-
-## Layout
+## Files
 
 ```
 swebench/
-├── __main__.py       # CLI entry: config loading, flag merge, dispatch
-├── batch.py          # Parallel execution + live dashboard
-├── dataset.py        # Instance loading, image resolution, task prompts
-├── models.py         # Generic types: ToolResult, CommandOutcome, AgentConfig,
-│                     #   CostTracker, Trajectory
-├── backends.py       # Sandbox backend from config (docker | microvm | k8s)
-├── sandbox.py        # AshSession: sandbox lifecycle + the executor seam
-├── prediction.py     # The SWE-bench prediction format (eval layer)
-├── submission.py     # Asking the agent to hand in its patch (eval layer)
-├── patch.py          # Diffing a worktree, for shared-tree topologies
-├── style.py          # Terminal formatting for the CLI and dashboard
-├── agent/            # The agent loop and the L2 interceptor pipeline:
-│   ├── pipeline.py   #   the onion: verdicts, CallContext, ToolPipeline
-│   ├── interceptors/ #   one package each — guardrail, truncate,
-│   │                 #   present — plus the default assembly
-│   ├── tools.py      #   panel compilation + routing (ToolPanel)
-│   └── ...           #   the loop itself: conversation, llm, prompts,
-│                     #   hooks, trace, custom_tools
-├── harnesses/        # Pluggable topologies; base.py defines the API
-├── configs/          # Per-model YAML, composed with `extends:`
-├── mcp_server.py     # MCP proxy: the same pipeline for external agents
-└── rollout_server.py # RL rollout endpoint (agent + in-sandbox grading)
+├── fork_eval.py     the loop: attempt, grade from a snapshot, branch on failure
+├── dataset.py       instances, test commands, the runner bare test ids need
+├── patch.py         what belongs in a diff: staged + untracked-minus-baseline
+├── models.py        shim -> harness.core.result
+├── backends.py      shim -> harness.execution.backends
+├── templates.py     shim -> harness.execution.templates
+├── mcp_server.py    shim -> harness.execution.server
+└── style.py         terminal colours
 ```
 
-## How a run works
+The four shims exist because the modules moved into the execution plane during the
+layering inversion, and documented import paths should keep working.
 
-1. **Sandbox** — `AshSession.create(image)` starts one from the configured
-   backend and connects to the `ash-runtime` serving tools inside it.
-2. **Tool panel** — compiled, not written: the runtime declares what it serves
-   (`runtime/schema/tools.json`) and a manifest says what to offer and how
-   (`tools:` in config, `configs/tool_panels/*.yaml`). See docs/TOOL_PANEL.md.
-   `bash_only` is one such panel — a single `shell` view with only `command`.
-3. **Agent loop** — the model gets a system prompt and the issue, and calls the
-   panel's tools. Every call crosses one seam —
-   `executor(tool_name, args) -> ToolResult` — which is where output truncation
-   and guardrails mount as interceptors (`agent/interceptors/`), and where your own
-   go via `execution.interceptors`.
-4. **Submission** — the agent is asked for its own diff, with steps reserved so it
-   still has turns to answer in (`submission.py`); it knows which files it changed,
-   which a harness reading git state can only guess.
-5. **Cleanup** — `session.destroy()` runs in a `finally`, so the sandbox goes away
-   even when the run raises.
+## Grading, and why it is easy to get wrong
 
-Output lands in `results/<run>/`: `preds.json`, plus per-instance trajectories and
-traces. Treat it as generated data.
+`grade_snapshot` restores the attempt's **last snapshot into a fresh microVM** and
+runs the tests there. That is deliberate: it proves the snapshot carries the work,
+and it lets grading happen after the agent's sandbox is gone.
 
-## Harnesses
+Before running anything it applies the dataset's `test_patch` — the tests the
+image ships predate the fix, so a graded test may assert the *old* behaviour, or
+not exist at all. A `test_patch` that will not apply is reported as a grading
+error rather than falling back to the stale copies: it means the agent's edits
+collided with the graded tests themselves.
 
-Registered in `harnesses/__init__.py`:
+**Validate any change to this code against an input that must fail.** Grade a
+snapshot from *before* the agent's edit; if it "passes", the grader is broken.
+That check is what caught four separate defects here, each of which had been
+reporting a confident wrong number:
 
-| Harness       | Topology                                     |
-|---------------|----------------------------------------------|
-| `litellm`     | one agent, one sandbox — any litellm model    |
-| `claude-code` | the Claude Code CLI, driven over MCP         |
+- sympy reports **bare test-function names** (all 75 of its Verified instances).
+  Handed to pytest as paths they collect nothing, so the run fails whatever the
+  agent did. `build_batch_test_command` now refuses ids it cannot express.
+- `bin/test -k EXPR FILE` ignores FILE, matches nothing, and **exits 0** — and
+  these images ship no pytest at all.
+- `sympy.test(file, kw=[...])` also returns truthy for a zero-match run, and its
+  progress output cannot be captured (it holds its own stream reference).
+  `SYMPY_RUNNER` imports the module and **calls** the named functions instead,
+  exiting `2` ("grader broken") when nothing ran.
+- the graded tests come from `test_patch`, not from the image.
 
-Add one by subclassing `BaseHarness` and registering it in `HARNESSES`.
+## Not here any more
 
-`manager-worker` and `best-of-n` were removed while the single-agent path is being
-settled, and Waggle (the write-arbitration interceptor they used) with them.
-Mounting one
-shared chain across several agents still works and is still tested — a
-coordination interceptor comes back as a plugin, or by reverting.
-
-## Evaluating results
-
-```bash
-pip install sb-cli
-sb-cli submit swe-bench_verified test \
-  --predictions_path results/<run>/preds.json --run_id my-run
-```
+This repository's own litellm agent loop, the four `harnesses/` topologies,
+SWE-Marathon, the batch runner (`python -m swebench`), the RL rollout server and
+step-replay were deleted. Each held a second copy of something the orchestrator
+does properly now — sandbox lifecycle, per-step checkpoints, agent drivers — and
+none was in use once `fork_eval` existed. Batch and rollout return on top of the
+orchestrator when they are needed, rather than being carried along broken.

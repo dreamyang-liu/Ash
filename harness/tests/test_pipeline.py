@@ -1,4 +1,4 @@
-"""Unit tests for the tool interceptor pipeline (swebench.agent.pipeline).
+"""Unit tests for the tool interceptor pipeline (harness.execution.pipeline).
 
 No Docker, no model calls — the interceptors are exercised against plain
 functions, and where a filesystem is needed, tests/fake_sandbox.py stands in.
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from swebench.agent.pipeline import (
+from harness.execution.pipeline import (
     CallContext,
     Continue,
     Reject,
@@ -29,7 +29,7 @@ from swebench.agent.pipeline import (
     load_pipeline,
     piped_executor,
 )
-from swebench.models import ToolResult
+from harness.core.result import ToolResult
 
 PATH = "/testbed/target.txt"
 
@@ -278,7 +278,7 @@ def test_inner_exception_becomes_failed_result_and_still_unwinds():
 # --------------------------------------------------------------------------- #
 
 _PLUGIN_SOURCE = """\
-from swebench.agent.pipeline import Continue, ToolInterceptor
+from harness.execution.pipeline import Continue, ToolInterceptor
 
 class Stamp(ToolInterceptor):
     def before(self, ctx):

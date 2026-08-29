@@ -141,28 +141,19 @@ minimal fork demo without any benchmark attached.
 
 ---
 
-## The classic SWE-bench harnesses
+## What is deliberately absent
 
-The older, non-checkpointed path is still the way to run a *batch*:
+`python -m swebench` (the batch runner), the four `harnesses/`, this
+repository's own litellm agent loop, SWE-Marathon, the RL rollout server and
+step-replay have all been **deleted**. Each kept a second copy of something the
+orchestrator now does properly — sandbox lifecycle, per-step checkpoints, agent
+drivers — and none was in use once `fork_eval` existed.
 
-```bash
-# one instance
-python -m swebench -c swebench/configs/bedrock-sonnet46.yaml -i django__django-11848
-# a full run (workers from the config, or -w)
-python -m swebench -c swebench/configs/bedrock-sonnet46.yaml
-# Claude Code as the agent instead of this repo's loop
-python -m swebench -c swebench/configs/claude-opus.yaml --harness claude-code
-# on microVMs instead of containers
-python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
-```
-
-Four harnesses (`swebench/harnesses/__init__.py`): `litellm` (this repo's agent
-loop, any model), `claude-code`, `marathon` (SWE-Marathon's ultra-long tasks,
-graded by the task's own `tests/test.sh`), `marathon-claude-code`. Add one by
-subclassing `BaseHarness` and registering it.
-
-Config is YAML with `extends:`; CLI flags override file values. Output lands in
-`results/<run>/` — **generated data, never hand-edited.**
+`fork_eval` runs **one instance at a time** and takes its arguments on the
+command line — the 24 per-model YAML configs went too, since the batch runner was
+their only reader. Batch (and the rollout server) come back on top of the
+orchestrator when they are needed, rather than being carried along broken.
+`results/` from those older runs is still on disk: generated data, untracked.
 
 ---
 

@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "sdk"))
 
 from ash_sandbox.toolset import parse_manifest  # noqa: E402
 
-from swebench.agent.tools import PANEL_DIR  # noqa: E402
+from harness.execution.panel import PANEL_DIR  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -143,16 +143,16 @@ def test_claude_md_paths_exist():
     assert not missing, f"CLAUDE.md names {missing}, which do not exist"
 
 
-def test_claude_md_config_keys_exist():
-    """Every `section.key` it documents has to be in the flag/section table, or a
-    reader sets something that is silently ignored -- which is how `custom_tools_dir`
-    spent months reaching AgentConfig from nowhere."""
-    mapping = (REPO / "swebench" / "__main__.py").read_text()
-    claimed = set(re.findall(r'`(agent|execution|dataset|limits|model)\.(\w+)`',
-                             CLAUDE_MD.read_text()))
-    missing = [f"{s}.{k}" for s, k in sorted(claimed)
-               if f'("{s}", "{k}")' not in mapping]
-    assert not missing, f"CLAUDE.md documents {missing}, which the CLI does not map"
+def test_claude_md_names_no_config_section_that_no_longer_exists():
+    """The `section.key` table it used to check lived in swebench/__main__.py,
+    which went with the batch runner. Nothing maps YAML sections any more, so a
+    documented `agent.tools` would send a reader to a flag that does not exist."""
+    stale = set(re.findall(r'`(agent|execution|dataset|limits|model)\.(\w+)`',
+                           CLAUDE_MD.read_text()))
+    assert not stale, (
+        "CLAUDE.md documents config keys %s, but the YAML/flag mapping was "
+        "deleted with the batch runner -- describe fork_eval's arguments instead"
+        % sorted("%s.%s" % k for k in stale))
 
 
 def test_claude_md_does_not_ask_for_hand_synced_tool_lists():

@@ -1,8 +1,9 @@
 """Unit tests for the interceptors migrated out of the agent loop.
 
-Covers GuardrailInterceptor (swebench/agent/guardrails.py), TruncateInterceptor
-and the loop's default chain (swebench/agent/interceptors.py), plus the agent
-loop consuming a pipeline (swebench/agent/__init__.py).
+Covers GuardrailInterceptor, TruncateInterceptor and the default chain in
+harness/execution/interceptors/. The tests that drove this repository's own agent
+loop went with that loop -- what remains is the chain itself, which every agent
+reaches through the MCP proxy.
 
 No Docker, no model calls.
 
@@ -27,18 +28,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from swebench.agent import AshAgent
-from swebench.agent.pipeline import (RAW_ERROR, RAW_OUTPUT, CallContext,
+from harness.core.result import ToolResult
+from harness.execution.pipeline import (RAW_ERROR, RAW_OUTPUT, CallContext,
                                      ToolPipeline)
-from swebench.agent.interceptors import (
+from harness.execution.interceptors import (
     EDIT_STREAK_LIMIT,
     GuardrailInterceptor,
     GuardrailState,
     TruncateInterceptor,
     default_pipeline,
 )
-from swebench.agent.trace import ToolTraceWriter
-from swebench.models import AgentConfig, ToolResult
 
 PATH = "/testbed/target.py"
 
@@ -104,14 +103,6 @@ def test_failed_view_does_not_unlock_editing():
     assert "without reading it first" in _run(pipe, *_edit()).output
 
 
-def test_read_state_is_keyed_by_agent():
-    """Shared interceptor instance: A's read must not excuse B's blind edit."""
-    pipe = ToolPipeline([GuardrailInterceptor()])
-    _run(pipe, *_view(), agent="A")
-    assert "Warning" not in _run(pipe, *_edit(), agent="A").output
-    assert "without reading it first" in _run(pipe, *_edit(), agent="B").output
-
-
 def test_read_state_is_keyed_by_sandbox():
     """Same agent, two workspaces: reading a path in one is not reading it in
     the other — the file behind that path is a different file."""
@@ -163,7 +154,7 @@ def test_one_place_states_what_counts_as_an_edit():
     everything that mutates *existing* content (CONTENT_EDIT_COMMANDS, for
     read-before-edit). A coordination interceptor keys off the wider one; that
     one left with Waggle, and the distinction is the part worth keeping."""
-    from swebench.agent.tools import CONTENT_EDIT_COMMANDS, EDIT_COMMANDS
+    from harness.execution.tool_constants import CONTENT_EDIT_COMMANDS, EDIT_COMMANDS
     assert "write" in EDIT_COMMANDS
     assert "write" not in CONTENT_EDIT_COMMANDS
     assert CONTENT_EDIT_COMMANDS < EDIT_COMMANDS
@@ -185,7 +176,7 @@ def test_warning_survives_a_rejection_from_a_deeper_interceptor():
     """The warning is stashed in `before` and emitted in `after`. A deeper interceptor
     rejecting must not swallow it — the guardrail was entered, so per the onion
     rules its `after` still runs."""
-    from swebench.agent.pipeline import Reject, ToolInterceptor
+    from harness.execution.pipeline import Reject, ToolInterceptor
 
     class DeepRejecter(ToolInterceptor):
         def before(self, ctx):
@@ -244,15 +235,6 @@ def test_non_test_shell_command_does_not_reset_the_streak():
         _run(pipe, *_edit())
     _run(pipe, "shell", {"command": "ls -la"})
     assert "without running tests" in _run(pipe, *_edit()).output
-
-
-def test_edit_streaks_are_per_agent():
-    pipe = ToolPipeline([GuardrailInterceptor()])
-    for agent in ("A", "B"):
-        _run(pipe, *_view(), agent=agent)
-    for _ in range(EDIT_STREAK_LIMIT):
-        _run(pipe, *_edit(), agent="A")
-    assert "without running tests" not in _run(pipe, *_edit(), agent="B").output
 
 
 def test_state_dump_reports_reads_and_streaks():
@@ -388,7 +370,7 @@ def test_default_chain_presents_then_bounds_then_annotates():
 # --------------------------------------------------------------------------- #
 
 def _chain(read_before_edit: bool):
-    from swebench.tests.fake_sandbox import FakeSandbox
+    from harness.tests.fake_sandbox import FakeSandbox
 
     sandbox = FakeSandbox({PATH: "base"})
     pipe = ToolPipeline([
@@ -442,144 +424,6 @@ class _Conv:
         self.results.append(content)
 
 
-def _agent(executor, **kw) -> AshAgent:
-    return AshAgent(AgentConfig(), executor=executor, **kw)
-
-
-def test_loop_mounts_the_default_chain_and_truncates():
-    agent = _agent(lambda n, a: _ok("q" * 40000))
-    conv = _Conv()
-    agent._run_tool(_tool_call("shell", {"command": "cat big"}), conv, "turn-1")
-    assert "characters truncated" in conv.results[0]
-
-
-def test_loop_default_chain_warns_on_blind_edit():
-    agent = _agent(lambda n, a: _ok())
-    conv = _Conv()
-    agent._run_tool(_tool_call("text_editor", {"command": "str_replace",
-                                              "path": PATH, "old_str": "a",
-                                              "new_str": "b"}), conv, "turn-1")
-    assert "without reading it first" in conv.results[0]
-
-
-def test_empty_pipeline_disables_interception():
-    agent = _agent(lambda n, a: _ok("q" * 40000), pipeline=ToolPipeline([]))
-    conv = _Conv()
-    agent._run_tool(_tool_call("shell", {"command": "cat big"}), conv, "turn-1")
-    assert "characters truncated" not in conv.results[0]
-    assert len(conv.results[0]) == 40000
-
-
-def test_caller_supplied_pipeline_is_used_and_sees_agent_identity():
-    seen = []
-
-    class Spy(TruncateInterceptor):
-        def after(self, ctx, result):
-            seen.append((ctx.agent_id, ctx.sandbox_id, ctx.tool_name))
-            return result
-
-    agent = _agent(lambda n, a: _ok(), pipeline=ToolPipeline([Spy()]),
-                   agent_id="worker-3", sandbox_id="shared")
-    agent._run_tool(_tool_call("shell", {"command": "ls"}), _Conv(), "turn-1")
-    assert seen == [("worker-3", "shared", "shell")]
-
-
-def test_interceptors_receive_the_runtime_tool_not_the_view_name():
-    """Interceptors are keyed on the runtime tool, so the loop routes first. A view may
-    rename the tool; what reaches an interceptor is what will actually execute.
-
-    This used to assert the `bash` -> `shell` alias, which no longer exists, and then
-    that an unoffered argument was silently dropped -- which was itself the defect the
-    panel compiler exists to stop. Now an unoffered argument is an error, so this
-    checks the part that is still true: routing happens before interception."""
-    seen = []
-
-    class Spy(TruncateInterceptor):
-        def before(self, ctx):
-            seen.append((ctx.tool_name, dict(ctx.args)))
-            return super().before(ctx)
-
-    agent = _agent(lambda n, a: _ok(), pipeline=ToolPipeline([Spy()]))
-    agent.use_panel("bash_only")
-    agent._run_tool(_tool_call("shell", {"command": "ls"}), _Conv(), "turn-1")
-
-    assert seen == [("shell", {"command": "ls"})]
-
-
-def test_guardrail_state_does_not_leak_between_runs(monkeypatch):
-    """Each run() gets a fresh default chain: an edit streak from a previous
-    instance must not warn on the first edit of the next one."""
-    agent = _agent(lambda n, a: _ok())
-    conv = _Conv()
-    for _ in range(EDIT_STREAK_LIMIT):
-        agent._run_tool(_tool_call("text_editor", {"command": "str_replace",
-                                                  "path": PATH, "old_str": "a",
-                                                  "new_str": "b"}), conv, "turn-1")
-    assert "without running tests" in conv.results[-1]
-
-    # run() re-resolves the default chain; stub the model call out immediately.
-    monkeypatch.setattr(agent, "_query", lambda *a, **kw: None)
-    agent.run("task")
-    conv2 = _Conv()
-    agent._run_tool(_tool_call("text_editor", {"command": "str_replace",
-                                               "path": PATH, "old_str": "a",
-                                               "new_str": "b"}), conv2, "turn-1")
-    assert "without running tests" not in conv2.results[0]
-
-
-def test_trace_is_not_polluted_by_a_guardrail_warning(tmp_path):
-    """The warning is for the model. Counting its bytes as the tool's output
-    inflates output_bytes and — because the polluted text then equals what the
-    model saw — suppresses the `observation` that documents the nudge."""
-    agent = _agent(lambda n, a: _ok("File edited successfully"))
-    path = tmp_path / "trace.events.jsonl"
-    agent._event_trace = ToolTraceWriter(path, run_id="r1", agent_id="A",
-                                        sandbox_id="sb")
-    conv = _Conv()
-    agent._run_tool(_tool_call("text_editor", {"command": "str_replace",
-                                              "path": PATH, "old_str": "a",
-                                              "new_str": "b"}), conv, "turn-1")
-    agent._event_trace.close()
-
-    _, finished = [json.loads(line) for line in path.read_text().splitlines()]
-    assert finished["result"]["output"] == "File edited successfully"
-    assert finished["result"]["output_bytes"] == len(b"File edited successfully")
-    assert "without reading it first" in finished["observation"]
-    assert "without reading it first" in conv.results[0]     # model saw it
-
-
-def test_trace_reports_the_runtime_error_not_the_truncated_one(tmp_path):
-    huge = "F" * 40000
-    agent = _agent(lambda n, a: ToolResult(success=False, output=huge, error=huge))
-    path = tmp_path / "trace.events.jsonl"
-    agent._event_trace = ToolTraceWriter(path, run_id="r1", agent_id="A",
-                                        sandbox_id="sb")
-    conv = _Conv()
-    agent._run_tool(_tool_call("shell", {"command": "pytest"}), conv, "turn-1")
-    agent._event_trace.close()
-
-    _, finished = [json.loads(line) for line in path.read_text().splitlines()]
-    assert finished["result"]["error"] == huge               # ground truth
-    assert finished["result"]["output_bytes"] == len(huge.encode())
-    assert len(conv.results[0]) < 30_000                    # model got a bound
-
-
-def test_trace_records_runtime_bytes_while_the_model_sees_bounded_output(tmp_path):
-    """Truncation protects the model's context; the trace keeps ground truth."""
-    huge = "w" * 40000
-    agent = _agent(lambda n, a: _ok(huge))
-    path = tmp_path / "trace.events.jsonl"
-    agent._event_trace = ToolTraceWriter(path, run_id="r1", agent_id="A",
-                                        sandbox_id="sb")
-    conv = _Conv()
-    agent._run_tool(_tool_call("shell", {"command": "cat big"}), conv, "turn-1")
-    agent._event_trace.close()
-
-    _, finished = [json.loads(line) for line in path.read_text().splitlines()]
-    assert finished["result"]["output_bytes"] == len(huge.encode())
-    assert finished["result"]["output"] == huge             # untruncated
-    assert "characters truncated" in finished["observation"]  # what the model saw
-    assert "characters truncated" in conv.results[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -621,7 +465,7 @@ def test_a_plugins_file_replaces_the_assembly(tmp_path):
     from harness.execution.server import _build_pipeline
     path = tmp_path / "interceptors.py"
     path.write_text(
-        "from swebench.agent.pipeline import ToolInterceptor\n"
+        "from harness.execution.pipeline import ToolInterceptor\n"
         "class MySeat(ToolInterceptor):\n    pass\n"
         "PIPELINE = [MySeat()]\n")
     names = [i.name for i in
@@ -634,7 +478,7 @@ def test_http_sessions_are_stable_for_an_identified_client():
     be identified gets a new one per request and no interceptor can hold state. MCP's
     own `initialize` hands out a sessionId; honoring it back is what makes
     read-before-edit satisfiable over HTTP."""
-    from swebench.mcp_server import HttpMcpServer, SandboxPool
+    from harness.execution.server import HttpMcpServer, SandboxPool
     server = HttpMcpServer(SandboxPool())
     echoed = [server._get_or_create_session({"mcp-session-id": "s-1"}).id
               for _ in range(3)]
@@ -650,43 +494,6 @@ def test_http_sessions_are_stable_for_an_identified_client():
 #  Composing with PR #21's harness-side mount (executor_for(pipeline=))
 # --------------------------------------------------------------------------- #
 
-def test_an_already_governed_executor_is_not_governed_twice():
-    """`executor_for(pipeline=…)` folds a chain into the executor. If the agent
-    then mounted its default on top, every rule the two share would be stated
-    to the model twice."""
-    from swebench.agent.pipeline import piped_executor
-
-    ex = piped_executor(ToolPipeline([GuardrailInterceptor()]),
-                        lambda t, a: _ok(), "w1", "sb")
-    agent = _agent(ex)
-    conv = _Conv()
-    agent._run_tool(_tool_call("text_editor", {"command": "str_replace",
-                                              "path": PATH, "old_str": "a",
-                                              "new_str": "b"}), conv, "turn-1")
-    assert conv.results[0].count("without reading it first") == 1
-
-
-def test_an_explicit_pipeline_still_wins_over_a_mounted_one():
-    """Deferring to the executor's chain must not override an explicit choice."""
-    from swebench.agent.pipeline import piped_executor
-
-    ex = piped_executor(ToolPipeline([]), lambda t, a: _ok(), "w1", "sb")
-    agent = _agent(ex, pipeline=ToolPipeline([GuardrailInterceptor()]))
-    conv = _Conv()
-    agent._run_tool(_tool_call("text_editor", {"command": "str_replace",
-                                              "path": PATH, "old_str": "a",
-                                              "new_str": "b"}), conv, "turn-1")
-    assert "without reading it first" in conv.results[0]
-
-
-def test_a_plain_executor_still_gets_the_default_chain():
-    """The deference must key off an actually-mounted chain, not fire always."""
-    agent = _agent(lambda t, a: _ok("z" * 40000))
-    conv = _Conv()
-    agent._run_tool(_tool_call("shell", {"command": "cat big"}), conv, "turn-1")
-    assert "characters truncated" in conv.results[0]
-
-
 # --------------------------------------------------------------------------- #
 #  An interceptor that rewrites a result must not destroy the rest of it
 # --------------------------------------------------------------------------- #
@@ -700,7 +507,7 @@ def test_no_interceptor_drops_the_structured_outcome():
     -- nothing downstream looked -- and became reachable as soon as `extra=` let a
     caller mount an interceptor outside it. Swept across the chain rather than tested on
     one interceptor, so a new interceptor inherits the check."""
-    from swebench.models import CommandOutcome
+    from harness.core.result import CommandOutcome
 
     outcome = CommandOutcome(exit_code=1, stdout="out", stderr="err",
                              stdout_bytes=3, stderr_bytes=3)
@@ -722,7 +529,7 @@ def test_no_interceptor_drops_the_structured_outcome():
 def test_the_whole_default_chain_preserves_the_outcome():
     """End to end rather than one at a time: what the agent loop receives still
     carries the structured report."""
-    from swebench.models import CommandOutcome
+    from harness.core.result import CommandOutcome
 
     outcome = CommandOutcome(exit_code=1, stdout="out", stderr="err")
     incoming = ToolResult(success=False, output="x" * 40_000, error=None,

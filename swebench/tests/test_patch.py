@@ -206,26 +206,6 @@ def test_never_submit_covers_the_usual_suspects():
         assert pattern in NEVER_SUBMIT
 
 
-def test_both_callers_use_the_shared_commands():
-    """The session and the MCP proxy produce predictions for the same benchmark;
-    they must not disagree about what a prediction contains."""
-    root = Path(__file__).resolve().parents[1]
-    # The proxy's extraction moved into this module as PatchObserver (the generic
-    # execution plane knows nothing about patches), so the two callers are the
-    # harness session and that observer.
-    for name in ("sandbox.py", "patch.py"):
-        source = (root / name).read_text()
-        # Only executable lines: patch.py *documents* why `git add -A` is the
-        # wrong primitive, and that prose must not read as the mistake itself.
-        code = "\n".join(
-            line for line in source.splitlines()
-            if not line.lstrip().startswith(("#", "`"))
-        )
-        assert 'call("shell", command="git add -A' not in code, \
-            f"{name} force-adds untracked files again"
-        assert "extract_patch" in source or "stage_commands" in source, \
-            f"{name} should build its patch via swebench/patch.py"
-
 
 def test_format_patch_normalises_the_diff():
     assert format_patch("") == ""
@@ -239,33 +219,17 @@ def test_untracked_list_respects_the_repo_and_stays_read_only():
     assert "add" not in UNTRACKED_LIST              # never mutates the index
 
 
-def test_the_session_passes_its_baseline_to_the_extractor():
-    """The wiring, not just the rule: a session that recorded the baseline at
-    creation and then forgot to pass it would put the image's `build/` tree back
-    into every prediction, and only a live run would notice."""
-    from swebench.sandbox import AshSession
+def test_the_grader_reads_the_diff_itself():
+    """AshSession.get_patch was the only in-band patch extractor and went with
+    this repository's agent loop. fork_eval reads `git diff` from a RESTORED
+    snapshot instead, which is strictly better: the answer can be re-derived from
+    a finished run, and a change to what counts as part of it does not invalidate
+    the runs already recorded."""
+    import inspect
 
-    calls: list[str] = []
+    from swebench import fork_eval
 
-    class FakeSandbox:
-        # The session dispatches through call_agent_tool (it owns the
-        # agent-facing tool surface), so that is what a stub must offer.
-        async def call_agent_tool(self, name, args, registry=None, agent_id=""):
-            calls.append(args.get("command", ""))
-            class R:
-                is_error = False
-                # The listing that select_added reads.
-                output = "build/lib/gen.py\nrepro.py\n"
-                stdout = None
-            return R()
-
-    session = AshSession(quiet=True)
-    session._sandbox = FakeSandbox()
-    session._baseline_untracked = {"build/lib/gen.py"}
-    session.get_patch()
-
-    staged = [c for c in calls if c.startswith("git add -- ")]
-    assert staged, "the agent's new file was never staged by name"
-    assert "'repro.py'" in staged[0]
-    assert "build/lib/gen.py" not in staged[0], \
-        "the image's own untracked file was staged as the agent's work"
+    source = inspect.getsource(fork_eval.grade_snapshot)
+    assert "git diff" in source
+    assert "session.create(snapshot_id)" in source, \
+        "grade a restored snapshot, not a live sandbox"

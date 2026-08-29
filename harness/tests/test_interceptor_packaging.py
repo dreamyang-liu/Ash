@@ -99,9 +99,9 @@ def test_the_default_chain_is_the_three_that_shape_what_the_model_sees():
 def test_the_metadata_keys_belong_to_the_pipeline_not_an_interceptor():
     """RAW_OUTPUT / RAW_ERROR are the protocol interceptors use to talk to the
     host, so they live with the pipeline. They used to be re-exported by the
-    interceptor module, which is how the agent loop came to import them from
+    interceptor module, which is how a caller came to import them from
     there."""
-    from swebench.agent import interceptors, pipeline
+    from harness.execution import interceptors, pipeline
 
     assert hasattr(pipeline, "RAW_OUTPUT") and hasattr(pipeline, "RAW_ERROR")
     assert not hasattr(interceptors, "RAW_OUTPUT"), \
@@ -110,7 +110,7 @@ def test_the_metadata_keys_belong_to_the_pipeline_not_an_interceptor():
 
 def test_interceptors_are_reachable_from_one_place_for_callers_who_want_the_set():
     """A caller composing a chain should not need four imports."""
-    from swebench.agent.interceptors import (EDIT_STREAK_LIMIT, TEST_MARKERS,
+    from harness.execution.interceptors import (EDIT_STREAK_LIMIT, TEST_MARKERS,
                                              GuardrailInterceptor, GuardrailState,
                                              OutcomePresenter, TruncateInterceptor,
                                              default_pipeline, render_outcome)

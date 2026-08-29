@@ -6,9 +6,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from swebench.agent.tools import load_panel
+from harness.execution.panel import load_panel
 
-_PANEL = load_panel()
+# `full`, explicitly: this file asserts the whole runtime-facing surface, and the
+# panel DEFAULT is now shell+text_editor. Relying on the default made these tests
+# describe whichever panel happened to be default rather than the contract.
+_PANEL = load_panel("full")
 TOOLS_SCHEMA = _PANEL.schema
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "sdk"))

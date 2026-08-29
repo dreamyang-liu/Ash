@@ -158,34 +158,13 @@ def test_the_harness_package_does_not_import_the_benchmark_layer():
         assert not offenders, "%s imports %s" % (path, ", ".join(offenders))
 
 
-# --- the subclass relationship ---------------------------------------------
-def test_ash_session_is_a_sandbox_session():
-    from swebench.sandbox import AshSession
+# --- the hook that made the split work -------------------------------------
+#
+# The AshSession subclass those tests covered is gone with this repository's own
+# agent loop; what the split bought survives it, and is what _after_create still
+# guarantees below: a session takes snapshots and runs tools, and the layer that
+# knows what an answer is hooks in without the execution plane knowing about it.
 
-    assert issubclass(AshSession, SandboxSession)
-
-
-def test_the_harness_agent_id_is_one_constant():
-    """Two spellings of the owner's identity would put bookkeeping into an
-    agent's event stream, and consume its cursor over the log."""
-    from swebench.sandbox import HARNESS_AGENT_ID
-
-    assert HARNESS_AGENT_ID is OWNER_AGENT_ID
-
-
-def test_the_subclass_adds_base_commit_to_the_environment():
-    """The image identifies the bits; the commit identifies the code inside them,
-    and only the benchmark layer cares."""
-    from swebench.sandbox import AshSession
-
-    session = _session(FakePool(), cls=AshSession)
-    session._base_commit = "abc123"
-    env = session.environment()
-    assert env["base_commit"] == "abc123"
-    # ...and the generic half is still there.
-    assert env["sandbox_id"] == "sb-1"
-    assert env["base_ref"] == "img@sha256:abc"
-    assert "base_commit" not in SandboxSession.environment(session)
 
 
 # --- the hook that separates them ------------------------------------------
