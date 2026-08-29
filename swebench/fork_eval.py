@@ -51,10 +51,12 @@ from swebench.dataset import (SYMPY_RUNNER, build_batch_test_command,
                               load_instances, needs_file_runner, parse_test_list,
                               resolve_image, sympy_runner_spec, test_files_of)
 
-#: Mantle serves the OpenAI catalogue on Bedrock; the analyst talks to it
-#: directly rather than through a translator, because one JSON call needs no
-#: agent scaffolding.
+#: Both analyst endpoints on Bedrock, keyed by what the model name says it is.
+#: One JSON call needs no agent scaffolding, so neither goes through a translator.
+#: Mantle serves the OpenAI catalogue (Responses shape); Converse serves
+#: Anthropic's and everything else Bedrock hosts.
 MANTLE = "https://bedrock-mantle.%s.api.aws/openai/v1/responses"
+CONVERSE = "https://bedrock-runtime.%s.amazonaws.com/model/%s/converse"
 
 
 # --- the agent's task ------------------------------------------------------
@@ -132,29 +134,52 @@ Return ONLY a JSON object, no prose:
 """
 
 
+#: A diagnosis plus K self-contained hints (each 4-10 sentences that must stand
+#: alone without the conversation) does not fit in 4k, and a truncated JSON object
+#: fails to parse -- losing the whole round.
+ANALYST_MAX_TOKENS = 32_000
+
+
 def ask_analyst(model: str, prompt: str, region: str = "us-west-2",
                 timeout: float = 300.0) -> str:
+    """One analyst call. The endpoint follows from the model name.
+
+    ``openai.*`` is Mantle's catalogue and speaks Responses; everything else is
+    asked through Converse, which is how Bedrock serves Anthropic's models. The
+    alternative -- one protocol plus a translator -- buys nothing here: this is a
+    single request with no tools and no streaming.
+    """
     key = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
     if not key:
         raise SystemExit("AWS_BEARER_TOKEN_BEDROCK is required for the analyst")
-    body = json.dumps({"model": model, "input": prompt,
-                       # A diagnosis plus K self-contained hints (each 4-10
-                       # sentences that must stand alone without the
-                       # conversation) does not fit in 4k, and a truncated JSON
-                       # object fails to parse -- losing the whole round.
-                       "max_output_tokens": 32_000}).encode()
-    request = urllib.request.Request(
-        MANTLE % region, data=body,
-        headers={"Authorization": "Bearer %s" % key,
-                 "Content-Type": "application/json"})
+    headers = {"Authorization": "Bearer %s" % key,
+               "Content-Type": "application/json"}
+
+    if model.startswith("openai."):
+        body = json.dumps({"model": model, "input": prompt,
+                           "max_output_tokens": ANALYST_MAX_TOKENS}).encode()
+        request = urllib.request.Request(MANTLE % region, data=body,
+                                        headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read())
+        chunks = []
+        for item in payload.get("output") or []:
+            for part in item.get("content") or []:
+                if part.get("type") in ("output_text", "text"):
+                    chunks.append(part.get("text") or "")
+        return "\n".join(chunks)
+
+    body = json.dumps({
+        "messages": [{"role": "user", "content": [{"text": prompt}]}],
+        "inferenceConfig": {"maxTokens": ANALYST_MAX_TOKENS},
+    }).encode()
+    request = urllib.request.Request(CONVERSE % (region, model), data=body,
+                                     headers=headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         payload = json.loads(response.read())
-    chunks = []
-    for item in payload.get("output") or []:
-        for part in item.get("content") or []:
-            if part.get("type") in ("output_text", "text"):
-                chunks.append(part.get("text") or "")
-    return "\n".join(chunks)
+    message = (payload.get("output") or {}).get("message") or {}
+    return "\n".join(part.get("text") or ""
+                     for part in (message.get("content") or []))
 
 
 def extract_json(text: str) -> dict:
@@ -260,6 +285,10 @@ class Grade:
     patch: str = ""
     detail: str = ""
     error: Optional[str] = None
+    #: Names of the PASS_TO_PASS tests this attempt broke, when the runner said
+    #: which. The single most useful thing an analyst can be told about a
+    #: regression: without it a branch can only guess what it broke.
+    broken: List[str] = field(default_factory=list)
 
     #: False until the regression sweep actually ran -- it is skipped when the
     #: target tests fail, and reporting that skip as "FAIL" reads as a
@@ -332,8 +361,16 @@ def grade_snapshot(snapshot_id: str, instance: dict, backend: dict,
             grade.p2p_ran = True
             result = _run_tests(session, repo, p2p, files, runner, timeout)
             grade.p2p_pass = _exit_ok(result)
-            grade.detail += "\n\nregressions: %s" % (
-                result.output or result.error or "")[-1200:]
+            text = result.output or result.error or ""
+            grade.broken = _failing_tests(text)
+            # Name the tests, not just the tail. Two instances in an 8-run batch
+            # stalled at "target passes, regressions fail" across seven branches
+            # each, because the analyst got 1200 trailing characters of a 57-test
+            # run -- the failing test's name was usually not in them, so every
+            # branch guessed at WHICH regression it had caused.
+            grade.detail += "\n\nregressions: %s%s" % (
+                ("BROKEN: " + ", ".join(grade.broken) + "\n") if grade.broken else "",
+                text[-4000:])
         grade.resolved = grade.f2p_pass and (grade.p2p_pass or not p2p)
     except Exception as exc:  # noqa: BLE001 - an ungradeable attempt is a zero
         grade.error = "%s: %s" % (type(exc).__name__, exc)
@@ -371,6 +408,35 @@ def _run_tests(session, repo: str, test_ids: List[str],
             repo, test_ids, files)
     return session.execute("shell", {"command": command, "timeout": timeout,
                                      "tail": 60})
+
+
+#: How each runner announces a failure. sympy's own runner and the direct-call
+#: runner print "FAIL <dotted.name>"; pytest prints "FAILED path::test - msg" and
+#: also lists them under a "short test summary info" banner; django's runner uses
+#: "FAIL: test_x (mod.Cls)".
+_FAILURE_PATTERNS = (
+    re.compile(r"^FAIL(?:ED)?[: ]+(\S+)", re.M),
+    re.compile(r"^ERROR[: ]+(\S+)", re.M),
+)
+
+
+def _failing_tests(text: str, limit: int = 25) -> List[str]:
+    """Test names a runner reported as failing, in order, de-duplicated.
+
+    Best-effort across four runners on purpose: a name we fail to extract costs
+    the analyst a hint, while a wrong guess about the format would cost nothing
+    at all -- the raw tail is still included either way.
+    """
+    seen, out = set(), []
+    for pattern in _FAILURE_PATTERNS:
+        for name in pattern.findall(text or ""):
+            name = name.strip().rstrip(":,")
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+            if len(out) >= limit:
+                return out
+    return out
 
 
 def _exit_ok(result) -> bool:
@@ -590,8 +656,12 @@ def run_one(orch: Orchestrator, args, raw: dict, schedule: List[int],
         if hi < 1:
             print("   no tool steps to branch from; stopping")
             break
-        verdict = "%s\n\nPatch (%d lines):\n%s\n\nTest output:\n%s" % (
-            best.grade.summary(), best.grade.patch.count("\n"),
+        broken = ""
+        if best.grade.broken:
+            broken = ("\n\nTests this attempt BROKE (they passed before it): %s"
+                      % ", ".join(best.grade.broken))
+        verdict = "%s%s\n\nPatch (%d lines):\n%s\n\nTest output:\n%s" % (
+            best.grade.summary(), broken, best.grade.patch.count("\n"),
             best.grade.patch[:40000], best.grade.detail[:20000])
         prompt = _ANALYSIS_PROMPT.format(
             problem=instance["problem"][:20000], verdict=verdict,

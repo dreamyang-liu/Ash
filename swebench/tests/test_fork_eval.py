@@ -73,3 +73,47 @@ def test_the_token_budget_elides_the_middle_not_the_ends(tmp_path):
     assert hi == 400, "the step COUNT is still the truth"
     assert "middle elided" in body
     assert "step-0" in body and "step-399" in body
+
+
+# --- naming the regression, not just tailing the log --------------------------
+def test_failing_test_names_are_extracted_from_every_runner_format():
+    """The one thing an analyst most needs about a regression is WHICH test broke.
+    Measured: two instances in an 8-run batch stalled at "target passes,
+    regressions fail" across seven branches each, because the verdict carried
+    1200 trailing characters of a 57-test run and the failing name was usually
+    not in them -- so every branch guessed at what it had broken."""
+    from swebench.fork_eval import _failing_tests
+
+    assert _failing_tests(
+        "FAILED lib/t_a.py::test_one - AssertionError\n"
+        "FAILED lib/t_b.py::test_two\n=== 2 failed ==="
+    ) == ["lib/t_a.py::test_one", "lib/t_b.py::test_two"]
+
+    # sympy's own runner and the direct-call runner
+    assert _failing_tests("PASS m.test_x\nFAIL m.test_y") == ["m.test_y"]
+    # django's runner, and errors count too
+    assert _failing_tests("FAIL: test_a (mod.Cls)\nERROR: test_b (mod.Cls)") == \
+        ["test_a", "test_b"]
+    assert _failing_tests("everything passed") == []
+
+
+def test_extraction_deduplicates_and_is_bounded():
+    """pytest names a failure twice (inline and in the summary banner), and a
+    sweeping change can break hundreds -- neither should flood the prompt."""
+    from swebench.fork_eval import _failing_tests
+
+    doubled = "FAILED a.py::test_x\n" * 3
+    assert _failing_tests(doubled) == ["a.py::test_x"]
+
+    many = "".join("FAILED a.py::test_%d\n" % i for i in range(100))
+    assert len(_failing_tests(many)) == 25
+
+
+def test_a_verdict_with_no_regressions_says_nothing_about_them():
+    """Silence is the correct output when nothing broke; inventing an empty
+    'BROKEN:' line would read as a finding."""
+    from swebench.fork_eval import Grade
+
+    grade = Grade(f2p_pass=True, p2p_ran=True, p2p_pass=True, resolved=True)
+    assert grade.broken == []
+    assert "BROKEN" not in grade.summary()
