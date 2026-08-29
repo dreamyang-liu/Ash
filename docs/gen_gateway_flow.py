@@ -39,12 +39,14 @@ def main() -> int:
                  "已验:模型改写 · 计价 · 预算 400 · wire-tap",
                  color=GREEN)
     oc = c.panel("ag-oc", cc["right"] + 18, top, 400,
-                 "opencode —— 协议匹配,未真机验证",
-                 "用它的 anthropic provider 时也说 /v1/messages\n"
-                 "接法:opencode 配置里 provider.options.baseURL\n"
-                 "  指到 gateway,api key 填 slot-token\n"
-                 "理论上直接能用;跑过之前不算数",
-                 color=ORANGE)
+                 "opencode —— 过 gateway ✅(已真机验证)",
+                 "它不读 ANTHROPIC_BASE_URL,只认自己配置里的 provider\n"
+                 "  → slot 把 base_url 翻译成 provider.anthropic.\n"
+                 "    options.{baseURL, apiKey=slot-token} 写进配置文件\n"
+                 "  → 同时清掉 AWS_* (留着它会优先用自己的 Bedrock)\n"
+                 "已验:harness --gateway 跑完整任务,\n"
+                 "  改写 + 计价 + 沙箱工具 + checkpoint 同时成立",
+                 color=GREEN)
     cx = c.panel("ag-cx", oc["right"] + 18, top, 400,
                  "codex —— 过 gateway ✅(已真机验证)",
                  "只说 OpenAI Responses 协议 → gateway 现在两种都会:\n"
@@ -63,7 +65,7 @@ def main() -> int:
     seq = Sequence(c, 40, bar_bottom + 44, [
         ("cfg", "routes.json\n(模型→上游的表)", ORANGE),
         ("orch", "Orchestrator", GREEN),
-        ("agent", "Agent\n(claude✅ codex✅ oc?)", BLUE),
+        ("agent", "Agent\n(三家都已验证 ✅)", BLUE),
         ("gw", "Gateway\n(进程内 HTTP)", GREEN),
         ("up", "上游\n(provider/vLLM/ckpt)", VIOLET),
         ("journal", "Journal", ORANGE),
@@ -74,8 +76,9 @@ def main() -> int:
                                ' {base_url, 真 api_key, 改写名, 单价}')
     seq.message("orch", "gw", "起 GatewayServer(临时端口)+ mint slot-token{agent_id, budget}")
     seq.message("orch", "agent", "env 注入:ANTHROPIC_BASE_URL=gateway · AUTH_TOKEN=slot-token")
-    seq.note("   slot 看到 base_url → 自动关 Bedrock/Vertex 直连(否则流量绕过 gateway,实测踩过)",
-             color=RED)
+    seq.note("   每个 slot 按自己 agent 的方言翻译这一步,并关掉 provider-direct —— "
+             "claude 关 USE_BEDROCK/VERTEX,opencode 写 provider 配置 + 清 AWS_*,codex 用自定义 provider。"
+             "\n   三家都踩过「不关就静默绕过 gateway」这个坑。", color=RED)
     seq.message("agent", "gw", "启动探活 GET /v1/models(失败即 CLI 拒启,gateway 自己应答)")
 
     # ---- per request ----------------------------------------------------------

@@ -50,6 +50,38 @@ from harness.slots.server_base import (DENY, ServerProcess, ServerSlot,
                                        find_free_port)
 
 
+def _routed_provider(task: TaskSpec) -> Dict[str, object]:
+    """opencode config for a run whose LLM traffic is routed elsewhere.
+
+    ``ANTHROPIC_BASE_URL`` in the task env is the harness-wide signal that a
+    gateway (or a vLLM, or an RL checkpoint) owns this agent's model traffic.
+    opencode does NOT read that variable -- it selects a provider from its own
+    config and its default here is Bedrock via AWS env vars, so a gateway run
+    would have gone straight to the provider and recorded nothing. Translating
+    the signal into its vocabulary is this function.
+
+    Also clears the AWS variables from the child's environment: leaving them
+    makes opencode prefer its Bedrock provider over the routed anthropic one --
+    the same silent-bypass shape the claude slot had.
+    """
+    env = task.env or {}
+    base_url = env.get("ANTHROPIC_BASE_URL")
+    if not base_url:
+        return {}
+    options: Dict[str, object] = {"baseURL": base_url.rstrip("/") + "/v1"}
+    key = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY")
+    if key:
+        options["apiKey"] = key
+    return {"provider": {"anthropic": {"options": options}}}
+
+
+#: Cleared from the child env on a routed run, or opencode picks these over the
+#: routed provider (see _routed_provider).
+_PROVIDER_DIRECT_VARS = ("AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID",
+                         "AWS_SECRET_ACCESS_KEY", "AWS_PROFILE",
+                         "GOOGLE_APPLICATION_CREDENTIALS")
+
+
 class OpenCodeServerSlot(ServerSlot):
     name = "opencode"
     binary = "opencode"
@@ -95,6 +127,9 @@ class OpenCodeServerSlot(ServerSlot):
             command.append("--pure")
 
         env = self.build_env(task)
+        if (task.env or {}).get("ANTHROPIC_BASE_URL"):
+            for name in _PROVIDER_DIRECT_VARS:
+                env.pop(name, None)
         config = self._render_config(mcp, task)
         if config:
             env["OPENCODE_CONFIG"] = config
@@ -253,8 +288,15 @@ class OpenCodeServerSlot(ServerSlot):
 
     # --- config ------------------------------------------------------------
     def _render_config(self, mcp: Optional[McpWiring], task: TaskSpec) -> Optional[str]:
+        routed = _routed_provider(task)
         if mcp is None:
-            return None
+            # No tools, but the run may still route this agent's LLM traffic
+            # (a gateway for budget/accounting). That is config too, so the file
+            # is written for it alone -- gating it on `mcp` made a gateway run
+            # without sandbox tools silently talk to the provider direct.
+            if not routed:
+                return None
+            return self._write_config(dict(routed))
         if mcp.command:
             entry: Dict[str, object] = {
                 "type": "local", "command": list(mcp.command), "enabled": True,
@@ -279,7 +321,11 @@ class OpenCodeServerSlot(ServerSlot):
             merged["mcp"].update(payload["mcp"])  # type: ignore[index]
             merged.setdefault("$schema", payload["$schema"])
             payload = merged
+        payload.update(routed)
+        return self._write_config(payload)
 
+    def _write_config(self, payload: Dict[str, object]) -> str:
+        payload.setdefault("$schema", "https://opencode.ai/config.json")
         handle = tempfile.NamedTemporaryFile(
             "w", suffix=".json", prefix="opencode-slot-", delete=False, encoding="utf-8"
         )

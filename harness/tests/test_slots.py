@@ -464,3 +464,49 @@ def test_a_routed_run_disables_the_clis_provider_direct_modes():
     # no base url: nothing injected, the CLI keeps its own configuration
     env = build({"X": "1"})
     assert "CLAUDE_CODE_USE_BEDROCK" not in env
+
+
+# --- opencode on a routed run --------------------------------------------------
+def test_opencode_translates_a_routed_run_into_its_own_provider_config(tmp_path):
+    """opencode does not read ANTHROPIC_BASE_URL -- it picks a provider from its
+    own config, and its default here is Bedrock via AWS env vars. Without this
+    translation a --gateway run went straight to the provider and the gateway
+    recorded nothing (the same silent-bypass shape the claude slot had)."""
+    from harness.slots.opencode_server import OpenCodeServerSlot
+
+    slot = OpenCodeServerSlot()
+    task = TaskSpec(prompt="p", cwd=str(tmp_path),
+                    env={"ANTHROPIC_BASE_URL": "http://127.0.0.1:9999",
+                         "ANTHROPIC_AUTH_TOKEN": "slot-tok"})
+    path = slot._render_config(stdio_wiring(args=["--attach", "sb-1"]), task)
+    config = json.loads(open(path).read())
+    options = config["provider"]["anthropic"]["options"]
+    assert options["baseURL"] == "http://127.0.0.1:9999/v1"
+    assert options["apiKey"] == "slot-tok"
+    assert "ash" in config["mcp"], "the tool wiring must survive alongside it"
+
+
+def test_opencode_writes_a_config_for_routing_even_with_no_tools(tmp_path):
+    """Gating the config file on `mcp` meant a gateway run without sandbox tools
+    silently talked to the provider direct."""
+    from harness.slots.opencode_server import OpenCodeServerSlot
+
+    slot = OpenCodeServerSlot()
+    task = TaskSpec(prompt="p", cwd=str(tmp_path),
+                    env={"ANTHROPIC_BASE_URL": "http://gw:1"})
+    path = slot._render_config(None, task)
+    assert path, "no mcp but routed: the file must still be written"
+    config = json.loads(open(path).read())
+    assert config["provider"]["anthropic"]["options"]["baseURL"] == "http://gw:1/v1"
+
+    # and an unrouted run with no tools still writes nothing
+    assert slot._render_config(None, TaskSpec(prompt="p", cwd=str(tmp_path))) is None
+
+
+def test_opencode_provider_direct_vars_are_cleared_on_a_routed_run():
+    """Leaving AWS_* set makes opencode prefer its Bedrock provider over the
+    routed one -- measured: opencode's own auth list shows Bedrock picked up
+    from AWS_BEARER_TOKEN_BEDROCK."""
+    from harness.slots.opencode_server import _PROVIDER_DIRECT_VARS
+
+    assert "AWS_BEARER_TOKEN_BEDROCK" in _PROVIDER_DIRECT_VARS

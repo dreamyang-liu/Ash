@@ -228,9 +228,15 @@ put other Bedrock models behind the codex scaffold.
 
 ## Inference gateway
 
-Speaks BOTH wire shapes now: `/v1/messages` (Anthropic -- claude-code, verified
-live) and `/v1/responses` (OpenAI -- codex, verified live against Bedrock
-Mantle GPT-5.6 through a custom provider whose env_key carries the slot token).
+Speaks BOTH wire shapes: `/v1/messages` (Anthropic -- claude-code and opencode)
+and `/v1/responses` (OpenAI -- codex). **All three agents verified live through
+it**, each needing its own translation of "this run is routed" plus its own
+provider-direct kill switch, because every one of them silently bypasses the
+gateway otherwise: claude-code takes ANTHROPIC_BASE_URL from env but needs
+CLAUDE_CODE_USE_BEDROCK/VERTEX=0; opencode ignores the variable entirely and
+needs `provider.anthropic.options.{baseURL,apiKey}` written into its config file
+with AWS_* cleared from its environment; codex needs a custom
+`model_providers.<id>` entry (base_url + env_key, sent as a bearer).
 Per-shape upstream auth (x-api-key vs Bearer) and per-shape usage parsing; the
 Responses stream carries its usage in the terminal event together with the
 whole response body, so the SSE scanner buffers split lines across chunks --
