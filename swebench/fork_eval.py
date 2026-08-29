@@ -410,9 +410,15 @@ class Attempt:
 
 
 def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
-                prompt: str, image: str, resume: Optional[str] = None,
+                prompt: str, image: str, out_dir: Path,
+                resume: Optional[str] = None,
                 fork: bool = False, origin: Optional[dict] = None) -> RunOutcome:
-    out_dir = Path(args.out)
+    """One attempt. Parent and branches differ only in the arguments.
+
+    ``out_dir`` is per instance: eight instances writing `parent.jsonl` into one
+    directory would overwrite each other's journals, and the journal is the only
+    record a killed run leaves.
+    """
     runtime_bin = str(Path(args.runtime_bin).resolve())
     extra: dict = {}
     if args.slot == "codex":
@@ -466,22 +472,83 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--analyst-model", default="openai.gpt-5.6-luna")
     parser.add_argument("--rounds", type=int, default=2,
                        help="branching rounds after the first attempt")
-    parser.add_argument("--branches", type=int, default=3)
+    parser.add_argument("--branches", default="3", metavar="N[,N...]",
+                        help="branches per round: one number for every round, or "
+                             "a comma list to vary it (e.g. 4,3 -- four "
+                             "directions first, three in the round after). A "
+                             "round only happens if the one before it produced "
+                             "no resolved attempt.")
     parser.add_argument("--analyst-tokens", type=int, default=100_000,
                         help="transcript budget handed to the analyst")
     parser.add_argument("--timeout", type=float, default=1800.0)
     parser.add_argument("--runtime-bin", default="runtime/ash-runtime")
     parser.add_argument("-o", "--out", default="runs/fork-eval")
     args = parser.parse_args(argv)
+    try:
+        schedule = [int(x) for x in str(args.branches).split(",") if x.strip()]
+    except ValueError:
+        raise SystemExit("--branches wants numbers, got %r" % args.branches)
+    if not schedule:
+        raise SystemExit("--branches cannot be empty")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    matches = [i for i in load_instances(args.subset)
-               if i["instance_id"] == args.instance]
-    if not matches:
-        raise SystemExit("instance %s not in %s" % (args.instance, args.subset))
-    raw = matches[0]
+    wanted = [x.strip() for x in str(args.instance).split(",") if x.strip()]
+    catalogue = {i["instance_id"]: i for i in load_instances(args.subset)}
+    missing = [x for x in wanted if x not in catalogue]
+    if missing:
+        raise SystemExit("not in %s: %s" % (args.subset, ", ".join(missing)))
+
+    orch = Orchestrator(out_dir=out_dir)
+    results = []
+    for position, instance_id in enumerate(wanted, 1):
+        print("\n" + "=" * 72)
+        print("INSTANCE %d/%d  %s" % (position, len(wanted), instance_id))
+        print("=" * 72)
+        attempts = run_one(orch, args, catalogue[instance_id], schedule,
+                           out_dir / instance_id)
+        resolved = [a for a in attempts if a.grade.resolved]
+        results.append({
+            "instance": instance_id,
+            "resolved": bool(resolved),
+            "resolved_by": [a.name for a in resolved],
+            "attempts": [{"name": a.name, "status": a.outcome.status,
+                          "pairs": a.outcome.checkpoints, "score": a.score,
+                          "resolved": a.grade.resolved,
+                          "f2p_pass": a.grade.f2p_pass,
+                          "p2p_ran": a.grade.p2p_ran,
+                          "p2p_pass": a.grade.p2p_pass,
+                          "grading_error": a.grade.error,
+                          "patch_lines": a.grade.patch.count("\n"),
+                          "journal": str(a.outcome.journal_path)}
+                         for a in attempts],
+        })
+        # Written after every instance, not at the end: a run of eight that dies
+        # on the sixth should still report the five it finished.
+        (out_dir / "summary.json").write_text(json.dumps(
+            {"slot": args.slot, "model": args.model, "subset": args.subset,
+             "branch_schedule": schedule, "rounds": args.rounds,
+             "instances": results}, indent=2, ensure_ascii=False),
+            encoding="utf-8")
+
+    print("\n" + "=" * 72)
+    solved = [r for r in results if r["resolved"]]
+    print("RESOLVED %d / %d" % (len(solved), len(results)))
+    for r in results:
+        mark = "PASS" if r["resolved"] else "fail"
+        best = max((a["score"] for a in r["attempts"]), default=0)
+        print("  %-4s %-34s best score %d  %s"
+              % (mark, r["instance"], best,
+                 ", ".join(r["resolved_by"]) or ""))
+    print("\nwrote %s" % (out_dir / "summary.json"))
+    return 0 if len(solved) == len(results) else 1
+
+
+def run_one(orch: Orchestrator, args, raw: dict, schedule: List[int],
+            out_dir: Path) -> List["Attempt"]:
+    """One instance: attempt, grade, and branch until resolved or out of rounds."""
+    out_dir.mkdir(parents=True, exist_ok=True)
     instance = {
         "instance_id": raw["instance_id"], "repo": raw["repo"],
         "image": resolve_image(raw), "problem": raw["problem_statement"],
@@ -494,8 +561,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("   image %s" % instance["image"])
     print("   F2P %d · P2P %d · slot %s · model %s"
           % (len(instance["f2p"]), len(instance["p2p"]), args.slot, args.model))
-
-    orch = Orchestrator(out_dir=out_dir)
     attempts: List[Attempt] = []
 
     print("\n== attempt: parent ==")
@@ -503,7 +568,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     outcome = run_attempt(orch, args, instance, name="parent",
                           prompt=PROMPT.format(repo=instance["repo"],
                                                problem=instance["problem"]),
-                          image=instance["image"])
+                          image=instance["image"], out_dir=out_dir)
     parent = Attempt("parent", outcome, grade_attempt(outcome, instance, args))
     attempts.append(parent)
     report(parent)
@@ -515,7 +580,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         if best.grade.resolved:
             print("\n== resolved; no further rounds ==")
             break
-        print("\n== round %d: analysing %s ==" % (round_no, best.name))
+        # A round's width comes from the schedule; the last entry repeats if
+        # there are more rounds than numbers.
+        width = schedule[min(round_no - 1, len(schedule) - 1)]
+        print("\n== round %d (%d branches): analysing %s =="
+              % (round_no, width, best.name))
         transcript, lo, hi = render_transcript(best.outcome.journal_path,
                                               token_budget=args.analyst_tokens)
         if hi < 1:
@@ -526,7 +595,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             best.grade.patch[:40000], best.grade.detail[:20000])
         prompt = _ANALYSIS_PROMPT.format(
             problem=instance["problem"][:20000], verdict=verdict,
-            transcript=transcript, lo=lo, hi=hi, branches=args.branches,
+            transcript=transcript, lo=lo, hi=hi, branches=width,
             notes=("\n## What earlier rounds already tried (do not repeat)\n"
                    + "\n".join(notes)) if notes else "")
         try:
@@ -548,7 +617,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             break
 
         round_attempts: List[Attempt] = []
-        for index, branch in enumerate((plan.get("branches") or [])[:args.branches], 1):
+        for index, branch in enumerate((plan.get("branches") or [])[:width], 1):
             name = "r%db%d-%s" % (round_no, index,
                                   re.sub(r"[^a-z0-9]+", "-",
                                          str(branch.get("name") or "b").lower())[:24])
@@ -556,7 +625,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("   hint  %s" % str(branch.get("hint"))[:200].replace("\n", " "))
             started = time.time()
             outcome = run_attempt(
-                orch, args, instance, name=name,
+                orch, args, instance, name=name, out_dir=out_dir,
                 prompt=BRANCH_PROMPT.format(
                     repo=instance["repo"], problem=instance["problem"],
                     verdict=verdict[:20000], hint=branch.get("hint")),
@@ -583,28 +652,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("\n   round %d best: %s (score %d); carrying %s forward"
                   % (round_no, winner.name, winner.score, best.name))
 
-    print("\n== summary ==")
+    print("\n== %s: %s ==" % (instance["instance_id"],
+                               "RESOLVED" if any(a.grade.resolved for a in attempts)
+                               else "unresolved"))
     for attempt in attempts:
-        print("  %-28s score=%d  %s" % (attempt.name, attempt.score,
+        print("  %-30s score=%d  %s" % (attempt.name, attempt.score,
                                         attempt.grade.summary()))
-    resolved = [a for a in attempts if a.grade.resolved]
-    print("\nRESOLVED by: %s" % (", ".join(a.name for a in resolved) or "nobody"))
-
-    summary = {
-        "instance": instance["instance_id"], "slot": args.slot,
-        "model": args.model,
-        "attempts": [{"name": a.name, "status": a.outcome.status,
-                      "pairs": a.outcome.checkpoints, "score": a.score,
-                      "resolved": a.grade.resolved,
-                      "f2p_pass": a.grade.f2p_pass, "p2p_pass": a.grade.p2p_pass,
-                      "grading_error": a.grade.error,
-                      "patch_lines": a.grade.patch.count("\n"),
-                      "journal": str(a.outcome.journal_path)} for a in attempts],
-    }
-    (out_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-    print("wrote %s" % (out_dir / "summary.json"))
-    return 0 if resolved else 1
+    return attempts
 
 
 if __name__ == "__main__":
