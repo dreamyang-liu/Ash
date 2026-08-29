@@ -111,6 +111,16 @@ def parse_test_list(raw: object) -> list[str]:
     return [str(t) for t in parsed] if isinstance(parsed, list) else []
 
 
+def test_files_of(instance: dict) -> list:
+    """Test files the instance's own test_patch touches.
+
+    Needed by runners whose test ids are bare function names (sympy): without
+    the files, a keyword filter sweeps the entire library and matches nothing.
+    """
+    patch = instance.get("test_patch") or ""
+    return re.findall(r"diff --git a/(\S+)", patch)
+
+
 def build_test_command(repo: str, test_id: str) -> str:
     """Shell command whose exit code says whether one test passes.
 
@@ -126,7 +136,79 @@ def build_test_command(repo: str, test_id: str) -> str:
     return build_batch_test_command(repo, [test_id])
 
 
-def build_batch_test_command(repo: str, test_ids: list[str]) -> str:
+#: Runner script for repos whose test ids are bare function names. Written into
+#: the sandbox as a FILE by the caller, never interpolated into a shell command:
+#: nesting python inside a heredoc inside a JSON tool argument mangles every
+#: backslash on the way, and an hour went into a regex that arrived as literal
+#: "d+". The only thing the shell sees now is `python <path>`.
+SYMPY_RUNNER = r"""
+import importlib, json, sys, traceback
+
+# Bare-name test ids (sympy reports these for all 75 of its Verified instances)
+# are just module-level functions. Importing the module and CALLING them is the
+# most direct reading available, and the only one that distinguishes "ran and
+# passed" from "matched nothing" -- which matters because sympy's own runner
+# returns truthy for a zero-match run, so a grader trusting it scores an
+# UNTOUCHED repository as resolved. Two earlier attempts at this (bin/test -k,
+# then sympy.test + stdout capture) both produced that false pass.
+spec = json.load(open(sys.argv[1]))
+wanted = set(spec["kw"])
+
+found, failed, missing = 0, [], set(wanted)
+for path in spec["files"]:
+    name = path.replace("/", ".").rsplit(".py", 1)[0]
+    try:
+        module = importlib.import_module(name)
+    except Exception as exc:
+        print("GRADER: cannot import %s: %s" % (name, exc))
+        continue
+    for test in sorted(wanted):
+        function = getattr(module, test, None)
+        if function is None or not callable(function):
+            continue
+        missing.discard(test)
+        found += 1
+        try:
+            function()
+        except Exception as exc:
+            # sympy marks skips with an exception type named Skipped; a skipped
+            # test is not a failure of the change under test.
+            if type(exc).__name__ in ("Skipped", "SkipTest"):
+                print("SKIP %s.%s" % (name, test))
+                continue
+            failed.append("%s.%s: %s" % (name, test, exc))
+            print("FAIL %s.%s" % (name, test))
+            traceback.print_exc(limit=3)
+        else:
+            print("PASS %s.%s" % (name, test))
+
+print("GRADER: ran %d, failed %d, not found %s" % (found, len(failed), sorted(missing)))
+if found == 0:
+    sys.exit(2)          # nothing ran: a broken grader, not a pass
+sys.exit(1 if failed else 0)
+"""
+
+
+def sympy_runner_spec(names: list, test_files: "list | None") -> dict:
+    """The JSON the runner script reads: which files, which keywords."""
+    return {"files": list(test_files or ["sympy"]), "kw": list(names)}
+
+
+def needs_file_runner(repo: str, test_ids: list) -> bool:
+    """Whether this repo's ids are bare function names needing SYMPY_RUNNER.
+
+    sympy reports bare names for all 75 of its Verified instances; handed to
+    pytest as paths they collect nothing and the run fails whatever the agent
+    did -- a live 7-attempt experiment scored every attempt zero on exactly that.
+    These images also ship no pytest at all.
+    """
+    if repo != "sympy/sympy":
+        return False
+    return any("::" not in t and "/" not in t for t in test_ids)
+
+
+def build_batch_test_command(repo: str, test_ids: list[str],
+                             test_files: "list[str] | None" = None) -> str:
     """Shell command whose exit code says whether ALL of ``test_ids`` pass.
 
     One invocation, not one per test: PASS_TO_PASS lists run to hundreds of
@@ -134,6 +216,9 @@ def build_batch_test_command(repo: str, test_ids: list[str]) -> str:
     check into an hour. Both runners accept multiple test specs and exit
     non-zero if any fails, which is exactly the all-or-nothing answer a
     regression gate needs.
+
+    ``test_files`` narrows a runner that needs it (sympy reports bare test-function
+    names, so without the files its keyword filter sweeps the whole library).
     """
     if repo == "django/django":
         specs = []
@@ -143,5 +228,13 @@ def build_batch_test_command(repo: str, test_ids: list[str]) -> str:
         joined = " ".join(shlex.quote(spec) for spec in specs)
         return ("./tests/runtests.py --verbosity 0 --settings=test_sqlite "
                 f"--parallel 1 {joined}")
+    if needs_file_runner(repo, test_ids):
+        # No shell command can express these. Emitting a pytest line anyway is
+        # what produced seven false zeros; the caller routes them to
+        # SYMPY_RUNNER instead.
+        raise ValueError(
+            "%s test ids are bare function names and need the file-based "
+            "runner (SYMPY_RUNNER + sympy_runner_spec), not a shell command"
+            % repo)
     joined = " ".join(shlex.quote(test_id) for test_id in test_ids)
     return f"python -m pytest -x -q {joined}"

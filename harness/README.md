@@ -416,6 +416,15 @@ follow, and violating either fails *quietly* — tool calls or snapshots return
   (resume + fork_session), opencode (`/session/{id}/fork`), codex
   (`thread_fork`) -- each through the orchestrator, full pair, sibling isolation
   on both halves. The `-cli` fallback drivers remain unverified end to end.
+- **Branching earns its keep on a real instance**: sympy__sympy-13091 (reference
+  patch 522 lines; return NotImplemented rather than False across the comparison
+  surface), codex + gpt-5.6-luna. The parent attempt changed only
+  `Basic.__eq__` -- target test half-fixed, graded FAIL. luna read the journal
+  plus the grading verdict, branched at step 11 and named three directions; two
+  of the three came back **resolved=True** (target tests PASS, all 89
+  PASS_TO_PASS regressions PASS), the winner touching both basic.py and
+  numbers.py the way the reference patch does. Independently re-graded from its
+  snapshot afterwards. One round was enough, so the second was skipped.
 - Verified on a real SWE-bench Verified instance (django__django-11848,
   microvm, http transport) with ALL THREE protocol drivers: claude-code (Opus 5
   on Bedrock), codex (gpt-5.6-sol, thread_fork), opencode (session fork). A
