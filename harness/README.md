@@ -202,36 +202,29 @@ Two requirements for that result, both of which fail loudly if unmet:
 
 ## codex on Bedrock (no ChatGPT login)
 
-codex 0.145 has **native Bedrock support** -- OpenAI's own models (GPT-5.6
-terra/luna/sol, 5.5, 5.4) are hosted on Bedrock, and codex ships a provider that
-speaks to them directly with AWS auth. No login, no proxy:
+codex has native Bedrock support -- OpenAI's models (GPT-5.6 terra/luna/sol,
+5.5, 5.4) are hosted on Bedrock and codex ships a provider for them. One config
+entry, no login, no proxy:
 
 ```bash
-# once, in ~/.codex/config.toml -- TOP-LEVEL keys, before any [section]:
+# once, in ~/.codex/config.toml -- TOP-LEVEL keys, before any [section]
+# (appended after a [table] header they silently belong to that table,
+# and codex silently falls back to api.openai.com):
 model_provider = "amazon-bedrock"
 model = "openai.gpt-5.6-terra"
 
-# then just:
+# then:
 AWS_BEARER_TOKEN_BEDROCK=... codex exec "..."
 ```
 
-Auth: `AWS_BEARER_TOKEN_BEDROCK` (bearer), or real AWS credentials via
+Auth: `AWS_BEARER_TOKEN_BEDROCK` (bearer), or AWS credentials via
 `model_providers.amazon-bedrock.aws.{profile,region,auth_refresh}` (SigV4).
-Two built-in providers: `amazon-bedrock` (Mantle endpoint) and
-`amazon-bedrock-runtime` (regional bedrock-runtime, `global.openai.*` model
-ids). Through the harness:
+Two built-in providers: `amazon-bedrock` (Mantle) and `amazon-bedrock-runtime`
+(regional, `global.openai.*` ids). Through the harness:
 `--model openai.gpt-5.6-terra --extra '{"config_overrides":
 {"model_provider": "\"amazon-bedrock\""}}'` -- verified live with sandbox
-tools and checkpoints.
-
-**Fallback for non-OpenAI Bedrock models** (e.g. Claude through the codex
-scaffold): the native provider serves only the OpenAI catalog, so route through
-a Responses translator instead -- litellm (`--model
-bedrock/us.anthropic.claude-sonnet-4-6`) with `scripts/responses_scrub.py` in
-front, because codex sends a codex-only `client_metadata` field that litellm
-1.97/1.98 forwards into Bedrock's Anthropic backend, which rejects it. Config:
-custom `model_providers.<name>` entry with `wire_api="responses"`, `env_key`
-auth, base_url pointing at the shim.
+tools and checkpoints. The provider serves only the OpenAI catalog; it does not
+put other Bedrock models behind the codex scaffold.
 
 ## Inference gateway
 
