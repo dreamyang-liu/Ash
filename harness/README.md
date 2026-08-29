@@ -202,34 +202,36 @@ Two requirements for that result, both of which fail loudly if unmet:
 
 ## codex on Bedrock (no ChatGPT login)
 
-codex speaks only the OpenAI **Responses** API (0.145 dropped `wire_api="chat"`),
-and its custom providers authenticate with an env var -- no login needed. Bedrock
-does not speak Responses, so a translator sits in between; and codex sends a
-codex-only field (`client_metadata`) that litellm 1.97/1.98 forwards verbatim
-into Bedrock's Anthropic backend, which rejects it -- hence the scrub shim:
+codex 0.145 has **native Bedrock support** -- OpenAI's own models (GPT-5.6
+terra/luna/sol, 5.5, 5.4) are hosted on Bedrock, and codex ships a provider that
+speaks to them directly with AWS auth. No login, no proxy:
 
 ```bash
-# 1. translator: Responses -> Bedrock (any Bedrock model)
-AWS_BEARER_TOKEN_BEDROCK=... AWS_REGION=us-west-2 \
-  litellm --model bedrock/us.anthropic.claude-sonnet-4-6 --port 4477
+# once, in ~/.codex/config.toml -- TOP-LEVEL keys, before any [section]:
+model_provider = "amazon-bedrock"
+model = "openai.gpt-5.6-terra"
 
-# 2. shim: strip client_metadata (delete the day litellm handles it)
-python3 scripts/responses_scrub.py --port 4478 --upstream http://127.0.0.1:4477
-
-# 3. codex, no login:
-LITELLM_KEY=anything codex exec \
-  -c 'model_providers.bedrock.base_url="http://127.0.0.1:4478/v1"' \
-  -c 'model_providers.bedrock.env_key="LITELLM_KEY"' \
-  -c 'model_providers.bedrock.wire_api="responses"' \
-  -c 'model_provider="bedrock"' \
-  -c 'model="bedrock/us.anthropic.claude-sonnet-4-6"' "..."
+# then just:
+AWS_BEARER_TOKEN_BEDROCK=... codex exec "..."
 ```
 
-Through the harness, the same settings ride in `RunSpec.extra["config_overrides"]`
-(pre-serialized TOML values) plus `model=` -- verified live with sandbox tools and
-checkpoints. Bedrock also has a native OpenAI-compat endpoint
-(`/openai/v1/chat/completions`, bearer auth) but it serves only gpt-oss models
-and speaks chat, which codex no longer does.
+Auth: `AWS_BEARER_TOKEN_BEDROCK` (bearer), or real AWS credentials via
+`model_providers.amazon-bedrock.aws.{profile,region,auth_refresh}` (SigV4).
+Two built-in providers: `amazon-bedrock` (Mantle endpoint) and
+`amazon-bedrock-runtime` (regional bedrock-runtime, `global.openai.*` model
+ids). Through the harness:
+`--model openai.gpt-5.6-terra --extra '{"config_overrides":
+{"model_provider": "\"amazon-bedrock\""}}'` -- verified live with sandbox
+tools and checkpoints.
+
+**Fallback for non-OpenAI Bedrock models** (e.g. Claude through the codex
+scaffold): the native provider serves only the OpenAI catalog, so route through
+a Responses translator instead -- litellm (`--model
+bedrock/us.anthropic.claude-sonnet-4-6`) with `scripts/responses_scrub.py` in
+front, because codex sends a codex-only `client_metadata` field that litellm
+1.97/1.98 forwards into Bedrock's Anthropic backend, which rejects it. Config:
+custom `model_providers.<name>` entry with `wire_api="responses"`, `env_key`
+auth, base_url pointing at the shim.
 
 ## Inference gateway
 
