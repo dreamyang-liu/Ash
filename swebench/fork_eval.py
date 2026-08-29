@@ -138,7 +138,11 @@ def ask_analyst(model: str, prompt: str, region: str = "us-west-2",
     if not key:
         raise SystemExit("AWS_BEARER_TOKEN_BEDROCK is required for the analyst")
     body = json.dumps({"model": model, "input": prompt,
-                       "max_output_tokens": 4096}).encode()
+                       # A diagnosis plus K self-contained hints (each 4-10
+                       # sentences that must stand alone without the
+                       # conversation) does not fit in 4k, and a truncated JSON
+                       # object fails to parse -- losing the whole round.
+                       "max_output_tokens": 32_000}).encode()
     request = urllib.request.Request(
         MANTLE % region, data=body,
         headers={"Authorization": "Bearer %s" % key,
@@ -167,12 +171,37 @@ def extract_json(text: str) -> dict:
 
 
 # --- journal -> transcript --------------------------------------------------
-def render_transcript(journal_path, char_budget: int = 24000) -> "tuple[str, int, int]":
+#: Roughly how many characters fit in a token here. Transcripts are JSON, code
+#: and test output, which tokenize worse than prose -- 3.2 is the pessimistic end
+#: of what was measured on these journals, so a token budget converts to a
+#: character budget that will not overshoot.
+CHARS_PER_TOKEN = 3.2
+
+#: Per-line caps. Generous on purpose, and measured: tool RESULTS on a real run
+#: have a median of ~1.9k characters and a max of ~17k, so the old 300-character
+#: cap fed the analyst the first two lines of every test run and threw away the
+#: assertion that explains the failure. Arguments are small (median ~112) -- the
+#: one that matters is a `str_replace` payload, which is worth showing whole.
+RESULT_CHARS = 6000
+ARG_CHARS = 4000
+MESSAGE_CHARS = 2000
+
+
+def render_transcript(journal_path, token_budget: int = 100_000
+                      ) -> "tuple[str, int, int]":
     """One line per tool step, numbered by the checkpoint step they map to.
 
     Numbered from the tool calls rather than from the checkpoints, because the
     analyst must name a step the *snapshot map* has -- and both are counted the
     same way (one per exec call, in order).
+
+    The budget is spent per-line first and only then globally, because that is
+    where the information was actually going: the old version elided the middle
+    of long transcripts (which mattered rarely -- a 66-step run rendered to 34k
+    characters) while truncating every tool result to 300 characters (which
+    mattered always -- the failing assertion lives past that cut). A result long
+    enough to be worth reading is kept head-and-tail, never head-only: a test
+    run's verdict is at the END.
     """
     lines: List[str] = []
     step = 0
@@ -183,21 +212,43 @@ def render_transcript(journal_path, char_budget: int = 24000) -> "tuple[str, int
             args = json.dumps(record.get("args") or {}, ensure_ascii=False)
             lines.append("[%d] %s(%s)" % (
                 step, str(record.get("name") or "?").split("__")[-1],
-                args[:400]))
+                _clip(args, ARG_CHARS)))
         elif kind == "tool.finished" and lines:
-            out = str(record.get("output") or "")[:300].replace("\n", " ")
-            lines[-1] += "  -> %s" % (out or record.get("status") or "")
+            out = str(record.get("output") or "")
+            lines[-1] += "  -> %s" % (_clip(out, RESULT_CHARS)
+                                      or record.get("status") or "")
         elif kind == "agent.message":
             text = str(record.get("text") or "").replace("\n", " ")
             if text.strip():
-                lines.append("    (agent said: %s)" % text[:200])
+                lines.append("    (agent said: %s)"
+                             % _clip(text, MESSAGE_CHARS))
     body = "\n".join(lines)
-    if len(body) > char_budget:
-        # Keep the head and the tail: the early steps establish what was
-        # understood, the late ones contain the failure.
-        half = char_budget // 2
-        body = body[:half] + "\n...[middle elided]...\n" + body[-half:]
+    budget = int(token_budget * CHARS_PER_TOKEN)
+    if len(body) > budget:
+        # Elide the middle, and give the TAIL two thirds: the late steps contain
+        # the failure being diagnosed, the early ones only establish what was
+        # understood. An even split looked fair and was not -- with a single step
+        # rendering to several thousand characters, half a small budget did not
+        # reach the end of step 1, so the last steps vanished entirely.
+        head = budget // 3
+        tail = budget - head
+        body = body[:head] + "\n...[middle elided]...\n" + body[-tail:]
     return body, 1, step
+
+
+def _clip(text: str, limit: int) -> str:
+    """Head AND tail when something is too long -- never head only.
+
+    A test run's verdict is at the end of its output, so head-only truncation
+    keeps the banner and drops the answer.
+    """
+    text = text.replace("\n", " ")
+    if len(text) <= limit:
+        return text
+    head = limit * 2 // 3
+    tail = limit - head
+    return "%s …[%d chars elided]… %s" % (text[:head], len(text) - limit,
+                                          text[-tail:])
 
 
 # --- grading ---------------------------------------------------------------
@@ -416,6 +467,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--rounds", type=int, default=2,
                        help="branching rounds after the first attempt")
     parser.add_argument("--branches", type=int, default=3)
+    parser.add_argument("--analyst-tokens", type=int, default=100_000,
+                        help="transcript budget handed to the analyst")
     parser.add_argument("--timeout", type=float, default=1800.0)
     parser.add_argument("--runtime-bin", default="runtime/ash-runtime")
     parser.add_argument("-o", "--out", default="runs/fork-eval")
@@ -463,15 +516,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("\n== resolved; no further rounds ==")
             break
         print("\n== round %d: analysing %s ==" % (round_no, best.name))
-        transcript, lo, hi = render_transcript(best.outcome.journal_path)
+        transcript, lo, hi = render_transcript(best.outcome.journal_path,
+                                              token_budget=args.analyst_tokens)
         if hi < 1:
             print("   no tool steps to branch from; stopping")
             break
         verdict = "%s\n\nPatch (%d lines):\n%s\n\nTest output:\n%s" % (
             best.grade.summary(), best.grade.patch.count("\n"),
-            best.grade.patch[:3000], best.grade.detail[:3000])
+            best.grade.patch[:40000], best.grade.detail[:20000])
         prompt = _ANALYSIS_PROMPT.format(
-            problem=instance["problem"][:6000], verdict=verdict,
+            problem=instance["problem"][:20000], verdict=verdict,
             transcript=transcript, lo=lo, hi=hi, branches=args.branches,
             notes=("\n## What earlier rounds already tried (do not repeat)\n"
                    + "\n".join(notes)) if notes else "")
@@ -505,7 +559,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 orch, args, instance, name=name,
                 prompt=BRANCH_PROMPT.format(
                     repo=instance["repo"], problem=instance["problem"],
-                    verdict=verdict[:4000], hint=branch.get("hint")),
+                    verdict=verdict[:20000], hint=branch.get("hint")),
                 image=pair["snapshot_id"],
                 resume=pair.get("session_ckpt"), fork=True,
                 origin={"parent_run_id": best.name, "branch_step": step,
