@@ -1,15 +1,18 @@
 # SWE-Marathon on an Anthropic-compatible proxy (deepseek-v4-flash).
 #
-# The key goes in one of two places, and litellm reads neither of Claude
-# Code's variables (ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL):
-#   1. model.api_key / model.api_base below, or
-#   2. export ANTHROPIC_API_KEY=... and ANTHROPIC_API_BASE=...
+# The key comes from the ENVIRONMENT, never from this file:
+#
+#     export ANTHROPIC_API_KEY=...        # litellm reads this when api_key is unset
+#
+# litellm reads neither of Claude Code's variables (ANTHROPIC_AUTH_TOKEN /
+# ANTHROPIC_BASE_URL), which is why api_base is stated below and the key is not.
+# `model.api_key` still accepts a literal, and a literal is how a real key spent
+# months in this repository's history -- so do not put one here.
 extends: default
 
 model:
   name: anthropic/deepseek-v4-flash
   api_base: http://47.100.35.241
-  api_key: REDACTED-SEE-CONFIG-COMMENT
 
 limits:
   step_limit: 2000
@@ -21,6 +24,8 @@ execution:
   backend: microvm
   microvm:
     server_url: http://127.0.0.1:18000
+    # Placeholder only -- the real one comes from AENV_API_KEY in the
+    # environment (harness/execution/backends.py reads it when unset).
     api_key: bench-key-0123456789abcdef0123456789abcdef
     runtime_bin: /tmp/ash-runtime
     sandbox_ttl: 28800

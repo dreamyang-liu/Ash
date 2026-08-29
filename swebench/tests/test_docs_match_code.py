@@ -159,3 +159,38 @@ def test_claude_md_does_not_ask_for_hand_synced_tool_lists():
     """That rule described three hand-written copies. The panel is compiled now, and
     asking a reader to edit copies that no longer exist sends them looking for them."""
     assert "three tool views" not in CLAUDE_MD.read_text()
+
+
+# --------------------------------------------------------------------------- #
+#  Secrets
+# --------------------------------------------------------------------------- #
+
+def test_no_config_carries_a_literal_secret():
+    """A real DeepSeek key (`sk-bfe3fe…`) sat in two marathon configs and was one
+    `git push` from being public -- caught by a pre-push scan, not by review.
+
+    Credentials come from the environment; `backends.py` already reads
+    AENV_API_KEY / api_key_file, and litellm reads ANTHROPIC_API_KEY when
+    `model.api_key` is unset. The heuristics below are the shapes that actually
+    appear: a provider-prefixed key, or a long opaque token that is not one of
+    the obvious placeholders.
+    """
+    import re
+
+    placeholder = re.compile(r"^(bench-key-|test-|dummy|fake|xxx|changeme|<)",
+                             re.I)
+    offenders = []
+    for path in sorted((REPO / "swebench" / "configs").rglob("*.y*ml")):
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            match = re.search(r"^\s*(?:api_key|token|secret)\s*:\s*(\S+)", line)
+            if not match:
+                continue
+            value = match.group(1).strip("'\"")
+            if placeholder.match(value):
+                continue
+            if value.startswith(("sk-", "sk_", "ghp_", "xoxb-", "AKIA")) or \
+                    len(value) >= 32:
+                offenders.append("%s:%d" % (path.relative_to(REPO), number))
+    assert not offenders, (
+        "literal credentials in %s -- source them from the environment instead"
+        % ", ".join(offenders))
