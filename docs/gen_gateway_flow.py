@@ -29,11 +29,39 @@ def main() -> int:
     legend = ("routes.json 是唯一的模型配置点;agent 拿到的只有 gateway 地址 + slot-token。\n"
               "实线 = 请求/数据 · 虚线 = 记录 · 紫框 = 每个 LLM 请求都重复的部分")
     c.text("legend", 40, 56, legend, size=12, color=GREY)
+    top = 56 + text_size(legend, 12)[1] + 22
 
-    seq = Sequence(c, 40, 56 + text_size(legend, 12)[1] + 26, [
+    # ---- who can go through the gateway, per agent --------------------------
+    cc = c.panel("ag-cc", 40, top, 400, "claude-code —— 过 gateway ✅(已真机验证)",
+                 "说 Anthropic Messages 协议,正是 gateway 说的\n"
+                 "接法:env 注入 ANTHROPIC_BASE_URL + AUTH_TOKEN\n"
+                 "slot 自动关 Bedrock/Vertex 直连(否则静默绕过)\n"
+                 "已验:模型改写 · 计价 · 预算 400 · wire-tap",
+                 color=GREEN)
+    oc = c.panel("ag-oc", cc["right"] + 18, top, 400,
+                 "opencode —— 协议匹配,未真机验证",
+                 "用它的 anthropic provider 时也说 /v1/messages\n"
+                 "接法:opencode 配置里 provider.options.baseURL\n"
+                 "  指到 gateway,api key 填 slot-token\n"
+                 "理论上直接能用;跑过之前不算数",
+                 color=ORANGE)
+    cx = c.panel("ag-cx", oc["right"] + 18, top, 400,
+                 "codex —— 过不了 gateway ❌(协议不同)",
+                 "只说 OpenAI Responses 协议(0.145 起 chat 也不说了)\n"
+                 "gateway 只会 Anthropic Messages → 接不上\n"
+                 "现状:provider-direct(原生 amazon-bedrock / ChatGPT)\n"
+                 "  → 预算和记账对 codex 不生效,这是已知缺口\n"
+                 "要接入:gateway 学 Responses 协议(等真需要再做)",
+                 color=RED)
+    bar_bottom = max(cc["bottom"], oc["bottom"], cx["bottom"])
+    c.text("seq-cap", 40, bar_bottom + 18,
+           "下面的时序对「说 Anthropic 协议的 agent」成立(claude-code 已验,opencode 待验):",
+           size=13, color=GREY)
+
+    seq = Sequence(c, 40, bar_bottom + 44, [
         ("cfg", "routes.json\n(模型→上游的表)", ORANGE),
         ("orch", "Orchestrator", GREEN),
-        ("agent", "Agent\n(claude CLI)", BLUE),
+        ("agent", "Agent\n(claude✅ / opencode?)", BLUE),
         ("gw", "Gateway\n(进程内 HTTP)", GREEN),
         ("up", "上游\n(provider/vLLM/ckpt)", VIOLET),
         ("journal", "Journal", ORANGE),
@@ -63,6 +91,8 @@ def main() -> int:
 
     seq.note("换模型 = routes.json 改一行(agent 要 opus-5,上游跑 sonnet-4-6,实测无感);"
              "RL rollout = base_url 指向自己的 checkpoint", color=VIOLET)
+    seq.note("codex 不在这张时序里:它的流量今天走 provider-direct,不经过任何一个框——"
+             "统一预算/记账要覆盖 codex,先给 gateway 加 Responses 协议", color=RED)
     seq.note("路由没配单价而又设了 budget → journal 记一次 budget_unenforceable,"
              "绝不静默假装在管账", color=RED)
     seq.lifelines()
