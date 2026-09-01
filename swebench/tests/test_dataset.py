@@ -70,3 +70,20 @@ def test_the_sympy_runner_distinguishes_ran_from_matched_nothing():
                 raise Skipped("nope")
             '''), ["test_ok"])
         assert skipped.returncode == 0, "a skip is not a failure of the change"
+
+
+def test_django_docstring_ids_are_inexpressible_but_labeled_ones_are_not():
+    """django announces a test by its docstring's first line when it has one, and
+    the dataset harvested those display strings: 165 of the 231 django instances
+    carry ids like "Tests creating/deleting CHECK constraints". As a label that
+    is a fatal collection error -- the batch dies before running ANY test, and 77
+    of the first full 500's 94 "broke regressions" verdicts were this. The
+    ``test_x (module.Class)`` form still carries a real label and must pass."""
+    from swebench.dataset import malformed_test_ids
+
+    assert malformed_test_ids([
+        "Tests creating/deleting CHECK constraints",          # prose: drop
+        "test_add (aggregation.tests.AggregateTestCase)",     # labeled: keep
+        "tests/t.py::TestX::test_y[param with space]",        # pytest: keep
+        "module.Class.test_plain",                            # label: keep
+    ]) == ["Tests creating/deleting CHECK constraints"]

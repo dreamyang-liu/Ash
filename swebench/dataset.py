@@ -111,8 +111,34 @@ def malformed_test_ids(test_ids: list) -> list:
     regression suite for every attempt, whatever the agent did. Measured: seven of
     a 32-instance batch's fourteen failures were this, three of them showing
     "target passes, regressions fail" across all eight attempts.
+
+    The second kind is django's: its runner announces a test by the FIRST LINE OF
+    ITS DOCSTRING when it has one, and the dataset harvested those display
+    strings, so 165 of the 231 django instances carry ids like
+    ``Tests creating/deleting CHECK constraints``. Handed back to
+    ``runtests.py`` as a label, that is a fatal "test label path does not exist"
+    at COLLECTION time -- the batch dies before running anything, and every
+    verdict downstream says "regressions FAIL" about a suite that never ran.
+    Measured on the first full 500: 77 of 94 "broke regressions" and 28 of 133
+    "target failed" verdicts were this. (``test_x (module.Class)`` ids are fine;
+    ``build_batch_test_command`` rewrites them into real labels.)
     """
-    return [t for t in test_ids if t.count("[") != t.count("]")]
+    def inexpressible(test_id: str) -> bool:
+        if test_id.count("[") != test_id.count("]"):
+            return True
+        # A space without either a pytest ``::`` path or a trailing
+        # ``(module.Class)`` label is a docstring, not a test id.
+        if " " in test_id and "::" not in test_id \
+                and not _DJANGO_LABEL.search(test_id):
+            return True
+        return False
+
+    return [t for t in test_ids if inexpressible(t)]
+
+
+#: ``test_name (module.Class)`` -- django's display form that still carries the
+#: real label. Anything space-separated WITHOUT this is prose.
+_DJANGO_LABEL = re.compile(r"\(\w[\w.]*\)\s*$")
 
 
 def parse_test_list(raw: object) -> list[str]:
