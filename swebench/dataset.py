@@ -3,6 +3,7 @@
 import json
 import re
 import shlex
+from typing import Optional
 
 
 _DATASET_MAP = {
@@ -139,6 +140,70 @@ def malformed_test_ids(test_ids: list) -> list:
 #: ``test_name (module.Class)`` -- django's display form that still carries the
 #: real label. Anything space-separated WITHOUT this is prose.
 _DJANGO_LABEL = re.compile(r"\(\w[\w.]*\)\s*$")
+
+
+def django_modules(test_ids: list, test_files: Optional[list] = None) -> list:
+    """The ``runtests.py`` labels that cover these ids.
+
+    Labeled ids carry their module (``test_x (aggregation.tests.Cls)`` ->
+    ``aggregation.tests``); prose ids carry nothing, so the graded test files
+    stand in (``tests/aggregation/tests.py`` -> ``aggregation.tests``). Modules,
+    not individual labels, because grading django is done by PARSING the runner's
+    verbose output -- the only representation in which a docstring id exists.
+    """
+    modules = []
+    for test_id in test_ids:
+        label = _DJANGO_LABEL.search(test_id)
+        if label:
+            dotted = label.group(0).strip("() \t")
+            module = dotted.rsplit(".", 1)[0]  # drop the class
+            if module and module not in modules:
+                modules.append(module)
+    for path in test_files or []:
+        if path.startswith("tests/") and path.endswith(".py"):
+            module = path[len("tests/"):-3].replace("/", ".")
+            if module not in modules:
+                modules.append(module)
+    return modules
+
+
+def parse_django_verbose(output: str) -> tuple[set, set]:
+    """(passed, failed) display names from ``runtests.py --verbosity 2`` output.
+
+    This is the official SWE-bench semantics: an id "passes" when the line the
+    runner printed for it ends in ``... ok``, and the printed line is the
+    docstring's first line WHEN THE TEST HAS ONE -- which is exactly where the
+    dataset's prose ids come from. Passing labels to the runner instead dies at
+    collection on any prose id ("test label path does not exist"), which turned
+    105 verdicts of this batch's first grading into fiction.
+
+    A test the output never names is a failure: silence usually means the module
+    crashed at import, and import-crashed is not passed.
+    """
+    passed, failed = set(), set()
+    previous = ""
+    for raw in (output or "").splitlines():
+        line = raw.strip()
+        for marker, bucket in ((" ... ok", passed), (" ... FAIL", failed),
+                               (" ... ERROR", failed)):
+            if line.endswith(marker):
+                name = line[: -len(marker)].strip()
+                bucket.add(name)
+                # verbosity 2 prints "test_x (mod.Cls)\nDocstring ... ok":
+                # the id line lands in `previous`, and BOTH forms appear in
+                # dataset ids, so both count.
+                if previous and (previous.endswith(")") or
+                                 previous.startswith("test_")):
+                    bucket.add(previous)
+        if line in ("ok", "FAIL", "ERROR") and previous.endswith("..."):
+            # wrapped form: name line ends "...", status on its own line
+            (passed if line == "ok" else failed).add(
+                previous[:-3].strip())
+        for prefix in ("FAIL: ", "ERROR: "):
+            if line.startswith(prefix):
+                failed.add(line[len(prefix):].strip())
+        previous = line
+    return passed - failed, failed
 
 
 def parse_test_list(raw: object) -> list[str]:

@@ -294,6 +294,10 @@ class Grade:
     #: says how much of the suite actually ran -- a grade over a silently
     #: shrunken suite is laxer than the benchmark it claims to be.
     skipped_ids: List[str] = field(default_factory=list)
+    #: True when the agent had edited graded test files and those edits were
+    #: discarded before grading (the public-leaderboard convention). Kept
+    #: visible: the work was graded, the violation still happened.
+    reverted_test_edits: bool = False
 
     #: False until the regression sweep actually ran -- it is skipped when the
     #: target tests fail, and reporting that skip as "FAIL" reads as a
@@ -342,6 +346,25 @@ def grade_snapshot(snapshot_id: str, instance: dict, backend: dict,
         # themselves; that grades 0 rather than falling back to stale copies.
         test_patch = str(instance.get("test_patch") or "")
         if test_patch.strip():
+            # Public-leaderboard convention: the model's patch EXCLUDES test
+            # files, so an agent's edits to the graded tests are discarded
+            # before test_patch lands, not graded as a collision. Measured: 53
+            # of the first full 500 were "test_patch did not apply", and the
+            # spot-check confirmed all five sampled had genuinely edited graded
+            # tests -- under this convention those edits are simply not part of
+            # the answer. The revert is per-file: back to HEAD when tracked,
+            # deleted when the agent invented it.
+            graded_files = sorted(set(
+                re.findall(r"^\+\+\+ b/(\S+)", test_patch, re.M) +
+                re.findall(r"^--- a/(\S+)", test_patch, re.M)) - {"/dev/null"})
+            if graded_files:
+                quoted = " ".join("'%s'" % f for f in graded_files)
+                revert = session.execute("shell", {
+                    "command": "cd /testbed && for f in %s; do "
+                               "git checkout HEAD -- \"$f\" 2>/dev/null "
+                               "|| rm -f \"$f\"; done" % quoted,
+                    "timeout": 120})
+                grade.reverted_test_edits = _exit_ok(revert)
             session.execute("text_editor", {
                 "command": "write", "path": "/tmp/.swebench_test.patch",
                 "file_text": test_patch})
@@ -349,13 +372,22 @@ def grade_snapshot(snapshot_id: str, instance: dict, backend: dict,
                 "command": "cd /testbed && git apply /tmp/.swebench_test.patch",
                 "timeout": 120})
             if not _exit_ok(applied):
-                grade.error = ("test_patch did not apply -- the attempt's edits "
-                               "collided with the graded tests")
+                grade.error = ("test_patch did not apply even after reverting "
+                               "the attempt's test edits")
                 return grade
 
         f2p = parse_test_list(instance.get("f2p") or instance.get("FAIL_TO_PASS"))
         p2p = parse_test_list(instance.get("p2p") or instance.get("PASS_TO_PASS"))
         repo = instance["repo"]
+
+        if repo == "django/django":
+            # Graded by PARSING the runner's verbose output -- the official
+            # semantics, and the only representation in which the dataset's
+            # docstring ids exist at all. Handing labels to runtests.py dies at
+            # collection on any prose id; that fiction cost 105 verdicts in this
+            # batch's first grading.
+            _grade_django(session, instance, f2p, p2p, grade, timeout)
+            return grade
 
         # Drop ids the dataset itself damaged, and SAY SO. Silently dropping them
         # would make grading laxer than the benchmark; keeping them makes every
@@ -401,6 +433,56 @@ def grade_snapshot(snapshot_id: str, instance: dict, backend: dict,
     finally:
         session.destroy()
     return grade
+
+
+def _grade_django(session, instance: dict, f2p: List[str], p2p: List[str],
+                  grade: "Grade", timeout: float) -> None:
+    """Run the covering modules once per phase and match ids against output."""
+    from swebench.dataset import django_modules, parse_django_verbose
+
+    bracket_broken = [t for t in f2p + p2p if t.count("[") != t.count("]")]
+    grade.skipped_ids += bracket_broken
+    f2p = [t for t in f2p if t not in bracket_broken]
+    p2p = [t for t in p2p if t not in bracket_broken]
+    if not f2p:
+        grade.error = "every FAIL_TO_PASS id is damaged -- cannot grade"
+        return
+
+    files = instance.get("test_files") or []
+
+    def run_phase(ids: List[str]) -> tuple:
+        modules = django_modules(ids, files)
+        if not modules:
+            return False, "no runnable module for: %s" % ids[:3]
+        # PYTHONIOENCODING: these images run a POSIX/ascii locale, and
+        # verbosity 2 makes django print "Creating tables…" -- one ellipsis and
+        # the whole run dies of UnicodeEncodeError before any test.
+        command = ("cd /testbed && PYTHONIOENCODING=utf-8 "
+                   "./tests/runtests.py --verbosity 2 --parallel 1 %s"
+                   % " ".join(modules))
+        result = session.execute("shell", {"command": command,
+                                           "timeout": int(timeout)})
+        text = ""
+        try:
+            body = json.loads(result.output or "{}")
+            text = (body.get("stdout") or "") + (body.get("stderr") or "")
+        except (ValueError, TypeError):
+            text = result.output or result.error or ""
+        passed, failed = parse_django_verbose(text)
+        missing = [t for t in ids if t not in passed]
+        return not missing, ("%d/%d ids pass; missing/failing: %s\n%s"
+                             % (len(ids) - len(missing), len(ids),
+                                missing[:5], text[-3000:]))
+
+    grade.f2p_pass, detail = run_phase(f2p)
+    grade.detail = "target: %s" % detail
+    if grade.f2p_pass and p2p:
+        grade.p2p_ran = True
+        grade.p2p_pass, detail = run_phase(p2p)
+        if not grade.p2p_pass:
+            grade.broken = [line for line in detail.splitlines()[:1]]
+        grade.detail += "\n\nregressions: %s" % detail
+    grade.resolved = grade.f2p_pass and (grade.p2p_pass or not p2p)
 
 
 def _install_runner(session, repo: str, test_ids: List[str]) -> Optional[str]:

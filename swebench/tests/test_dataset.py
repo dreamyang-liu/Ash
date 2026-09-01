@@ -87,3 +87,32 @@ def test_django_docstring_ids_are_inexpressible_but_labeled_ones_are_not():
         "tests/t.py::TestX::test_y[param with space]",        # pytest: keep
         "module.Class.test_plain",                            # label: keep
     ]) == ["Tests creating/deleting CHECK constraints"]
+
+
+def test_django_grading_matches_output_lines_in_both_display_forms():
+    """django prints "test_x (mod.Cls)" and, when the test has a docstring, the
+    docstring's first line on the NEXT line with the status attached -- and the
+    dataset's ids come from BOTH forms. Grading is therefore membership against
+    parsed output, never labels handed to runtests.py (any prose id kills its
+    collection). A name the output never mentions is a failure: silence usually
+    means the module died at import."""
+    from swebench.dataset import parse_django_verbose
+
+    passed, failed = parse_django_verbose(
+        "test_add (aggregation.tests.AggregateTestCase)\n"
+        "Tests creating/deleting CHECK constraints ... ok\n"
+        "test_other (x.Y) ... FAIL\n"
+        "FAIL: test_other (x.Y)\n")
+    assert "Tests creating/deleting CHECK constraints" in passed
+    assert "test_add (aggregation.tests.AggregateTestCase)" in passed
+    assert "test_other (x.Y)" in failed
+    assert "test_never_printed (m.C)" not in passed
+
+
+def test_django_modules_come_from_labels_and_fall_back_to_test_files():
+    from swebench.dataset import django_modules
+
+    assert django_modules(
+        ["test_a (aggregation.tests.Cls)", "Prose only id"],
+        ["tests/schema/tests.py"],
+    ) == ["aggregation.tests", "schema.tests"]
