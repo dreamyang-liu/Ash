@@ -19,11 +19,15 @@ The loop:
    there. Grading in a restored sandbox rather than the live one is deliberate:
    it proves the snapshot carries the work, and it lets grading happen after the
    agent's sandbox is gone.
-3. **Branch on failure.** An analyst model reads the journal as a step-by-step
-   transcript plus the grading verdict, picks the step to branch from and K
-   diverse directions; each direction becomes another attempt whose sandbox image
-   IS that step's snapshot and whose conversation forks the parent's. Grade each.
-4. Repeat from the best-scoring attempt, up to ``--rounds``.
+3. **Branch on failure**, in two analyst stages. *Map:* every failed attempt is
+   analysed separately -- its transcript, its verdict, the hint it was given --
+   into a failure_reason, a lesson, and candidate branch steps. *Reduce:* a
+   reviewer reads ALL the analyses (parent included) and picks ONE base attempt
+   + step + K divergent directions. Each direction becomes another attempt whose
+   sandbox image IS that step's snapshot and whose conversation forks the
+   base's. The reviewer may go BACK to an earlier attempt when later ones are
+   deeper in a dead end -- the escape hatch winner-take-all lacked.
+4. Repeat until something resolves or ``--rounds`` is spent.
 
 Why the analyst sees the *verdict* and not just the transcript: on a benchmark the
 agent usually believes it succeeded, so "what went wrong" is only answerable from
@@ -160,39 +164,79 @@ edits to them.
 {primer}"""
 
 
-# --- analyst ---------------------------------------------------------------
-_ANALYSIS_PROMPT = """\
-You are deciding where to BRANCH a fresh attempt at a software bug fix, from \
-per-step environment snapshots of an earlier attempt that FAILED its grading.
+# --- analysts: one per failed case, then one review over all of them --------
+#
+# Two stages on purpose. A single analyst reading only the best attempt threw
+# away the losing branches' trajectories -- round 2 used to receive one 120-char
+# line per sibling. Now every failed attempt gets its own analysis (map), and a
+# review agent reads ALL of them -- parent included -- to pick where the next
+# round starts (reduce). The reviewer may choose ANY earlier attempt as the
+# base, which is also the escape hatch the old winner-take-all flow lacked:
+# when the round-1 winner is a deeper dead end, the reviewer can go back to the
+# parent.
 
-## The problem the attempt was solving
+_CASE_PROMPT = """\
+You are analysing ONE failed attempt at a software bug fix. Your analysis will
+be pooled with analyses of the other attempts, and a reviewer will decide where
+a fresh attempt should branch from this attempt's per-step snapshots.
+
+## The problem it was solving
 {problem}
 
-## How it was graded (this is ground truth the attempt itself could not see)
+## The direction this attempt was given (empty if it was the original attempt)
+{hint}
+
+## How it was graded (ground truth the attempt itself could not see)
 {verdict}
 
 ## The attempt, one line per tool step ("[N] tool(args) -> result")
 {transcript}
 
 ## Rules
-- Valid branch steps: integers {lo}..{hi} that appear in the transcript. A branch
-  at step N resumes from the environment AS IT STOOD AFTER step N.
-- LATER IS BETTER: every step kept preserves work. But the step must be strictly
-  BEFORE the decisive wrong turn -- branching after it inherits the mistake.
-  Weigh both; do not reflexively pick the middle or the end.
-- The resumed agent gets the ENVIRONMENT ONLY -- files as they were after that
-  step. It has none of this conversation. Every hint must be self-contained: say
-  what is already on disk and trustworthy, what this attempt learned (including
-  from its failures), and what to do differently.
-- Produce {branches} genuinely DIVERSE directions: different hypotheses about the
-  failure, or different strategies (fix-forward, revert-and-redo the flawed part,
-  narrower change, different verification discipline). Not paraphrases. They run
-  independently, so it is fine for them to disagree.
-{notes}
+- Valid steps: integers {lo}..{hi}. A branch at step N resumes from the
+  environment AS IT STOOD AFTER step N.
+- branch_candidates: up to 3 steps worth branching from, LATER IS BETTER (every
+  step kept preserves work) but strictly BEFORE this attempt's decisive wrong
+  turn. If the whole attempt was poisoned from the start, say so with step {lo}.
+- Be specific about MECHANISM: "changed __eq__ but numeric subclasses override
+  it" is a failure_reason; "the fix was incomplete" is not.
 
 Return ONLY a JSON object, no prose:
-{{"branch_step": <int>, "why_here": "<why this step, and why not later>",
-  "what_went_wrong": "<diagnosis>",
+{{"failure_reason": "<the mechanism, specific>",
+  "lesson": "<what the next attempt must know that this one proved>",
+  "salvage": "<what on this attempt's disk is worth keeping, or 'nothing'>",
+  "branch_candidates": [{{"step": <int>, "why": "<one sentence>"}}]}}
+"""
+
+_REVIEW_PROMPT = """\
+You are the REVIEWER for a failed software bug fix. Several attempts have been
+made; each failed attempt has been analysed separately below. Decide where the
+next round of {branches} parallel attempts should start.
+
+## The problem
+{problem}
+
+## Every attempt so far ("parent" is the original; branches were given a hint)
+{reports}
+
+## Rules
+- Pick ONE base attempt and a branch_step from ITS branch_candidates (you may
+  choose a different step of the same attempt if the analyses justify it). The
+  new attempts resume from that attempt's environment after that step, and they
+  inherit that attempt's conversation up to it.
+- Going BACK to an earlier attempt (including parent) is legitimate when later
+  attempts are deeper in a dead end -- weigh salvage against contamination.
+- Synthesise across the analyses: a hypothesis two attempts each half-proved is
+  the most valuable thing you can hand the next round.
+- Produce {branches} genuinely DIVERSE directions, disjoint from every
+  hint_given above. Each hint must be self-contained (4-10 sentences): what is
+  on the base's disk and trustworthy, what the pooled lessons established, and
+  what to do differently.
+
+Return ONLY a JSON object, no prose:
+{{"base": "<attempt name>", "branch_step": <int>,
+  "why": "<why this base and step>",
+  "synthesis": "<the pooled diagnosis>",
   "branches": [{{"name": "<slug>", "hint": "<4-10 sentences>"}}]}}
 """
 
@@ -633,6 +677,20 @@ class Attempt:
     outcome: RunOutcome
     grade: Grade
     plan: dict = field(default_factory=dict)
+    #: The direction this attempt was given ("" for the parent). Analyses quote
+    #: it so the reviewer can see hypothesis -> outcome in one place.
+    hint: str = ""
+    round_no: int = 0
+
+    def verdict_text(self) -> str:
+        """The grading verdict as the analysts and branch prompts see it."""
+        broken = ""
+        if self.grade.broken:
+            broken = ("\n\nTests this attempt BROKE (they passed before it): %s"
+                      % ", ".join(self.grade.broken))
+        return "%s%s\n\nPatch (%d lines):\n%s\n\nTest output:\n%s" % (
+            self.grade.summary(), broken, self.grade.patch.count("\n"),
+            self.grade.patch[:40000], self.grade.detail[:20000])
 
     @property
     def score(self) -> int:
@@ -915,48 +973,71 @@ def run_one(orch: Orchestrator, args, raw: dict, schedule: List[int],
     report(parent)
     print("   wall       %.0fs" % (time.time() - started))
 
-    best = parent
-    notes: List[str] = []
+    case_reports: dict = {}
+    by_name: dict = {"parent": parent}
     for round_no in range(1, args.rounds + 1):
-        if best.grade.resolved:
+        if any(a.grade.resolved for a in attempts):
             print("\n== resolved; no further rounds ==")
             break
-        # A round's width comes from the schedule; the last entry repeats if
-        # there are more rounds than numbers.
         width = schedule[min(round_no - 1, len(schedule) - 1)]
-        print("\n== round %d (%d branches): analysing %s =="
-              % (round_no, width, best.name))
-        transcript, lo, hi = render_transcript(best.outcome.journal_path,
-                                              token_budget=args.analyst_tokens)
-        if hi < 1:
-            print("   no tool steps to branch from; stopping")
-            break
-        broken = ""
-        if best.grade.broken:
-            broken = ("\n\nTests this attempt BROKE (they passed before it): %s"
-                      % ", ".join(best.grade.broken))
-        verdict = "%s%s\n\nPatch (%d lines):\n%s\n\nTest output:\n%s" % (
-            best.grade.summary(), broken, best.grade.patch.count("\n"),
-            best.grade.patch[:40000], best.grade.detail[:20000])
-        prompt = _ANALYSIS_PROMPT.format(
-            problem=instance["problem"][:20000], verdict=verdict,
-            transcript=transcript, lo=lo, hi=hi, branches=width,
-            notes=("\n## What earlier rounds already tried (do not repeat)\n"
-                   + "\n".join(notes)) if notes else "")
+        print("\n== round %d (%d branches) ==" % (round_no, width))
+
+        # -- map: analyse every failed attempt not yet analysed ----------------
+        for attempt in attempts:
+            if attempt.name in case_reports:
+                continue
+            transcript, lo, hi = render_transcript(
+                attempt.outcome.journal_path, token_budget=args.analyst_tokens)
+            if hi < 1:
+                case_reports[attempt.name] = {
+                    "failure_reason": "no tool steps recorded",
+                    "lesson": "", "salvage": "nothing", "branch_candidates": []}
+                continue
+            print("   analysing %s (%d steps)..." % (attempt.name, hi))
+            try:
+                case = extract_json(ask_analyst(
+                    args.analyst_model, _CASE_PROMPT.format(
+                        problem=instance["problem"][:20000],
+                        hint=attempt.hint or "(none -- original attempt)",
+                        verdict=attempt.verdict_text(), transcript=transcript,
+                        lo=lo, hi=hi)))
+            except Exception as exc:  # noqa: BLE001
+                case = {"failure_reason": "analysis failed: %s" % exc,
+                        "lesson": "", "salvage": "unknown",
+                        "branch_candidates": []}
+            case["steps"] = hi
+            case_reports[attempt.name] = case
+            print("      %s" % str(case.get("failure_reason"))[:150])
+
+        # -- reduce: one reviewer over all reports ------------------------------
+        reports_text = json.dumps(
+            [{"name": a.name, "round": a.round_no, "hint_given": a.hint or None,
+              "grade": a.grade.summary(), **case_reports.get(a.name, {})}
+             for a in attempts], indent=1, ensure_ascii=False)
         try:
-            plan = extract_json(ask_analyst(args.analyst_model, prompt))
+            plan = extract_json(ask_analyst(
+                args.analyst_model, _REVIEW_PROMPT.format(
+                    problem=instance["problem"][:20000],
+                    reports=reports_text, branches=width)))
         except Exception as exc:  # noqa: BLE001
-            print("   analyst failed: %s -- stopping" % exc)
+            print("   reviewer failed: %s -- stopping" % exc)
             break
-        step = int(plan.get("branch_step") or hi)
-        step = max(lo, min(hi, step))
-        print("   branch_step %d — %s" % (step, str(plan.get("why_here"))[:160]))
-        print("   diagnosis   %s" % str(plan.get("what_went_wrong"))[:200])
+        base = by_name.get(str(plan.get("base")))
+        if base is None:
+            base = max(attempts, key=lambda a: a.score)
+            print("   reviewer named unknown base %r; falling back to %s"
+                  % (plan.get("base"), base.name))
+        hi = case_reports.get(base.name, {}).get("steps", 1)
+        step = max(1, min(hi, int(plan.get("branch_step") or hi)))
+        print("   base %s @ step %d — %s" % (base.name, step,
+                                             str(plan.get("why"))[:160]))
+        print("   synthesis   %s" % str(plan.get("synthesis"))[:200])
         (out_dir / ("plan-round%d.json" % round_no)).write_text(
-            json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+            json.dumps({"reports": case_reports, "review": plan}, indent=2,
+                       ensure_ascii=False), encoding="utf-8")
 
         try:
-            pair = fork_plan(best.outcome.journal_path, step)
+            pair = fork_plan(base.outcome.journal_path, step)
         except ValueError as exc:
             print("   %s -- stopping" % exc)
             break
@@ -973,30 +1054,27 @@ def run_one(orch: Orchestrator, args, raw: dict, schedule: List[int],
                 orch, args, instance, name=name, out_dir=out_dir,
                 prompt=BRANCH_PROMPT.format(
                     repo=instance["repo"], problem=instance["problem"],
-                    verdict=verdict[:20000], hint=branch.get("hint"),
-                    primer=TOOL_PRIMER),
+                    verdict=base.verdict_text()[:20000],
+                    hint=branch.get("hint"), primer=TOOL_PRIMER),
                 image=pair["snapshot_id"],
                 resume=pair.get("session_ckpt"), fork=True,
-                origin={"parent_run_id": best.name, "branch_step": step,
+                origin={"parent_run_id": base.name, "branch_step": step,
                         "snapshot_id": pair["snapshot_id"],
                         "round": round_no, "direction": branch.get("name")})
             attempt = Attempt(name, outcome,
-                              grade_attempt(outcome, instance, args), plan)
+                              grade_attempt(outcome, instance, args), plan,
+                              hint=str(branch.get("hint") or ""),
+                              round_no=round_no)
             round_attempts.append(attempt)
             attempts.append(attempt)
+            by_name[name] = attempt
             report(attempt)
             print("   wall       %.0fs" % (time.time() - started))
-            notes.append("- round %d %s: %s -> %s" % (
-                round_no, branch.get("name"),
-                str(branch.get("hint"))[:120].replace("\n", " "),
-                attempt.grade.summary()))
 
         if round_attempts:
             winner = max(round_attempts, key=lambda a: a.score)
-            if winner.score >= best.score:
-                best = winner
-            print("\n   round %d best: %s (score %d); carrying %s forward"
-                  % (round_no, winner.name, winner.score, best.name))
+            print("\n   round %d best: %s (score %d)"
+                  % (round_no, winner.name, winner.score))
 
     print("\n== %s: %s ==" % (instance["instance_id"],
                                "RESOLVED" if any(a.grade.resolved for a in attempts)

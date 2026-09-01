@@ -125,6 +125,14 @@ def malformed_test_ids(test_ids: list) -> list:
     ``build_batch_test_command`` rewrites them into real labels.)
     """
     def inexpressible(test_id: str) -> bool:
+        stripped = test_id.strip()
+        # The third kind: pytest's PROGRESS MARKER harvested as a test id.
+        # "[100%]" balances its brackets, so the fragment check passes it, and
+        # pytest exits 4 ("file not found: [100%]") having run NOTHING -- found
+        # when a case-analysis of pytest-dev__pytest-5262 accused the grader,
+        # and the accusation checked out. Two Verified instances carry one.
+        if stripped.startswith("[") and stripped.endswith("]"):
+            return True
         if test_id.count("[") != test_id.count("]"):
             return True
         # A space without either a pytest ``::`` path or a trailing

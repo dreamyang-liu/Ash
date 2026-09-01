@@ -116,3 +116,13 @@ def test_django_modules_come_from_labels_and_fall_back_to_test_files():
         ["test_a (aggregation.tests.Cls)", "Prose only id"],
         ["tests/schema/tests.py"],
     ) == ["aggregation.tests", "schema.tests"]
+
+
+def test_a_bare_progress_marker_is_not_a_test_id():
+    """"[100%]" is pytest's progress display, harvested into two instances'
+    PASS_TO_PASS lists. Its brackets balance, so the fragment check passed it --
+    and pytest exits 4 having run NOTHING. Found because a case-analysis accused
+    the grader of a test invocation error, and the accusation checked out."""
+    from swebench.dataset import malformed_test_ids
+
+    assert malformed_test_ids(["[100%]", "a.py::test_x[100%]"]) == ["[100%]"]

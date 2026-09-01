@@ -184,3 +184,17 @@ def test_the_django_run_forces_utf8_stdout():
     assert "PYTHONIOENCODING=utf-8" in source
     assert "--verbosity 2" in source, \
         "output parsing NEEDS verbosity 2 -- the docstring lines only exist there"
+
+
+def test_verdict_text_names_broken_tests_and_survives_empty_grade():
+    """The verdict is what both analyst stages and every branch prompt see; the
+    BROKEN names are the single most useful fact in it (measured: without them,
+    branches guessed for seven attempts what they had regressed)."""
+    from swebench.fork_eval import Attempt, Grade
+
+    grade = Grade(f2p_pass=True, p2p_ran=True, p2p_pass=False,
+                  broken=["mod.test_a"], patch="+x\n", detail="d")
+    attempt = Attempt("r1b1", outcome=None, grade=grade, hint="try X")
+    text = attempt.verdict_text()
+    assert "mod.test_a" in text and "BROKE" in text
+    assert Attempt("p", None, Grade()).verdict_text()  # empty grade renders too
