@@ -149,10 +149,15 @@ step-replay have all been **deleted**. Each kept a second copy of something the
 orchestrator now does properly — sandbox lifecycle, per-step checkpoints, agent
 drivers — and none was in use once `fork_eval` existed.
 
-`fork_eval` runs **one instance at a time** and takes its arguments on the
-command line — the 24 per-model YAML configs went too, since the batch runner was
-their only reader. Batch (and the rollout server) come back on top of the
-orchestrator when they are needed, rather than being carried along broken.
+`fork_eval` takes its arguments on the command line — the 24 per-model YAML
+configs went too, since the batch runner was their only reader. `--instance`
+accepts a comma list (each instance gets its own output directory; summary.json
+is rewritten after every one), `--branches 4,3` varies width per round,
+`--rounds 0` disables branching, and `--regrade` re-runs the current grader over
+a finished run's snapshots without spending agent time. For full-dataset scale,
+shard the ids across parallel invocations (scripts/run_v500_when_ready.sh shows
+the pattern: pre-pull images first, then launch). The rollout server comes back
+on top of the orchestrator when it is needed.
 `results/` from those older runs is still on disk: generated data, untracked.
 
 ---
