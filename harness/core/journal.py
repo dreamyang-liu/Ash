@@ -1,9 +1,9 @@
 """Append-only JSONL journal (v2 envelope).
 
-Same envelope discipline as swebench/agent/trace.py (v1) -- monotonic ``seq``,
-RFC3339 UTC ``ts``, flush per line -- but standalone so harness/* has no import
-edge into benchmark code, and thread-safe because CLI slots emit from reader
-threads.
+Monotonic ``seq``, RFC3339 UTC ``ts``, flush per line; standalone so harness/*
+has no import edge into benchmark code, and thread-safe because CLI slots emit
+from reader threads. (The v1 of this envelope lived in the deleted
+swebench/agent/trace.py.)
 
 The journal is the canonical state: replay/export/resume all read this file.
 Writers never rewrite history; corrections are new events.
@@ -19,6 +19,30 @@ from pathlib import Path
 from typing import Callable, Iterator, List, Optional, Union
 
 from harness.core.events import JOURNAL_SCHEMA_VERSION
+
+
+#: Directories the OS empties on reboot (and tmpwatch empties sooner). A journal
+#: is the ONLY record a run leaves -- snapshot ids, every step, the grading
+#: evidence -- so writing one here schedules its own destruction. Learned the
+#: expensive way: a 32-instance batch's journals lived in /tmp when the host
+#: rebooted mid-regrade, and several hours of agent time now exist only as prose.
+VOLATILE_ROOTS = ("/tmp", "/var/tmp", "/dev/shm", "/run")
+
+
+def volatile_reason(path: Union[str, Path]) -> Optional[str]:
+    """Why this path will not survive a reboot, or None if it should.
+
+    Entry points refuse volatile journal destinations; the library layer does
+    not, because tests legitimately journal into pytest's /tmp fixtures. The
+    check is a resolved-prefix test rather than a filesystem-type probe --
+    simple, and it catches the mistake that was actually made.
+    """
+    resolved = Path(path).resolve()
+    for root in VOLATILE_ROOTS:
+        if resolved == Path(root) or str(resolved).startswith(root + "/"):
+            return ("%s is under %s, which the OS empties on reboot -- a journal "
+                    "is the only record a run leaves" % (resolved, root))
+    return None
 
 
 def new_run_id() -> str:

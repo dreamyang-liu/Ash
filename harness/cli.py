@@ -45,7 +45,8 @@ from harness.atif import export_file
 from harness.orchestrator import (AgentEnvClient, BatchRunner, Orchestrator,
                                   Reaper, ResourceLedger, RunSpec, load_tasks,
                                   parse_duration)
-from harness.core.journal import JournalWriter, new_run_id, read_journal
+from harness.core.journal import (JournalWriter, new_run_id, read_journal,
+                                   volatile_reason)
 from harness.core.slot import TaskSpec
 from harness.execution.provision import provision_http
 from harness.extract import patch_extractor, run_extract
@@ -94,7 +95,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         timeout_s=args.timeout,
         agent_id=args.agent_id,
         run_id=args.run_id,
-        journal_path=args.journal,
+        journal_path=args.journal,  # guarded below: journals must survive a reboot
         mcp_url=args.mcp_url,
         sandbox_image=args.sandbox_image,
         sandbox_id=args.sandbox_id,
@@ -133,6 +134,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # the ledger to reclaim what a killed process could not release. This used to
     # be created only for a sandbox on a remote server, so an orchestrator-owned
     # one -- the common case now -- was invisible to reap.
+    reason = volatile_reason(args.journal) if args.journal else None
+    if reason and not args.volatile_ok:
+        raise SystemExit("refusing: %s (pass --volatile-ok to override)" % reason)
+
     ledger = ResourceLedger() if args.sandbox_image else None
     outcome = Orchestrator(ledger=ledger, on_event=report).run(spec)
 
@@ -372,6 +377,9 @@ def main(argv=None) -> int:
     run.add_argument("--model")
     run.add_argument("--timeout", type=float, default=3600.0)
     run.add_argument("--journal")
+    run.add_argument("--volatile-ok", action="store_true",
+                     help="allow a journal under /tmp and friends -- refused by "
+                          "default, journals are the run's only record")
     run.add_argument("--run-id")
     run.add_argument("--agent-id", default="agent")
     run.add_argument("--mcp-name", default="ash")

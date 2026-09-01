@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-from harness.core.journal import read_journal
+from harness.core.journal import read_journal, volatile_reason
 from harness.orchestrator.run import Orchestrator, RunOutcome, RunSpec
 from harness.rollback import fork_plan, load_checkpoints
 from swebench.dataset import (SYMPY_RUNNER, build_batch_test_command,
@@ -660,6 +660,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--timeout", type=float, default=1800.0)
     parser.add_argument("--runtime-bin", default="runtime/ash-runtime")
     parser.add_argument("-o", "--out", default="runs/fork-eval")
+    parser.add_argument("--volatile-ok", action="store_true",
+                        help="allow -o under /tmp and friends. Refused by "
+                             "default: a reboot mid-batch already destroyed one "
+                             "32-instance run's journals.")
     parser.add_argument("--regrade", action="store_true",
                         help="re-grade a finished run in -o with the current "
                              "grader, spending no agent time: every attempt left "
@@ -677,9 +681,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.regrade:
+        # Not guarded: regrade only READS journals, and they are wherever the
+        # original run put them.
         return regrade(args, out_dir)
     if not args.instance:
         raise SystemExit("--instance is required (or use --regrade)")
+    reason = volatile_reason(out_dir)
+    if reason and not args.volatile_ok:
+        raise SystemExit("refusing: %s (pass --volatile-ok to override)" % reason)
 
     wanted = [x.strip() for x in str(args.instance).split(",") if x.strip()]
     catalogue = {i["instance_id"]: i for i in load_instances(args.subset)}

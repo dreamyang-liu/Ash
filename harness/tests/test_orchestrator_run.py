@@ -1010,3 +1010,53 @@ def test_a_run_with_no_origin_emits_none(tmp_path):
     Orchestrator(out_dir=tmp_path).run(spec(tmp_path))
     assert all(r["type"] != "fork.origin"
                for r in read_journal(tmp_path / "j.jsonl"))
+
+
+# --- journals must survive a reboot ------------------------------------------
+def test_volatile_paths_are_named_and_persistent_ones_are_not():
+    """A journal is the ONLY record a run leaves -- snapshot ids, every step, the
+    grading evidence. A 32-instance batch's journals lived in /tmp when the host
+    rebooted mid-regrade; hours of agent time now exist only as prose. The guard
+    is a resolved-prefix check at the ENTRY POINTS only: the library layer stays
+    unguarded because tests legitimately journal into pytest's /tmp fixtures."""
+    from harness.core.journal import volatile_reason
+
+    for doomed in ("/tmp/v32", "/tmp", "/var/tmp/x/deep/run.jsonl",
+                   "/dev/shm/j.jsonl", "/tmp/../tmp/sneaky"):
+        assert volatile_reason(doomed), doomed
+    for safe in ("runs/fork-eval", "/home/user/runs", "/tmpdir/runs",
+                 "/data/tmp-results"):
+        assert volatile_reason(safe) is None, safe
+
+
+def test_the_run_entrypoint_refuses_a_volatile_journal():
+    import subprocess, sys
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "harness", "run", "--slot", "claude-code",
+         "--journal", "/tmp/doomed.jsonl", "prompt"],
+        capture_output=True, text=True)
+    assert proc.returncode != 0
+    assert "refusing" in proc.stderr and "--volatile-ok" in proc.stderr
+
+
+def test_fork_eval_refuses_a_volatile_out_dir_but_not_for_regrade():
+    """Regrade only READS journals; they are wherever the original run put them,
+    and refusing to read from /tmp would strand exactly the data most in need of
+    rescue."""
+    import subprocess, sys
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "swebench.fork_eval", "--instance", "x",
+         "-o", "/tmp/doomed"],
+        capture_output=True, text=True)
+    assert proc.returncode != 0
+    assert "refusing" in proc.stderr
+
+    # --regrade on an empty /tmp dir: must get PAST the guard (it fails later,
+    # on the empty directory, or succeeds trivially -- either way, no "refusing").
+    proc = subprocess.run(
+        [sys.executable, "-m", "swebench.fork_eval", "--regrade",
+         "-o", "/tmp/definitely-empty-regrade-dir"],
+        capture_output=True, text=True)
+    assert "refusing" not in proc.stderr

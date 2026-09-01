@@ -195,6 +195,12 @@ makes `SandboxSession.create` build such a template per image on demand.
 are mutable tags, so every trajectory carries `base_image` (digest-pinned),
 `base_ref`, `base_commit` and the sandbox id.
 
+**A journal under `/tmp` schedules its own destruction.** It is the run's only
+record — snapshot ids, every step, the grading evidence. A 32-instance batch's
+journals lived in `/tmp` when the host rebooted mid-regrade; hours of agent time
+now exist only as prose. `harness run` and `fork_eval` now **refuse** volatile
+output paths (`--volatile-ok` to override); put runs under `runs/`.
+
 **The `cwd` you give an agent is not the sandbox.** It is where the CLI process
 runs on the host; keep it neutral (`/tmp`). Pointing it at this repository once
 handed an agent this repo's own `.claude/` skills mid-task.
