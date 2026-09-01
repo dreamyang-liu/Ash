@@ -117,3 +117,70 @@ def test_a_verdict_with_no_regressions_says_nothing_about_them():
     grade = Grade(f2p_pass=True, p2p_ran=True, p2p_pass=True, resolved=True)
     assert grade.broken == []
     assert "BROKEN" not in grade.summary()
+
+
+# --- the two grading conventions that must not silently regress ---------------
+class _RecordingSession:
+    """Stands in for SandboxSession; records every command grade_snapshot runs."""
+
+    def __init__(self, *a, **k):
+        self.commands = []
+        self.create_error = None
+
+    def create(self, image):
+        return True
+
+    def destroy(self):
+        pass
+
+    def execute(self, tool, args):
+        import json as _json
+        from harness.core.result import ToolResult
+
+        self.commands.append((tool, args))
+        return ToolResult(success=True, output=_json.dumps(
+            {"exit_code": 0, "stdout": "x ... ok", "stderr": ""}))
+
+
+def test_agent_test_edits_are_reverted_before_the_test_patch_lands(monkeypatch):
+    """Public-leaderboard convention: the model's patch excludes test files, so
+    edits to graded tests are DISCARDED before grading, not graded as a fatal
+    collision. 53 of the first full 500 were killed by the old behaviour; the
+    first one re-graded under the convention was simply resolved -- its source
+    fix had been right all along. The revert must come BEFORE `git apply` of the
+    test_patch, or the collision it prevents still happens."""
+    import harness.execution.session as session_module
+    from swebench.fork_eval import grade_snapshot
+
+    recorder = {}
+    monkeypatch.setattr(session_module, "SandboxSession",
+                        lambda *a, **k: recorder.setdefault("s", _RecordingSession()))
+    grade_snapshot("snap-1", {
+        "instance_id": "x", "repo": "some/repo",
+        "f2p": ["tests/t.py::test_a"], "p2p": [],
+        "test_patch": "--- a/tests/t.py\n+++ b/tests/t.py\n@@ -1 +1 @@\n-a\n+b\n",
+    }, {"backend": "docker"})
+    shell = [args["command"] for tool, args in recorder["s"].commands
+             if tool == "shell"]
+    revert = next((i for i, c in enumerate(shell) if "checkout HEAD" in c), None)
+    apply_ = next((i for i, c in enumerate(shell) if "git apply" in c), None)
+    assert revert is not None, "no revert of the graded test files"
+    assert "tests/t.py" in shell[revert]
+    assert apply_ is not None and revert < apply_, \
+        "the revert must precede the test_patch application"
+
+
+def test_the_django_run_forces_utf8_stdout():
+    """--verbosity 2 makes django print "Creating tables…", and one ellipsis
+    under the images' ascii locale killed the whole run with UnicodeEncodeError
+    before any test executed. Found because the MUST-PASS validation case failed
+    -- a previously-resolved instance graded as target-FAIL. Without the forced
+    encoding every django verdict is fiction again."""
+    import inspect
+
+    from swebench import fork_eval
+
+    source = inspect.getsource(fork_eval._grade_django)
+    assert "PYTHONIOENCODING=utf-8" in source
+    assert "--verbosity 2" in source, \
+        "output parsing NEEDS verbosity 2 -- the docstring lines only exist there"

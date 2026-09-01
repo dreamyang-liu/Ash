@@ -70,6 +70,26 @@ reporting a confident wrong number:
   exiting `2` ("grader broken") when nothing ran.
 - the graded tests come from `test_patch`, not from the image.
 
+The full-500 run added three more, worth ~30 points of fiction (43.0% reported,
+72.6% after re-grading the same snapshots — no agent was re-run):
+
+- the dataset splits parametrised ids on the commas **inside** the parameters
+  (65 instances), and harvested **django's docstring display strings** as test
+  ids (165 of 231 django instances). A prose id handed to `runtests.py` as a
+  label kills collection before any test runs. django is therefore graded the
+  official way: run the covering modules at `--verbosity 2` and match ids
+  against the **printed lines** (`parse_django_verbose`) — the only
+  representation in which a docstring id exists. An id the output never names
+  is a failure.
+- `--verbosity 2` makes django print `Creating tables…`, and one ellipsis under
+  the images' ascii locale killed the run with UnicodeEncodeError. Found because
+  the MUST-PASS validation case failed — which is exactly what it is for.
+- an agent's edits to graded test files are **reverted before grading** (the
+  public-leaderboard convention: the model's patch excludes tests), recorded in
+  `Grade.reverted_test_edits`, instead of being graded as a fatal collision.
+  Five of five spot-checked "collisions" were real edits to graded tests — and
+  the first one re-graded under the convention was simply resolved.
+
 ## Not here any more
 
 This repository's own litellm agent loop, the four `harnesses/` topologies,

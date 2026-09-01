@@ -161,15 +161,16 @@ orchestrator when they are needed, rather than being carried along broken.
 
 Each of these cost real debugging time, most of it in a single session.
 
-**Grading lies quietly.** A grader must be validated against an input that *must*
-fail. Verify by grading a **pre-edit snapshot**: if it "passes", the grader is
-broken. Four separate defects hid behind confident numbers here — sympy reports
-bare test-function names (all 75 Verified instances) that pytest collects as
-nothing; `bin/test -k` matches nothing and still exits 0; `sympy.test(...)`
-returns truthy for a zero-match run and its output cannot be captured; and the
-graded tests come from `test_patch`, not from the image. `swebench/dataset.py`
-now *refuses* to build a command it cannot express, and `SYMPY_RUNNER` exits `2`
-("grader broken") rather than `0` when nothing ran.
+**Grading lies quietly.** A grader must be validated against inputs that *must*
+fail AND that *must* pass — the must-pass case is what caught django dying of a
+UnicodeEncodeError under `--verbosity 2`. Seven separate defects hid behind
+confident numbers here: sympy's bare test names, `bin/test -k` exiting 0 on no
+match, `sympy.test(...)` truthy on zero-match, graded tests coming from
+`test_patch` not the image, the dataset splitting parametrised ids on internal
+commas, django docstrings harvested as test ids (165/231 django instances —
+grade by parsing `--verbosity 2` output, never by labels), and agent test-file
+edits graded as fatal instead of reverted per the public convention. The first
+full 500 reported 43.0%; the same snapshots re-graded honestly are 72.6%.
 
 **Every agent silently bypasses a gateway** unless its own provider-direct mode
 is disabled, and each does it differently: `claude-code` needs
