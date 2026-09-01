@@ -25,28 +25,36 @@ from swebench.dataset import (load_instances, malformed_test_ids,
 from swebench.fork_eval import grade_snapshot
 
 A = Path(__file__).resolve().parents[1]
-STATE = A / "runs/v500/regrade-poisoned.jsonl"
+STATE = A / "runs/v500/regrade-round2.jsonl"
 BACKEND = {"backend": "microvm",
            "microvm": {"from_image": True,
                        "runtime_bin": str(A / "runtime" / "ash-runtime")}}
 
 
 def poisoned_instances() -> dict:
-    """instance_id -> shard, for every non-resolved verdict the fix can move."""
-    catalogue = {i["instance_id"]: i for i in load_instances("verified")}
+    """instance_id -> shard, for every verdict the grader upgrade can move.
+
+    Round 2 sweeps EVERY non-resolved instance (round 1's flips stay resolved:
+    both fixes only widen what can pass). Two grader changes moved the goalposts
+    -- django by output-parsing, and test-file edits reverted instead of fatal --
+    so the affected set is "everything that failed", not one poisoned list.
+    Instances already flipped by round 1 are re-checked too; they can only
+    confirm.
+    """
+    flipped = set()
+    round1 = A / "runs/v500/regrade-poisoned.jsonl"
+    if round1.exists():
+        for line in round1.read_text().splitlines():
+            record = json.loads(line)
+            if record.get("resolved"):
+                flipped.add(record["instance"])
     out = {}
     for summary in sorted(glob.glob(str(A / "runs/v500/shard-*/summary.json"))):
         shard = summary.rsplit("/", 2)[-2]
         for entry in json.load(open(summary))["instances"]:
-            if entry["resolved"]:
-                continue  # a dead collection can only LOWER a verdict
-            raw = catalogue.get(entry["instance"])
-            if raw is None:
+            if entry["resolved"] or entry["instance"] in flipped:
                 continue
-            ids = parse_test_list(raw["PASS_TO_PASS"]) + \
-                parse_test_list(raw["FAIL_TO_PASS"])
-            if any(" " in t and "::" not in t for t in malformed_test_ids(ids)):
-                out[entry["instance"]] = shard
+            out[entry["instance"]] = shard
     return out
 
 
