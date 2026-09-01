@@ -61,28 +61,81 @@ CONVERSE = "https://bedrock-runtime.%s.amazonaws.com/model/%s/converse"
 
 
 # --- the agent's task ------------------------------------------------------
+#
+# The shape borrows what worked in mini-swe-agent's task prompt -- a numbered
+# reproduce-first workflow, environment quirks stated plainly instead of learned
+# by failing, and concrete tool invocations to copy -- re-grounded on this
+# panel's two tools. The old prompt named the tools and the rules but taught
+# nothing, so the model spent its first turns rediscovering the environment.
+
+TOOL_PRIMER = """\
+## Your tools, and the quirks that will bite you
+
+You have exactly two tools, served over MCP as `shell` and `text_editor`. Your \
+own built-in tools (Bash, Read, Edit, ...) are disabled -- they cannot see the \
+repository.
+
+**Every `shell` call runs in a FRESH process.** `cd` and environment variables \
+do not survive to the next call. Pass `working_dir` instead of cd, and set \
+`timeout` (seconds) for long test runs -- the default is too short for a full \
+suite. `tail` limits how much output comes back; use it when a test run is \
+noisy.
+
+    shell {"command": "python -m pytest tests/test_x.py -x -q",
+           "working_dir": "/testbed", "timeout": 600, "tail": 50}
+
+**`text_editor` is for reading and precise edits:**
+
+    view        {"command": "view", "path": "/testbed/pkg/mod.py",
+                 "view_range": [80, 140]}       # numbered lines
+    str_replace {"command": "str_replace", "path": "...",
+                 "old_str": "...", "new_str": "..."}
+                # old_str must match EXACTLY ONCE, whitespace included --
+                # include enough surrounding lines to make it unique
+    insert      {"command": "insert", "path": "...",
+                 "insert_line": 42, "insert_text": "..."}
+    write       {"command": "write", "path": "...", "file_text": "..."}
+                # whole-file write; for NEW files (e.g. a repro script)
+"""
+
 PROMPT = """\
 You are fixing a bug in the {repo} repository, checked out at /testbed inside \
-your sandbox. Use ONLY your ash MCP tools (shell, text_editor) -- your own local
-shell cannot see the repository.
+your sandbox.
 
 ## Problem statement
 {problem}
 
-## What counts as done
-The project's own test suite must accept your change. Find the tests that cover \
-this behaviour, run them, and iterate until they pass. Do not edit tests to make \
-them pass. Do not create new files unless the fix genuinely needs one.
+## Recommended workflow
 
-Work efficiently: read before you edit, and prefer a minimal, targeted change \
-over a sweeping refactor.
-"""
+Work step by step; run something after every change so a mistake surfaces while \
+it is still one edit deep.
+
+1. Explore the codebase and READ the code paths the problem statement names.
+2. Write a small script (e.g. /testbed/repro.py) that reproduces the issue, and \
+run it to confirm it fails the way the report says.
+3. Edit the source to fix the root cause -- minimal, targeted change; no \
+sweeping refactors.
+4. Re-run your script and confirm the fix.
+5. Probe edge cases around the fix (empty input, negatives, the other code \
+paths through the changed function) and handle what breaks.
+6. Run the project's own tests covering this area, and iterate until they pass.
+
+## Rules, and why
+
+- Do NOT edit test files. Grading restores the official tests and DISCARDS your \
+edits to them -- changing a test cannot make you pass and wastes your time.
+- Only changes under /testbed count. Do not create files outside it except \
+throwaway scripts.
+- A wrong-but-plausible fix that passes one test still fails the hidden \
+regression suite: fix causes, not symptoms.
+
+{primer}"""
 
 BRANCH_PROMPT = """\
 You are continuing work on a bug in the {repo} repository at /testbed in your \
 sandbox. The filesystem already holds an earlier attempt's work -- ITS EDITS ARE \
-ON DISK. You do not have that attempt's conversation, so trust the files, not \
-your memory.
+ON DISK. Start from the files as they are: run `git diff` in /testbed to see \
+exactly what the earlier attempt changed before you touch anything.
 
 ## Problem statement
 {problem}
@@ -93,9 +146,18 @@ your memory.
 ## Your direction for this attempt
 {hint}
 
-Use ONLY your ash MCP tools. Verify with the project's own tests, and do not \
-edit tests to make them pass.
-"""
+## Workflow
+
+1. `git diff` in /testbed -- know what is already changed.
+2. Reproduce the remaining failure with a small script before editing.
+3. Follow your direction above: fix forward or revert-and-redo, but keep the \
+change minimal.
+4. Re-run the reproduction, probe edge cases, then the project's own tests.
+
+Do NOT edit test files -- grading restores the official tests and discards your \
+edits to them.
+
+{primer}"""
 
 
 # --- analyst ---------------------------------------------------------------
@@ -845,7 +907,8 @@ def run_one(orch: Orchestrator, args, raw: dict, schedule: List[int],
     started = time.time()
     outcome = run_attempt(orch, args, instance, name="parent",
                           prompt=PROMPT.format(repo=instance["repo"],
-                                               problem=instance["problem"]),
+                                               problem=instance["problem"],
+                                               primer=TOOL_PRIMER),
                           image=instance["image"], out_dir=out_dir)
     parent = Attempt("parent", outcome, grade_attempt(outcome, instance, args))
     attempts.append(parent)
@@ -910,7 +973,8 @@ def run_one(orch: Orchestrator, args, raw: dict, schedule: List[int],
                 orch, args, instance, name=name, out_dir=out_dir,
                 prompt=BRANCH_PROMPT.format(
                     repo=instance["repo"], problem=instance["problem"],
-                    verdict=verdict[:20000], hint=branch.get("hint")),
+                    verdict=verdict[:20000], hint=branch.get("hint"),
+                    primer=TOOL_PRIMER),
                 image=pair["snapshot_id"],
                 resume=pair.get("session_ckpt"), fork=True,
                 origin={"parent_run_id": best.name, "branch_step": step,
