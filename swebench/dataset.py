@@ -98,6 +98,23 @@ def image_registry_for_subset(subset: str) -> str:
 _DJANGO_TEST_ID = re.compile(r"^(\S+)\s+\(([^)]+)\)$")
 
 
+def malformed_test_ids(test_ids: list) -> list:
+    """Ids whose brackets do not balance -- dataset damage, not agent behaviour.
+
+    SWE-bench's own test lists split parametrised ids on the comma INSIDE the
+    parameters, so ``test_stem[png-w/ orientation, bottom]`` arrives as two
+    fragments: ``test_stem[png-w/ orientation`` and ``bottom]``. 65 of the 500
+    Verified instances carry at least one.
+
+    pytest cannot collect a fragment, so it answers "ERROR: not found" and exits
+    non-zero -- and a grader reading only the exit code then reports a broken
+    regression suite for every attempt, whatever the agent did. Measured: seven of
+    a 32-instance batch's fourteen failures were this, three of them showing
+    "target passes, regressions fail" across all eight attempts.
+    """
+    return [t for t in test_ids if t.count("[") != t.count("]")]
+
+
 def parse_test_list(raw: object) -> list[str]:
     """Parse FAIL_TO_PASS / PASS_TO_PASS — a JSON list *string* in SWE-bench."""
     if isinstance(raw, list):

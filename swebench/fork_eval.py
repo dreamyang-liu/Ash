@@ -48,8 +48,9 @@ from harness.core.journal import read_journal
 from harness.orchestrator.run import Orchestrator, RunOutcome, RunSpec
 from harness.rollback import fork_plan, load_checkpoints
 from swebench.dataset import (SYMPY_RUNNER, build_batch_test_command,
-                              load_instances, needs_file_runner, parse_test_list,
-                              resolve_image, sympy_runner_spec, test_files_of)
+                              load_instances, malformed_test_ids,
+                              needs_file_runner, parse_test_list, resolve_image,
+                              sympy_runner_spec, test_files_of)
 
 #: Both analyst endpoints on Bedrock, keyed by what the model name says it is.
 #: One JSON call needs no agent scaffolding, so neither goes through a translator.
@@ -289,6 +290,10 @@ class Grade:
     #: which. The single most useful thing an analyst can be told about a
     #: regression: without it a branch can only guess what it broke.
     broken: List[str] = field(default_factory=list)
+    #: Test ids skipped because the DATASET damaged them. Recorded so a result
+    #: says how much of the suite actually ran -- a grade over a silently
+    #: shrunken suite is laxer than the benchmark it claims to be.
+    skipped_ids: List[str] = field(default_factory=list)
 
     #: False until the regression sweep actually ran -- it is skipped when the
     #: target tests fail, and reporting that skip as "FAIL" reads as a
@@ -300,9 +305,11 @@ class Grade:
             return "GRADING ERROR: %s" % self.error
         regression = ("PASS" if self.p2p_pass else "FAIL") if self.p2p_ran \
             else "not run"
-        return ("resolved=%s (target tests %s, regressions %s)"
+        skipped = (", %d malformed id(s) skipped" % len(self.skipped_ids)
+                   if self.skipped_ids else "")
+        return ("resolved=%s (target tests %s, regressions %s%s)"
                 % (self.resolved, "PASS" if self.f2p_pass else "FAIL",
-                   regression))
+                   regression, skipped))
 
 
 def grade_snapshot(snapshot_id: str, instance: dict, backend: dict,
@@ -349,6 +356,23 @@ def grade_snapshot(snapshot_id: str, instance: dict, backend: dict,
         f2p = parse_test_list(instance.get("f2p") or instance.get("FAIL_TO_PASS"))
         p2p = parse_test_list(instance.get("p2p") or instance.get("PASS_TO_PASS"))
         repo = instance["repo"]
+
+        # Drop ids the dataset itself damaged, and SAY SO. Silently dropping them
+        # would make grading laxer than the benchmark; keeping them makes every
+        # attempt fail regardless of what it did (see malformed_test_ids).
+        for label, ids in (("FAIL_TO_PASS", f2p), ("PASS_TO_PASS", p2p)):
+            bad = malformed_test_ids(ids)
+            if bad:
+                grade.skipped_ids += bad
+                for one in bad:
+                    ids.remove(one)
+                print("   note: %d malformed %s id(s) skipped (dataset splits "
+                      "parametrised ids on their internal commas): %s"
+                      % (len(bad), label, ", ".join(b[-40:] for b in bad[:3])))
+        if not f2p:
+            grade.error = ("every FAIL_TO_PASS id is malformed in the dataset -- "
+                           "this instance cannot be graded")
+            return grade
 
         files = instance.get("test_files") or None
         runner = _install_runner(session, repo, f2p)
@@ -529,9 +553,96 @@ def report(attempt: Attempt) -> None:
     print("   patch      %d 行" % attempt.grade.patch.count("\n"))
 
 
+def regrade(args, out_dir: Path) -> int:
+    """Re-grade a finished run's snapshots with the CURRENT grader.
+
+    Needed because a grader defect invalidates results without invalidating the
+    *runs*: every attempt left a snapshot, so the verdict can be recomputed
+    without spending another agent. (This exists because 7 of a 32-instance
+    batch's 14 failures turned out to be the dataset's malformed test ids, not
+    the agent -- five of those instances had been solved by their first attempt.)
+
+    Attempts are graded in the order the loop would have made them, stopping at
+    the first resolved one: had the grader been right, a run whose parent already
+    passed would never have branched, so crediting those branches -- or paying to
+    grade them -- would both be wrong.
+    """
+    catalogue = {i["instance_id"]: i for i in load_instances(args.subset)}
+    previous = {}
+    old_path = out_dir / "summary.json"
+    if old_path.exists():
+        for entry in (json.loads(old_path.read_text()).get("instances") or []):
+            previous[entry["instance"]] = entry
+
+    results, changed = [], []
+    directories = sorted(d for d in out_dir.iterdir() if d.is_dir())
+    for position, directory in enumerate(directories, 1):
+        instance_id = directory.name
+        raw = catalogue.get(instance_id)
+        if raw is None:
+            continue
+        instance = {
+            "instance_id": instance_id, "repo": raw["repo"],
+            "f2p": parse_test_list(raw["FAIL_TO_PASS"]),
+            "p2p": parse_test_list(raw["PASS_TO_PASS"]),
+            "test_files": test_files_of(raw),
+            "test_patch": raw.get("test_patch") or "",
+        }
+        # parent first, then rounds in order -- the order attempts were made in.
+        journals = sorted(directory.glob("*.jsonl"),
+                          key=lambda p: (p.stem != "parent", p.stem))
+        print("\n[%d/%d] %s" % (position, len(directories), instance_id))
+        verdicts, resolved_by = [], None
+        for journal in journals:
+            pairs = [c for c in load_checkpoints(journal) if c.snapshot_id]
+            if not pairs:
+                print("   %-30s no snapshot" % journal.stem)
+                continue
+            grade = grade_snapshot(pairs[-1].snapshot_id, instance,
+                                  backend_for(args))
+            print("   %-30s %s" % (journal.stem, grade.summary()))
+            verdicts.append({"name": journal.stem, "resolved": grade.resolved,
+                             "f2p_pass": grade.f2p_pass,
+                             "p2p_ran": grade.p2p_ran,
+                             "p2p_pass": grade.p2p_pass,
+                             "skipped_ids": len(grade.skipped_ids),
+                             "broken": grade.broken,
+                             "grading_error": grade.error})
+            if grade.resolved:
+                resolved_by = journal.stem
+                break
+        was = bool(previous.get(instance_id, {}).get("resolved"))
+        if bool(resolved_by) != was:
+            changed.append((instance_id, was, bool(resolved_by)))
+        results.append({"instance": instance_id, "resolved": bool(resolved_by),
+                        "resolved_by": [resolved_by] if resolved_by else [],
+                        "attempts": verdicts})
+        (out_dir / "regrade.json").write_text(json.dumps(
+            {"slot": args.slot, "model": args.model, "regraded": True,
+             "instances": results}, indent=2, ensure_ascii=False),
+            encoding="utf-8")
+
+    solved = [r for r in results if r["resolved"]]
+    print("\n" + "=" * 72)
+    print("RE-GRADED %d / %d resolved" % (len(solved), len(results)))
+    for r in results:
+        print("  %-4s %-34s %s" % ("PASS" if r["resolved"] else "fail",
+                                   r["instance"],
+                                   ", ".join(r["resolved_by"])))
+    if changed:
+        print("\nVERDICT CHANGED for %d:" % len(changed))
+        for name, was, now in changed:
+            print("  %-34s %s -> %s" % (name, "pass" if was else "fail",
+                                        "pass" if now else "fail"))
+    print("\nwrote %s" % (out_dir / "regrade.json"))
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--instance", required=True)
+    parser.add_argument("--instance", default="",
+                        help="instance id, or a comma list of them. Not needed "
+                             "with --regrade, which reads what is on disk.")
     parser.add_argument("--subset", default="verified")
     parser.add_argument("--slot", default="codex")
     parser.add_argument("--model", default="openai.gpt-5.6-luna")
@@ -549,6 +660,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--timeout", type=float, default=1800.0)
     parser.add_argument("--runtime-bin", default="runtime/ash-runtime")
     parser.add_argument("-o", "--out", default="runs/fork-eval")
+    parser.add_argument("--regrade", action="store_true",
+                        help="re-grade a finished run in -o with the current "
+                             "grader, spending no agent time: every attempt left "
+                             "a snapshot, so a grader fix can be applied to "
+                             "results that already exist")
     args = parser.parse_args(argv)
     try:
         schedule = [int(x) for x in str(args.branches).split(",") if x.strip()]
@@ -559,6 +675,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.regrade:
+        return regrade(args, out_dir)
+    if not args.instance:
+        raise SystemExit("--instance is required (or use --regrade)")
 
     wanted = [x.strip() for x in str(args.instance).split(",") if x.strip()]
     catalogue = {i["instance_id"]: i for i in load_instances(args.subset)}
