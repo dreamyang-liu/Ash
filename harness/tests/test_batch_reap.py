@@ -138,18 +138,25 @@ class FakeClient:
         return True
 
 
-def test_reaper_frees_ledger_orphans_only(tmp_path):
+def test_snapshots_are_never_planned_even_as_ledger_orphans(tmp_path):
+    """The policy this pins REVERSED. A checkpoint used to be "reclaimable
+    unless a fork pins it", and the reaper planned dead runs' snapshots for
+    deletion -- latent-only because the server answered DELETE with 405. The
+    day the endpoint landed, one habitual `harness reap` would have eaten
+    every finished run's forkability: "owning run died" describes EVERY
+    snapshot worth keeping. Snapshots die only by `harness sweep <journal>
+    --yes`, where naming the journal is the consent."""
     ledger = ResourceLedger(tmp_path / "res.jsonl")
     ledger._append("claim", run_id="dead", kind="snapshot", id="orphan", pid=999999999)
     ledger._append("claim", run_id="mine", kind="snapshot", id="mine", pid=os.getpid())
     client = FakeClient(snapshots=[
         {"id": "orphan", "created_at": "2026-01-01T00:00:00Z", "names": []},
         {"id": "mine", "created_at": "2026-01-01T00:00:00Z", "names": []},
-        {"id": "stranger", "created_at": "2026-01-01T00:00:00Z", "names": []},
     ])
 
     plan = Reaper(client, ledger).plan()
-    assert plan.snapshots == ["orphan"]      # not mine, not the stranger's
+    assert plan.snapshots == []
+    assert "orphan" in plan.kept
 
 
 def test_include_unknown_needs_an_age_cutoff_and_spares_named(tmp_path):
@@ -162,8 +169,10 @@ def test_include_unknown_needs_an_age_cutoff_and_spares_named(tmp_path):
     plan = Reaper(client, ledger).plan(
         include_unknown=True, older_than=timedelta(hours=24)
     )
-    assert plan.snapshots == ["old"]         # recent spared, named spared
-    assert "named" in plan.kept
+    # Even the widest sweep never touches snapshots: reap reclaims COMPUTE
+    # (a running sandbox burns cpu/memory now); a snapshot is inert bytes
+    # that might be the one thing someone meant to branch from.
+    assert plan.snapshots == []
 
 
 def test_stale_ledger_entry_for_a_missing_resource_is_skipped(tmp_path):
@@ -360,9 +369,11 @@ def test_stop_prevents_new_attempts(tmp_path, fake_slot):
     assert all(r.status == "killed" for r in results)
 
 
-def test_snapshots_are_reported_unsupported_not_failed(tmp_path):
-    """AgentENV has no DELETE /snapshots/{id} (405). "Cannot" is not "failed":
-    one clear message beats N error lines for a leak the harness cannot fix."""
+def test_snapshot_policy_does_not_depend_on_server_capability(tmp_path):
+    """Before the server grew DELETE /snapshots, an "unsupported" listing
+    explained why snapshots stayed. Now that deleting IS possible they stay for
+    a better reason -- policy, not capability -- and the plan must read the
+    same regardless of what the backend supports."""
     ledger = ResourceLedger(tmp_path / "res.jsonl")
     ledger._append("claim", run_id="dead", kind="snapshot", id="orphan", pid=999999999)
 
@@ -370,33 +381,30 @@ def test_snapshots_are_reported_unsupported_not_failed(tmp_path):
         def supports_snapshot_delete(self):
             return False
 
-    client = NoSnapshotDelete(snapshots=[
-        {"id": "orphan", "created_at": "2020-01-01T00:00:00Z", "names": []},
-    ])
-    plan = Reaper(client, ledger).plan()
-    assert plan.snapshots == []
-    assert plan.unsupported == ["orphan"]
-    assert plan.total() == 0
-    assert Reaper(client, ledger).apply(plan)["failed"] == []
+    for client_cls in (FakeClient, NoSnapshotDelete):
+        client = client_cls(snapshots=[
+            {"id": "orphan", "created_at": "2020-01-01T00:00:00Z", "names": []},
+        ])
+        plan = Reaper(client, ledger).plan()
+        assert plan.snapshots == []
+        assert "orphan" in plan.kept
+        assert plan.total() == 0
 
-
-def test_sandboxes_are_still_reaped_when_snapshots_cannot_be(tmp_path):
+def test_a_dead_runs_sandbox_is_reaped_while_its_snapshots_survive(tmp_path):
+    """The asymmetry IS the policy: a dead run's sandbox burns compute right
+    now; its snapshots are the branch-later capability the run existed to
+    produce."""
     ledger = ResourceLedger(tmp_path / "res.jsonl")
     ledger._append("claim", run_id="dead", kind="sandbox", id="sb", pid=999999999)
     ledger._append("claim", run_id="dead", kind="snapshot", id="snap", pid=999999999)
-
-    class NoSnapshotDelete(FakeClient):
-        def supports_snapshot_delete(self):
-            return False
-
-    client = NoSnapshotDelete(
+    client = FakeClient(
         sandboxes=[{"id": "sb", "created_at": None, "names": []}],
         snapshots=[{"id": "snap", "created_at": None, "names": []}],
     )
     plan = Reaper(client, ledger).plan()
-    assert plan.sandboxes == ["sb"] and plan.unsupported == ["snap"]
+    assert plan.sandboxes == ["sb"] and plan.snapshots == []
+    assert "snap" in plan.kept
     assert Reaper(client, ledger).apply(plan)["sandboxes"] == ["sb"]
-
 
 def test_sqlite_contention_is_retryable():
     """opencode keeps sessions in SQLite; parallel lanes hit this immediately.
@@ -426,3 +434,77 @@ def test_batch_isolates_opencode_state_per_task(tmp_path, monkeypatch):
     assert captured["extra"]["data_home"].endswith("state/abc")
     assert captured["xdg"] == captured["extra"]["data_home"]
     assert (tmp_path / "out" / "state" / "abc").is_dir()
+
+
+# --- sweep: the one legitimate way a snapshot dies -----------------------------
+def _journal_with_snapshots(path, ids):
+    import json as _json
+
+    lines = [{"v": 2, "type": "run.started", "seq": 1, "run_id": "r"}]
+    for n, sid in enumerate(ids, 2):
+        lines.append({"v": 2, "type": "checkpoint.captured", "seq": n,
+                      "run_id": "r", "snapshot_id": sid})
+    path.write_text("\n".join(_json.dumps(l) for l in lines) + "\n")
+
+
+def test_sweep_is_a_dry_run_unless_told_otherwise(tmp_path, monkeypatch, capsys):
+    """Deleting history must take two deliberate acts: naming the journal AND
+    typing --yes. The default prints what WOULD die and touches nothing."""
+    import json as _json
+
+    import harness.cli as cli
+
+    journal = tmp_path / "run.jsonl"
+    _journal_with_snapshots(journal, ["s1", "s2"])
+    deleted = []
+
+    class FakeEnv:
+        def delete_snapshot(self, sid):
+            deleted.append(sid)
+            return True
+
+    monkeypatch.setattr(cli, "AgentEnvClient", FakeEnv)
+    assert cli.main(["sweep", str(journal)]) == 0
+    assert deleted == []
+    assert "would delete 2" in capsys.readouterr().out
+    # the journal is untouched -- no swept marker on a dry run
+    assert "snapshots.swept" not in journal.read_text()
+
+    assert cli.main(["sweep", str(journal), "--yes"]) == 0
+    assert deleted == ["s1", "s2"]
+    marker = [_json.loads(l) for l in journal.read_text().splitlines()][-1]
+    assert marker["type"] == "snapshots.swept" and marker["deleted"] == 2
+
+
+def test_sweep_refuses_to_double_sweep_and_missing_journals(tmp_path, monkeypatch, capsys):
+    import harness.cli as cli
+
+    journal = tmp_path / "run.jsonl"
+    _journal_with_snapshots(journal, ["s1"])
+    calls = []
+
+    class FakeEnv:
+        def delete_snapshot(self, sid):
+            calls.append(sid)
+            return True
+
+    monkeypatch.setattr(cli, "AgentEnvClient", FakeEnv)
+    assert cli.main(["sweep", str(journal), "--yes"]) == 0
+    assert cli.main(["sweep", str(journal), "--yes"]) == 0  # 幂等
+    assert calls == ["s1"], "a swept journal must not be swept again"
+    assert cli.main(["sweep", str(tmp_path / "nope.jsonl")]) == 2
+
+
+def test_nothing_in_the_run_lifecycle_calls_snapshot_deletion():
+    """The design boundary in one test: deletion is never wired into teardown.
+    The orchestrator, the checkpointing path and the session may CREATE
+    snapshots; the only callers of deletion are the two explicit surfaces
+    (harness sweep, and SDK users calling delete_snapshot themselves)."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    for module in ("harness/orchestrator/run.py", "harness/checkpointing.py",
+                   "harness/execution/session.py", "harness/execution/server.py"):
+        text = (root / module).read_text()
+        assert "delete_snapshot" not in text, \
+            "%s must not delete snapshots -- runs end, history stays" % module

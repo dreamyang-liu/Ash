@@ -80,20 +80,34 @@ class Reaper:
                 continue
             if not resource.orphaned():
                 continue
-            pool = live_sandboxes if resource.kind == "sandbox" else live_snapshots
+            if resource.kind == "snapshot":
+                # NEVER reclaimed here, deliberately. A snapshot's whole point
+                # is that any step of any FINISHED run can be branched later,
+                # so "owning run died" -- the exact condition this planner
+                # keys on -- describes every snapshot worth keeping. This was
+                # latent while the server answered DELETE with 405; the day it
+                # gained the endpoint, one habitual `harness reap` would have
+                # eaten every finished run's forkability. Snapshot deletion is
+                # `harness sweep <journal> --yes`: the journal names exactly
+                # what dies, and typing it is the consent.
+                plan.kept.append(resource.id)
+                continue
+            pool = live_sandboxes
             if resource.id not in pool:
                 continue  # already gone; the ledger entry is just stale
-            target = plan.sandboxes if resource.kind == "sandbox" else plan.snapshots
-            target.append(resource.id)
+            plan.sandboxes.append(resource.id)
             plan.reasons[resource.id] = "orphan of run %s (pid %s gone)" % (
                 resource.run_id or "?", resource.pid,
             )
 
         if include_unknown:
+            # Sandboxes only. An unknown RUNNING sandbox burns CPU and memory
+            # right now; an unknown snapshot is inert bytes that might be the
+            # one thing someone meant to branch from. The asymmetry is the
+            # policy: reap reclaims compute, never history.
             cutoff = _utcnow() - older_than if older_than else None
             for kind, pool, target in (
                 ("sandbox", live_sandboxes, plan.sandboxes),
-                ("snapshot", live_snapshots, plan.snapshots),
             ):
                 for resource_id, meta in pool.items():
                     if (kind, resource_id) in ledger_ids or resource_id in target:

@@ -310,6 +310,60 @@ def _cmd_batch(args: argparse.Namespace) -> int:
     return 0 if counts.get("completed", 0) == total else 1
 
 
+def _cmd_sweep(args: argparse.Namespace) -> int:
+    """Delete the snapshots a NAMED run's journal records. Explicitly, only.
+
+    Dry-run by default; ``--yes`` deletes. The journal path is the consent
+    token: nothing sweeps a run you did not name, and no lifecycle hook calls
+    this. After a real sweep the journal gains a ``snapshots.swept`` line, so
+    "this run's snapshots are gone" is itself on the record.
+    """
+    import json as _json
+
+    client = AgentEnvClient()
+    exit_code = 0
+    for journal_path in args.journals:
+        path = Path(journal_path)
+        if not path.exists():
+            print("no such journal: %s" % path, file=sys.stderr)
+            exit_code = 2
+            continue
+        ids, last_seq, already = [], 0, False
+        for line in path.read_text().splitlines():
+            record = _json.loads(line)
+            last_seq = max(last_seq, record.get("seq") or 0)
+            if record.get("type") == "checkpoint.captured" and record.get("snapshot_id"):
+                if record["snapshot_id"] not in ids:
+                    ids.append(record["snapshot_id"])
+            if record.get("type") == "snapshots.swept":
+                already = True
+        if already:
+            print("%s: already swept, skipping" % path)
+            continue
+        if not args.yes:
+            print("%s: would delete %d snapshot(s)  (dry run; pass --yes)"
+                  % (path, len(ids)))
+            continue
+        deleted = failed = 0
+        for snapshot_id in ids:
+            if client.delete_snapshot(snapshot_id):
+                deleted += 1
+            else:
+                failed += 1
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(_json.dumps({
+                "v": 2, "type": "snapshots.swept", "seq": last_seq + 1,
+                "run_id": "sweep", "agent_id": "sweep",
+                "deleted": deleted, "failed": failed,
+            }) + "\n")
+        print("%s: deleted %d/%d snapshot(s)%s"
+              % (path, deleted, len(ids),
+                 ", %d failed" % failed if failed else ""))
+        if failed:
+            exit_code = 1
+    return exit_code
+
+
 def _cmd_reap(args: argparse.Namespace) -> int:
     ledger = ResourceLedger(args.ledger) if args.ledger else ResourceLedger()
     if args.compact:
@@ -501,6 +555,16 @@ def main(argv=None) -> int:
         help="re-run tasks that already have a terminal status",
     )
     batch.set_defaults(func=_cmd_batch)
+
+    sweep = sub.add_parser(
+        "sweep",
+        help="delete the snapshots a named journal records (dry-run without --yes)")
+    sweep.add_argument("journals", nargs="+",
+                       help="journal file(s) of the run(s) whose snapshots die; "
+                            "naming them is the consent")
+    sweep.add_argument("--yes", action="store_true",
+                       help="actually delete (default is a dry run)")
+    sweep.set_defaults(func=_cmd_sweep)
 
     reap = sub.add_parser("reap", help="reclaim resources left by dead runs")
     reap.add_argument("--ledger", default=None, help="path to resources.jsonl")

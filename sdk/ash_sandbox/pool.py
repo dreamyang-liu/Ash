@@ -622,6 +622,29 @@ class MicroVMPool(Pool):
         resp.raise_for_status()
         return Snapshot.from_api(resp.json())
 
+    async def delete_snapshot(self, snapshot_id: str) -> bool:
+        """Delete one committed snapshot. Explicit calls only, by design.
+
+        Nothing in the SDK or the harness calls this on a run's behalf: a
+        snapshot's whole point is that any step of any finished run can be
+        branched LATER, so deletion must always be someone's deliberate act
+        (``harness sweep`` with a named journal, or code calling this).
+
+        Idempotent (a missing snapshot deletes as success, HTTP 204), so
+        sweepers can retry blindly. Chain-safe on the server side: layers a
+        child still references survive until unreferenced. Returns False when
+        the server refuses -- e.g. 409 for a template id, which is managed
+        through the template API instead.
+        """
+        resp = await self._client.delete(
+            f"{self.server_url}/snapshots/{snapshot_id}")
+        if resp.status_code == 204:
+            return True
+        if resp.status_code in (404, 409):
+            return resp.status_code == 404
+        resp.raise_for_status()
+        return False
+
     # --- Internals ---
 
     def attach(self, sandbox_id: str, agent_id: str = "",
