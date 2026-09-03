@@ -34,24 +34,30 @@ rescued 101 of its 134 targets because each branch starts from a chosen step
 of a failed trajectory WITH the verdict (which test failed, what broke). The
 verifier signal is precisely what breaks the failure correlation.
 
-### The stronger baseline: blind retries on the same failures
+### The stronger baseline, run for real: adaptive blind retry
 
-The obvious objection to the table above: branching only spends extra on the
-134 failures, while pass@4 wastes money re-running solved instances. The fair
-opponent is *adaptive* blind retry — re-run only what failed. Passes 2–4 cover
-those 134 instances, so this is measured, not argued:
+The obvious objection to pass@4: branching only spends extra on the failures,
+while full passes waste money re-running solved instances. So the fair opponent
+was RUN as its own experiment (`runs/adaptive`, 2026-09-03): one fresh full
+pass (365/500 = 73.0%, consistent with the other four singles), then FIVE blind
+single-attempt retries over exactly its 135 failures — ~5.0 runs per failed
+instance, versus branching's 5.5. Budget matched, verifier used identically for
+instance selection; the only variable left is whether the retry carries the
+verdict.
 
-| extra spend on the same 134 failures | rescued |
+| on the same 135 failures | rescued (union) |
 |---|---:|
-| 1 blind retry (new prompt) | 22/134 = 16% |
-| 2 blind retries | 28/134 = 21% |
-| 3 blind retries | 31/134 = 23% |
-| branching (1 retry + ~4.5 branches, 5.5 runs/instance) | **101/134 = 75%** |
+| 1 blind retry | 14/135 = 10% |
+| 2 blind retries | 21/135 = 16% |
+| 3 blind retries | 24/135 = 18% |
+| 4 blind retries | 27/135 = 20% |
+| 5 blind retries | 28/135 = 21% |
+| branching, 5.5 runs/instance | **101/134 = 75%** |
 
-Blind marginal decays +16 → +5 → +2: these 134 ARE the model's blind spot, and
-resampling draws from the same spot. Adaptive retry also uses the verifier
-(to know what failed) — the only variable left is whether the retry carries
-the verdict, which isolates exactly the thing being claimed.
+Bottom line at near-equal spend: **adaptive blind $566 → 393/500 = 78.6%;
+branching $663 → 465/500 = 93.0%.** The blind marginal decays +14, +7, +3, +3,
++1 — the failures ARE the model's blind spot and resampling keeps drawing from
+it, while the verdict is what moves the sampling distribution out of it.
 
 Reference points: public leaderboard numbers for sonnet 4.6 with tuned harnesses
 are ~77–80%. **The 93.0% is not leaderboard-comparable**: the analyst reads the
