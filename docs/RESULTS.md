@@ -4,7 +4,7 @@ Everything below is measured, not estimated, except where marked *(est)*. Agent
 costs are the Claude Code CLI's own `cost_usd` accounting summed from journals;
 times are journal timestamps; resolve verdicts are the fixed grader run against
 restored snapshots. Data: `runs/v500`, `runs/branch134`, `runs/pass4` (persistent
-disk). As of 2026-09-02; pass 3/4 of the pass@4 baseline still running.
+disk). As of 2026-09-03; all four baseline passes complete.
 
 **Setup**: agent = Claude Code CLI + `us.anthropic.claude-sonnet-4-6` (Bedrock),
 two MCP tools (shell + text_editor), microVM sandboxes with a snapshot per step,
@@ -20,8 +20,19 @@ sonnet 4.6.
 | single attempt, old prompt, **broken grader** | 215/500 | 43.0% | the first full run's reported number |
 | single attempt, old prompt, fixed grader | 364/500 | 72.8% | same snapshots re-graded; **no agent re-run** |
 | single attempt, new prompt (pass 2) | 371/500 | 74.2% | prompt alone is worth +1.6 pt |
-| pass@2 (union of the two singles) | 386/500 | 77.2% | blind retry buys +3 pt, not the +20 the independence formula promises |
+| pass@2 (union of two singles) | 386/500 | 77.2% | |
+| pass@3 | 392/500 | 78.4% | |
+| pass@4 (four independent singles) | 395/500 | 79.0% | measured, not extrapolated: the independence formula promised ~99% |
 | **single + verifier-guided branching** | **465/500** | **93.0%** | 134 failures re-run with branching (2 rounds, width 4→3) |
+
+**The head-to-head this table exists for**: at near-equal budget, four blind
+samples reach 79.0% (pass@4, $739 total) while verifier-guided branching
+reaches 93.0% (pass@3.9, $663). Same model, same sandboxes, same grader. Blind
+retries fail in correlated ways — 105 instances failed all four samples, and
+the marginal sample decays fast (+4.4, +1.2, +0.6 pt) — while branching
+rescued 101 of its 134 targets because each branch starts from a chosen step
+of a failed trajectory WITH the verdict (which test failed, what broke). The
+verifier signal is precisely what breaks the failure correlation.
 
 Reference points: public leaderboard numbers for sonnet 4.6 with tuned harnesses
 are ~77–80%. **The 93.0% is not leaderboard-comparable**: the analyst reads the
@@ -94,6 +105,7 @@ for it. Early-fork + redesign directions for this class are untested.
 | analyst calls (~340 case analyses + reviews) | — | ~$30 *(est)* | — |
 | **full pipeline (single + rescue)** | 1240 | **$663** | **$1.33** |
 | single pass, new prompt (pass 2) | 500 | $194 | $0.39 |
+| pass 3 + pass 4 (baseline experiment) | 1000 | $374 | $0.37 |
 
 **The pipeline costs pass@3.9** (663 / (500 × $0.34)) and reached 93.0%. The
 empirical pass@2 already shows why blind retries cannot match it at that
@@ -125,7 +137,5 @@ re-running an agent.
 
 ## Pending
 
-- pass 3/4 running → empirical pass@4 baseline (projection from pass@2's
-  marginal: ~80–82%).
 - Analyst-prompt calibration from the fork-position and failure-shape tables.
 - 33 unrescued instances' failure reports unexamined.
