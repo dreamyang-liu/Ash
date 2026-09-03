@@ -55,8 +55,11 @@ curve extends to NINE independent samples for free:
 | 9 (the v500 pass, OLD prompt) | 36/135 = 27% | +3 |
 | branching, 5.5 runs/instance | **101/134 = 75%** | |
 
-Bottom line at near-equal spend: **adaptive blind $566 → 393/500 = 78.6%;
-branching $663 → 465/500 = 93.0%.** Nine blind samples cap at 27% on the
+Budget-equalised exactly, by grafting the pass@4 rounds' samples on these 135
+(costed at only those instances' runs): **blind is bracketed from both sides of
+branching's $663 — $644 (1+6 draws) → 79.4%, $714 (1+7 draws) → 79.4%, the
+seventh draw adding zero across a full round — while branching's $663 → 93.0%.
+Same money, the verdict is worth 13.6 points (68 instances).** Nine blind samples cap at 27% on the
 failure set — sample 7 added ZERO new solves across a full round — while the
 verdict-guided branches reached 75% in 5.5. Two footnotes the curve buys:
 same-model blind resampling is exhausted by ~5 draws, and the one sample with a
