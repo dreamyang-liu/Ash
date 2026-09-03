@@ -34,6 +34,25 @@ rescued 101 of its 134 targets because each branch starts from a chosen step
 of a failed trajectory WITH the verdict (which test failed, what broke). The
 verifier signal is precisely what breaks the failure correlation.
 
+### The stronger baseline: blind retries on the same failures
+
+The obvious objection to the table above: branching only spends extra on the
+134 failures, while pass@4 wastes money re-running solved instances. The fair
+opponent is *adaptive* blind retry — re-run only what failed. Passes 2–4 cover
+those 134 instances, so this is measured, not argued:
+
+| extra spend on the same 134 failures | rescued |
+|---|---:|
+| 1 blind retry (new prompt) | 22/134 = 16% |
+| 2 blind retries | 28/134 = 21% |
+| 3 blind retries | 31/134 = 23% |
+| branching (1 retry + ~4.5 branches, 5.5 runs/instance) | **101/134 = 75%** |
+
+Blind marginal decays +16 → +5 → +2: these 134 ARE the model's blind spot, and
+resampling draws from the same spot. Adaptive retry also uses the verifier
+(to know what failed) — the only variable left is whether the retry carries
+the verdict, which isolates exactly the thing being claimed.
+
 Reference points: public leaderboard numbers for sonnet 4.6 with tuned harnesses
 are ~77–80%. **The 93.0% is not leaderboard-comparable**: the analyst reads the
 official tests' verdict between rounds, so it is verifier-guided. The honest
