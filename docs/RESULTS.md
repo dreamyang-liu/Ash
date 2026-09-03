@@ -45,19 +45,24 @@ instance, versus branching's 5.5. Budget matched, verifier used identically for
 instance selection; the only variable left is whether the retry carries the
 verdict.
 
-| on the same 135 failures | rescued (union) |
-|---|---:|
-| 1 blind retry | 14/135 = 10% |
-| 2 blind retries | 21/135 = 16% |
-| 3 blind retries | 24/135 = 18% |
-| 4 blind retries | 27/135 = 20% |
-| 5 blind retries | 28/135 = 21% |
-| branching, 5.5 runs/instance | **101/134 = 75%** |
+The pass@4 experiment's rounds also cover these 135 instances, so the blind
+curve extends to NINE independent samples for free:
+
+| blind samples on the same 135 failures | rescued (union) | marginal |
+|---|---:|---:|
+| 1–5 (the adaptive retries) | 28/135 = 21% | +14, +7, +3, +3, +1 |
+| 6–8 (the pass@4 rounds, same prompt) | 33/135 = 24% | +4, **+0**, +1 |
+| 9 (the v500 pass, OLD prompt) | 36/135 = 27% | +3 |
+| branching, 5.5 runs/instance | **101/134 = 75%** | |
 
 Bottom line at near-equal spend: **adaptive blind $566 → 393/500 = 78.6%;
-branching $663 → 465/500 = 93.0%.** The blind marginal decays +14, +7, +3, +3,
-+1 — the failures ARE the model's blind spot and resampling keeps drawing from
-it, while the verdict is what moves the sampling distribution out of it.
+branching $663 → 465/500 = 93.0%.** Nine blind samples cap at 27% on the
+failure set — sample 7 added ZERO new solves across a full round — while the
+verdict-guided branches reached 75% in 5.5. Two footnotes the curve buys:
+same-model blind resampling is exhausted by ~5 draws, and the one sample with a
+DIFFERENT prompt (old-prompt v500, +3) out-earned same-prompt draws 6–8 —
+distribution diversity beats redrawing, and the verdict is the strongest
+distribution shift available.
 
 Reference points: public leaderboard numbers for sonnet 4.6 with tuned harnesses
 are ~77–80%. **The 93.0% is not leaderboard-comparable**: the analyst reads the
