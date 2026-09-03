@@ -146,115 +146,137 @@ pip install ./sdk litellm pyyaml datasets
 
 ## Running things
 
-### A SWE-bench instance on microVMs, checkpointing every step
-
-```yaml
-# swebench/configs/mine.yaml
-extends: bedrock-sonnet46
-execution:
-  backend: microvm
-  microvm:
-    server_url: http://127.0.0.1:18000
-    api_key: <AgentENV key>
-    runtime_bin: /tmp/ash-runtime     # set this and templates build themselves
-  checkpoints:
-    enabled: true
-    mode: disk_only        # or full, for milestones that must resume live
-    trigger: mutation      # or every_step
-```
+Everything below assumes the env file this machine keeps at
+`~/aenv-bench/env.sh` (AENV_SERVER_URL + AENV_API_KEY, chmod 600 — the key is
+whatever the server was STARTED with, so a restart may mint a new one) plus:
 
 ```bash
-python -m swebench -c swebench/configs/mine.yaml -i django__django-11848
+source ~/aenv-bench/env.sh
+export AWS_BEARER_TOKEN_BEDROCK=...          # claude-code & the analyst
+export CLAUDE_CODE_USE_BEDROCK=1 AWS_REGION=us-west-2
+export PYTHONPATH=.:sdk                      # from the Ash checkout
 ```
 
-With `runtime_bin` set, each benchmark image is turned into a microVM template
-on demand — cold-start the image, upload the runtime and ripgrep through the
-backend's file service, snapshot, then build a template declaring a startup
-command. Templates are content-addressed over (image, runtime hash, port), so a
-batch builds each image once (~30–60 s) and every later run reuses it (~0.3 s).
+### Recovering the server after a reboot
 
-### A SWE-Marathon task
-
-Marathon tasks are directories, not dataset rows, and each brings its own
-Dockerfile and verifier:
+A reboot (or a kernel update) is the common way this machine breaks:
 
 ```bash
-git clone --depth 1 --filter=blob:none --sparse \
-    https://github.com/abundant-ai/swe-marathon /tmp/swe-marathon
-cd /tmp/swe-marathon && git sparse-checkout set tasks
+# 1. ublk module gone? Rebuild against the RUNNING kernel:
+cd ~/projects/LBP/artifacts/ublk-build
+make -C /usr/src/kernels/$(uname -r) M=$PWD modules
+sudo cp ublk_drv.ko /lib/modules/$(uname -r)/extra/ && sudo depmod -a
+sudo modprobe ublk_drv
 
-# one task
-python -m swebench --harness marathon -c swebench/configs/marathon-full.yaml \
-    --task-dir /tmp/swe-marathon/tasks/wasm-simd
-
-# every task in the checkout
-python -m swebench --harness marathon -c swebench/configs/marathon-full.yaml \
-    --task-dir /tmp/swe-marathon
+# 2. start the bench instance (setsid so a later shell mishap cannot kill it)
+sudo setsid env \
+  AENV_CONFIG_PATH=/opt/aenv-bench/config.toml \
+  AENV_HOME_PATH=/opt/aenv-bench/home \
+  AENV_RUNTIME_PATH=/opt/aenv-bench/run \
+  AENV_DEPS_PATH=/var/lib/aenv/deps \
+  API_ADDR=127.0.0.1:18000 \
+  AENV_API_KEY="$AENV_API_KEY" RUST_LOG=info \
+  /opt/aenv-bench/bin/server >> ~/aenv-bench/server.log 2>&1 < /dev/null &
+# give it ~20s, then:
+curl -s -H "X-API-Key: $AENV_API_KEY" http://127.0.0.1:18000/sandboxes
 ```
 
-The harness builds the task's image locally (several bake encrypted
-verification assets in, so nothing is published to pull), pushes it to a
-registry the backend can reach, and grades by running the task's own
-`tests/test.sh` verbatim — its anti-cheat is part of the specification. Both the
-binary reward and `partial_score` are recorded, because nearly every attempt on
-these tasks scores zero and 7-of-43 has to be distinguishable from none.
+`/opt/aenv-bench/home` (image cache, snapshot store) survives reboots; the
+templates and snapshots come back by themselves. Docker Hub credentials do
+NOT flow from `docker login` to the server: its regctl needs its own
+`sudo regctl registry login docker.io` (see "Things that will bite you").
 
-A local registry is the simplest reachable target:
+### One SWE-bench instance, with branching on failure
 
 ```bash
-docker run -d --name local-registry -p 5000:5000 registry:2
-# the server runs as root, so let its regctl use plain HTTP for it:
-sudo mkdir -p /root/.regctl
-echo '{"hosts":{"localhost:5000":{"tls":"disabled"}}}' | sudo tee /root/.regctl/config.json
+python -m swebench.fork_eval \
+    --instance sympy__sympy-13091 \
+    --slot claude-code --model us.anthropic.claude-sonnet-4-6 \
+    --analyst-model us.anthropic.claude-sonnet-4-6 \
+    --rounds 2 --branches 4,3 --timeout 1200 \
+    -o runs/my-run
 ```
 
-### Resuming an interrupted run
+`--rounds 0` = single attempt, no branching. `--branches 4,3` = width per
+round. `--instance` takes a comma list; each instance gets its own directory
+under `-o`, and `summary.json` is rewritten after every instance. Volatile
+output paths (/tmp and friends) are refused — journals are the run's only
+record.
 
-Every checkpoint writes the trajectory next to itself, so an interrupted run
-leaves both the snapshots and the map from step to snapshot:
+### Full-dataset batches: pre-pull, then shard
+
+Pulling images and running agents consume different scarce resources
+(Docker Hub quota vs agent time); mixing them cost one batch 49 instances.
+`scripts/run_v500_when_ready.sh` is the whole pattern: resumable per-image
+pre-pull (`scripts/prepull_images.py`, 8 workers), retry rounds across
+rate-limit windows, a refuses-to-launch check if too many images are missing,
+then 8 sharded `fork_eval` workers. To run a fresh batch:
 
 ```bash
-python -m swebench --harness marathon -c swebench/configs/marathon-full.yaml \
-    --task-dir /tmp/swe-marathon/tasks/wasm-simd \
-    --resume-from <snapshot-id>
+# shard ids round-robin (mixes heavy repos across workers)
+python3 - <<'EOF'
+from swebench.dataset import load_instances
+import pathlib
+ids = sorted(i['instance_id'] for i in load_instances('verified'))
+out = pathlib.Path('runs/mybatch'); out.mkdir(parents=True, exist_ok=True)
+for k in range(8):
+    (out / f'shard-{k}.txt').write_text(','.join(ids[k::8]))
+EOF
+
+for k in 0 1 2 3 4 5 6 7; do
+  setsid nohup python3.12 -u -m swebench.fork_eval \
+    --instance "$(cat runs/mybatch/shard-$k.txt)" --slot claude-code \
+    --model us.anthropic.claude-sonnet-4-6 \
+    --analyst-model us.anthropic.claude-sonnet-4-6 \
+    --rounds 2 --branches 4,3 --timeout 1200 \
+    -o runs/mybatch/shard-$k > runs/mybatch/shard-$k.log 2>&1 < /dev/null &
+  sleep 3
+done
 ```
 
-The environment carries the work; the transcript does not, and the prompt says
-so. To find the snapshot for a particular step, read the trajectory:
+8 workers is the proven throughput (24 courts Bedrock throttling). Monitor:
 
-```python
-from swebench.replay import (load_step_snapshots, messages_through_step,
-                             replay_caveats, environment_mismatch)
-
-step_snapshots = load_step_snapshots("results/.../trajectories/task.json")
-snapshot = step_snapshots[156]              # environment as of step 156
-prefix = messages_through_step(path, 156)   # transcript to re-feed
-print(replay_caveats(path, 156))            # e.g. background processes were live
+```bash
+python3 -c "
+import json, glob
+d = ok = 0
+for f in glob.glob('runs/mybatch/shard-*/summary.json'):
+    for i in json.load(open(f))['instances']:
+        d += 1; ok += i['resolved']
+print(f'{ok}/{d} resolved')"
 ```
 
-### Using a model behind a proxy
+### Re-grading without re-running
 
-litellm reads **`ANTHROPIC_API_KEY`** and **`ANTHROPIC_API_BASE`** — *not* Claude
-Code's `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL`, which is the mistake worth
-knowing about. Either export those, or put them in the config:
+A grader fix applies to finished runs — every attempt left a snapshot:
 
-```yaml
-model:
-  name: anthropic/deepseek-v4-flash    # `anthropic/` = speak the Messages API
-  api_base: http://<proxy>
-  api_key: sk-...                       # keep such a config out of git
-execution:
-  # litellm has no metadata for a proxy-served name, so state the window or the
-  # guard assumes a conservative 200K and folds far too early.
-  context_window_tokens: 1000000
-  context_budget_fraction: 0.60
+```bash
+python -m swebench.fork_eval --regrade -o runs/mybatch/shard-0 \
+    --slot claude-code --model us.anthropic.claude-sonnet-4-6
 ```
 
-A large window is what the model *accepts*, not what to fill: on the proxy
-measured here, latency grew ~13 s per 100K input tokens (29 s at 200K, 137 s at
-1M), so every token kept is paid for again on every later step. Note also that
-a proxy which does not report cost makes `cost_limit` inert — only `step_limit`
-and the wall-clock timeout bind.
+Grades in attempt order, stops at the first resolved one (a correct grader
+would have stopped the loop there too). ~150 verdicts flipped across three
+regrade waves in this repo's history for ~20 minutes of compute total.
+
+### Cleaning up
+
+Nothing deletes snapshots automatically — runs end, history stays, and
+`harness reap` reclaims only compute (leaked sandboxes), never snapshots.
+Deletion takes a deliberate act, twice over:
+
+```bash
+python -m harness reap                     # leaked sandboxes (safe, habitual)
+python -m harness sweep runs/old/*/parent.jsonl        # dry-run: what would die
+python -m harness sweep runs/old/*/parent.jsonl --yes  # delete + journal marker
+sudo python3 scripts/gc_layers.py --store /opt/aenv-bench/home/snapshot-store
+sudo python3 scripts/gc_layers.py --store ... --yes    # reclaim orphaned layers
+```
+
+`sweep` deletes the snapshots a NAMED journal records (the path is the
+consent); `gc_layers` mark-and-sweeps `managed-layers/` against every catalog
+record, keeps anything referenced or younger than 2h, and is dry-run by
+default like everything else here.
 
 ## What a run produces
 
@@ -293,11 +315,22 @@ and cannot become one.
 - **Two runs of one task must not share snapshot names.** Aliases are unique
   per repository, so names include the run id; without that, the second run's
   every capture fails on a collision.
-- **There is no GC yet.** Deleting a snapshot does not reclaim its layers, and
-  squash adds a copy until the originals become unreferenced. A 500-step
-  disk-only chain is ~1.4 GB; the store on this machine grew to 85 GB across a
-  few days of experiments. Reclaiming means stopping the server and removing
-  `$AENV_HOME/snapshot-store` (task images then reconvert, minutes each).
+- **Deleting a snapshot reclaims no bytes by itself.** `DELETE /snapshots/{id}`
+  (added on the `feat/snapshot-delete` branch) removes the record — the layers
+  sit orphaned in `managed-layers/` because neither our AgentENV nor upstream
+  has a layer GC. `scripts/gc_layers.py` is that GC: mark every digest any
+  catalog record mentions, sweep unreferenced layers older than 2h. Measured:
+  ~25k orphaned records ≈ only 15 GiB, because per-step deltas are small — the
+  store's weight is template commits (~3.9 GB per unique rootfs, deduplicated
+  by content) that live history genuinely references.
+- **Ops footguns that each cost a session real time.** `pkill -f <pattern>`
+  matches the shell issuing it when the pattern appears in the command line —
+  bracket a character (`serve[r]`) or the kill takes you with it. A compound
+  `cd X && ... &` backgrounds the `cd` too; later commands in the same shell
+  run from the old directory. Workers sometimes hang AFTER writing their final
+  summary (exit-path bug, unfixed) — check summaries, not process counts, and
+  kill stragglers freely once summaries are complete. Journals under /tmp die
+  on reboot; the entry points refuse volatile paths for exactly that reason.
 - **A streaming response can go silent, and the request timeout will not save
   you.** `timeout=` bounds getting a response started; once the stream is open,
   iterating it blocks indefinitely if the provider stops sending — seen as a
