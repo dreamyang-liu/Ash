@@ -666,14 +666,16 @@ class MicroVMPool(Pool):
 
     # --- Internals ---
 
-    def attach(self, sandbox_id: str, agent_id: str = "",
+    def handle(self, sandbox_id: str, agent_id: str = "",
                base_ref: str = "") -> Sandbox:
-        """Wrap an AgentENV sandbox id as a Sandbox reachable via the proxy.
+        """A fresh, unregistered handle on an existing sandbox.
 
-        Public because a caller that created a sandbox may lend it to another
-        process -- the MCP proxy's ``--attach`` serves tool calls into a sandbox
-        the orchestrator owns, so the owner keeps the handle it needs to snapshot
-        and extract afterwards.
+        A handle's HTTP client binds to the first event loop that uses it. One
+        that has been probed from a session's loop cannot then serve calls from
+        the MCP server's loop -- measured after re-boards: the first tool call
+        on the replacement failed with "Event ... is bound to a different event
+        loop" (1-3 per re-boarded run). Whoever serves calls on another loop
+        takes its own handle from here.
         """
         sb = Sandbox(backend=GatewayBackend(
             self.server_url, sandbox_id,
@@ -685,6 +687,18 @@ class MicroVMPool(Pool):
         #: What the server resolved this sandbox's source to (digest-pinned
         #: image reference, or snapshot id). Empty when unreported.
         sb.base_ref = base_ref
+        return sb
+
+    def attach(self, sandbox_id: str, agent_id: str = "",
+               base_ref: str = "") -> Sandbox:
+        """Wrap an AgentENV sandbox id as a Sandbox reachable via the proxy.
+
+        Public because a caller that created a sandbox may lend it to another
+        process -- the MCP proxy's ``--attach`` serves tool calls into a sandbox
+        the orchestrator owns, so the owner keeps the handle it needs to snapshot
+        and extract afterwards. Registered: this pool destroys it on close.
+        """
+        sb = self.handle(sandbox_id, agent_id=agent_id, base_ref=base_ref)
         self._sandboxes[sandbox_id] = sb
         return sb
 

@@ -68,6 +68,34 @@ def test_instance_prompt_and_resources_come_from_the_task(tmp_path):
     assert "resolved=False" in branch and "try X" in branch and "/testbed" not in branch
 
 
+def test_branch_note_for_a_truncated_fork_reads_as_environment_feedback(tmp_path):
+    from swebench.fork_eval import Grade
+    make_task(tmp_path)
+    bench = DeepSWE(tmp_path)
+    instance = bench.instance(bench.catalogue(None)["demo-task"])
+    grade = Grade(patch="diff", detail=(
+        "repo state: branch=feat, 1 commit(s) since base, 0 uncommitted path(s)\n"
+        'reward.json: {"f2p_passed": 5, "f2p_total": 6, "p2p_passed": 6, "p2p_total": 6, "reward": 0}\n'
+        "non-passing tests (1 shown): f2p:pkg.TestStep\n\nverifier output (tail):\nblah"))
+    analysis = {"failure_reason": "the step parser dropped the sign", "lesson": "negative steps exist",
+                "salvage": "everything on disk at step 60"}
+    note = bench.branch_prompt(instance, verdict="IGNORED RAW VERDICT", hint="handle negative steps",
+                               truncated=True, step=25, grade=grade, analysis=analysis)
+    assert note.startswith("<system-reminder>") and note.rstrip().endswith("</system-reminder>")
+    assert "step 25" in note
+    assert "target tests: 5/6" in note and "pkg.TestStep" in note
+    assert "regression tests: 6/6" in note
+    assert "committed and applied cleanly" in note
+    assert "the step parser dropped the sign" in note and "negative steps exist" in note
+    assert "handle negative steps" in note
+    # not restated: the task, the tool primer, the raw verdict, the salvage note
+    assert "Add `Query`" not in note and "Your tools" not in note
+    assert "IGNORED RAW VERDICT" not in note and "everything on disk" not in note
+    # an untruncated fork still gets the full prompt that explains the rolled-back disk
+    full = bench.branch_prompt(instance, verdict="V", hint="H")
+    assert "ITS EDITS ARE ON DISK" in full and "Add `Query`" in full
+
+
 def test_run_attempt_passes_shape_and_offline_backend_to_the_orchestrator(tmp_path):
     make_task(tmp_path)
     bench = DeepSWE(tmp_path)

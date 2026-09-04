@@ -185,6 +185,14 @@ def test_claude_code_mcp_config_shapes():
 def test_denied_builtins_cover_host_escaping_tools():
     for tool in ("Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch"):
         assert tool in DENIED_BUILTINS
+    # Out-of-band builtins: a CronCreate from one eval run was delivered into
+    # other runs' sessions for hours (2026-09-04). Nothing that schedules,
+    # messages other sessions, spawns subagents or touches host git may be offered.
+    for tool in ("Task", "CronCreate", "ScheduleWakeup", "Workflow", "SendMessage",
+                 "EnterWorktree", "Skill"):
+        assert tool in DENIED_BUILTINS
+    # ToolSearch stays: the MCP sandbox tools are deferred and found through it.
+    assert "ToolSearch" not in DENIED_BUILTINS
 
 
 # --- CLI driver end-to-end (fake agent) -----------------------------------

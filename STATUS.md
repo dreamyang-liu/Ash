@@ -2,8 +2,17 @@
 
 State pack per the behavioral contract. Read this FIRST in any new session; the
 chat log is only an index. Verify "Confirmed" against reality before relying on
-it (§5 of the contract). Last written: 2026-09-03, after the adaptive-blind
-experiment closed and the paper numbers were updated.
+it (§5 of the contract). Last written: 2026-09-04, after the DeepSWE true-fork
+branching round closed (101/113) and the work was committed and pushed.
+
+**Where things stand (one paragraph):** SWE-bench Verified 93.0% (465/500) with
+the ORIGINAL branching mechanism (full-conversation fork; docs/RESULTS.md now
+says so). DeepSWE: single pass 31/113 = 27.4%; branching with the original
+mechanism 89/113 = 78.8%; branching with the TRUE fork (conversation cut at the
+fork step, `<system-reminder>` branch note, out-of-band builtins denied)
+**101/113 = 89.4%** — same parents, same analyst, controlled. Usage for all of
+it is in AGENTS.md ("DeepSWE" and "What a branch actually inherits"). Open
+decisions are listed under Next steps.
 
 ## Original request (verbatim, unedited)
 
@@ -109,7 +118,8 @@ batch (check `/sandboxes` = 0).
 | **Grader gate passes on the final backend: 226/226** (113 tasks × oracle→1 AND nop→0), `allow_internet=false, image_env=true`, one job per task, 8 workers, ~55 min; 0 sandboxes leaked. This is passing-evidence item (1) of the DeepSWE agreement. | `runs/deepswe-gate/gate.jsonl` + `summary.json` + `gate.log` (run #3; runs #1/#2 archived under `run1/`, `run2/`) | 2026-09-03 |
 | **Cheat audit of the 89 resolved trajectories** (`scripts/deepswe_audit_resolved.py`): 0 accesses to /tests, /solution, /logs, test.patch, grader.py; 1 real network attempt (`go install goyacc@latest`, anko) — blocked; git-history digging = 8× `git branch -a` / `log --all` / `diff HEAD~1` on their own commits (images have future refs gc'd); non-MCP tools = ToolSearch (117, Claude Code's tool loader) + 8 `Agent` subagents (7 Explore read-only, 1 did work via MCP), 0 denied builtins. Test edits: 124 in 39 tasks; 34 on test.patch files (reset by grader), most others on agent-created tests; **13 tasks edited pre-existing tests that persist into grading**, 4 of them files the reference solution also edits (legit API adaptations); 9 not touched by the reference: abs (changed then reverted), helm/prometheus/onedump-style signature updates, kombu mocks, vulture/langchain expected lists, sql-formatter (adds asserts) — benign; **gray, worth a human look: arktype (snapshot predicate expectations changed), bandit (expected counts in `test_functional.py::test_nosec` changed)**. No skip/xfail/TestMain patterns survive grading. | `runs/deepswe-audit.txt`, `runs/deepswe-audit-testedits.txt` | 2026-09-04 |
 | **Test-edit audit, empirical** (`scripts/deepswe_p2p_original_check.py`: re-verify with the agent's edits to PRE-EXISTING test files stripped, so the repo's original tests run): of 13 tasks, 5 still pass (edits not load-bearing: bandit — its edit was only ADDING tests, my earlier "changed expected counts" read was wrong; abs, langchain, sql-formatter, prometheus), 8 fail without the edits; 2 of those 8 edit files the reference solution also edits (meriyah snapshot, onedump signatures → legit). **6 tasks = agent changed public behaviour/API, existing tests caught it, agent edited the tests to match** (masked p2p deviation; their grader can't see it since only test.patch files are reset): arktype (r1b4; snapshot `predicate` lists gained an extra validator; p2p 1676/1679 with originals), helm (r1b3; changed `coalesce` signature; f2p 22/47, p2p 7/12 with originals), kombu (r2b1; mock-based tests), query-persist (single pass), mashumaro (r1b2; `field_options()` gained keys), vulture (r2b1; `make_config` gained keys). Under a SWE-bench-style "model patch excludes test files" rule: single 31→30 (26.5%), combined 89→83 (73.5%). No hidden-info access, no network, no history exploitation anywhere. | `runs/deepswe-p2p-original.jsonl`; `runs/deepswe-audit-testedits.txt` | 2026-09-04 |
-| **DeepSWE branching: rescued 58/82 = 70.7%** (round 1: 41, round 2: 17, unrescued 24); **combined 89/113 = 78.8%** (single pass 27.4%). 451 branches graded, 36% per-branch success (r1 37%, r2 34%); branch cost $649 (mean $1.44, 25 tool calls, 320 s); analyst/reviewer Bedrock calls not metered. Recorded parent reused (no re-run), 32 workers, 0 proxy 404s, 0 throttling, 0 sandboxes leaked. Rescue by prior shape: near-miss 74% (39), partial 77% (31), weak 22% (9), regression-broke 3/3. Fork position median 97% of trajectory; 66–100% region 46% vs 33–66% 56% (same late-fork bias as SWE-bench; prompt unchanged per "同样的来"). | `runs/deepswe-branch/shard-*/summary.json`; `runs/deepswe-branch-report.md`; `docs/RESULTS.md` §DeepSWE branching; tarball `runs/deepswe-resolved-trajectories.tar.gz` (89 tasks, 30.5 MB) | 2026-09-04 |
+| **DeepSWE TRUE-FORK branching: rescued 70/82 = 85.4%** (round 1: 52, round 2: 18, unrescued 12); **combined 101/113 = 89.4%** vs 78.8% with the full-conversation fork. 418 branches, 48% per-branch success (r1 48%, r2 47%) vs 36%; branch cost $554 (mean $1.33, 22 tool calls, 323 s) vs $649. Controlled: same 82 tasks, same recorded parents, same analyst/reviewer, rounds 4→3; changed only (a) conversation cut at the fork step, (b) `<system-reminder>` branch note, (c) out-of-band builtins denied. 4 branches ran with the full conversation by design (parent compacted before the fork; recorded in origin). Rescue by shape: near-miss 87%, partial 90%, weak 56%, regression-broke 3/3. Integrity: 0 foreign queued messages, 0 proxy 404s; 22 branches hit the transient event-loop error (old code; fixed after launch). Main batch `runs/deepswe-branch-truefork` (79 valid tasks) + `…-fix` (4 tasks: 3 compaction cases + task-task-graph-export). | `runs/deepswe-branch-truefork-report.md`; `scripts/deepswe_branch_report.py runs/deepswe-branch-truefork runs/deepswe-branch-truefork-fix --single runs/deepswe-final.json --details runs/deepswe-details.jsonl`; tarball `runs/deepswe-resolved-trajectories-truefork.tar.gz` (101 tasks, 35 MB) | 2026-09-04 |
+| DeepSWE branching (full-conversation fork, superseded as the headline): rescued 58/82 = 70.7% (round 1: 41, round 2: 17, unrescued 24); **combined 89/113 = 78.8%** (single pass 27.4%). 451 branches graded, 36% per-branch success (r1 37%, r2 34%); branch cost $649 (mean $1.44, 25 tool calls, 320 s); analyst/reviewer Bedrock calls not metered. Recorded parent reused (no re-run), 32 workers, 0 proxy 404s, 0 throttling, 0 sandboxes leaked. Rescue by prior shape: near-miss 74% (39), partial 77% (31), weak 22% (9), regression-broke 3/3. Fork position median 97% of trajectory; 66–100% region 46% vs 33–66% 56% (same late-fork bias as SWE-bench; prompt unchanged per "同样的来"). | `runs/deepswe-branch/shard-*/summary.json`; `runs/deepswe-branch-report.md`; `docs/RESULTS.md` §DeepSWE branching; tarball `runs/deepswe-resolved-trajectories.tar.gz` (89 tasks, 30.5 MB) | 2026-09-04 |
 | DeepSWE cost/shape: final-verdict runs $341 (mean $3.02/task, median wall 847 s, 0 hit the 10800 s cap, mean 72 tool calls) + $223 on the 14 discarded infra-affected runs. By language: ts 14/35 (40%), py 9/34 (26%), go 6/34 (18%), js 1/5, rust 1/5. Failure shape: 39 near-miss (≥90% f2p), 31 partial (50–90%), 3 all-f2p-but-regression, 5 zero, 3 weak, 1 agent error; median f2p fraction among failures 0.90. | `runs/deepswe-report.md` §Cost/§Failure shape; `scripts/deepswe_report.py` | 2026-09-04 |
 | **DeepSWE headline: 31/113 = 27.4% pass@1** (claude-code + sonnet 4.6, single attempt, offline, 2 CPU/8 GB, 10800 s cap; their grader verbatim). All 113 measured cleanly: base batch 113 (29 resolved, 14 infra-affected) + rerun of the 14 with the re-board fix (2 resolved, 0 404s). 1 agent-side error (`kea-atomic-signal-selectors`: Claude Code "exceeded 32000 output token maximum", counted as fail). Independent re-grade of 99 clean base tasks: **0 verdict flips**. 0 sandboxes leaked. | `runs/deepswe-final.json` (`scripts/deepswe_aggregate.py runs/deepswe runs/deepswe-rerun1`); `runs/deepswe-details.jsonl`; `runs/deepswe/shard-*/summary.json`, `runs/deepswe-rerun1/shard-*/summary.json` | 2026-09-04 |
 | **Re-board fix verified live** (Failure log #7): in `runs/deepswe-rerun1`, 6 tasks re-boarded mid-run (original sandbox deleted 2–19 min before run end: arcane, boa, helm×2, kgateway, oxvg) and had **0** proxy-404 tool results afterwards; the same tasks in the base batch had 6–315 each. | server.log `delete_sandbox` vs journal `run.finished`; `runs/deepswe-rerun1/shard-*/*/parent.jsonl` | 2026-09-04 |
@@ -159,6 +169,48 @@ batch (check `/sandboxes` = 0).
 
 ## Failure log (round, cause, what changed)
 
+9b. 2026-09-04 10:10 — **Claude Code stops transcribing after an auto-compaction.**
+   meriyah (101 steps): transcript has `compact_boundary` at entry 340, step 72's
+   tool_result after it, and steps 73–101 NOWHERE on disk (no other file holds
+   their tool ids). So for a compacted parent even the "full conversation" a
+   resume loads ends at the last transcribed step. Our fallback forked meriyah at
+   step 72 (last cuttable; disk moved with it, conversation and disk consistent)
+   instead of the reviewer's 100 — logged as "fork step 100 has no transcript
+   cut; using step 72". Not fixable on our side; affects the 11 compacted
+   parents only when the chosen fork lies in the untranscribed tail.
+9. 2026-09-04 08:20 — **Two defects surfaced by the true-fork batch (running
+   with the pre-fix code):** (a) `resume_session_at` before a Claude Code
+   auto-compaction boundary is rejected ("No message found with message.uuid")
+   — 11 of the 82 parents were compacted (`compact_boundary` entry); in the
+   running batch 3 tasks (koota-deferred-mutation-buffer, koota-pair-relation-
+   tracking, meriyah-explicit-resource-declarations) had every branch error out
+   → their verdicts in `runs/deepswe-branch-truefork` are invalid, rerun needed.
+   Fix: `conversation_cut` returns None when a boundary follows the cut; the
+   branch then runs with the FULL conversation and records
+   `origin.cut_note="compacted-before-fork"`; a CLI refusal at runtime is
+   retried the same way (`cut-refused-by-cli`, refused journal kept as
+   `*.cut-refused.jsonl`). (b) After a re-board, the first tool call(s) on the
+   replacement failed with "Event ... is bound to a different event loop":
+   the session probed the handle on its own loop, then fix #7 handed that same
+   handle to the MCP server's loop. 1–3 failed calls per re-boarded run in
+   rerun1 (11 runs), deepswe-branch (35), truefork (9) — transient, agent
+   retried. Fix: `MicroVMPool.handle()` (unregistered fresh handle) and the
+   `_serve_in_process` swap listener takes one. Tests:
+   `test_a_cut_before_a_compaction_boundary_is_not_loadable`,
+   `test_a_cut_the_cli_refuses_is_retried_with_the_full_conversation`,
+   `test_the_server_takes_a_fresh_handle_on_reboard_when_the_pool_offers_one`.
+8. 2026-09-04 07:47 — **Host rebooted** 2 min into the true-fork branching
+   launch (32 workers). Previous boot's journal ends mid-activity at 07:46:38
+   with no shutdown sequence (hard reset: hypervisor event or panic; kernel
+   unchanged 6.12.103-127.188; not a dnf update). Lost: the batch (3/82 graded,
+   one with spurious "no snapshot" errors), archived at
+   `runs/deepswe-branch-truefork.crashed-reboot-0747/`. Recovery per AGENTS.md
+   runbook: ublk module was already loaded, bench server restarted 07:59
+   (`/sandboxes` → []), batch relaunched fresh 08:01. Root cause unknown; if it
+   recurs under 32 workers, drop to 20 and note it. Also noticed: files in
+   `runs/` not written by this session (`deepswe-audit*.txt`,
+   `deepswe-p2p-original.jsonl`) — another Claude session (`lbp-60`) is active
+   in this repo; not touched.
 7. 2026-09-03 — **Re-board left the http MCP server serving a destroyed VM.**
    DeepSWE builds write GBs → chain > `max_chain_size_mib` → server compacts →
    Checkpointer re-boards via `SandboxSession.swap_sandbox` (new VM, old
@@ -216,7 +268,39 @@ batch (check `/sandboxes` = 0).
 
 ## Next steps
 
--2. **DeepSWE branching DONE 2026-09-04 06:11** — 58/82 rescued, combined
+-5. **Docs updated + committed + pushed 2026-09-04** (user: "先把项目状态和最新的用法
+   更新一下，然后commit push"): AGENTS.md gained "DeepSWE: single pass, gate,
+   branching", "What a branch actually inherits", `--parent-from` /
+   `--fork-full-conversation` knobs, 6 new "things that will bite you", test
+   command (594); docs/RESULTS.md corrects the SWE-bench fork description.
+   Second commit on `feat/harness-v1` on top of 0555133; pushed with tags.
+-4. **DeepSWE TRUE-FORK branching DONE 2026-09-04 11:54** — 70/82 rescued,
+   combined 101/113 = 89.4% (vs 78.8% full-conversation). Report appended to
+   `docs/RESULTS.md`; tarball `runs/deepswe-resolved-trajectories-truefork.tar.gz`
+   (51.8 MB; per task: `TRAJECTORY.md` = parent to the fork step, the
+   `<system-reminder>` it received, then the branch's steps, numbering
+   continued — user: "parent 到 branch step的位置，然后受到system reminder, 然后后面
+   的step"; `ANALYSIS.md` = verdict + analyst/reviewer; plus journals, plans,
+   manifest, ATIF, `parent.md`, `<winner>-with-parent.md`; rendered by
+   `scripts/trajectory_view.py`, full tool outputs). 0 sandboxes.
+   Open for the user:
+   - **SWE-bench 93.0%**: still the full-conversation mechanism; re-run
+     branch134 with the true fork (~$600) or leave the corrected description.
+   - analyst late-fork bias persists (median 96%); prompt calibration untouched.
+   - analyst `failure_reason` can run 1500+ chars into the branch note; cap it.
+   - per-task cwd for future batches (isolates Claude Code sessions/queues).
+   - 12 unrescued tasks' plans unexamined; ATIF export lossy for claude-code.
+-3. DeepSWE TRUE-FORK branching run details (launched 2026-09-04 08:01 after the reboot):
+   `OUT=runs/deepswe-branch-truefork WORKERS=32 scripts/run_deepswe_branching.sh`
+   — same 82 tasks, same recorded parents (`--parent-from runs/deepswe-final.json`),
+   rounds 2, width 4→3; differences vs `runs/deepswe-branch` (58/82): conversation
+   cut at the fork step (`conversation_cut` → `resume_session_at`), branch
+   message = `<system-reminder>` note (deepswe.bench.branch_note), out-of-band
+   builtins denied. Compare with `scripts/deepswe_branch_report.py
+   runs/deepswe-branch-truefork --single runs/deepswe-final.json --details
+   runs/deepswe-details.jsonl`; run the aggregate's foreign-message check on
+   its journals too. Code uncommitted (only the old baseline is committed/tagged).
+-2. **DeepSWE branching (full-conversation fork) DONE 2026-09-04 06:11** — 58/82 rescued, combined
    89/113 = 78.8%; report appended to `docs/RESULTS.md`; tarball of the 89
    resolved trajectories at `runs/deepswe-resolved-trajectories.tar.gz`
    (ATIF export is lossy for claude-code — one step holding all tool calls —
@@ -276,7 +360,33 @@ batch (check `/sandboxes` = 0).
 
 ## Pending re-review
 
-**FIRING 2026-09-04 — branch conversations are NOT truncated at the fork step.**
+**RESOLVED 2026-09-04 by user ruling** — user: "要修一下，我觉得做一下B,然后重新跑
+branching"; hint delivery as an environment-style note ("1 是可以的"); builtin
+tools: "禁掉内置工具". Agreement updated: true fork (`resume_session_at` at the
+fork step's tool_result uuid; `conversation_cut`), `<system-reminder>` branch
+note (verdict facts + analyst failure_reason/lesson + reviewer hint; no task
+restatement/primer/diff), Claude Code out-of-band builtins denied (Task, Cron*,
+ScheduleWakeup, Workflow, SendMessage, Worktree, Skill, ReportFindings),
+rerun branching on the same 82 tasks/parents as a controlled comparison
+against 58/82. Old mechanism preserved at git tag `branching-fullconv-2026-09-04`
+(commit 0555133, user-requested; not pushed). Probe evidence: fork of
+abs-module-cache-flags at step 25 → new transcript has 25/25 pre-fork tool ids,
+0/35 post-fork, no closing summary (`runs/probe-truefork/`).
+
+**NEW FINDING during the probe — cross-run message contamination**: the boa
+agent (old branching, mid-404) called `CronCreate` with `* * * * *`; Claude Code
+delivered that prompt into 7 later sessions sharing cwd=/tmp (02:31–07:24),
+2 of them other tasks' branch attempts (aiomonitor r1b1, tomlkit r1b2) — so 2
+of the 58/82 round's branches were externally steered. SWE-bench v500/branch134:
+0 of 1240 sessions. Store of the cron not found on disk; a throwaway cwd=/tmp
+session at 07:38 received nothing. Mitigations: builtins denied (above);
+`scripts/deepswe_aggregate.py` now flags runs with foreign queued messages as
+unmeasured; future batches should use a per-task cwd (`/tmp/ash-cwd/<task>`),
+not possible for this rerun because the recorded parents live under `/tmp`.
+
+Original signal text kept below for the record.
+
+**FIRED 2026-09-04 — branch conversations are NOT truncated at the fork step.**
 Signal: a key assumption refuted by a counterexample (user question "为什么不是
 直接从旧的开始而是新开一个session"). `session_ckpt` is the same Claude Code
 session id at every checkpoint (59/59 in `runs/deepswe-branch/shard-0/abs-module-

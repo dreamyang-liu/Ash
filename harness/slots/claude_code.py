@@ -50,7 +50,14 @@ from harness.core.slot import (
 )
 from harness.normalize import claude_code as cc_normalize
 
-#: Builtin tools that would execute on the host instead of in the sandbox.
+#: Builtin tools that would execute on the host instead of in the sandbox --
+#: plus everything that acts outside this run: scheduling, cross-session
+#: messaging, worktrees, subagents. Measured 2026-09-04: one DeepSWE agent
+#: created a `* * * * *` CronCreate prompt while its sandbox was gone; Claude
+#: Code kept delivering it into OTHER tasks' sessions (same cwd) for hours --
+#: 7 deliveries, 2 into unrelated branch attempts. The eval offers exactly the
+#: two MCP sandbox tools (plus ToolSearch, which loads their schemas, and the
+#: todo-list tools, which touch nothing).
 DENIED_BUILTINS = (
     "Bash",
     "BashOutput",
@@ -60,6 +67,20 @@ DENIED_BUILTINS = (
     "Write",
     "NotebookEdit",
     "Glob",
+    # out-of-band: scheduling, messaging, background work, host git state
+    "Task",
+    "Agent",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "ScheduleWakeup",
+    "Workflow",
+    "SendMessage",
+    "ListAgents",
+    "EnterWorktree",
+    "ExitWorktree",
+    "Skill",
+    "ReportFindings",
     "Grep",
     "WebFetch",
     "WebSearch",
@@ -254,6 +275,12 @@ class ClaudeCodeSlot(AgentSlot):
             kwargs["resume"] = extra["resume_session_id"]
             if extra.get("fork"):
                 kwargs["fork_session"] = True
+            if extra.get("resume_session_at"):
+                # Truncate the resumed conversation at this transcript entry
+                # (uuid). Without it a fork carries the WHOLE parent
+                # conversation -- including everything after the step whose
+                # filesystem snapshot the branch starts from.
+                kwargs["resume_session_at"] = extra["resume_session_at"]
         if extra.get("max_turns"):
             kwargs["max_turns"] = extra["max_turns"]
         if task.env:

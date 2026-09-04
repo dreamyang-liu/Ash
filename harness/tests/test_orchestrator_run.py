@@ -481,6 +481,38 @@ def test_the_in_process_server_follows_a_reboard(tmp_path):
         owned.stop_server()
 
 
+def test_the_server_takes_a_fresh_handle_on_reboard_when_the_pool_offers_one(tmp_path):
+    """The session's replacement handle was probed on the session's loop, so its
+    HTTP client is bound there; the server must serve through its own handle or
+    the first call after a re-board fails ("Event ... bound to a different event
+    loop", 1-3 per re-boarded run measured)."""
+    from types import SimpleNamespace
+    from harness.orchestrator.run import Orchestrator, OwnedSandbox, RunSpec
+
+    made = []
+
+    class Pool:
+        def handle(self, sandbox_id, agent_id="", base_ref=""):
+            h = SimpleNamespace(_container_id=sandbox_id, agent_id=agent_id, base_ref=base_ref, fresh=True)
+            made.append(h)
+            return h
+
+    session = _FakeSession(sandbox_id="sb-first")
+    session.on_swap = []
+    session._pool = Pool()
+    owned = OwnedSandbox(session=session, sandbox_id="sb-first")
+    orch = Orchestrator(out_dir=tmp_path)
+    try:
+        orch._serve_in_process(RunSpec(prompt="x", sandbox_image="img", transport="http"), owned)
+        replacement = SimpleNamespace(_container_id="sb-second", agent_id="agent", base_ref="snap-9")
+        session.on_swap[0](replacement)
+        served = owned.server.pool.get("sb-first").sandbox
+        assert served is not replacement and getattr(served, "fresh", False)
+        assert served._container_id == "sb-second" and served.base_ref == "snap-9"
+    finally:
+        owned.stop_server()
+
+
 def test_a_sandbox_is_not_leaked_when_wiring_fails(monkeypatch):
     """The sandbox exists but nothing can reach it. Raising without releasing
     would leave it running with the caller seeing only an exception."""

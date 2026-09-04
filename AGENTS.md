@@ -122,6 +122,42 @@ resolved** with all 89 `PASS_TO_PASS` regressions passing.
   cannot contaminate each other.
 - `--slot claude-code|codex|opencode` — all three verified end to end on this
   loop.
+- `--parent-from runs/prev/final.json|runs/prev/` — branch from a RECORDED
+  single-pass parent instead of running a fresh one: the journal is copied in
+  as `parent.jsonl`, its last snapshot graded, then round 1. A fresh parent
+  with an unchanged prompt is a blind retry, not a branch.
+- `--fork-full-conversation` — the pre-2026-09-04 behaviour (git tag
+  `branching-fullconv-2026-09-04`): see below.
+
+### What a branch actually inherits
+
+A checkpoint pair is `(snapshot after step N, native session id)`. For
+`claude-code` the session id alone cannot express "up to step N":
+`fork_session` copies the WHOLE parent transcript — every branch of the 93.0%
+SWE-bench run and of the first DeepSWE branching round carried the parent's
+post-fork steps and its closing "done" summary while its filesystem sat at
+step N. Since 2026-09-04 `fork_eval.conversation_cut` finds the transcript
+entry holding step N's `tool_result` (its `tool_use_id` equals the journal's
+`call_id`; Claude Code issues one tool per assistant message, 0 parallel calls
+in 10k measured) and the slot passes it as `resume_session_at`, so the branch
+remembers exactly what its disk holds. Measured on DeepSWE's 82 failures, same
+parents, same analyst: rescued 70/82 vs 58/82, per-branch success 48% vs 36%,
+cheaper branches ($1.33 vs $1.44). 414/418 branches verified truncated.
+
+Two cases cannot be cut, and are recorded rather than hidden
+(`origin.cut_note`): a parent whose conversation Claude Code **auto-compacted**
+before the fork step (entries before `compact_boundary` are not loadable; 11 of
+82 DeepSWE parents were compacted, and after compaction Claude Code stopped
+transcribing tool results altogether), and a cut the CLI refuses at runtime
+("No message found with message.uuid"). Both fall back to the full
+conversation for that branch; the report counts them.
+
+The branch message (`deepswe.bench.branch_note`) is a `<system-reminder>` — the
+form Claude Code uses for environment feedback — carrying the verifier's facts
+(failing test ids, regression counts, patch state), the analyst's
+failure_reason and lesson, and the reviewer's hint; not the task text, not the
+tool primer, not the parent's later diff. SWE-bench keeps its original
+`BRANCH_PROMPT`.
 
 ---
 
@@ -260,6 +296,50 @@ for f in glob.glob('runs/mybatch/shard-*/summary.json'):
         d += 1; ok += i['resolved']
 print(f'{ok}/{d} resolved')"
 ```
+
+### DeepSWE (datacurve-ai/deep-swe): single pass, gate, branching
+
+The eval layer for a second benchmark lives in `deepswe/` beside `swebench/`
+and plugs into the same loop via `--benchmark deepswe --tasks-dir`. Their
+grader runs verbatim: `tests/Dockerfile` (COPY 4 files, RUN chmod) is replayed
+onto a fresh offline microVM built from the task's own image, the `/logs/artifacts/model.patch` file is
+collected with their exact `[[verifier.collect]]` command from the attempt's
+last snapshot, `bash /tests/test.sh` writes `reward.json`. Everything the
+adapter declares — `no_network`, `image_env` (launch the runtime under the
+image's OCI ENV; the guest agent otherwise drops `/opt/venv/bin`,
+`/root/go/bin`), 2 CPU / 8 GB — flows through `backend_for(args, bench)`.
+
+```bash
+git clone https://github.com/datacurve-ai/deep-swe ~/projects/LBP/deep-swe   # 113 public tasks
+
+# 1. gate FIRST: their oracle must score 1 and doing nothing must score 0 on every task,
+#    through our exact path (snapshot -> collect -> offline verifier VM). ~55 min, 8 workers.
+python3.11 -m deepswe.gate --tasks-dir ~/projects/LBP/deep-swe/tasks -o runs/deepswe-gate --workers 8
+
+# 2. single pass, 113 tasks, 16 workers (~1.5 h), then aggregate + per-task reward details
+scripts/run_deepswe.sh                                     # -> runs/deepswe
+python3.11 scripts/deepswe_aggregate.py runs/deepswe [runs/deepswe-rerun1] --json runs/deepswe-final.json
+python3.11 scripts/deepswe_regrade_details.py runs/deepswe --skip-infra -o runs/deepswe-details.jsonl
+python3.11 scripts/deepswe_report.py runs/deepswe-final.json runs/deepswe-details.jsonl --extra-cost runs/deepswe
+
+# 3. branching on the failures, recorded parents reused, width 4 then 3 (~4 h, 32 workers)
+WORKERS=32 OUT=runs/deepswe-branch scripts/run_deepswe_branching.sh
+python3.11 scripts/deepswe_branch_report.py runs/deepswe-branch [runs/deepswe-branch-fix] \
+    --single runs/deepswe-final.json --details runs/deepswe-details.jsonl
+
+# 4. every resolved trajectory, readable: <task>/TRAJECTORY.md = parent to the fork,
+#    the system-reminder, the branch's steps; plus journals, plans, manifest, ATIF
+python3.11 scripts/deepswe_export_resolved.py --single runs/deepswe-final.json \
+    --branch runs/deepswe-branch runs/deepswe-branch-fix --details runs/deepswe-details.jsonl -o traj.tar.gz
+python3.11 scripts/trajectory_view.py runs/.../r1b2-x.jsonl --with-parent --full -o one.md   # any journal
+```
+
+`scripts/rerun_deepswe_affected.sh` reruns tasks whose journals carry the
+proxy-404 signature (a sandbox Ash destroyed mid-run, Failure log #7 in
+STATUS.md); the aggregate treats those, and runs that received a foreign
+queued message, as unmeasured. Measured 2026-09-04 (claude-code, sonnet 4.6,
+their 10800 s cap): single pass 31/113 = 27.4%; + true-fork branching
+101/113 = 89.4%. Not leaderboard-comparable (theirs is mini-swe-agent).
 
 ### Re-grading without re-running
 
@@ -440,6 +520,41 @@ handed an agent this repo's own `.claude/` skills mid-task.
 - **Killing a run leaks its sandbox.** `session.destroy()` runs in a `finally`
   that a `kill -9` skips; the sandbox then lives until its TTL. Delete it with
   `DELETE /sandboxes/<id>`.
+- **Two holders of one sandbox handle must both follow a re-board.** The
+  checkpoint bridge swaps the session's sandbox when the chain compacts; the
+  in-process MCP server kept the OLD handle, so every tool call after a
+  compaction went to a destroyed VM (404 until the run ended). Hidden on
+  SWE-bench (small writes), hit 14/113 DeepSWE tasks (GB builds).
+  `SandboxSession.on_swap` listeners fix it — and the server must take a
+  FRESH handle (`MicroVMPool.handle`): one probed on the session's loop fails
+  its first call on the server's loop ("Event ... bound to a different event
+  loop").
+- **Two processes building the same template race.** The second spawns before
+  the first's build commits → AgentENV 500 "resolve committed snapshot into
+  runnable runtime paths". Never run two jobs on the same image concurrently
+  from separate processes (the gate runs one job per task for this reason).
+- **The guest agent rebuilds PATH.** Image ENV reaches the runtime except
+  PATH: `/opt/venv/bin`, `/root/go/bin`, `/app/node_modules/.bin` were
+  missing in every DeepSWE image. `microvm.image_env=true` launches the
+  runtime under the image's OCI ENV (read with AgentENV's own `regctl`);
+  opt-in, changes the template name.
+- **`allowInternetAccess` is spelled two ways.** `POST /sandboxes` (template)
+  only parses `allow_internet_access`; `/sandboxes-cold` only camelCase;
+  unknown keys are silently ignored — so "offline" was online until measured
+  with `curl` inside the VM. Ash sends both; verify egress with a probe.
+- **Claude Code's builtins act outside the run.** One DeepSWE agent created a
+  `* * * * *` `CronCreate` while its sandbox was gone; Claude Code delivered
+  that prompt into other tasks' sessions (same cwd=/tmp) for hours. The slot
+  now denies Task/Agent, Cron*, ScheduleWakeup, Workflow, SendMessage,
+  Worktree, Skill, ReportFindings; `deepswe_aggregate.py` flags runs whose
+  transcript holds a queued message this harness did not send. Use a per-task
+  cwd for future batches.
+- **Auto-compaction ends the transcript you can fork.** After Claude Code's
+  `compact_boundary`, earlier entries are not loadable (`resume_session_at`
+  → "No message found") and — measured on a 101-step run — later tool results
+  were not written at all. A fork before the boundary gets the full
+  conversation with `origin.cut_note` set; a fork in the untranscribed tail
+  moves back to the last transcribed step (disk moves with it).
 
 ## Repository layout
 
@@ -639,7 +754,8 @@ pip install ./sdk litellm pyyaml datasets
 ## Tests
 
 ```bash
-cd ~/projects/LBP/Ash    && python -m pytest swebench/tests sdk/tests -q   # 516
+cd ~/projects/LBP/Ash    && PYTHONPATH=.:sdk python3.11 -m pytest harness/tests swebench/tests sdk/tests deepswe/tests -q   # 594
+cd ~/projects/LBP/Ash    && PYTHONPATH=.:sdk python3.11 contracts/ci_check.py                                              # 114 checks
 cd ~/projects/LBP/AgentENV && make test-unit                                # 761
 cd ~/projects/LBP/AgentENV && make fmt clippy
 ```

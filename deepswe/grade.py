@@ -257,6 +257,40 @@ def grade_from_verifier(patch: str, outcome: VerifierOutcome,
     return grade
 
 
+def verdict_facts(grade: Grade) -> dict:
+    """The structured verdict back out of ``Grade.detail`` (written by
+    :func:`grade_from_verifier`): their reward.json, the non-passing test ids,
+    and how the patch fared. What a branch note quotes instead of raw output."""
+    import re
+    facts: dict = {"reward": None, "failing_target": [], "failing_regression": [],
+                   "patch_state": None}
+    detail = grade.detail or ""
+    m = re.search(r"^reward\.json: (\{.*\})$", detail, re.M)
+    if m:
+        try:
+            facts["reward"] = json.loads(m.group(1))
+        except ValueError:
+            pass
+    m = re.search(r"^non-passing tests \(\d+ shown\): (.*)$", detail, re.M)
+    if m:
+        for item in (t.strip() for t in m.group(1).split(", ")):
+            if item.startswith("f2p:"):
+                facts["failing_target"].append(item[4:])
+            elif item.startswith("p2p:"):
+                facts["failing_regression"].append(item[4:])
+            elif item:
+                facts["failing_target"].append(item)
+    if "did not apply" in detail:
+        facts["patch_state"] = "did not apply to the pristine base"
+    elif "empty model.patch" in detail:
+        facts["patch_state"] = "empty -- nothing had been committed"
+    elif grade.error:
+        facts["patch_state"] = "grading error: %s" % grade.error
+    else:
+        facts["patch_state"] = "committed and applied cleanly"
+    return facts
+
+
 def grade_snapshot(snapshot_id: str, task: Task, backend: dict) -> Grade:
     """The whole path: restore, collect, verify on a pristine VM, read reward."""
     session = SandboxSession(quiet=True, backend=dict(backend))

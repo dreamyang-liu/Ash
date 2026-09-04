@@ -46,6 +46,8 @@ commit everything before you finish.
 
 {primer}"""
 
+#: The branch message for a conversation that was NOT truncated (the agent
+#: remembers work its disk no longer has) or when no analysis is available.
 BRANCH_PROMPT = """\
 You are continuing work on a task in the {repo} repository at {repo_dir} in your \
 sandbox. The filesystem already holds an earlier attempt's work -- ITS EDITS ARE \
@@ -65,6 +67,56 @@ changed before you touch anything. The sandbox has NO internet access.
 Only COMMITTED work is graded: commit everything on a branch before you finish.
 
 {primer}"""
+
+#: The branch message for a TRUNCATED conversation: the agent has just finished
+#: step N and remembers nothing after it, so this reads as environment feedback
+#: arriving at that moment -- Claude Code's own <system-reminder> convention --
+#: not as a new task. No task restatement, no tool primer (both are in the
+#: conversation), no raw test output, no post-fork diff (anchoring).
+BRANCH_NOTE = """\
+<system-reminder>
+Hidden-test grading of a continuation from this exact point. Your working tree \
+is unchanged since your last step (step {step}).
+
+Result of that continuation:
+{verdict_lines}
+
+{analysis_block}Direction for you now:
+  {hint}
+
+Only committed work is graded: commit on a branch when you are done.
+</system-reminder>"""
+
+
+def branch_note(step, grade, analysis: Optional[dict], hint: str) -> str:
+    """Render :data:`BRANCH_NOTE` from the verdict facts and the analyst report."""
+    from deepswe.grade import verdict_facts
+    facts = verdict_facts(grade)
+    reward = facts["reward"] or {}
+    lines = []
+    if reward:
+        lines.append("  target tests: %s/%s passing." % (reward.get("f2p_passed", "?"),
+                                                        reward.get("f2p_total", "?")))
+        if facts["failing_target"]:
+            lines.append("  Failing:")
+            lines += ["    %s" % t for t in facts["failing_target"][:25]]
+        lines.append("  regression tests: %s/%s passing." % (reward.get("p2p_passed", "?"),
+                                                            reward.get("p2p_total", "?")))
+        if facts["failing_regression"]:
+            lines.append("  Broken regressions:")
+            lines += ["    %s" % t for t in facts["failing_regression"][:25]]
+    else:
+        lines.append("  %s" % grade.summary())
+    lines.append("  patch: %s." % facts["patch_state"])
+    analysis = analysis or {}
+    block = ""
+    if analysis.get("failure_reason"):
+        block += "Why it failed (analysis of that continuation):\n  %s\n\n" % analysis["failure_reason"].strip()
+    if analysis.get("lesson"):
+        block += "What the next attempt must know:\n  %s\n\n" % analysis["lesson"].strip()
+    return BRANCH_NOTE.format(step=step if step is not None else "?",
+                              verdict_lines="\n".join(lines),
+                              analysis_block=block, hint=(hint or "").strip())
 
 
 class DeepSWE:
@@ -107,7 +159,14 @@ class DeepSWE:
         return PROMPT.format(repo=instance["repo"], repo_dir=REPO_DIR,
                              instruction=instance["problem"], primer=PRIMER)
 
-    def branch_prompt(self, instance: dict, verdict: str, hint: str) -> str:
+    def branch_prompt(self, instance: dict, verdict: str, hint: str, *,
+                      truncated: bool = False, step=None, grade=None,
+                      analysis: Optional[dict] = None) -> str:
+        """``truncated``: the branch's conversation ends at ``step`` (true fork),
+        so it gets the environment-style note; otherwise the full prompt that
+        also explains the rolled-back disk."""
+        if truncated and grade is not None:
+            return branch_note(step, grade, analysis, hint)
         return BRANCH_PROMPT.format(repo=instance["repo"], repo_dir=REPO_DIR,
                                     instruction=instance["problem"],
                                     verdict=verdict, hint=hint, primer=PRIMER)

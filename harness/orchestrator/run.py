@@ -542,8 +542,21 @@ class Orchestrator:
         # DeepSWE the first time chain compaction fired mid-run.
         listeners = getattr(owned.session, "on_swap", None)
         if listeners is not None:
-            listeners.append(lambda replacement, _entry=entry:
-                             setattr(_entry, "sandbox", replacement))
+            def follow_swap(replacement, _entry=entry, _session=owned.session):
+                # The session probed `replacement` on ITS loop, which bound the
+                # handle's HTTP client there; served from the server's loop the
+                # first call then failed ("Event ... bound to a different event
+                # loop", measured 1-3 times per re-boarded run). A fresh handle
+                # binds to whichever loop uses it first -- the server's.
+                fresh = None
+                make = getattr(getattr(_session, "_pool", None), "handle", None)
+                container = getattr(replacement, "_container_id", None)
+                if make is not None and container:
+                    fresh = make(container,
+                                 agent_id=getattr(replacement, "agent_id", ""),
+                                 base_ref=getattr(replacement, "base_ref", ""))
+                _entry.sandbox = fresh or replacement
+            listeners.append(follow_swap)
         # The tracker is the interceptor half of checkpointing, and it must sit
         # on THIS pipeline -- the one that serves the calls. It is created here
         # (the pipeline cannot be retrofitted once the server is running) and

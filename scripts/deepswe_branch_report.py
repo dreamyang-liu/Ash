@@ -65,19 +65,34 @@ def shape_of(rec: dict) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("branch_dir")
+    parser.add_argument("branch_dir", nargs="+",
+                        help="branching batch dir(s); later ones override earlier for the same task "
+                             "(e.g. a rerun of tasks the first batch could not fork)")
     parser.add_argument("--single", default=None)
     parser.add_argument("--details", default=None)
     args = parser.parse_args()
 
-    root = Path(args.branch_dir)
+    roots = [Path(d) for d in args.branch_dir]
+    root = roots[0]
     tasks = {}
-    for summary in sorted(root.glob("shard-*/summary.json")):
-        for inst in json.loads(Path(summary).read_text()).get("instances", []):
-            tasks[inst["instance"]] = (inst, Path(summary).parent / inst["instance"])
+    for r in roots:
+        for summary in sorted(r.glob("shard-*/summary.json")):
+            for inst in json.loads(Path(summary).read_text()).get("instances", []):
+                tasks[inst["instance"]] = (inst, Path(summary).parent / inst["instance"])
     planned = set()
     for shard in root.glob("shard-*.txt"):
         planned |= {t for t in shard.read_text().strip().split(",") if t}
+    # fallbacks: branches that ran with the full conversation because the parent
+    # was compacted before the fork step (origin.cut_note) -- reported, not hidden
+    fallbacks = 0
+    for _inst, tdir in tasks.values():
+        for j in tdir.glob("r*.jsonl"):
+            try:
+                head = j.open().readline()
+                if '"cut_note": "compacted-before-fork"' in head or '"cut_note": "cut-refused-by-cli"' in head:
+                    fallbacks += 1
+            except OSError:
+                pass
 
     stage = Counter()
     per_branch = Counter()      # round -> (graded, resolved)
@@ -125,7 +140,7 @@ def main() -> int:
 
     n = len(tasks)
     out = []
-    out.append("## DeepSWE branching (`%s`): the %d tasks the single pass failed\n" % (root, len(planned) or n))
+    out.append("## DeepSWE branching (`%s`): the %d tasks the single pass failed\n" % (", ".join(map(str, roots)), len(planned) or n))
     out.append("Recipe: recorded single-pass parent as base (no re-run), verifier-guided branching, "
                "2 rounds, width 4 then 3; analyst = agent model. %d/%d tasks finished.\n" % (n, len(planned) or n))
     out.append("| | |")
@@ -135,6 +150,8 @@ def main() -> int:
         if stage.get(k):
             out.append("| — by %s | %d |" % (k, stage[k]))
     out.append("| unrescued | %d |" % stage.get("unrescued", 0))
+    if fallbacks:
+        out.append("| branches run with the FULL conversation (parent compacted before the fork step) | %d |" % fallbacks)
     total_branches = sum(per_branch.values())
     total_ok = sum(branch_ok.values())
     out.append("| per-branch success rate (%d graded branches) | %.0f%% |" % (total_branches, 100.0 * total_ok / total_branches if total_branches else 0))

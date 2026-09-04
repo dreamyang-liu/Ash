@@ -706,7 +706,8 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
                 resume: Optional[str] = None,
                 fork: bool = False, origin: Optional[dict] = None,
                 resources: Optional[dict] = None,
-                bench: "Optional[Benchmark]" = None) -> RunOutcome:
+                bench: "Optional[Benchmark]" = None,
+                resume_at: Optional[str] = None) -> RunOutcome:
     """One attempt. Parent and branches differ only in the arguments.
 
     ``out_dir`` is per instance: eight instances writing `parent.jsonl` into one
@@ -722,6 +723,10 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
         extra["config_overrides"] = {"model_provider": '"amazon-bedrock"'}
     if args.slot.startswith("opencode"):
         extra["data_home"] = str(out_dir / "state" / "shared")
+    if resume_at:
+        # Transcript entry (uuid) the resumed conversation ends at. The slot
+        # passes it to the SDK's resume_session_at; see conversation_cut.
+        extra["resume_session_at"] = resume_at
     spec = RunSpec(
         prompt=prompt, slot=args.slot, cwd="/tmp", model=args.model,
         timeout_s=args.timeout, run_id=name,
@@ -783,7 +788,9 @@ class Benchmark:
     def prompt(self, instance: dict) -> str:
         raise NotImplementedError
 
-    def branch_prompt(self, instance: dict, verdict: str, hint: str) -> str:
+    def branch_prompt(self, instance: dict, verdict: str, hint: str, **context) -> str:
+        """``context`` (truncated, step, grade, analysis) lets a benchmark phrase
+        the branch message for a conversation cut at the fork step."""
         raise NotImplementedError
 
     def resources(self, instance: dict) -> Optional[dict]:
@@ -814,7 +821,10 @@ class SweBench(Benchmark):
         return PROMPT.format(repo=instance["repo"], problem=instance["problem"],
                              primer=TOOL_PRIMER)
 
-    def branch_prompt(self, instance: dict, verdict: str, hint: str) -> str:
+    def branch_prompt(self, instance: dict, verdict: str, hint: str, **context) -> str:
+        # Unchanged wording for SWE-bench (the 93.0% recipe); the conversation
+        # cut applies to it too, so "its edits are on disk" is now literally the
+        # state the agent remembers.
         return BRANCH_PROMPT.format(repo=instance["repo"], problem=instance["problem"],
                                     verdict=verdict, hint=hint, primer=TOOL_PRIMER)
 
@@ -830,6 +840,72 @@ def select_benchmark(args) -> Benchmark:
         from deepswe.bench import DeepSWE
         return DeepSWE(getattr(args, "tasks_dir", None))
     raise SystemExit("unknown --benchmark %r; choose swebench or deepswe" % name)
+
+
+# --- truncating the forked conversation ---------------------------------------
+#
+# The checkpoint pair for step N is (snapshot after tool call N, session id).
+# The session id alone cannot express "up to step N": resuming it with
+# fork_session copies the WHOLE transcript -- measured 2026-09-04, every branch
+# of the 93.0% SWE-bench run and of the first DeepSWE branching round carried
+# the parent's post-fork steps and its closing "done" summary, while its
+# filesystem was at step N. Claude Code's transcript has one entry per tool
+# result, keyed by the same tool_use id the journal records as call_id, so the
+# cut point is the uuid of the user entry holding step N's tool_result; the SDK's
+# resume_session_at loads the conversation up to and including it.
+
+CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+
+def conversation_cut(journal_path, step: int) -> Optional[str]:
+    """uuid of the transcript entry that ends step ``step`` of ``journal_path``.
+
+    None when it cannot be found -- the journal has no such step, the native
+    session transcript is not on this host, or Claude Code recorded the tool
+    result differently. Callers must not fall back to an untruncated fork
+    silently: that is the bug this exists to fix.
+    """
+    journal_path = Path(journal_path)
+    calls: List[str] = []
+    session_id = None
+    for record in read_journal(journal_path):
+        kind = record.get("type")
+        if kind == "tool.started" and record.get("call_id"):
+            calls.append(str(record["call_id"]))
+        elif kind == "session.ref" and record.get("native_session_id"):
+            session_id = str(record["native_session_id"])
+    if not session_id or step < 1 or step > len(calls):
+        return None
+    call_id = calls[step - 1]
+    for transcript in CLAUDE_PROJECTS_DIR.glob("*/%s.jsonl" % session_id):
+        found = None
+        with transcript.open(encoding="utf-8") as fh:
+            for line in fh:
+                if found is not None:
+                    # Claude Code auto-compacts a long conversation: a
+                    # `compact_boundary` entry, then a summary; on resume only
+                    # entries AFTER the boundary are loadable, so a cut before
+                    # it is rejected ("No message found with message.uuid").
+                    # Measured: 11 of 82 DeepSWE parents were compacted.
+                    if '"compact_boundary"' in line:
+                        return None
+                    continue
+                if call_id not in line or '"tool_result"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if entry.get("type") != "user":
+                    continue
+                content = (entry.get("message") or {}).get("content")
+                if isinstance(content, list) and any(
+                        isinstance(b, dict) and b.get("type") == "tool_result"
+                        and b.get("tool_use_id") == call_id for b in content):
+                    found = entry.get("uuid")
+        if found is not None:
+            return found
+    return None
 
 
 # --- reusing a recorded parent -----------------------------------------------
@@ -1001,6 +1077,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "grader (default: swebench, unchanged behaviour)")
     parser.add_argument("--tasks-dir", default=None,
                         help="deepswe: the dataset's tasks/ directory")
+    parser.add_argument("--fork-full-conversation", action="store_true",
+                        help="branch with the parent's WHOLE conversation (the "
+                             "pre-2026-09-04 behaviour, tag branching-fullconv-"
+                             "2026-09-04) instead of cutting it at the fork step")
     parser.add_argument("--parent-from", default=None,
                         help="reuse each instance's recorded parent journal from "
                              "this batch dir or aggregate .json instead of running "
@@ -1066,6 +1146,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             {"slot": args.slot, "model": args.model, "subset": args.subset,
              "benchmark": bench.name, "tasks_dir": args.tasks_dir,
              "parent_from": getattr(args, "parent_from", None),
+             "fork_conversation": ("full" if getattr(args, "fork_full_conversation", False)
+                                   else "truncated_at_fork_step"),
              "timeout": args.timeout, "no_network": bench.no_network,
              "branch_schedule": schedule, "rounds": args.rounds,
              "instances": results}, indent=2, ensure_ascii=False),
@@ -1202,17 +1284,63 @@ def run_one(orch: Orchestrator, args, raw, schedule: List[int],
             print("\n== attempt: %s ==" % name)
             print("   hint  %s" % str(branch.get("hint"))[:200].replace("\n", " "))
             started = time.time()
-            outcome = run_attempt(
-                orch, args, instance, name=name, out_dir=out_dir,
-                prompt=bench.branch_prompt(
-                    instance, verdict=base.verdict_text()[:20000],
-                    hint=str(branch.get("hint") or "")),
-                image=pair["snapshot_id"],
-                resume=pair.get("session_ckpt"), fork=True,
-                origin={"parent_run_id": base.name, "branch_step": step,
-                        "snapshot_id": pair["snapshot_id"],
-                        "round": round_no, "direction": branch.get("name")},
-                bench=bench)
+            # A branch's conversation must end where its filesystem does.
+            # `fork_session` alone resumes the WHOLE parent transcript; the cut
+            # uuid makes it stop at step `step`'s tool result.
+            cut = None
+            if not getattr(args, "fork_full_conversation", False):
+                # A step whose tool result never reached the transcript (the
+                # run died mid-call) cannot be a cut point; fork at the latest
+                # earlier step that can, moving the snapshot with it so the
+                # conversation and the filesystem still agree.
+                chosen = step
+                while chosen >= 1 and cut is None:
+                    cut = conversation_cut(base.outcome.journal_path, chosen)
+                    if cut is None:
+                        chosen -= 1
+                cut_note = None
+                if cut is None:
+                    # No loadable cut at or before the fork step (the parent's
+                    # conversation was compacted after it). The disk still
+                    # forks where the reviewer said; the conversation cannot,
+                    # so this branch gets the full one -- recorded, not hidden.
+                    cut_note = "compacted-before-fork"
+                    print("   no loadable transcript cut at or before step %d "
+                          "(conversation compacted); branching with the full "
+                          "conversation" % step)
+                elif chosen != step:
+                    print("   fork step %d has no transcript cut; using step %d"
+                          % (step, chosen))
+                    step = chosen
+                    pair = fork_plan(base.outcome.journal_path, step)
+
+            def branch_run(cut_uuid, cut_reason):
+                return run_attempt(
+                    orch, args, instance, name=name, out_dir=out_dir,
+                    prompt=bench.branch_prompt(
+                        instance, verdict=base.verdict_text()[:20000],
+                        hint=str(branch.get("hint") or ""),
+                        truncated=cut_uuid is not None, step=step, grade=base.grade,
+                        analysis=case_reports.get(base.name)),
+                    image=pair["snapshot_id"],
+                    resume=pair.get("session_ckpt"), fork=True, resume_at=cut_uuid,
+                    origin={"parent_run_id": base.name, "branch_step": step,
+                            "snapshot_id": pair["snapshot_id"],
+                            "conversation_cut": cut_uuid, "cut_note": cut_reason,
+                            "round": round_no, "direction": branch.get("name")},
+                    bench=bench)
+
+            outcome = branch_run(cut, cut_note)
+            if cut is not None and "No message found with message.uuid" in str(outcome.error or ""):
+                # The CLI could not load the cut entry after all. Same fallback,
+                # same record; the journal of the refused start stays on disk
+                # under the name the retry overwrites... so rename it first.
+                refused = Path(outcome.journal_path)
+                if refused.exists():
+                    refused.rename(refused.with_suffix(".cut-refused.jsonl"))
+                print("   cut %s refused by Claude Code; retrying with the full "
+                      "conversation" % cut[:8])
+                outcome = branch_run(None, "cut-refused-by-cli")
             attempt = Attempt(name, outcome,
                               grade_attempt(outcome, instance, args, bench), plan,
                               hint=str(branch.get("hint") or ""),

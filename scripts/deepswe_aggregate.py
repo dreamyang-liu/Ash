@@ -40,6 +40,46 @@ def infra_affected(journal: Path) -> int:
     return n
 
 
+OUR_PROMPT_PREFIXES = ("You are working in", "You are continuing work", "You are fixing a bug",
+                       "<system-reminder>\nHidden-test grading")
+CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+
+
+def foreign_queued_messages(journal: Path) -> list:
+    """User-turn messages in the run's native transcript that this harness did
+    not send: another run's CronCreate prompt, a stray task notification. A run
+    that received one was steered by something outside the experiment (seen
+    2026-09-04: one task's `* * * * *` cron delivered into 2 other tasks'
+    branches). Returns the first 80 chars of each."""
+    session = None
+    try:
+        with journal.open(encoding="utf-8") as fh:
+            for line in fh:
+                if '"session.ref"' in line:
+                    session = json.loads(line).get("native_session_id")
+                    break
+    except OSError:
+        return []
+    if not session:
+        return []
+    out = []
+    for transcript in CLAUDE_PROJECTS.glob("*/%s.jsonl" % session):
+        with transcript.open(encoding="utf-8") as fh:
+            for line in fh:
+                if '"queue-operation"' not in line or '"enqueue"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                content = rec.get("content") or ""
+                if isinstance(content, list):
+                    content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+                if content and not content.startswith(OUR_PROMPT_PREFIXES):
+                    out.append(content[:80].replace("\n", " "))
+    return out
+
+
 def load_batch(out_dir: Path) -> dict:
     """task -> record for one batch directory (sharded or flat)."""
     records = {}
@@ -57,6 +97,7 @@ def load_batch(out_dir: Path) -> dict:
                 "patch_lines": attempt.get("patch_lines"),
                 "grading_error": attempt.get("grading_error"),
                 "infra_404s": infra_affected(journal) if journal else 0,
+                "foreign_messages": foreign_queued_messages(journal) if journal else [],
                 "batch": str(out_dir),
                 "journal": str(journal) if journal else None,
             }
@@ -76,8 +117,10 @@ def main() -> int:
             final[task] = rec          # later batches override
 
     rows = sorted(final.values(), key=lambda r: r["task"])
-    measured = [r for r in rows if not r["infra_404s"]]
-    unmeasured = [r for r in rows if r["infra_404s"]]
+    def tainted(r):
+        return r["infra_404s"] or r.get("foreign_messages")
+    measured = [r for r in rows if not tainted(r)]
+    unmeasured = [r for r in rows if tainted(r)]
     resolved_all = sum(r["resolved"] for r in rows)
     resolved_measured = sum(r["resolved"] for r in measured)
     errors = [r for r in rows if r["status"] != "completed" or r["grading_error"]]
@@ -90,9 +133,12 @@ def main() -> int:
           % (resolved_measured, len(measured),
              100.0 * resolved_measured / len(measured) if measured else 0))
     if unmeasured:
-        print("\ninfra-affected (need clean rerun):")
+        print("\ninfra-affected or externally steered (need clean rerun):")
         for r in unmeasured:
-            print("  %-50s 404s=%-4d batch=%s" % (r["task"], r["infra_404s"], r["batch"]))
+            print("  %-50s 404s=%-4d foreign_msgs=%d batch=%s" % (
+                r["task"], r["infra_404s"], len(r.get("foreign_messages") or []), r["batch"]))
+            for m in (r.get("foreign_messages") or [])[:2]:
+                print("        foreign: %s" % m)
     if errors:
         print("\nnon-completed / grading errors:")
         for r in errors:

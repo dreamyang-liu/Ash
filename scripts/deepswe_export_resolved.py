@@ -53,6 +53,11 @@ verifier). `INDEX.json` lists them; each `manifest.json` says how.
   snapshot at that step. Read parent up to the fork step, then this file.
 - `plan-round<N>.json` -- the analysts' per-attempt reports and the reviewer's
   plan (base attempt, fork step, K hints) that produced round N.
+- `parent.md`, `<winner>-with-parent.md` -- the same trajectories rendered as
+  readable markdown (`scripts/trajectory_view.py`): the prompt, then per step the
+  agent's thinking, the exact tool call, the full tool result and the snapshot
+  taken; the branch file shows the parent up to the fork step, a marker, then
+  the branch -- the conversation the branch model saw.
 - `<winner>.atif.json` -- ATIF v1.8 export of the resolving journal. CAVEAT:
   for the claude-code slot the exporter currently collapses the run into a
   single step whose `tool_calls` holds every call in order (the normalizer does
@@ -88,10 +93,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--single", required=True, help="scripts/deepswe_aggregate.py output")
-    parser.add_argument("--branch", default=None, help="branching batch dir (shard-*/summary.json)")
+    parser.add_argument("--branch", nargs="*", default=[],
+                        help="branching batch dir(s) (shard-*/summary.json); later dirs override earlier "
+                             "ones for the same task (e.g. a rerun of tasks the first batch could not fork)")
     parser.add_argument("--details", default=None, help="scripts/deepswe_regrade_details.py output")
     parser.add_argument("-o", "--out", default="runs/deepswe-resolved-trajectories.tar.gz")
     parser.add_argument("--no-atif", action="store_true")
+    parser.add_argument("--no-render", action="store_true",
+                        help="skip the readable markdown renderings (parent.md, <winner>-with-parent.md)")
     args = parser.parse_args()
 
     details = {}
@@ -113,12 +122,12 @@ def main() -> int:
                 "winner_journal": rec["journal"],
                 "reward": (details.get(rec["task"]) or {}).get("reward"),
             }
-    if args.branch:
-        for summary in sorted(Path(args.branch).glob("shard-*/summary.json")):
+    for branch_dir in args.branch:
+        for summary in sorted(Path(branch_dir).glob("shard-*/summary.json")):
             tdir_root = Path(summary).parent
             for inst in json.loads(Path(summary).read_text()).get("instances", []):
                 winner = next((a for a in inst["attempts"] if a["resolved"]), None)
-                if winner is None or inst["instance"] in entries:
+                if winner is None or entries.get(inst["instance"], {}).get("stage") == "single-pass":
                     continue
                 tdir = tdir_root / inst["instance"]
                 journals = {"parent.jsonl": str(tdir / "parent.jsonl")}
@@ -160,6 +169,60 @@ def main() -> int:
                 tar.add(src, arcname="%s/%s" % (task, arcname))
             for p in e["plans"]:
                 tar.add(p, arcname="%s/%s" % (task, Path(p).name))
+            if not args.no_render:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from trajectory_view import load as tv_load, render as tv_render
+                parent_events = tv_load(e["journals"]["parent.jsonl"])
+                # TRAJECTORY.md: exactly what the resolving run experienced, as one
+                # linear transcript -- the parent's steps up to the fork, the
+                # system-reminder that arrived there, then the branch's steps
+                # (numbering continues). The parent's post-fork steps are NOT here
+                # (see parent.md): the branch never saw them.
+                fork_step = (e.get("fork") or {}).get("branch_step") if e["stage"] == "branching" else None
+                story = ["# %s — trajectory of the resolving run" % task, "",
+                         "Resolved by: **%s** (%s)%s" % (e["resolved_by"], e["stage"],
+                         "; forked from the parent after step %s" % fork_step if fork_step else ""), ""]
+                if e["stage"] == "branching" and fork_step:
+                    story += tv_render(parent_events, max_output=10**9, full=True, upto_step=int(fork_step))
+                    # replace the generic marker line with a precise one
+                    story = [ln if "fork point:" not in ln else
+                             "**⋯ fork: conversation and filesystem continue from here (after step %s); the parent's own "
+                             "later steps are not part of this run ⋯**" % fork_step for ln in story]
+                    story += tv_render(tv_load(e["winner_journal"]), max_output=10**9, full=True,
+                                       step_offset=int(fork_step), prompt_as="message")
+                else:
+                    story += tv_render(parent_events, max_output=10**9, full=True)
+                add_bytes("%s/TRAJECTORY.md" % task, "\n".join(story).encode())
+                if e["stage"] == "branching":
+                    ana = ["# %s — verdict and analysis behind the fork" % task, ""]
+                    for pth in e["plans"]:
+                        plan = json.loads(Path(pth).read_text())
+                        ana += ["## Round %s" % Path(pth).stem[-1], ""]
+                        for name, rep in (plan.get("reports") or {}).items():
+                            ana += ["### analyst report on `%s`" % name, "",
+                                    "- failure_reason: %s" % rep.get("failure_reason", ""),
+                                    "- lesson: %s" % rep.get("lesson", ""),
+                                    "- salvage: %s" % rep.get("salvage", ""),
+                                    "- branch_candidates: `%s`" % json.dumps(rep.get("branch_candidates")), ""]
+                        rv = plan.get("review") or {}
+                        ana += ["### reviewer plan", "", "- base: `%s` at step %s" % (rv.get("base"), rv.get("branch_step")),
+                                "- why: %s" % rv.get("why", ""), "- synthesis: %s" % rv.get("synthesis", ""), ""]
+                        for b in rv.get("branches") or []:
+                            ana += ["- **%s**: %s" % (b.get("name"), b.get("hint")), ""]
+                    add_bytes("%s/ANALYSIS.md" % task, "\n".join(ana).encode())
+                add_bytes("%s/parent.md" % task, "\n".join(tv_render(
+                    parent_events, max_output=10**9, full=True,
+                    title="PARENT — %s (single pass)" % task)).encode())
+                if e["stage"] == "branching":
+                    fork_step = (e.get("fork") or {}).get("branch_step")
+                    lines = []
+                    if fork_step:
+                        lines += tv_render(parent_events, max_output=10**9, full=True,
+                                           upto_step=int(fork_step),
+                                           title="PARENT — %s (up to fork step %s)" % (task, fork_step))
+                    lines += tv_render(tv_load(e["winner_journal"]), max_output=10**9, full=True,
+                                       title="%s — %s" % (e["resolved_by"], task))
+                    add_bytes("%s/%s-with-parent.md" % (task, e["resolved_by"]), "\n".join(lines).encode())
             if not args.no_atif:
                 atif = atif_export(Path(e["winner_journal"]))
                 if atif:
