@@ -23,6 +23,43 @@ def test_names_are_legal_stable_and_input_sensitive():
     assert first != template_name(IMAGE + "@v2", "fp1", 3000)
 
 
+def test_image_env_changes_the_start_command_and_the_name(monkeypatch, runtime_bin):
+    # Measured: the guest agent rebuilds PATH, dropping a venv's bin, so
+    # `pytest` was "not found" in a verifier that the image's own PATH would
+    # have satisfied. With image_env the runtime is launched under the image's
+    # ENV -- and under a different template name, so a plain template built
+    # earlier is never mistaken for one that carries the environment.
+    import harness.execution.templates as templates
+    env = ["PATH=/opt/venv/bin:/usr/bin:/bin", "LANG=C.UTF-8", "MSG=has space"]
+    monkeypatch.setattr(templates, "image_config_env", lambda image, regctl, **kw: env)
+    client = FakeClient(exists=False)
+    b = builder(monkeypatch, client, runtime_bin)
+    b.image_env, b.regctl_bin = True, runtime_bin      # any existing file will do
+    name = b.template_for(IMAGE)
+
+    payload = client.build_payload
+    assert payload["startCmd"] == (
+        "env PATH=/opt/venv/bin:/usr/bin:/bin LANG=C.UTF-8 'MSG=has space' "
+        f"{RUNTIME_PATH} --port 3000")
+    assert name != template_name(IMAGE, b._fingerprint, 3000)
+    assert name == template_name(IMAGE, b._fingerprint, 3000,
+                                 salt=templates.env_salt(env))
+    # Off by default: the SWE-bench templates keep their names and their startCmd.
+    plain = builder(monkeypatch, FakeClient(exists=False), runtime_bin)
+    assert plain.template_for(IMAGE) == template_name(IMAGE, plain._fingerprint, 3000)
+
+
+def test_image_env_without_regctl_is_refused_at_wiring(monkeypatch, runtime_bin):
+    import harness.execution.templates as templates
+    monkeypatch.setattr(templates, "find_regctl", lambda: None)
+    monkeypatch.setattr(templates, "ensure_ripgrep", lambda: None)
+    with pytest.raises(TemplateError, match="regctl"):
+        builder_from_backend({"backend": "microvm",
+                              "microvm": {"runtime_bin": str(runtime_bin),
+                                          "server_url": "http://s",
+                                          "image_env": True}})
+
+
 class FakeResponse:
     def __init__(self, status_code, body=None, text=""):
         self.status_code = status_code

@@ -200,6 +200,33 @@ def test_spawn_sends_ttl_and_pause_policy(aenv):
     assert body["autoPause"] is True
     assert body["autoResume"] == {"enabled": True}
 
+def test_allow_internet_reaches_every_create_payload(aenv):
+    # A no-network benchmark is only no-network if the flag is on the request
+    # AgentENV sees, on both create paths; and the default must stay absent so
+    # the server's own policy applies when nobody asked.
+    pool = MicroVMPool(aenv, allow_internet=False)
+
+    async def scenario():
+        await pool.spawn()
+        await pool.close()
+
+    asyncio.run(scenario())
+    _, _, body, _ = FakeAenv.requests[0]
+    assert body["allowInternetAccess"] is False
+    # POST /sandboxes on the deployed server reads the snake_case key only.
+    assert body["allow_internet_access"] is False
+
+    FakeAenv.requests.clear()
+    default_pool = MicroVMPool(aenv)
+
+    async def default_scenario():
+        await default_pool.spawn()
+        await default_pool.close()
+
+    asyncio.run(default_scenario())
+    _, _, body, _ = FakeAenv.requests[0]
+    assert "allowInternetAccess" not in body
+
 def test_spawn_refuses_what_a_template_cannot_express(aenv):
     # entrypoint and resources are container-pool concepts; a microVM template
     # bakes both in. Silently dropping them would strand a caller whose setup

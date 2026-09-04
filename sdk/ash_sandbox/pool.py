@@ -355,10 +355,18 @@ class MicroVMPool(Pool):
     def __init__(self, server_url: str, default_template: str = "ubuntu",
                  runtime_port: int = 3000, api_key: str = "",
                  request_timeout: float = 120, sandbox_ttl: int = 300,
-                 auto_resume: bool = True):
+                 auto_resume: bool = True,
+                 allow_internet: "bool | None" = None):
         """
         Args:
             server_url: AgentENV server, e.g. "http://127.0.0.1:8000".
+            allow_internet: Sent as ``allowInternetAccess`` on every sandbox
+                this pool creates (template spawn and cold start alike).
+                ``False`` denies all egress from the VM -- the host still
+                reaches the runtime, since that is inbound. ``None`` leaves
+                the server's default (internet on). A benchmark that declares
+                ``network_mode = "no-network"`` needs ``False``; nothing in
+                the payload can be inferred, so it is explicit here.
             default_template: Template or snapshot name whose image already
                 runs ash-runtime on `runtime_port` (e.g. built once with
                 `aenv snapshot create <sandbox> --name ash-base`).
@@ -379,6 +387,7 @@ class MicroVMPool(Pool):
         self.runtime_port = runtime_port
         self.sandbox_ttl = sandbox_ttl
         self.auto_resume = auto_resume
+        self.allow_internet = allow_internet
         headers = {"X-API-KEY": api_key} if api_key else {}
         self._client = httpx.AsyncClient(timeout=request_timeout, headers=headers)
         self._sandboxes: dict[str, Sandbox] = {}
@@ -458,6 +467,14 @@ class MicroVMPool(Pool):
         }
         if env:
             payload["envVars"] = env
+        if self.allow_internet is not None:
+            # Both spellings on purpose. Measured against AgentENV 758d575
+            # (2026-09-03): POST /sandboxes only honours the snake_case key
+            # (its NewSandbox model lacks the camelCase rename) while
+            # /sandboxes-cold only honours camelCase; unknown keys are ignored,
+            # so sending both is what works on every server version.
+            payload["allowInternetAccess"] = self.allow_internet
+            payload["allow_internet_access"] = self.allow_internet
 
         resp = await self._client.post(f"{self.server_url}/sandboxes", json=payload)
         resp.raise_for_status()
@@ -495,6 +512,8 @@ class MicroVMPool(Pool):
                 payload["cpuCount"] = int(resources["cpu"])
             if "memory_mb" in resources:
                 payload["memoryMB"] = int(resources["memory_mb"])
+        if self.allow_internet is not None:
+            payload["allowInternetAccess"] = self.allow_internet
         resp = await self._client.post(f"{self.server_url}/sandboxes-cold",
                                        json=payload)
         resp.raise_for_status()

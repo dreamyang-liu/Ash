@@ -704,7 +704,9 @@ class Attempt:
 def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
                 prompt: str, image: str, out_dir: Path,
                 resume: Optional[str] = None,
-                fork: bool = False, origin: Optional[dict] = None) -> RunOutcome:
+                fork: bool = False, origin: Optional[dict] = None,
+                resources: Optional[dict] = None,
+                bench: "Optional[Benchmark]" = None) -> RunOutcome:
     """One attempt. Parent and branches differ only in the arguments.
 
     ``out_dir`` is per instance: eight instances writing `parent.jsonl` into one
@@ -725,25 +727,152 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
         timeout_s=args.timeout, run_id=name,
         journal_path=out_dir / ("%s.jsonl" % name),
         transport="http", tools="default",
-        backend=backend_for(args), runtime_bin=runtime_bin,
-        sandbox_image=image,
+        backend=backend_for(args, bench), runtime_bin=runtime_bin,
+        sandbox_image=image, sandbox_resources=resources,
         resume_session_id=resume, fork=fork, origin=origin, extra=extra,
     )
     return orch.run(spec)
 
 
-def backend_for(args) -> dict:
-    return {"backend": "microvm",
-            "microvm": {"from_image": True,
-                        "runtime_bin": str(Path(args.runtime_bin).resolve())}}
+def backend_for(args, bench: "Optional[Benchmark]" = None) -> dict:
+    microvm: dict = {"from_image": True,
+                     "runtime_bin": str(Path(args.runtime_bin).resolve())}
+    if bench is not None and bench.no_network:
+        # One policy for the attempt AND the grading VM: a benchmark that says
+        # no-network means the verifier ran offline too.
+        microvm["allow_internet"] = False
+    if bench is not None and bench.image_env:
+        microvm["image_env"] = True
+    return {"backend": "microvm", "microvm": microvm}
 
 
-def grade_attempt(outcome: RunOutcome, instance: dict, args) -> Grade:
+def grade_attempt(outcome: RunOutcome, instance: dict, args,
+                  bench: "Optional[Benchmark]" = None) -> Grade:
     checkpoints = load_checkpoints(outcome.journal_path)
     usable = [c for c in checkpoints if c.snapshot_id]
     if not usable:
         return Grade(error="no snapshot recorded -- nothing to grade")
-    return grade_snapshot(usable[-1].snapshot_id, instance, backend_for(args))
+    bench = bench or SweBench()
+    return bench.grade(usable[-1].snapshot_id, instance, backend_for(args, bench))
+
+
+# --- benchmarks --------------------------------------------------------------
+#
+# The loop above is benchmark-neutral: it runs an agent, grades a snapshot,
+# and branches on a Grade. What differs per benchmark is where tasks come
+# from, what the agent is told, what shape its sandbox needs, and how a
+# snapshot becomes a Grade. That is this interface; SWE-bench is the default
+# and behaves exactly as before, DeepSWE lives in ``deepswe/`` and is imported
+# only when asked for, so the SWE-bench path never depends on it.
+
+class Benchmark:
+    """What ``fork_eval`` needs from a benchmark. Duck-typed; SweBench is the reference."""
+    name: str = ""
+    #: True when every task runs with sandbox egress disabled.
+    no_network: bool = False
+    #: True when the runtime must run under the image's own ENV (PATH etc.),
+    #: i.e. the benchmark's verifier assumes the Docker image's environment.
+    image_env: bool = False
+
+    def catalogue(self, args) -> dict:                    # id -> raw record
+        raise NotImplementedError
+
+    def instance(self, raw) -> dict:                      # raw -> loop's dict
+        raise NotImplementedError
+
+    def prompt(self, instance: dict) -> str:
+        raise NotImplementedError
+
+    def branch_prompt(self, instance: dict, verdict: str, hint: str) -> str:
+        raise NotImplementedError
+
+    def resources(self, instance: dict) -> Optional[dict]:
+        return None
+
+    def grade(self, snapshot_id: str, instance: dict, backend: dict) -> Grade:
+        raise NotImplementedError
+
+
+class SweBench(Benchmark):
+    name = "swebench"
+
+    def catalogue(self, args) -> dict:
+        return {i["instance_id"]: i for i in load_instances(args.subset)}
+
+    def instance(self, raw: dict) -> dict:
+        return {
+            "instance_id": raw["instance_id"], "repo": raw["repo"],
+            "image": resolve_image(raw),
+            "problem": raw.get("problem_statement") or "",
+            "f2p": parse_test_list(raw["FAIL_TO_PASS"]),
+            "p2p": parse_test_list(raw["PASS_TO_PASS"]),
+            "test_files": test_files_of(raw),
+            "test_patch": raw.get("test_patch") or "",
+        }
+
+    def prompt(self, instance: dict) -> str:
+        return PROMPT.format(repo=instance["repo"], problem=instance["problem"],
+                             primer=TOOL_PRIMER)
+
+    def branch_prompt(self, instance: dict, verdict: str, hint: str) -> str:
+        return BRANCH_PROMPT.format(repo=instance["repo"], problem=instance["problem"],
+                                    verdict=verdict, hint=hint, primer=TOOL_PRIMER)
+
+    def grade(self, snapshot_id: str, instance: dict, backend: dict) -> Grade:
+        return grade_snapshot(snapshot_id, instance, backend)
+
+
+def select_benchmark(args) -> Benchmark:
+    name = str(getattr(args, "benchmark", "") or "swebench").lower()
+    if name == "swebench":
+        return SweBench()
+    if name == "deepswe":
+        from deepswe.bench import DeepSWE
+        return DeepSWE(getattr(args, "tasks_dir", None))
+    raise SystemExit("unknown --benchmark %r; choose swebench or deepswe" % name)
+
+
+# --- reusing a recorded parent -----------------------------------------------
+#
+# Branching is about the FAILED trajectory: its snapshots and its verdict are
+# what the analysts fork from. Re-running the parent first (what branch134 did,
+# because its prompt had changed) is a blind retry that costs a full attempt
+# per task and tells the branches nothing. With the prompt unchanged, the
+# recorded single-pass journal IS the parent: copy it into the run directory,
+# grade its last snapshot, and go straight to round 1.
+
+def existing_parent(source: str, instance_id: str) -> Optional[Path]:
+    """The recorded parent journal for ``instance_id`` under ``source``.
+
+    ``source`` is either an aggregate file (``scripts/deepswe_aggregate.py``
+    output: the final journal per task, reruns already layered) or a batch
+    directory searched for ``**/<instance_id>/parent.jsonl``.
+    """
+    root = Path(source)
+    if root.suffix == ".json":
+        for entry in json.loads(root.read_text()).get("tasks", []):
+            if entry.get("task") == instance_id and entry.get("journal"):
+                return Path(entry["journal"])
+        return None
+    hits = sorted(root.glob("**/%s/parent.jsonl" % instance_id))
+    return hits[0] if hits else None
+
+
+def outcome_from_journal(journal: Path, run_id: str = "parent") -> RunOutcome:
+    """A ``RunOutcome`` rebuilt from what a finished run left in its journal."""
+    status, usage, error, final_text = "unknown", {}, None, ""
+    for record in read_journal(journal):
+        kind = record.get("type")
+        if kind == "run.finished":
+            status = record.get("status") or status
+            usage = record.get("usage") or {}
+            error = record.get("error")
+        elif kind == "run.result":
+            final_text = record.get("text") or ""
+    pairs = sum(1 for c in load_checkpoints(journal) if c.snapshot_id)
+    return RunOutcome(run_id=run_id, journal_path=Path(journal), status=status,
+                      final_text=final_text, usage=usage, checkpoints=pairs,
+                      error=error)
 
 
 def report(attempt: Attempt) -> None:
@@ -755,7 +884,7 @@ def report(attempt: Attempt) -> None:
     print("   patch      %d 行" % attempt.grade.patch.count("\n"))
 
 
-def regrade(args, out_dir: Path) -> int:
+def regrade(args, out_dir: Path, bench: "Optional[Benchmark]" = None) -> int:
     """Re-grade a finished run's snapshots with the CURRENT grader.
 
     Needed because a grader defect invalidates results without invalidating the
@@ -769,7 +898,8 @@ def regrade(args, out_dir: Path) -> int:
     passed would never have branched, so crediting those branches -- or paying to
     grade them -- would both be wrong.
     """
-    catalogue = {i["instance_id"]: i for i in load_instances(args.subset)}
+    bench = bench or SweBench()
+    catalogue = bench.catalogue(args)
     previous = {}
     old_path = out_dir / "summary.json"
     if old_path.exists():
@@ -783,13 +913,7 @@ def regrade(args, out_dir: Path) -> int:
         raw = catalogue.get(instance_id)
         if raw is None:
             continue
-        instance = {
-            "instance_id": instance_id, "repo": raw["repo"],
-            "f2p": parse_test_list(raw["FAIL_TO_PASS"]),
-            "p2p": parse_test_list(raw["PASS_TO_PASS"]),
-            "test_files": test_files_of(raw),
-            "test_patch": raw.get("test_patch") or "",
-        }
+        instance = bench.instance(raw)
         # parent first, then rounds in order -- the order attempts were made in.
         journals = sorted(directory.glob("*.jsonl"),
                           key=lambda p: (p.stem != "parent", p.stem))
@@ -800,8 +924,8 @@ def regrade(args, out_dir: Path) -> int:
             if not pairs:
                 print("   %-30s no snapshot" % journal.stem)
                 continue
-            grade = grade_snapshot(pairs[-1].snapshot_id, instance,
-                                  backend_for(args))
+            grade = bench.grade(pairs[-1].snapshot_id, instance,
+                                backend_for(args, bench))
             print("   %-30s %s" % (journal.stem, grade.summary()))
             verdicts.append({"name": journal.stem, "resolved": grade.resolved,
                              "f2p_pass": grade.f2p_pass,
@@ -871,7 +995,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "grader, spending no agent time: every attempt left "
                              "a snapshot, so a grader fix can be applied to "
                              "results that already exist")
+    parser.add_argument("--benchmark", default="swebench",
+                        choices=["swebench", "deepswe"],
+                        help="which benchmark supplies tasks, prompts and the "
+                             "grader (default: swebench, unchanged behaviour)")
+    parser.add_argument("--tasks-dir", default=None,
+                        help="deepswe: the dataset's tasks/ directory")
+    parser.add_argument("--parent-from", default=None,
+                        help="reuse each instance's recorded parent journal from "
+                             "this batch dir or aggregate .json instead of running "
+                             "a fresh parent: grade its last snapshot, then branch. "
+                             "Refuses an instance that has none.")
     args = parser.parse_args(argv)
+    bench = select_benchmark(args)
     try:
         schedule = [int(x) for x in str(args.branches).split(",") if x.strip()]
     except ValueError:
@@ -885,7 +1021,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.regrade:
         # Not guarded: regrade only READS journals, and they are wherever the
         # original run put them.
-        return regrade(args, out_dir)
+        return regrade(args, out_dir, bench)
     if not args.instance:
         raise SystemExit("--instance is required (or use --regrade)")
     reason = volatile_reason(out_dir)
@@ -893,10 +1029,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         raise SystemExit("refusing: %s (pass --volatile-ok to override)" % reason)
 
     wanted = [x.strip() for x in str(args.instance).split(",") if x.strip()]
-    catalogue = {i["instance_id"]: i for i in load_instances(args.subset)}
+    catalogue = bench.catalogue(args)
     missing = [x for x in wanted if x not in catalogue]
     if missing:
-        raise SystemExit("not in %s: %s" % (args.subset, ", ".join(missing)))
+        raise SystemExit("not in %s: %s" % (
+            args.tasks_dir if bench.name == "deepswe" else args.subset,
+            ", ".join(missing)))
 
     orch = Orchestrator(out_dir=out_dir)
     results = []
@@ -905,7 +1043,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("INSTANCE %d/%d  %s" % (position, len(wanted), instance_id))
         print("=" * 72)
         attempts = run_one(orch, args, catalogue[instance_id], schedule,
-                           out_dir / instance_id)
+                           out_dir / instance_id, bench)
         resolved = [a for a in attempts if a.grade.resolved]
         results.append({
             "instance": instance_id,
@@ -926,6 +1064,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         # on the sixth should still report the five it finished.
         (out_dir / "summary.json").write_text(json.dumps(
             {"slot": args.slot, "model": args.model, "subset": args.subset,
+             "benchmark": bench.name, "tasks_dir": args.tasks_dir,
+             "parent_from": getattr(args, "parent_from", None),
+             "timeout": args.timeout, "no_network": bench.no_network,
              "branch_schedule": schedule, "rounds": args.rounds,
              "instances": results}, indent=2, ensure_ascii=False),
             encoding="utf-8")
@@ -943,32 +1084,43 @@ def main(argv: Optional[List[str]] = None) -> int:
     return 0 if len(solved) == len(results) else 1
 
 
-def run_one(orch: Orchestrator, args, raw: dict, schedule: List[int],
-            out_dir: Path) -> List["Attempt"]:
+def run_one(orch: Orchestrator, args, raw, schedule: List[int],
+            out_dir: Path, bench: "Optional[Benchmark]" = None) -> List["Attempt"]:
     """One instance: attempt, grade, and branch until resolved or out of rounds."""
+    bench = bench or SweBench()
     out_dir.mkdir(parents=True, exist_ok=True)
-    instance = {
-        "instance_id": raw["instance_id"], "repo": raw["repo"],
-        "image": resolve_image(raw), "problem": raw["problem_statement"],
-        "f2p": parse_test_list(raw["FAIL_TO_PASS"]),
-        "p2p": parse_test_list(raw["PASS_TO_PASS"]),
-        "test_files": test_files_of(raw),
-        "test_patch": raw.get("test_patch") or "",
-    }
+    instance = bench.instance(raw)
+    resources = bench.resources(instance)
     print("== %s (%s) ==" % (instance["instance_id"], instance["repo"]))
     print("   image %s" % instance["image"])
-    print("   F2P %d · P2P %d · slot %s · model %s"
-          % (len(instance["f2p"]), len(instance["p2p"]), args.slot, args.model))
+    print("   F2P %d · P2P %d · slot %s · model %s%s%s"
+          % (len(instance["f2p"]), len(instance["p2p"]), args.slot, args.model,
+             " · offline" if bench.no_network else "",
+             " · %s" % resources if resources else ""))
     attempts: List[Attempt] = []
 
     print("\n== attempt: parent ==")
     started = time.time()
-    outcome = run_attempt(orch, args, instance, name="parent",
-                          prompt=PROMPT.format(repo=instance["repo"],
-                                               problem=instance["problem"],
-                                               primer=TOOL_PRIMER),
-                          image=instance["image"], out_dir=out_dir)
-    parent = Attempt("parent", outcome, grade_attempt(outcome, instance, args))
+    source = getattr(args, "parent_from", None)
+    recorded = existing_parent(source, instance["instance_id"]) if source else None
+    if recorded is not None:
+        # Same file name the loop would have written, so fork_plan, the
+        # analysts' transcript rendering and --regrade all find it here.
+        import shutil
+        target = out_dir / "parent.jsonl"
+        if recorded.resolve() != target.resolve():
+            shutil.copyfile(recorded, target)
+        print("   reused    %s" % recorded)
+        outcome = outcome_from_journal(target)
+    elif source:
+        raise SystemExit("--parent-from %s has no parent journal for %s"
+                         % (source, instance["instance_id"]))
+    else:
+        outcome = run_attempt(orch, args, instance, name="parent",
+                              prompt=bench.prompt(instance),
+                              image=instance["image"], out_dir=out_dir,
+                              resources=resources, bench=bench)
+    parent = Attempt("parent", outcome, grade_attempt(outcome, instance, args, bench))
     attempts.append(parent)
     report(parent)
     print("   wall       %.0fs" % (time.time() - started))
@@ -1052,17 +1204,17 @@ def run_one(orch: Orchestrator, args, raw: dict, schedule: List[int],
             started = time.time()
             outcome = run_attempt(
                 orch, args, instance, name=name, out_dir=out_dir,
-                prompt=BRANCH_PROMPT.format(
-                    repo=instance["repo"], problem=instance["problem"],
-                    verdict=base.verdict_text()[:20000],
-                    hint=branch.get("hint"), primer=TOOL_PRIMER),
+                prompt=bench.branch_prompt(
+                    instance, verdict=base.verdict_text()[:20000],
+                    hint=str(branch.get("hint") or "")),
                 image=pair["snapshot_id"],
                 resume=pair.get("session_ckpt"), fork=True,
                 origin={"parent_run_id": base.name, "branch_step": step,
                         "snapshot_id": pair["snapshot_id"],
-                        "round": round_no, "direction": branch.get("name")})
+                        "round": round_no, "direction": branch.get("name")},
+                bench=bench)
             attempt = Attempt(name, outcome,
-                              grade_attempt(outcome, instance, args), plan,
+                              grade_attempt(outcome, instance, args, bench), plan,
                               hint=str(branch.get("hint") or ""),
                               round_no=round_no)
             round_attempts.append(attempt)

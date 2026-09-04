@@ -66,6 +66,10 @@ class RunSpec:
     mcp_url: Optional[str] = None
     #: Provision a sandbox from this image and bind the slot to it.
     sandbox_image: Optional[str] = None
+    #: Shape for that sandbox, ``{"cpu": 2, "memory_mb": 8192}``. A task that
+    #: declares its needs must get them; the backend's default (2 CPUs, 1 GB)
+    #: OOMs a build-heavy task instead of failing loudly. None = default.
+    sandbox_resources: Optional[Dict[str, Any]] = None
     #: Bind to a sandbox that already exists (a restored snapshot, say).
     sandbox_id: Optional[str] = None
     #: Keep the sandbox after the run -- grading and extraction need it alive.
@@ -460,7 +464,7 @@ class Orchestrator:
 
         session = SandboxSession(runtime_bin=spec.runtime_bin,
                                  backend=dict(spec.backend), quiet=True)
-        if not session.create(spec.sandbox_image):
+        if not session.create(spec.sandbox_image, spec.sandbox_resources):
             # The session is quiet here (its progress lines are not this run's
             # output), so the reason has to travel in the exception or it is lost.
             # getattr: any session-shaped object may be substituted here, and not
@@ -530,6 +534,16 @@ class Orchestrator:
         entry = pool.adopt(owned.session.sandbox, [f"owner:{spec.agent_id}"],
                            sandbox_id=owned.session.sandbox_id,
                            image=spec.sandbox_image or "")
+        # Two holders of one sandbox handle: the session (which the checkpoint
+        # bridge re-boards through) and this entry (which every tool call is
+        # served through). After a re-board they MUST agree, or the agent's
+        # calls go to the VM the session just destroyed -- 404 for the rest of
+        # the run, while checkpoints keep landing on the new one. Seen on
+        # DeepSWE the first time chain compaction fired mid-run.
+        listeners = getattr(owned.session, "on_swap", None)
+        if listeners is not None:
+            listeners.append(lambda replacement, _entry=entry:
+                             setattr(_entry, "sandbox", replacement))
         # The tracker is the interceptor half of checkpointing, and it must sit
         # on THIS pipeline -- the one that serves the calls. It is created here
         # (the pipeline cannot be retrofitted once the server is running) and

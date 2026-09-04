@@ -234,6 +234,33 @@ def test_a_progress_line_cannot_break_the_operation_it_reports():
         assert session.sandbox_id == "unknown"
 
 
+def test_swap_tells_listeners_before_the_old_sandbox_is_destroyed():
+    """Whoever else holds this session's sandbox handle must follow a re-board.
+    The in-process MCP server did not: the bridge swapped the session, the
+    server kept serving the destroyed VM, and every tool call 404'd until the
+    run ended (3 of the first 43 DeepSWE runs, the moment chain compaction
+    first fired). Order matters too -- learning late is one lost call."""
+    replacement = FakeSandbox(sandbox_id="sb-2")
+    pool = FakePool(replacement=replacement)
+    session = _session(pool)
+    seen = []
+    session.on_swap.append(lambda sb: seen.append((sb, list(pool.destroyed))))
+    assert session.swap_sandbox("snap-x") is True
+    assert seen and seen[0][0] is replacement
+    assert seen[0][1] == [], "listener ran after the previous sandbox was destroyed"
+
+
+def test_a_failing_swap_listener_does_not_fail_the_reboard():
+    replacement = FakeSandbox(sandbox_id="sb-2")
+    session = _session(FakePool(replacement=replacement))
+
+    def boom(_sb):
+        raise RuntimeError("listener bug")
+    session.on_swap.append(boom)
+    assert session.swap_sandbox("snap-x") is True
+    assert session._sandbox is replacement
+
+
 # --- the checkpoint contract -----------------------------------------------
 def test_the_three_methods_checkpointing_calls_are_present():
     """harness.checkpointing duck-types on exactly these. A session missing one

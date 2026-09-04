@@ -91,6 +91,14 @@ class SandboxSession:
         #: error, so "could not create a sandbox from <image>" pointed at the image
         #: when the actual cause was a missing setting.
         self.create_error: str = ""
+        #: Called with the replacement sandbox after a successful re-board.
+        #: Anyone who copied this session's sandbox handle (the in-process MCP
+        #: server's adopted entry) must follow the swap, or it keeps serving a
+        #: sandbox that :meth:`swap_sandbox` just destroyed. Measured before this
+        #: existed: 3 of the first 43 DeepSWE runs lost every tool call after a
+        #: chain compaction -- 404 until the run ended -- while checkpoints,
+        #: taken through this session, kept succeeding on the new VM.
+        self.on_swap: list = []
 
     # --- reporting ---------------------------------------------------------
     def _note(self, label: str, text: str) -> None:
@@ -375,6 +383,14 @@ class SandboxSession:
             return False
 
         self._sandbox = replacement
+        # Listeners BEFORE the old sandbox dies: a server that learns of the swap
+        # late serves one call into a destroyed VM; one that never learns serves
+        # every later call into it.
+        for listener in list(self.on_swap):
+            try:
+                listener(replacement)
+            except Exception as e:  # noqa: BLE001
+                self._warn("swap listener failed: %s" % e)
         try:
             self._get_loop().run_until_complete(self._pool.destroy(previous))
         except Exception as e:  # noqa: BLE001

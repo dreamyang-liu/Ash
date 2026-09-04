@@ -59,7 +59,16 @@ _ALLOWED_KEYS = {
                 # the binary through the backend's file service
                 # (swebench/templates.py); leave it unset and the harness
                 # expects templates to exist already.
-                "runtime_bin"},
+                "runtime_bin",
+                # False = no egress from any sandbox this pool creates
+                # (AgentENV `allowInternetAccess`). A benchmark whose tasks
+                # declare no-network sets it; unset keeps the server default.
+                "allow_internet",
+                # True = templates launch the runtime under the image's own
+                # OCI ENV (PATH included), read with regctl at build time. The
+                # guest agent otherwise rebuilds PATH and drops e.g. a venv's
+                # bin. Opt-in so existing template names stay stable.
+                "image_env"},
     "k8s": {"control_plane_url", "gateway_url", "default_image"},
 }
 
@@ -148,6 +157,8 @@ def _microvm(config: dict, section: dict) -> Pool:
         request_timeout=float(section.get("request_timeout", 120)),
         sandbox_ttl=int(section.get("sandbox_ttl", 600)),
         auto_resume=bool(section.get("auto_resume", True)),
+        allow_internet=(None if section.get("allow_internet") is None
+                        else bool(section["allow_internet"])),
     )
 
 

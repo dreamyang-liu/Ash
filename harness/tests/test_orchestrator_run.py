@@ -454,6 +454,33 @@ def test_a_failed_create_does_not_leave_a_half_wired_run(monkeypatch):
     assert "backend said no" in str(exc.value)
 
 
+def test_the_in_process_server_follows_a_reboard(tmp_path):
+    """The bridge re-boards through the session; the server serves through its
+    adopted entry. When the two disagreed, every tool call after a chain
+    compaction went to the destroyed VM (404 to the end of the run) while the
+    checkpoints, taken via the session, kept succeeding -- 3 of the first 43
+    DeepSWE runs. The entry must follow the session's swap."""
+    from harness.orchestrator.run import Orchestrator, OwnedSandbox, RunSpec
+
+    session = _FakeSession(sandbox_id="sb-first")
+    session.on_swap = []
+    owned = OwnedSandbox(session=session, sandbox_id="sb-first")
+    orch = Orchestrator(out_dir=tmp_path)
+    try:
+        orch._serve_in_process(RunSpec(prompt="x", sandbox_image="img",
+                                       transport="http"), owned)
+        entry = owned.server.pool.get("sb-first")
+        assert entry is not None and entry.sandbox is session.sandbox
+        assert len(session.on_swap) == 1, "the server registered to follow swaps"
+
+        replacement = object()
+        session.sandbox = replacement
+        session.on_swap[0](replacement)
+        assert owned.server.pool.get("sb-first").sandbox is replacement
+    finally:
+        owned.stop_server()
+
+
 def test_a_sandbox_is_not_leaked_when_wiring_fails(monkeypatch):
     """The sandbox exists but nothing can reach it. Raising without releasing
     would leave it running with the caller seeing only an exception."""
