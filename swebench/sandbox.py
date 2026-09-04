@@ -70,8 +70,28 @@ class AshSession:
             return "unknown"
         return self._sandbox.sandbox_id or "unknown"
 
+    @property
+    def supports_snapshot(self) -> bool:
+        return bool(self._pool and self._pool.supports_snapshot())
+
+    @property
+    def supports_fork(self) -> bool:
+        return bool(self._pool and self._pool.supports_fork())
+
     def create(self, image: str) -> bool:
         return self._get_loop().run_until_complete(self._create_async(image))
+
+    def snapshot(self, name: str | None = None) -> str:
+        """Persist the active sandbox and return a durable snapshot id."""
+        if not self._pool or not self._sandbox:
+            raise RuntimeError("No active sandbox")
+        if not self._pool.supports_snapshot():
+            raise NotImplementedError(
+                f"{type(self._pool).__name__} does not support durable snapshots"
+            )
+        return self._get_loop().run_until_complete(
+            self._pool.snapshot(self._sandbox, name=name)
+        )
 
     async def _create_async(self, image: str) -> bool:
         try:
@@ -94,6 +114,42 @@ class AshSession:
             return True
         except Exception as e:
             print(f"  {S.bright_red('!')} Failed to create sandbox: {e}")
+            return False
+
+    def restore(self, snapshot_id: str, agent_id: str = "") -> bool:
+        """Attach this session to a new sandbox restored from a durable snapshot.
+
+        A restored branch gets its own Pool/client and event loop. This matters
+        when several branches run in parallel threads: sharing the source pool's
+        async HTTP client across loops is unsafe even though the underlying
+        AgentENV snapshot is perfectly shareable.
+        """
+        return self._get_loop().run_until_complete(
+            self._restore_async(snapshot_id, agent_id=agent_id)
+        )
+
+    async def _restore_async(self, snapshot_id: str, agent_id: str = "") -> bool:
+        if not snapshot_id:
+            raise ValueError("snapshot_id must be non-empty")
+        try:
+            self._pool = build_pool(self.backend, runtime_bin=self.runtime_bin)
+            if not self._pool.supports_restore():
+                raise NotImplementedError(
+                    f"{type(self._pool).__name__} does not support snapshot restore"
+                )
+            self._sandbox = await self._pool.restore(snapshot_id, agent_id=agent_id)
+            if not self.quiet:
+                print(S.kv("restore ", S.cyan(self.sandbox_id[:12])))
+            return True
+        except Exception as e:
+            print(f"  {S.bright_red('!')} Failed to restore sandbox: {e}")
+            if self._pool is not None:
+                try:
+                    await self._pool.close()
+                except Exception:
+                    pass
+            self._pool = None
+            self._sandbox = None
             return False
 
     def destroy(self):

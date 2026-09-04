@@ -21,6 +21,7 @@ class FakeAenv(BaseHTTPRequestHandler):
 
     requests: list = []  # (method, path, body, headers)
     next_id = 0
+    next_snapshot_id = 0
 
     def _read_body(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
@@ -48,6 +49,9 @@ class FakeAenv(BaseHTTPRequestHandler):
         if self.path == "/sandboxes":
             FakeAenv.next_id += 1
             return self._reply({"sandboxID": f"vm-{FakeAenv.next_id}"})
+        if self.path.endswith("/snapshots"):
+            FakeAenv.next_snapshot_id += 1
+            return self._reply({"snapshotID": f"snap-{FakeAenv.next_snapshot_id}"})
         if self.path.endswith("/fork"):
             # AgentENV replies with one result per requested fork, each
             # carrying either `sandbox` or `error` (verified against a live
@@ -78,6 +82,7 @@ class FakeAenv(BaseHTTPRequestHandler):
 def aenv():
     FakeAenv.requests = []
     FakeAenv.next_id = 0
+    FakeAenv.next_snapshot_id = 0
     FakeAenv.fork_error = None
     server = HTTPServer(("127.0.0.1", 0), FakeAenv)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -88,18 +93,21 @@ def paths_of(method: str) -> list:
     return [p for m, p, _, _ in FakeAenv.requests if m == method]
 
 def test_capabilities_are_declared_not_assumed():
-    # A harness can ask instead of checking types, and containers answer no.
+    # Both backends support branching, but with different fidelity: AgentENV
+    # captures VM memory + filesystem; Docker commit captures filesystem only.
     vm = MicroVMPool("http://aenv:8000")
     assert vm.supports_pause() and vm.supports_fork()
+    assert vm.supports_snapshot() and vm.supports_restore()
 
     docker = DockerPool.__new__(DockerPool)
     assert not docker.supports_pause()
-    assert not docker.supports_fork()
+    assert docker.supports_fork()
+    assert docker.supports_snapshot()
+    assert docker.supports_restore()
+
 
 def test_unsupported_capability_refuses_clearly():
     docker = DockerPool.__new__(DockerPool)
-    with pytest.raises(NotImplementedError, match="supports_fork"):
-        asyncio.run(docker.fork(None))
     with pytest.raises(NotImplementedError, match="supports_pause"):
         asyncio.run(docker.pause(None))
 
@@ -170,6 +178,34 @@ def test_pause_and_resume_hit_the_state_endpoints(aenv):
     # the timeout restarts the sandbox's TTL clock.
     _, _, resume_body, _ = FakeAenv.requests[-1]
     assert resume_body == {"timeout": 600}
+
+def test_durable_snapshot_can_restore_after_source_is_destroyed(aenv):
+    pool = MicroVMPool(aenv, sandbox_ttl=600)
+
+    async def scenario():
+        source = await pool.spawn(agent_id="backbone")
+        source_id = source.sandbox_id
+        snapshot_id = await pool.snapshot(source, name="task-step-20")
+        await pool.destroy(source)
+        restored = await pool.restore(snapshot_id, agent_id="branch-a")
+        return source_id, snapshot_id, restored
+
+    source_id, snapshot_id, restored = asyncio.run(scenario())
+    assert snapshot_id == "snap-1"
+    assert restored.sandbox_id != source_id
+    assert restored.agent_id == "branch-a"
+
+    snapshot_calls = [r for r in FakeAenv.requests if r[1].endswith("/snapshots")]
+    assert len(snapshot_calls) == 1
+    _, path, body, _ = snapshot_calls[0]
+    assert path == f"/sandboxes/{source_id}/snapshots"
+    assert body == {"name": "task-step-20"}
+
+    spawn_bodies = [body for method, path, body, _ in FakeAenv.requests
+                    if method == "POST" and path == "/sandboxes"]
+    assert spawn_bodies[0]["templateID"] == "ubuntu"
+    assert spawn_bodies[1]["templateID"] == snapshot_id
+
 
 def test_requests_authenticate_with_the_x_api_key_header(aenv):
     # AgentENV validates X-API-KEY; an Authorization: Bearer header is not
@@ -254,7 +290,7 @@ def test_microvm_pool_satisfies_the_pool_interface():
     pool = MicroVMPool("http://aenv:8000")
     assert isinstance(pool, Pool)
     for name in ("spawn", "destroy", "destroy_all", "list", "close",
-                 "pause", "resume", "fork"):
+                 "pause", "resume", "fork", "snapshot", "restore"):
         assert hasattr(pool, name)
 
 def test_spawn_binds_an_identity_to_the_handle(aenv):

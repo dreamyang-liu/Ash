@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 import shutil
 import subprocess
 from typing import Any
+import uuid
 
 import httpx
 
@@ -76,6 +77,18 @@ class Pool(ABC):
         """Whether this pool can split a running sandbox into copies."""
         return False
 
+    def supports_snapshot(self) -> bool:
+        """Whether this pool can persist a sandbox state for later reuse."""
+        return False
+
+    def supports_restore(self) -> bool:
+        """Whether this pool can start a sandbox from a persisted snapshot."""
+        return False
+
+    def supports_snapshot_delete(self) -> bool:
+        """Whether this pool can explicitly release a persisted snapshot."""
+        return False
+
     async def pause(self, sandbox: Sandbox) -> None:
         """Suspend a sandbox, releasing its compute until resumed."""
         raise NotImplementedError(
@@ -101,6 +114,27 @@ class Pool(ABC):
             "check supports_fork() first"
         )
 
+    async def snapshot(self, sandbox: Sandbox, name: str | None = None) -> str:
+        """Persist a sandbox's current state and return its stable snapshot id."""
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot persist snapshots; "
+            "check supports_snapshot() first"
+        )
+
+    async def restore(self, snapshot_id: str, *, agent_id: str = "") -> Sandbox:
+        """Start a new sandbox from a previously persisted snapshot."""
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot restore snapshots; "
+            "check supports_restore() first"
+        )
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        """Release a persisted snapshot owned by this pool."""
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot delete snapshots; "
+            "check supports_snapshot_delete() first"
+        )
+
     async def close(self) -> None:
         await self.destroy_all()
 
@@ -120,6 +154,22 @@ class DockerPool(Pool):
         self.runtime_bin = runtime_bin or shutil.which("ash-runtime")
         self.port = port
         self._sandboxes: dict[str, Sandbox] = {}
+
+    # macOS/Colima cannot expose Firecracker's VM-memory snapshots, but Docker
+    # can persist the container writable layer with `docker commit`. For coding
+    # agents this captures the repo, installed packages, generated files, and
+    # tool artifacts, which is sufficient for local branching P0/P1 experiments.
+    def supports_fork(self) -> bool:
+        return True
+
+    def supports_snapshot(self) -> bool:
+        return True
+
+    def supports_restore(self) -> bool:
+        return True
+
+    def supports_snapshot_delete(self) -> bool:
+        return True
 
     async def spawn(
         self,
@@ -218,6 +268,75 @@ class DockerPool(Pool):
             await proc.wait()
         self._sandboxes.clear()
 
+    async def snapshot(self, sandbox: Sandbox, name: str | None = None) -> str:
+        """Persist the container filesystem as a Docker image.
+
+        This is a macOS-friendly compatibility snapshot, not a VM-memory
+        snapshot: running processes are restarted when the image is restored.
+        Docker pauses the source container while committing so its filesystem is
+        captured at a consistent turn boundary.
+        """
+        cid = _require_id(sandbox)
+        if cid not in self._sandboxes:
+            raise RuntimeError("sandbox is not managed by this DockerPool")
+
+        label = _docker_snapshot_label(name)
+        ref = f"ash-snapshot:{label}-{uuid.uuid4().hex[:12]}"
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "commit", "--pause=true", cid, ref,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "docker commit failed: " + stderr.decode(errors="replace").strip()
+            )
+        return ref
+
+    async def restore(self, snapshot_id: str, *, agent_id: str = "") -> Sandbox:
+        """Start a fresh container from a Docker compatibility snapshot."""
+        if not snapshot_id:
+            raise ValueError("snapshot_id must be non-empty")
+        return await self.spawn(image=snapshot_id, agent_id=agent_id)
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        """Remove one exact Docker compatibility snapshot image."""
+        if not snapshot_id:
+            raise ValueError("snapshot_id must be non-empty")
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "image", "rm", "-f", snapshot_id,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "docker snapshot delete failed: "
+                + stderr.decode(errors="replace").strip()
+            )
+
+    async def fork(self, sandbox: Sandbox, count: int = 1,
+                   agent_ids: list[str] | None = None) -> list[Sandbox]:
+        """Commit once, then restore ``count`` independent container branches."""
+        if count < 1:
+            raise ValueError("count must be >= 1")
+        snapshot_id = await self.snapshot(sandbox, name="fork")
+        try:
+            children = []
+            for i in range(count):
+                agent_id = (
+                    agent_ids[i] if agent_ids and i < len(agent_ids)
+                    else sandbox.agent_id
+                )
+                children.append(await self.restore(snapshot_id, agent_id=agent_id))
+            return children
+        finally:
+            # Fork snapshots are ephemeral implementation details. Child
+            # containers retain their layer references after the temporary tag
+            # is released, so this prevents one leaked image per live fork.
+            await self.delete_snapshot(snapshot_id)
+
 
 class MicroVMPool(Pool):
     """Sandboxes as Firecracker microVMs, provisioned by an AgentENV server.
@@ -289,6 +408,12 @@ class MicroVMPool(Pool):
         return True
 
     def supports_fork(self) -> bool:
+        return True
+
+    def supports_snapshot(self) -> bool:
+        return True
+
+    def supports_restore(self) -> bool:
         return True
 
     # --- Lifecycle ---
@@ -368,6 +493,26 @@ class MicroVMPool(Pool):
             json={"timeout": self.sandbox_ttl})
         resp.raise_for_status()
 
+    async def snapshot(self, sandbox: Sandbox, name: str | None = None) -> str:
+        """Commit the VM's current memory + filesystem state to AgentENV.
+
+        Unlike :meth:`pause`, this creates a durable snapshot that outlives the
+        source sandbox and can therefore back a trajectory-prefix cache. The
+        source sandbox returns to Running after AgentENV commits the snapshot.
+        """
+        sid = _require_id(sandbox)
+        body = {"name": name} if name else {}
+        resp = await self._client.post(
+            f"{self.server_url}/sandboxes/{sid}/snapshots", json=body)
+        resp.raise_for_status()
+        return _snapshot_id(resp.json())
+
+    async def restore(self, snapshot_id: str, *, agent_id: str = "") -> Sandbox:
+        """Start a new VM from a durable AgentENV snapshot."""
+        if not snapshot_id:
+            raise ValueError("snapshot_id must be non-empty")
+        return await self.spawn(image=snapshot_id, agent_id=agent_id)
+
     async def fork(self, sandbox: Sandbox, count: int = 1,
                    agent_ids: list[str] | None = None) -> list[Sandbox]:
         """Split a running VM into `count` copies of its current state.
@@ -423,6 +568,21 @@ def _sandbox_id(body: dict) -> str:
         if body.get(key):
             return str(body[key])
     raise RuntimeError(f"no sandbox id in response: {body}")
+
+
+def _snapshot_id(body: dict) -> str:
+    """Read a durable snapshot id from an AgentENV response."""
+    for key in ("snapshotID", "snapshot_id", "id"):
+        if body.get(key):
+            return str(body[key])
+    raise RuntimeError(f"no snapshot id in response: {body}")
+
+
+def _docker_snapshot_label(name: str | None) -> str:
+    raw = (name or "checkpoint").lower()
+    cleaned = "".join(c if c.isalnum() or c in "_.-" else "-" for c in raw)
+    cleaned = cleaned.strip(".-") or "checkpoint"
+    return cleaned[:80]
 
 
 def _require_id(sandbox: Sandbox) -> str:
