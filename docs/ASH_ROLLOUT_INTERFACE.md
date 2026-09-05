@@ -1,8 +1,10 @@
 # Ash Rollout Interface
 
-This branch adds a strategy-neutral Ash rollout interface for Miles. It is
-not a replacement for Ash's branch algorithm, and it does not require a
-particular checkpoint index or branch-selection policy.
+This branch adds a strategy-neutral Ash rollout interface for Miles. It starts
+from the Ash `main` branch and keeps the rollout protocol independent from any
+branching algorithm. The first executable strategy is the branch-free
+`SequentialRolloutStrategy`; no checkpoint index or branch-selection policy is
+part of the interface layer.
 
 ## Boundary
 
@@ -46,7 +48,9 @@ weight version, ordered messages, reward and branch lineage.
 
 The protocol and HTTP lifecycle are covered by unit tests; malformed requests,
 duplicate IDs, cancellation and result identity are checked before import into
-Miles. Full Ash SDK regression is `486 passed, 4 skipped` in the current test
-environment. The sequential interface baseline has an HTTP end-to-end test; a
-production strategy and real Miles Session Server/RL integration are still
-pending.
+Miles. The executable sequential path additionally verifies that a model
+client is called once per slot, an environment is created and destroyed for
+each slot, and the returned token sequence is exported as a trajectory. Full
+Ash SDK regression is `486 passed, 4 skipped` in the current test environment.
+Wiring an agent strategy into a real Miles Session Server and RL integration
+remain separate tasks.

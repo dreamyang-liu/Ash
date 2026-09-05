@@ -72,3 +72,65 @@ def test_http_to_sequential_strategy_end_to_end():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+class _Model:
+    def __init__(self):
+        self.calls = []
+
+    def generate(self, **kwargs):
+        self.calls.append(kwargs)
+        index = kwargs["request"]["sample_index"]
+        return {
+            "output_token_ids": [3000 + index, 4000 + index],
+            "text": f"real-sample-{index}",
+            "weight_version": "42",
+            "finish_reason": "stop",
+        }
+
+
+class _Environment:
+    def __init__(self):
+        self.spawned = []
+        self.destroyed = []
+
+    def spawn(self, request):
+        sandbox = type("Sandbox", (), {"sandbox_id": f"sandbox-{len(self.spawned)}"})()
+        self.spawned.append(sandbox)
+        return sandbox
+
+    def destroy(self, sandbox):
+        self.destroyed.append(sandbox.sandbox_id)
+
+def test_http_to_executable_sequential_strategy_uses_model_and_environment():
+    model = _Model()
+    environment = _Environment()
+    service = GroupRolloutService(
+        lambda _request, _context: SequentialRolloutStrategy(allow_deterministic_fallback=False),
+        model_client=model,
+        environment_provider=environment,
+    )
+    server = RolloutGroupsHTTPServer(("127.0.0.1", 0), service)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    payload = _request("executable-sequential-e2e")
+    try:
+        request = urllib.request.Request(
+            f"{base}/rollout-groups", data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 202
+        result = _wait(base, payload["rollout_job_id"])
+        assert result["status"] == "completed"
+        assert result["actual_samples"] == 2
+        assert [call["request"]["sample_index"] for call in model.calls] == [0, 1]
+        assert [call["request"]["sandbox_id"] for call in model.calls] == ["sandbox-0", "sandbox-1"]
+        assert environment.destroyed == ["sandbox-0", "sandbox-1"]
+        assert result["trajectories"][0]["token_ids"] == [11, 12, 3000, 4000]
+        assert result["trajectories"][0]["metadata"]["model_call"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
