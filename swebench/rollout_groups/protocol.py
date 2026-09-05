@@ -109,7 +109,7 @@ class RolloutGroupRequest:
             raise ValueError("prompt must be a string or message list")
         token_ids = value.get("prompt_token_ids")
         if not isinstance(token_ids, list) or not token_ids or any(
-            not isinstance(token, int) for token in token_ids
+            not isinstance(token, int) or isinstance(token, bool) for token in token_ids
         ):
             raise ValueError("prompt_token_ids must be a non-empty integer list")
         sampling = value.get("sampling_params", {})
