@@ -42,7 +42,8 @@ class AshAgent:
                  run_id: Optional[str] = None,
                  agent_id: str = "agent",
                  sandbox_id: str = "default",
-                 pipeline: "ToolPipeline | None" = None):
+                 pipeline: "ToolPipeline | None" = None,
+                 on_turn_end: Optional[Callable[[int, list[dict]], None]] = None):
         self.config = config
         self.executor = executor          # executor(tool_name, args) -> ToolResult
         # Caller-supplied L2 chain, or None to let run() mount the loop's
@@ -56,6 +57,11 @@ class AshAgent:
         # reused as-is, because its state is the caller's to own.
         self._pipeline: "ToolPipeline | None" = None
         self.on_step = on_step            # on_step(step_num, kind, text)
+        # Called after an assistant response and all of its tool results have
+        # been appended to the model-facing history.  This is the safe hook for
+        # an environment checkpoint: a callback can persist the copied message
+        # list without observing a later turn mutate it.
+        self.on_turn_end = on_turn_end  # on_turn_end(step_num, messages)
         self.trace_dir = trace_dir
         self.run_id = run_id
         self.agent_id = agent_id
@@ -329,7 +335,12 @@ class AshAgent:
                     turn_id = f"turn-{self.cost.api_calls}"
                     for tc in message.tool_calls:
                         self._run_tool(tc, conv, turn_id)
-                elif self._nudge(conv, message) == "completed":
+                # Do not fire immediately after the assistant response.  For a
+                # tool turn the environment is not at a recoverable boundary
+                # until every corresponding tool result is in the history.
+                if self.on_turn_end:
+                    self.on_turn_end(self.cost.api_calls, list(conv.messages))
+                if not message.tool_calls and self._nudge(conv, message) == "completed":
                     # A hook may want one more turn before we call it a day.
                     if not any(h(self, conv) for h in self.before_finish_hooks):
                         return "completed"

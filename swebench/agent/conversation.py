@@ -26,7 +26,10 @@ class Conversation:
         """Append the assistant turn and update the no-tool counter."""
         msg = {"role": "assistant", "content": message.content or ""}
         if message.tool_calls:
-            msg["tool_calls"] = message.tool_calls
+            # Provider SDKs commonly return Pydantic/namespace objects.  A
+            # durable trajectory key must be JSON-compatible, while retaining
+            # the original OpenAI tool-call shape.
+            msg["tool_calls"] = [_tool_call_dict(call) for call in message.tool_calls]
         # Preserve thinking_blocks for Anthropic extended thinking + tool use
         if thinking := getattr(message, "thinking_blocks", None):
             msg["thinking_blocks"] = thinking
@@ -59,3 +62,33 @@ class Conversation:
                       if m["role"] in ("tool_result", "user")), None)
         if saved is not None:
             saved["content"] = (saved.get("content") or "") + suffix
+
+
+def _tool_call_dict(call) -> dict:
+    """Convert an OpenAI/LiteLLM tool-call object to a plain mapping."""
+    if isinstance(call, dict):
+        value = dict(call)
+    elif hasattr(call, "model_dump"):
+        value = call.model_dump(mode="json")
+    elif hasattr(call, "to_dict"):
+        value = call.to_dict()
+    else:
+        value = {
+            key: getattr(call, key)
+            for key in ("id", "type", "function")
+            if hasattr(call, key)
+        }
+    function = value.get("function")
+    if function is not None and not isinstance(function, dict):
+        if hasattr(function, "model_dump"):
+            function = function.model_dump(mode="json")
+        elif hasattr(function, "to_dict"):
+            function = function.to_dict()
+        else:
+            function = {
+                key: getattr(function, key)
+                for key in ("name", "arguments")
+                if hasattr(function, key)
+            }
+        value["function"] = function
+    return value
