@@ -67,6 +67,12 @@ class RolloutContext:
         if self.cancel_event.is_set():
             raise RolloutCancelled("rollout job was cancelled")
 
+    @property
+    def remaining_wall_time_seconds(self) -> float | None:
+        if self.deadline is None:
+            return None
+        return max(0.0, self.deadline - time.monotonic())
+
 
 class RolloutCancelled(Exception):
     pass
