@@ -59,8 +59,11 @@ class RolloutContext:
     environment_provider: EnvironmentProvider | None
     checkpoint_store: Any | None
     job_id: str
+    deadline: float | None = None
 
     def check_cancelled(self) -> None:
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self.cancel_event.set()
         if self.cancel_event.is_set():
             raise RolloutCancelled("rollout job was cancelled")
 
@@ -187,8 +190,20 @@ class GroupRolloutService:
                 status="running",
                 max_samples=request.max_samples,
             )
-        context = RolloutContext(cancel_event, self.model_client,
-                                 self.environment_provider, self.checkpoint_store, job_id)
+        context = RolloutContext(
+            cancel_event,
+            self.model_client,
+            self.environment_provider,
+            self.checkpoint_store,
+            job_id,
+            deadline=time.monotonic() + request.budgets.max_wall_time_seconds,
+        )
+        timeout_timer = threading.Timer(
+            request.budgets.max_wall_time_seconds,
+            cancel_event.set,
+        )
+        timeout_timer.daemon = True
+        timeout_timer.start()
         started = time.monotonic()
         try:
             strategy = self.strategy_factory(request, context)
@@ -226,6 +241,7 @@ class GroupRolloutService:
                 consumed_budget={"elapsed_seconds": round(time.monotonic() - started, 3)},
             ))
         finally:
+            timeout_timer.cancel()
             close = getattr(strategy if "strategy" in locals() else None, "close", None)
             if callable(close):
                 try:
