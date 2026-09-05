@@ -17,7 +17,7 @@ BARRIER = "barrier"
 DEFAULT_WORKSPACE_ROOTS = ("/testbed", "/app")
 _SAFE_SHELL_PROGRAMS = {
     "pwd", "ls", "cat", "head", "tail", "wc", "grep", "rg", "stat", "file",
-    "sort", "uniq", "tr", "echo", "sed", "find", "which",
+    "sort", "uniq", "tr", "echo", "printf", "sed", "find", "which",
 }
 
 
@@ -241,6 +241,93 @@ def is_proven_workspace_read_shell(
     return True
 
 
+def _partition_shell_command(
+    command: str,
+    *,
+    workspace_roots: tuple[str, ...] = DEFAULT_WORKSPACE_ROOTS,
+    working_dir: str | None = None,
+) -> tuple[str, int]:
+    """Split a shell command into barrier-only payload plus proven-safe count.
+
+    A composite command whose *final* effect class is BARRIER may still contain
+    segments proven to be read-only.  Environment equivalence depends only on
+    the unproven (barrier) segments, so the state key carries just those; the
+    proven-safe segments are counted (and their results remain replayable via
+    the read-result cache).  Execution-only parameters (timeout, output caps)
+    never affect environment state and are dropped from the key payload.
+
+    Returns ``(barrier_command_text, proven_safe_segment_count)``.  When the
+    command cannot be tokenized or contains no proven-safe segments, the
+    original command text is returned unchanged.
+    """
+    roots = tuple(str(root).rstrip("/") or "/" for root in workspace_roots)
+    text = str(command or "").strip()
+    if not text or "\n" in text or "`" in text or "$(" in text or "$" in text:
+        return text, 0
+    stripped = _strip_safe_devnull_redirections(text)
+    if stripped is None:
+        return text, 0
+    try:
+        lexer = shlex.shlex(stripped, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return text, 0
+    if not tokens:
+        return text, 0
+
+    segments: list[list[str]] = [[]]
+    separators: list[str] = []
+    for token in tokens:
+        if token in {";", "&&", "|"}:
+            if not segments[-1]:
+                return text, 0
+            separators.append(token)
+            segments.append([])
+            continue
+        if token in {"&", "||"}:
+            return text, 0
+        segments[-1].append(token)
+    if not segments[-1]:
+        return text, 0
+
+    current_root: str | None = None
+    if working_dir:
+        normalized = str(working_dir).rstrip("/") or "/"
+        current_root = next(
+            (root for root in roots if normalized == root or normalized.startswith(root.rstrip("/") + "/")),
+            None,
+        )
+        if current_root is None:
+            return text, 0
+
+    barrier_segments: list[str] = []
+    safe_count = 0
+    for index, segment in enumerate(segments):
+        separator = separators[index - 1] if index else ""
+        program = PurePosixPath(segment[0]).name if segment else ""
+        rendered = _render_segment(segment, separator)
+        if program == "cd":
+            # ``cd`` only moves the shell cwd; it cannot be replayed out of
+            # order, so it stays part of the key payload.
+            barrier_segments.append(rendered)
+            continue
+        if _safe_shell_segment(segment, roots=roots, current_root=current_root):
+            safe_count += 1
+        else:
+            barrier_segments.append(rendered)
+
+    if not barrier_segments or safe_count == 0:
+        return text, safe_count
+    return " ".join(barrier_segments), safe_count
+
+
+def _render_segment(tokens: list[str], separator: str) -> str:
+    body = " ".join(tokens)
+    return f"{separator} {body}" if separator else body
+
+
 def classify_tool_effect(
     tool_name: str,
     tool_args: dict[str, Any] | None,
@@ -260,6 +347,19 @@ def classify_tool_effect(
             return SAFE_READ
         if command in {"write", "create", "replace", "str_replace", "insert", "delete", "patch"}:
             return MUTATION
+        if not command:
+            # Runner variants may omit ``command`` for pure views: a text_editor
+            # call carrying only a path (no write payload) cannot mutate state.
+            write_payload_keys = {
+                "file_text", "new_str", "old_str", "insert_line", "content",
+                "text", "patch", "edits",
+            }
+            non_payload = {
+                key for key, value in args.items()
+                if key not in write_payload_keys and value not in (None, "")
+            }
+            if non_payload <= {"path", "file_path", "view_range", "start_line", "end_line", "limit"}:
+                return SAFE_READ
         return BARRIER
     if name == "shell" and allow_safe_shell:
         if is_proven_workspace_read_shell(
@@ -366,9 +466,28 @@ def canonical_tool_event(
     effect = classify_tool_effect(
         tool_name, tool_args, allow_safe_shell=allow_safe_shell, workspace_roots=workspace_roots
     )
+    key_args = tool_args
+    if (
+        effect == BARRIER
+        and allow_safe_shell
+        and str(tool_name or "").strip() == "shell"
+    ):
+        # Environment equivalence of a composite shell command depends only on
+        # its unproven segments; proven-safe segments and execution-only
+        # parameters (timeout, output caps, cwd hints) carry no state effect
+        # and must not widen the key.
+        barrier_text, _safe_count = _partition_shell_command(
+            str(tool_args.get("command") or ""),
+            workspace_roots=workspace_roots,
+            working_dir=(str(tool_args.get("working_dir")) if tool_args.get("working_dir") else None),
+        )
+        key_args = dict(tool_args)
+        key_args["command"] = barrier_text
+        for volatile in ("timeout", "max_output_bytes", "working_dir"):
+            key_args.pop(volatile, None)
     event: dict[str, Any] = {
         "tool_name": tool_name,
-        "tool_args": tool_args,
+        "tool_args": key_args,
         "effect": effect,
         "success": bool(message.get("success", True)),
     }
