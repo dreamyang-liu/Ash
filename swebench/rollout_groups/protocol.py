@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-PROTOCOL_VERSION = "ash-tree-rollout-v1"
+PROTOCOL_VERSION = "ash-rollout-v1"
 JOB_STATUSES = {"queued", "running", "completed", "early_stopped", "failed", "cancelled"}
 TRAJECTORY_STATUSES = {"completed", "truncated", "failed", "aborted"}
 

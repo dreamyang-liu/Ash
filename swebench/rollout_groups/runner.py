@@ -1,9 +1,7 @@
-"""Strategy-neutral group rollout orchestration.
+"""Strategy-neutral rollout-group orchestration.
 
-The runner owns lifecycle, cancellation and resource cleanup.  Branch choice,
-checkpoint cadence and model prompting are injected through protocols.  This
-is the seam at which peize's Prefix DAG/checkpoint implementation can be
-cherry-picked without changing the HTTP contract.
+The runner owns lifecycle, cancellation and resource cleanup. Branch choice,
+checkpoint cadence and model prompting are injected through protocols.
 """
 
 from __future__ import annotations

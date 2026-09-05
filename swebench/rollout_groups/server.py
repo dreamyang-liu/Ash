@@ -84,7 +84,7 @@ def serve(service: GroupRolloutService, *, host: str = "0.0.0.0", port: int = 11
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ash group rollout glue service")
+    parser = argparse.ArgumentParser(description="Ash rollout interface service")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=11001)
     args = parser.parse_args()
