@@ -195,6 +195,8 @@ class GroupRolloutService:
             result = strategy.run(request, context)
             if not isinstance(result, RolloutGroupResult):
                 raise TypeError("rollout strategy must return RolloutGroupResult")
+            if result.status in {"queued", "running"}:
+                raise ValueError("rollout strategy must return a terminal result")
             if result.rollout_job_id != request.rollout_job_id or result.prompt_group_id != request.prompt_group_id:
                 raise ValueError("strategy result does not match request identity")
             if result.max_samples != request.max_samples:

@@ -116,3 +116,25 @@ def test_http_endpoints():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_strategy_cannot_leave_job_non_terminal():
+    def bad_strategy(request, _context):
+        return _ResultStrategy(lambda req, ctx: RolloutGroupResult(
+            rollout_job_id=req.rollout_job_id,
+            prompt_group_id=req.prompt_group_id,
+            status="running",
+            max_samples=req.max_samples,
+        ))
+
+    service = GroupRolloutService(bad_strategy)
+    request = RolloutGroupRequest.from_dict(request_payload("non-terminal"))
+    service.submit(request)
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        result = service.get(request.rollout_job_id)
+        if result.status == "failed":
+            break
+        time.sleep(0.01)
+    assert result.status == "failed"
+    assert "terminal" in (result.stop_reason or "")
