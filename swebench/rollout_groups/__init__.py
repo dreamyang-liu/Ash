@@ -12,6 +12,7 @@ from .protocol import (
     RolloutGroupRequest,
     RolloutGroupResult,
     RolloutSubmission,
+    SampleSlot,
     Trajectory,
 )
 from .runner import (
@@ -35,6 +36,7 @@ __all__ = [
     "RolloutGroupsHTTPServer",
     "RolloutStrategy",
     "RolloutSubmission",
+    "SampleSlot",
     "Trajectory",
     "serve",
 ]

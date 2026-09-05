@@ -86,11 +86,9 @@ class EndpointModelClient:
         # SGLang's native endpoint expects generation controls under one
         # ``sampling_params`` object.  A Session Server adapter can instead
         # replace this client while keeping the strategy and HTTP contract.
-        body = {
-            "input_ids": prompt_token_ids,
-            "sampling_params": sampling_params,
-            **request,
-        }
+        body = dict(request)
+        body["input_ids"] = prompt_token_ids
+        body["sampling_params"] = sampling_params
         data = json.dumps(body).encode("utf-8")
         url = endpoint.rstrip("/") + "/generate"
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})

@@ -172,6 +172,8 @@ class GeneratedSpan:
         inputs = value.get("input_token_ids")
         if not isinstance(inputs, list) or not isinstance(output, list):
             raise ValueError("generated span token ids must be lists")
+        if any(not isinstance(token, int) or isinstance(token, bool) for token in inputs + output):
+            raise ValueError("generated span token ids must be integers")
         if len(output) != end - start:
             raise ValueError("output_token_ids length must equal span length")
         logs = value.get("output_token_log_probs")
@@ -222,9 +224,16 @@ class Trajectory:
         tokens = value.get("token_ids")
         if not isinstance(tokens, list) or not tokens:
             raise ValueError("trajectory token_ids must be a non-empty list")
+        if any(not isinstance(token, int) or isinstance(token, bool) for token in tokens):
+            raise ValueError("trajectory token_ids must be integers")
         prompt_length = value.get("prompt_length")
         if not isinstance(prompt_length, int) or prompt_length < 1 or prompt_length >= len(tokens):
             raise ValueError("prompt_length must leave at least one response token")
+        messages = value.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("trajectory messages must be a non-empty list")
+        if any(not isinstance(message, dict) for message in messages):
+            raise ValueError("trajectory messages must contain objects")
         spans = [GeneratedSpan.from_dict(item) for item in value.get("generated_spans", [])]
         if not spans:
             raise ValueError("trajectory must contain at least one generated span")
@@ -248,7 +257,7 @@ class Trajectory:
             branch_id=_required_string(value.get("branch_id"), "branch_id"),
             parent_branch_id=parent,
             branch_point_token_count=branch_point,
-            messages=value.get("messages") if isinstance(value.get("messages"), list) else [],
+            messages=messages,
             token_ids=[int(token) for token in tokens],
             prompt_length=prompt_length,
             generated_spans=spans,
