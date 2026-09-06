@@ -88,7 +88,12 @@ class MilesSessionAgentRolloutStrategy:
             session_id = session_client.create()
             try:
                 config = self._config(request, session_client, session_id)
-                executor = self._executor(sandbox, context=context, max_tool_calls=request.budgets.max_tool_calls)
+                executor = self._executor(
+                    sandbox,
+                    agent_id=f"{request.rollout_job_id}:{slot.sample_slot_id}",
+                    context=context,
+                    max_tool_calls=request.budgets.max_tool_calls,
+                )
                 agent = AshAgent(
                     config,
                     executor=executor,
@@ -139,10 +144,14 @@ class MilesSessionAgentRolloutStrategy:
         )
 
     @staticmethod
-    def _executor(sandbox, *, context: RolloutContext, max_tool_calls: int):
+    def _executor(sandbox, *, agent_id: str, context: RolloutContext, max_tool_calls: int):
         call = getattr(sandbox, "call_agent_tool", None)
         if call is None:
             call = getattr(sandbox, "call", None)
+        if call is None:
+            session_executor = getattr(sandbox, "executor_for", None)
+            if session_executor is not None:
+                call = session_executor(agent_id)
         if call is None:
             raise TypeError("environment sandbox must expose call_agent_tool or call")
 
