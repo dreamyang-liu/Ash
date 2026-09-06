@@ -117,6 +117,52 @@ func countProcessesMatching(t *testing.T, needle string) int {
 	return count
 }
 
+func TestForegroundTimeoutKillsDescendantsAndReturns(t *testing.T) {
+	// This is the synchronous form of the background kill regression above.
+	// CommandContext's default cancellation kills only the direct `sh`. A
+	// backgrounded descendant then keeps stdout/stderr open, so cmd.Run waits
+	// forever even though the requested timeout elapsed.
+	marker := fmt.Sprintf("ASH_TIMEOUT_PROBE_%d_%d", os.Getpid(), time.Now().UnixNano())
+	start := time.Now()
+	result := (&ShellTool{}).Execute(map[string]any{
+		"command": "sh -c 'sleep 7117 # " + marker + "' & wait",
+		"timeout": float64(1),
+	})
+	elapsed := time.Since(start)
+
+	if result.Success {
+		t.Fatal("a timed-out command must fail")
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("timeout returned after %v, want no more than 4s", elapsed)
+	}
+	var outcome struct {
+		ExitCode *int `json:"exit_code"`
+		TimedOut bool `json:"timed_out"`
+		Running  bool `json:"running"`
+	}
+	if err := json.Unmarshal([]byte(result.Output), &outcome); err != nil {
+		t.Fatalf("decode timeout outcome %q: %v", result.Output, err)
+	}
+	if !outcome.TimedOut || outcome.Running {
+		t.Fatalf("timeout outcome = %+v, want timed_out and not running", outcome)
+	}
+	if outcome.ExitCode == nil || *outcome.ExitCode != 128+9 {
+		t.Fatalf("exit_code = %v, want %d", outcome.ExitCode, 128+9)
+	}
+	if n := countProcessesMatching(t, marker); n != 0 {
+		t.Fatalf("%d descendant(s) survived the foreground timeout", n)
+	}
+
+	// A leaked pipe or process must not poison the runtime after the timeout.
+	if followUp := (&ShellTool{}).Execute(map[string]any{
+		"command": "printf follow-up-ok",
+		"timeout": float64(2),
+	}); !followUp.Success || followUp.Output != "follow-up-ok" {
+		t.Fatalf("follow-up shell failed after timeout: %#v", followUp)
+	}
+}
+
 func TestBackgroundProcessExitWaitsForCapturedOutput(t *testing.T) {
 	shell := &ShellTool{}
 	process := &ProcessTool{}

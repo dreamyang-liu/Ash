@@ -182,17 +182,26 @@ func setProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
-// killProcessGroup signals the entire job, falling back to the direct child if
-// the group is already gone.
-func killProcessGroup(cmd *exec.Cmd) {
+// cancelProcessGroup signals the entire job, falling back to the direct child
+// if signalling the group fails. Returning the error lets exec.CommandContext
+// distinguish a successful cancellation from a process that already exited.
+func cancelProcessGroup(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
-		return
+		return os.ErrProcessDone
 	}
 	// Negative pid means "the group with this leader". Setpgid made the child
 	// its own leader, so this reaches its descendants too.
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-		_ = cmd.Process.Kill()
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err == nil {
+		return nil
 	}
+	return cmd.Process.Kill()
+}
+
+// killProcessGroup is the fire-and-forget form used by the explicit background
+// process kill operation. The waiting goroutine remains the authority for the
+// eventual exit code.
+func killProcessGroup(cmd *exec.Cmd) {
+	_ = cancelProcessGroup(cmd)
 }
 
 // waitExitCode waits for a command and reports how it ended. Only for a command
@@ -227,6 +236,13 @@ func (s *ShellTool) runSync(command string, timeout, tail int, opts runOpts) Res
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	setProcessGroup(cmd)
+	// CommandContext's default Cancel kills only cmd.Process. A shell pipeline
+	// or backgrounded job leaves descendants alive, and they can keep the
+	// stdout/stderr pipes open after the shell dies so Run never returns.
+	// Cancel the whole process group, then bound pipe cleanup in case a child
+	// escaped the group or retained an inherited descriptor.
+	cmd.Cancel = func() error { return cancelProcessGroup(cmd) }
+	cmd.WaitDelay = 2 * time.Second
 	opts.apply(cmd)
 
 	stdout := NewBoundedLogMode(opts.maxOutputBytes, opts.mode)
