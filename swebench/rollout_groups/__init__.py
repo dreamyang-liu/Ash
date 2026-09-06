@@ -22,7 +22,10 @@ from .runner import (
     RolloutContext,
     RolloutStrategy,
 )
-from .strategies import SequentialRolloutStrategy
+from .strategies import (
+    MilesSessionAgentRolloutStrategy,
+    SequentialRolloutStrategy,
+)
 from .server import RolloutGroupsHTTPServer, serve
 
 __all__ = [
@@ -30,6 +33,7 @@ __all__ = [
     "GeneratedSpan",
     "GroupRolloutService",
     "ModelClient",
+    "MilesSessionAgentRolloutStrategy",
     "RolloutBudget",
     "RolloutContext",
     "RolloutGroupRequest",

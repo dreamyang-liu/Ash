@@ -81,6 +81,11 @@ class RolloutGroupRequest:
     return_rollout_logprobs: bool
     sampling_params: dict[str, Any]
     budgets: RolloutBudget
+    # When set, Ash runs its agent loop through Miles' v2 Session Server.
+    # ``model_endpoint`` remains the raw generation endpoint for simple
+    # strategies and backwards compatibility.
+    session_server_endpoint: str | None = None
+    model: str | None = None
     protocol_version: str = PROTOCOL_VERSION
 
     @classmethod
@@ -134,6 +139,11 @@ class RolloutGroupRequest:
             ),
             sampling_params=dict(sampling),
             budgets=RolloutBudget.from_dict(value.get("budgets")),
+            session_server_endpoint=(
+                None if value.get("session_server_endpoint") is None
+                else _required_string(value.get("session_server_endpoint"), "session_server_endpoint")
+            ),
+            model=(None if value.get("model") is None else _required_string(value.get("model"), "model")),
         )
 
     def to_dict(self) -> dict[str, Any]:

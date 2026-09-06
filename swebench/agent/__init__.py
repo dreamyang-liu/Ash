@@ -13,6 +13,7 @@ repeat.
 """
 
 import json
+from copy import deepcopy
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -289,7 +290,13 @@ class AshAgent:
             self._trace("\n[NUDGE] text-only response, prompting continuation\n")
         return None
 
-    def run(self, task: str, instance_id: str = "") -> str:
+    def run(
+        self,
+        task: str,
+        instance_id: str = "",
+        *,
+        initial_messages: Optional[list[dict]] = None,
+    ) -> str:
         """Run the agent loop. Returns exit status: completed | step_limit |
         cost_limit | error."""
         self.trajectory = Trajectory()
@@ -314,8 +321,20 @@ class AshAgent:
         self._pipeline = None             # re-resolved per run (see __init__)
 
         conv = Conversation(self.trajectory)
-        conv.add_system(build_system_prompt(task, self.config))
-        conv.add_user(build_instance_message(task, self.config))
+        if initial_messages is None:
+            conv.add_system(build_system_prompt(task, self.config))
+            conv.add_user(build_instance_message(task, self.config))
+        else:
+            # External rollout orchestrators (for example Miles) already own
+            # the canonical prompt and tokenization.  Seed the conversation
+            # verbatim so the first session request has exactly that prefix.
+            for message in initial_messages:
+                copied = deepcopy(message)
+                if not isinstance(copied, dict) or not copied.get("role"):
+                    raise ValueError("initial_messages must contain message objects with a role")
+                conv.messages.append(copied)
+                extras = {k: v for k, v in copied.items() if k not in {"role", "content"}}
+                conv.trajectory.add_message(copied["role"], copied.get("content", "") or "", **extras)
 
         try:
             while True:
