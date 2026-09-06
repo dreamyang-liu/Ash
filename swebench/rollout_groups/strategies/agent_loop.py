@@ -66,7 +66,10 @@ class MilesSessionAgentRolloutStrategy:
     """Run one AshAgent per allocated slot through Miles v2 sessions."""
 
     def __init__(self, *, agent_config: AgentConfig | None = None, allow_text_prompt: bool = True):
-        self.agent_config = agent_config or AgentConfig()
+        # Miles exposes an OpenAI-compatible local endpoint.  Do not inherit
+        # AshAgent's Anthropic-oriented standalone default unless the caller
+        # explicitly supplies an AgentConfig.
+        self.agent_config = agent_config or AgentConfig(model="openai/local")
         self.allow_text_prompt = allow_text_prompt
 
     def run(self, request: RolloutGroupRequest, context: RolloutContext) -> RolloutGroupResult:
