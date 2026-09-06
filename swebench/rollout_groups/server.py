@@ -43,19 +43,10 @@ def build_service(
         provider = AshSessionEnvironmentProvider(image=image, backend=backend)
         agent_config = AgentConfig(model=model or "openai/local")
 
-        def factory(request, _context):
-            # The endpoint in the request is authoritative when supplied by
-            # Miles; the process-level value is the convenient service default.
-            if request.session_server_endpoint is None:
-                request = type(request)(
-                    **{
-                        **request.__dict__,
-                        "session_server_endpoint": miles_session_endpoint,
-                        "model": request.model or model,
-                    }
-                )
+        def factory(_request, _context):
             return MilesSessionAgentRolloutStrategy(
                 agent_config=agent_config,
+                session_server_endpoint=miles_session_endpoint,
                 allow_text_prompt=allow_text_prompt,
             )
 

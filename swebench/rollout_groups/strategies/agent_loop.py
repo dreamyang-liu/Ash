@@ -65,17 +65,24 @@ class MilesSessionClient:
 class MilesSessionAgentRolloutStrategy:
     """Run one AshAgent per allocated slot through Miles v2 sessions."""
 
-    def __init__(self, *, agent_config: AgentConfig | None = None, allow_text_prompt: bool = True):
+    def __init__(
+        self,
+        *,
+        agent_config: AgentConfig | None = None,
+        session_server_endpoint: str | None = None,
+        allow_text_prompt: bool = True,
+    ):
         # Miles exposes an OpenAI-compatible local endpoint.  Do not inherit
         # AshAgent's Anthropic-oriented standalone default unless the caller
         # explicitly supplies an AgentConfig.
         self.agent_config = agent_config or AgentConfig(model="openai/local")
+        self.session_server_endpoint = session_server_endpoint.rstrip("/") if session_server_endpoint else None
         self.allow_text_prompt = allow_text_prompt
 
     def run(self, request: RolloutGroupRequest, context: RolloutContext) -> RolloutGroupResult:
         if context.environment_provider is None:
             raise RuntimeError("agent-loop rollout requires an environment provider")
-        endpoint = request.session_server_endpoint or request.model_endpoint
+        endpoint = request.session_server_endpoint or self.session_server_endpoint or request.model_endpoint
         if "/sessions" in endpoint:
             raise ValueError("session_server_endpoint must be the Miles server base URL, not a session URL")
         trajectories: list[Trajectory] = []
