@@ -15,7 +15,7 @@ from dataclasses import replace
 from typing import Any
 
 from ..protocol import GeneratedSpan, RolloutGroupRequest, RolloutGroupResult, Trajectory
-from ..runner import RolloutContext
+from ..runner import RolloutCancelled, RolloutContext
 from ...agent import AshAgent
 from ...models import AgentConfig, ToolResult
 
@@ -88,7 +88,7 @@ class MilesSessionAgentRolloutStrategy:
             session_id = session_client.create()
             try:
                 config = self._config(request, session_client, session_id)
-                executor = self._executor(sandbox)
+                executor = self._executor(sandbox, context=context, max_tool_calls=request.budgets.max_tool_calls)
                 agent = AshAgent(
                     config,
                     executor=executor,
@@ -135,17 +135,25 @@ class MilesSessionAgentRolloutStrategy:
             max_tokens=int(max_tokens),
             temperature=None if temperature is None else float(temperature),
             prompt_cache=False,
+            step_limit=min(self.agent_config.step_limit, request.budgets.max_model_calls),
         )
 
     @staticmethod
-    def _executor(sandbox):
+    def _executor(sandbox, *, context: RolloutContext, max_tool_calls: int):
         call = getattr(sandbox, "call_agent_tool", None)
         if call is None:
             call = getattr(sandbox, "call", None)
         if call is None:
             raise TypeError("environment sandbox must expose call_agent_tool or call")
 
+        calls = 0
+
         def execute(name: str, args: dict[str, Any]) -> ToolResult:
+            nonlocal calls
+            context.check_cancelled()
+            if calls >= max_tool_calls:
+                raise RolloutCancelled("rollout tool-call budget exhausted")
+            calls += 1
             result = _run_async(call(name, args))
             if isinstance(result, ToolResult):
                 return result
