@@ -26,7 +26,7 @@ from .strategies import (
     MilesSessionAgentRolloutStrategy,
     SequentialRolloutStrategy,
 )
-from .server import RolloutGroupsHTTPServer, serve
+from .server import RolloutGroupsHTTPServer, build_service, serve
 
 __all__ = [
     "EnvironmentProvider",
@@ -39,6 +39,7 @@ __all__ = [
     "RolloutGroupRequest",
     "RolloutGroupResult",
     "RolloutGroupsHTTPServer",
+    "build_service",
     "RolloutStrategy",
     "RolloutSubmission",
     "SampleSlot",
