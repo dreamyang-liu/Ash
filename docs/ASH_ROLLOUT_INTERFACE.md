@@ -44,6 +44,28 @@ weight version, ordered messages, reward and branch lineage.
   is a minimal raw SGLang implementation; a Session Server client can replace
   it when Miles needs SessionTree recording.
 
+## Starting the service
+
+The generic service can be started without changing the strategy code. The
+following command selects the real AgentENV-backed environment provider and the
+Miles v2 Session Server:
+
+```bash
+PYTHONPATH=sdk:. python -m swebench.rollout_groups.server \
+  --strategy agent-loop \
+  --image "$ASH_ROLLOUT_IMAGE" \
+  --backend-json '{"backend":"microvm","microvm":{"server_url":"http://agentenv:8000","template":"ash-runtime-template","runtime_port":3000,"api_key_file":"/run/secrets/agentenv-api-key"}}' \
+  --miles-session-endpoint "http://miles-session:30000" \
+  --model openai/local
+```
+
+`ASH_ROLLOUT_IMAGE` is an AgentENV template or snapshot containing
+`ash-runtime`; it is not a Docker entrypoint. `server_url` and the API-key
+file are deployment settings supplied by the environment owner. The process
+exposes `POST/GET/DELETE /rollout-groups` on port `11001` by default. A later
+branch policy can replace `MilesSessionAgentRolloutStrategy` without changing
+this transport or environment wiring.
+
 ## What this branch proves
 
 The protocol and HTTP lifecycle are covered by unit tests; malformed requests,
@@ -51,6 +73,8 @@ duplicate IDs, cancellation and result identity are checked before import into
 Miles. The executable sequential path additionally verifies that a model
 client is called once per slot, an environment is created and destroyed for
 each slot, and the returned token sequence is exported as a trajectory. Full
-Ash SDK regression is `486 passed, 4 skipped` in the current test environment.
-Wiring an agent strategy into a real Miles Session Server and RL integration
-remain separate tasks.
+Ash SDK regression is `490 passed, 4 skipped` in the current test environment.
+The service builder and real `AshAgent -> AshSession -> AgentENV` wiring are
+implemented. A live AgentENV endpoint and template are still required for a
+deployment-level run; the Miles-side GRPO/Megatron smoke must then be launched
+with the returned trajectories.
