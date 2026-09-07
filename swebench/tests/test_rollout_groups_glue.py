@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import urllib.error
 import urllib.request
 
 import pytest
@@ -83,7 +84,26 @@ def test_protocol_round_trip_and_span_validation():
         )
 
 
-def test_service_idempotency_and_cancel():
+@pytest.mark.parametrize(
+    "path, field",
+    [
+        ((), "future_request_field"),
+        (("budgets",), "future_budget_field"),
+        (("sample_slots", 0), "future_slot_field"),
+    ],
+)
+def test_protocol_rejects_unknown_v1_request_fields(path, field):
+    payload = request_payload()
+    target = payload
+    for component in path:
+        target = target[component]
+    target[field] = True
+
+    with pytest.raises(ValueError, match="unknown fields"):
+        RolloutGroupRequest.from_dict(payload)
+
+
+def test_service_idempotency_and_delete():
     service = GroupRolloutService(lambda request, context: _ResultStrategy(complete_result))
     request = RolloutGroupRequest.from_dict(request_payload())
     first = service.submit(request)
@@ -97,6 +117,49 @@ def test_service_idempotency_and_cancel():
         service.submit(RolloutGroupRequest.from_dict(request_payload(job_id="job-1") | {
             "prompt_group_id": "different",
         }))
+    deleted = service.delete(request.rollout_job_id)
+    assert deleted.status == "completed"
+    with pytest.raises(KeyError):
+        service.get(request.rollout_job_id)
+
+
+def test_delete_cancels_active_job_and_releases_record():
+    started = threading.Event()
+
+    def wait_for_cancel(request, context):
+        started.set()
+        while not context.cancel_event.wait(0.01):
+            pass
+        context.check_cancelled()
+
+    service = GroupRolloutService(lambda request, context: _ResultStrategy(wait_for_cancel))
+    request = RolloutGroupRequest.from_dict(request_payload("active-job"))
+    service.submit(request)
+    assert started.wait(timeout=2)
+
+    deleted = service.delete(request.rollout_job_id)
+
+    assert deleted.status == "cancelled"
+    with pytest.raises(KeyError):
+        service.get(request.rollout_job_id)
+
+
+def test_terminal_job_expires_if_consumer_does_not_delete_it():
+    service = GroupRolloutService(
+        lambda request, context: _ResultStrategy(complete_result),
+        result_ttl_seconds=0.01,
+    )
+    request = RolloutGroupRequest.from_dict(request_payload("expiring-job"))
+    service.submit(request)
+    deadline = time.time() + 2
+    while time.time() < deadline and service.get(request.rollout_job_id).status in {"queued", "running"}:
+        time.sleep(0.001)
+    assert service.get(request.rollout_job_id).status == "completed"
+
+    time.sleep(0.02)
+
+    with pytest.raises(KeyError):
+        service.get(request.rollout_job_id)
 
 
 def test_http_endpoints():
@@ -121,6 +184,21 @@ def test_http_endpoints():
             time.sleep(0.01)
         assert result["actual_samples"] == 1
         assert result["trajectories"][0]["branch_id"] == "root"
+        delete = urllib.request.Request(
+            base + "/rollout-groups/http-job",
+            method="DELETE",
+        )
+        with urllib.request.urlopen(delete) as response:
+            assert response.status == 200
+            deletion = json.load(response)
+            assert deletion == {
+                "protocol_version": "ash-rollout-v1",
+                "rollout_job_id": "http-job",
+                "status": "completed",
+            }
+        with pytest.raises(urllib.error.HTTPError) as missing:
+            urllib.request.urlopen(base + "/rollout-groups/http-job")
+        assert missing.value.code == 404
     finally:
         server.shutdown()
         server.server_close()

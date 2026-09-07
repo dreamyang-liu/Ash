@@ -18,6 +18,12 @@ JOB_STATUSES = {"queued", "running", "completed", "early_stopped", "failed", "ca
 TRAJECTORY_STATUSES = {"completed", "truncated", "failed", "aborted"}
 
 
+def _reject_unknown_keys(value: dict[str, Any], allowed: set[str], name: str) -> None:
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(f"{name} contains unknown fields: {sorted(unknown)}")
+
+
 def _required_string(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
@@ -34,6 +40,11 @@ class RolloutBudget:
     def from_dict(cls, value: Any) -> "RolloutBudget":
         if not isinstance(value, dict):
             raise ValueError("budgets must be an object")
+        _reject_unknown_keys(
+            value,
+            {"max_model_calls", "max_tool_calls", "max_wall_time_seconds"},
+            "budgets",
+        )
         model_calls = value.get("max_model_calls")
         tool_calls = value.get("max_tool_calls")
         wall_time = value.get("max_wall_time_seconds")
@@ -55,6 +66,7 @@ class SampleSlot:
     def from_dict(cls, value: Any) -> "SampleSlot":
         if not isinstance(value, dict):
             raise ValueError("sample_slots entries must be objects")
+        _reject_unknown_keys(value, {"sample_slot_id", "sample_index"}, "sample slot")
         return cls(
             _required_string(value.get("sample_slot_id"), "sample_slot_id"),
             _nonnegative_int(value.get("sample_index"), "sample_index"),
@@ -93,6 +105,28 @@ class RolloutGroupRequest:
     def from_dict(cls, value: Any) -> "RolloutGroupRequest":
         if not isinstance(value, dict):
             raise ValueError("request body must be an object")
+        _reject_unknown_keys(
+            value,
+            {
+                "protocol_version",
+                "rollout_job_id",
+                "rollout_id",
+                "prompt_group_id",
+                "sample_slots",
+                "max_samples",
+                "minimum_returned_samples",
+                "prompt",
+                "prompt_token_ids",
+                "model_endpoint",
+                "session_server_endpoint",
+                "model",
+                "expected_weight_version",
+                "return_rollout_logprobs",
+                "sampling_params",
+                "budgets",
+            },
+            "request body",
+        )
         version = value.get("protocol_version", PROTOCOL_VERSION)
         if version != PROTOCOL_VERSION:
             raise ValueError(f"unsupported protocol_version: {version!r}")
@@ -113,6 +147,8 @@ class RolloutGroupRequest:
         prompt = value.get("prompt")
         if not isinstance(prompt, (str, list)):
             raise ValueError("prompt must be a string or message list")
+        if isinstance(prompt, list) and any(not isinstance(message, dict) for message in prompt):
+            raise ValueError("prompt messages must be objects")
         token_ids = value.get("prompt_token_ids")
         if not isinstance(token_ids, list) or not token_ids or any(
             not isinstance(token, int) or isinstance(token, bool) for token in token_ids
@@ -175,6 +211,20 @@ class GeneratedSpan:
     def from_dict(cls, value: Any) -> "GeneratedSpan":
         if not isinstance(value, dict):
             raise ValueError("generated_spans entries must be objects")
+        _reject_unknown_keys(
+            value,
+            {
+                "response_id",
+                "start",
+                "end",
+                "input_token_ids",
+                "output_token_ids",
+                "output_token_log_probs",
+                "weight_version",
+                "finish_reason",
+            },
+            "generated span",
+        )
         start = _nonnegative_int(value.get("start"), "generated span start")
         end = value.get("end")
         if not isinstance(end, int) or end <= start:
@@ -229,6 +279,24 @@ class Trajectory:
     def from_dict(cls, value: Any) -> "Trajectory":
         if not isinstance(value, dict):
             raise ValueError("trajectory entries must be objects")
+        _reject_unknown_keys(
+            value,
+            {
+                "sample_slot_id",
+                "branch_id",
+                "parent_branch_id",
+                "branch_point_token_count",
+                "messages",
+                "token_ids",
+                "prompt_length",
+                "generated_spans",
+                "response_text",
+                "reward",
+                "status",
+                "metadata",
+            },
+            "trajectory",
+        )
         status = value.get("status", "completed")
         if status not in TRAJECTORY_STATUSES:
             raise ValueError(f"unknown trajectory status: {status!r}")
@@ -341,6 +409,25 @@ class RolloutSubmission:
     rollout_job_id: str
     status: str
     protocol_version: str = PROTOCOL_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "protocol_version": self.protocol_version,
+            "rollout_job_id": self.rollout_job_id,
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True)
+class RolloutDeletion:
+    rollout_job_id: str
+    status: str
+    protocol_version: str = PROTOCOL_VERSION
+
+    def __post_init__(self) -> None:
+        _required_string(self.rollout_job_id, "rollout_job_id")
+        if self.status not in {"completed", "early_stopped", "failed", "cancelled"}:
+            raise ValueError(f"deletion status must be terminal, got {self.status!r}")
 
     def to_dict(self) -> dict[str, Any]:
         return {

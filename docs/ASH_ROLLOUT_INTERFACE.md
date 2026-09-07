@@ -30,7 +30,10 @@ algorithm without changing the Miles-facing API.
 | --- | --- |
 | `POST /rollout-groups` | Validate a group and enqueue an asynchronous job. Repeating the same job ID with the same request is idempotent; reusing it for another request is rejected. |
 | `GET /rollout-groups/{job_id}` | Read progress or the terminal result. A terminal result contains complete trajectories, not just final text. |
-| `DELETE /rollout-groups/{job_id}` | Set a cancellation event. Strategies must check it before creating new branches and release their resources in `close()`. |
+| `DELETE /rollout-groups/{job_id}` | Cancel unfinished work and release the in-memory job record. Miles calls it after consuming a terminal result as well as on failure; the response is a lightweight job ID/status acknowledgement, not a second copy of the trajectories. |
+
+Terminal results that are not deleted, for example after a Miles process
+failure, expire after `--result-ttl-seconds` (300 seconds by default).
 
 The wire version is `ash-rollout-v1`, matching the Miles adapter. Each
 returned leaf must retain its `sample_slot_id`; Ash branch/checkpoint IDs are
@@ -52,6 +55,11 @@ weight version, ordered messages, reward and branch lineage.
 - `ModelClient` receives the endpoint supplied by Miles. `EndpointModelClient`
   is a minimal raw SGLang implementation; a Session Server client can replace
   it when Miles needs SessionTree recording.
+- `SessionAgentStrategySupport` owns the common Miles SessionTree agent
+  execution path, tool-budget enforcement and model configuration.
+  `trajectory_from_session` converts SessionTree records into the wire
+  trajectory. A new branch policy can reuse both and implement only its tree
+  growth, checkpoint selection and scheduling decisions.
 
 ## Starting the service
 
@@ -83,16 +91,13 @@ releases the persistent AgentENV snapshot after the group finishes.
 ## What this branch proves
 
 The protocol and HTTP lifecycle are covered by unit tests; malformed requests,
-duplicate IDs, cancellation and result identity are checked before import into
-Miles. The executable sequential path additionally verifies that a model
-client is called once per slot, an environment is created and destroyed for
-each slot, and the returned token sequence is exported as a trajectory. Full
-Ash regression is `414 passed, 4 skipped` after removing the unrelated
-checkpoint-cache experiment suite. The tests cover checkpoint capabilities,
-AgentENV create/restore/release HTTP paths, ownership, release failure and the
-parent/child SessionTree reference strategy. An earlier revision using the
-same AgentENV create/restore endpoints also ran the real
-`AshAgent -> AgentENV -> Miles Session Server -> GRPO/Megatron` path. The new
-ownership/release wrapper still needs a live deployment rerun; performance,
-dynamic checkpoint selection and cross-job checkpoint retention remain
-outside this functional reference.
+duplicate IDs, cancellation, terminal-result release and result identity are
+checked before import into Miles. The executable sequential path additionally
+verifies that a model client is called once per slot, an environment is created
+and destroyed for each slot, and the returned token sequence is exported as a
+trajectory. The tests cover checkpoint capabilities, AgentENV
+create/restore/release HTTP paths, ownership, release failure and the
+parent/child SessionTree reference strategy. Revision `0238b23` ran the real
+`AshAgent -> AgentENV -> Miles Session Server -> GRPO/Megatron` path, including
+the ownership/release wrapper. Performance, dynamic checkpoint selection and
+cross-job checkpoint retention remain outside this functional reference.

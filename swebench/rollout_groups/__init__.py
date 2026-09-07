@@ -9,6 +9,7 @@ here.
 from .protocol import (
     GeneratedSpan,
     RolloutBudget,
+    RolloutDeletion,
     RolloutGroupRequest,
     RolloutGroupResult,
     RolloutSubmission,
@@ -23,6 +24,12 @@ from .runner import (
     RolloutContext,
     RolloutStrategy,
 )
+from .session_runtime import (
+    MilesSessionClient,
+    SessionAgentStrategySupport,
+    branch_input_length,
+    trajectory_from_session,
+)
 from .strategies import (
     CheckpointAgentLoopRolloutStrategy,
     MilesSessionAgentRolloutStrategy,
@@ -36,10 +43,12 @@ __all__ = [
     "GeneratedSpan",
     "GroupRolloutService",
     "ModelClient",
+    "MilesSessionClient",
     "CheckpointAgentLoopRolloutStrategy",
     "MilesSessionAgentRolloutStrategy",
     "RolloutBudget",
     "RolloutContext",
+    "RolloutDeletion",
     "RolloutGroupRequest",
     "RolloutGroupResult",
     "RolloutGroupsHTTPServer",
@@ -47,7 +56,10 @@ __all__ = [
     "RolloutStrategy",
     "RolloutSubmission",
     "SampleSlot",
+    "SessionAgentStrategySupport",
     "SequentialRolloutStrategy",
     "Trajectory",
+    "branch_input_length",
     "serve",
+    "trajectory_from_session",
 ]

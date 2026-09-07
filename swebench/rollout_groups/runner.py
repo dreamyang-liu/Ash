@@ -18,6 +18,7 @@ from .protocol import (
     GeneratedSpan,
     RolloutGroupRequest,
     RolloutGroupResult,
+    RolloutDeletion,
     RolloutSubmission,
     Trajectory,
 )
@@ -137,17 +138,27 @@ class EndpointModelClient:
 class GroupRolloutService:
     """In-process asynchronous service backing the three HTTP endpoints."""
 
-    def __init__(self, strategy_factory, *, model_client: ModelClient | None = None,
-                 environment_provider: EnvironmentProvider | None = None):
+    def __init__(
+        self,
+        strategy_factory,
+        *,
+        model_client: ModelClient | None = None,
+        environment_provider: EnvironmentProvider | None = None,
+        result_ttl_seconds: float = 300.0,
+    ):
+        if result_ttl_seconds <= 0:
+            raise ValueError("result_ttl_seconds must be greater than zero")
         self.strategy_factory = strategy_factory
         self.model_client = model_client
         self.environment_provider = environment_provider
+        self.result_ttl_seconds = result_ttl_seconds
         self._lock = threading.RLock()
         self._jobs: dict[str, dict[str, Any]] = {}
 
     def submit(self, request: RolloutGroupRequest) -> RolloutSubmission:
         canonical = json.dumps(request.to_dict(), sort_keys=True, separators=(",", ":"))
         with self._lock:
+            self._prune_terminal_jobs_locked()
             existing = self._jobs.get(request.rollout_job_id)
             if existing is not None:
                 if existing["request_json"] != canonical:
@@ -165,6 +176,7 @@ class GroupRolloutService:
                 "result": result,
                 "cancel_event": threading.Event(),
                 "thread": None,
+                "terminal_at": None,
             }
             self._jobs[request.rollout_job_id] = record
             worker = threading.Thread(target=self._run, args=(request.rollout_job_id,),
@@ -175,28 +187,34 @@ class GroupRolloutService:
 
     def get(self, job_id: str) -> RolloutGroupResult:
         with self._lock:
+            self._prune_terminal_jobs_locked()
             record = self._jobs.get(job_id)
             if record is None:
                 raise KeyError(job_id)
             return record["result"]
 
-    def cancel(self, job_id: str) -> RolloutGroupResult:
+    def delete(self, job_id: str) -> RolloutDeletion:
+        """Cancel unfinished work and release the in-memory job record.
+
+        The returned snapshot lets the HTTP layer acknowledge what was
+        deleted.  Removing terminal results is important because they contain
+        complete trajectories and would otherwise accumulate for the lifetime
+        of the rollout service.
+        """
         with self._lock:
-            record = self._jobs.get(job_id)
+            self._prune_terminal_jobs_locked()
+            record = self._jobs.pop(job_id, None)
             if record is None:
                 raise KeyError(job_id)
             result: RolloutGroupResult = record["result"]
             if result.status in {"completed", "early_stopped", "failed", "cancelled"}:
-                return result
+                return RolloutDeletion(job_id, result.status)
             record["cancel_event"].set()
-            record["result"] = RolloutGroupResult(
-                rollout_job_id=result.rollout_job_id,
-                prompt_group_id=result.prompt_group_id,
-                status="cancelled",
-                max_samples=result.max_samples,
-                stop_reason="cancelled by Miles",
-            )
-            return record["result"]
+            return RolloutDeletion(job_id, "cancelled")
+
+    def cancel(self, job_id: str) -> RolloutDeletion:
+        """Compatibility alias for callers using the original method name."""
+        return self.delete(job_id)
 
     def _set_result(self, job_id: str, result: RolloutGroupResult) -> None:
         with self._lock:
@@ -206,10 +224,24 @@ class GroupRolloutService:
             if current.status == "cancelled":
                 return
             self._jobs[job_id]["result"] = result
+            if result.status in {"completed", "early_stopped", "failed", "cancelled"}:
+                self._jobs[job_id]["terminal_at"] = time.monotonic()
+
+    def _prune_terminal_jobs_locked(self) -> None:
+        cutoff = time.monotonic() - self.result_ttl_seconds
+        expired = [
+            job_id
+            for job_id, record in self._jobs.items()
+            if record["terminal_at"] is not None and record["terminal_at"] <= cutoff
+        ]
+        for job_id in expired:
+            del self._jobs[job_id]
 
     def _run(self, job_id: str) -> None:
         with self._lock:
-            record = self._jobs[job_id]
+            record = self._jobs.get(job_id)
+            if record is None:
+                return
             request: RolloutGroupRequest = record["request"]
             cancel_event: threading.Event = record["cancel_event"]
             if record["result"].status == "cancelled":

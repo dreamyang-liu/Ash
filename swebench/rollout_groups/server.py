@@ -20,6 +20,7 @@ def build_service(
     miles_session_endpoint: str | None = None,
     model: str | None = None,
     allow_text_prompt: bool = True,
+    result_ttl_seconds: float = 300.0,
 ) -> GroupRolloutService:
     """Build a production rollout service from transport-level settings.
 
@@ -50,7 +51,11 @@ def build_service(
                 allow_text_prompt=allow_text_prompt,
             )
 
-        return GroupRolloutService(factory, environment_provider=provider)
+        return GroupRolloutService(
+            factory,
+            environment_provider=provider,
+            result_ttl_seconds=result_ttl_seconds,
+        )
 
     if normalized == "checkpoint-agent-loop-v1":
         if not image:
@@ -71,13 +76,18 @@ def build_service(
                 allow_text_prompt=allow_text_prompt,
             )
 
-        return GroupRolloutService(factory, environment_provider=provider)
+        return GroupRolloutService(
+            factory,
+            environment_provider=provider,
+            result_ttl_seconds=result_ttl_seconds,
+        )
 
     if normalized == "sequential":
         from .strategies.sequential import SequentialRolloutStrategy
 
         return GroupRolloutService(
-            lambda _request, _context: SequentialRolloutStrategy(allow_deterministic_fallback=False)
+            lambda _request, _context: SequentialRolloutStrategy(allow_deterministic_fallback=False),
+            result_ttl_seconds=result_ttl_seconds,
         )
     raise ValueError(
         f"unknown rollout strategy {strategy!r}; choose agent-loop, checkpoint-agent-loop-v1, or sequential"
@@ -126,7 +136,7 @@ class RolloutGroupsRequestHandler(BaseHTTPRequestHandler):
             self._send({"error": "unknown path"}, 404)
             return
         try:
-            self._send(self.server.service.cancel(self.path[len(prefix):]).to_dict(), 200)
+            self._send(self.server.service.delete(self.path[len(prefix):]).to_dict(), 200)
         except KeyError:
             self._send({"error": "unknown rollout_job_id"}, 404)
 
@@ -175,6 +185,12 @@ def main() -> None:
         help="Miles v2 Session Server base URL",
     )
     parser.add_argument("--model", default=os.environ.get("ASH_ROLLOUT_MODEL", "openai/local"))
+    parser.add_argument(
+        "--result-ttl-seconds",
+        type=float,
+        default=float(os.environ.get("ASH_ROLLOUT_RESULT_TTL_SECONDS", "300")),
+        help="Fallback retention for terminal results that Miles does not delete",
+    )
     args = parser.parse_args()
     try:
         backend = json.loads(args.backend_json)
@@ -186,6 +202,7 @@ def main() -> None:
             backend=backend,
             miles_session_endpoint=args.miles_session_endpoint,
             model=args.model,
+            result_ttl_seconds=args.result_ttl_seconds,
         )
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
