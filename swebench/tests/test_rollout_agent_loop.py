@@ -4,6 +4,7 @@ from swebench.rollout_groups.protocol import RolloutGroupRequest
 from swebench.rollout_groups.strategies.agent_loop import (
     MilesSessionAgentRolloutStrategy,
     _trajectory_from_session,
+    _trajectory_status,
 )
 
 
@@ -75,3 +76,10 @@ def test_strategy_uses_explicit_session_endpoint():
     strategy = MilesSessionAgentRolloutStrategy()
     assert request.session_server_endpoint == "http://session:31000"
     assert strategy.agent_config.prompt_cache is True
+
+
+def test_agent_exit_status_maps_to_trajectory_status():
+    assert _trajectory_status("completed") == "completed"
+    assert _trajectory_status("step_limit") == "truncated"
+    assert _trajectory_status("cost_limit") == "truncated"
+    assert _trajectory_status("error") == "failed"

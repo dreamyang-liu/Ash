@@ -28,6 +28,21 @@ def _agent_with_trace(path, executor):
     return agent
 
 
+def test_conversation_persists_assistant_tool_calls_in_both_views():
+    trajectory = Trajectory()
+    conversation = Conversation(trajectory)
+    message = SimpleNamespace(
+        content="",
+        tool_calls=[_tool_call("call-1", "shell", {"command": "printf ok"})],
+        thinking_blocks=None,
+    )
+
+    conversation.add_assistant(message)
+
+    assert conversation.messages[0]["tool_calls"] == trajectory.messages[0]["tool_calls"]
+    assert trajectory.messages[0]["tool_calls"][0]["function"]["name"] == "shell"
+
+
 def test_tool_trace_records_turn_sequence_routing_and_background_process(tmp_path):
     path = tmp_path / "trace.events.jsonl"
     calls = []

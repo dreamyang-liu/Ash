@@ -107,6 +107,13 @@ class LLMClient:
             kwargs["api_base"] = c.api_base
         if c.api_key:
             kwargs["api_key"] = c.api_key
+        if c.extra_body:
+            # LiteLLM's OpenAI-compatible adapter forwards provider-specific
+            # fields correctly when they are top-level kwargs.  Passing the
+            # mapping as ``extra_body`` would nest it in the JSON payload;
+            # Miles v2 (and SGLang) expect ``chat_template_kwargs`` itself at
+            # the top level.
+            kwargs.update(c.extra_body)
         return kwargs
 
     def query(self, messages: list[dict]) -> Any:

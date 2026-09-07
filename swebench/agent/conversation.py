@@ -25,16 +25,19 @@ class Conversation:
     def add_assistant(self, message) -> None:
         """Append the assistant turn and update the no-tool counter."""
         msg = {"role": "assistant", "content": message.content or ""}
+        trajectory_extra = {}
         if message.tool_calls:
             # Provider SDKs commonly return Pydantic/namespace objects.  A
             # durable trajectory key must be JSON-compatible, while retaining
             # the original OpenAI tool-call shape.
             msg["tool_calls"] = [_tool_call_dict(call) for call in message.tool_calls]
+            trajectory_extra["tool_calls"] = msg["tool_calls"]
         # Preserve thinking_blocks for Anthropic extended thinking + tool use
         if thinking := getattr(message, "thinking_blocks", None):
             msg["thinking_blocks"] = thinking
+            trajectory_extra["thinking_blocks"] = thinking
         self.messages.append(msg)
-        self.trajectory.add_message("assistant", message.content or "")
+        self.trajectory.add_message("assistant", message.content or "", **trajectory_extra)
         self.consecutive_no_tool = 0 if message.tool_calls else self.consecutive_no_tool + 1
 
     def add_tool_result(self, tool_call_id: str, content: str, **meta) -> None:

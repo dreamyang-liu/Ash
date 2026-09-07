@@ -24,6 +24,7 @@ from .runner import (
     RolloutStrategy,
 )
 from .strategies import (
+    CheckpointAgentLoopRolloutStrategy,
     MilesSessionAgentRolloutStrategy,
     SequentialRolloutStrategy,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "GeneratedSpan",
     "GroupRolloutService",
     "ModelClient",
+    "CheckpointAgentLoopRolloutStrategy",
     "MilesSessionAgentRolloutStrategy",
     "RolloutBudget",
     "RolloutContext",

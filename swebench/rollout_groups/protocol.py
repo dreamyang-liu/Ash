@@ -8,6 +8,7 @@ created.
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -306,6 +307,15 @@ class RolloutGroupResult:
         branches = [item.branch_id for item in self.trajectories]
         if len(slots) != len(set(slots)) or len(branches) != len(set(branches)):
             raise ValueError("trajectory slot and branch ids must be unique")
+        for name, value in self.consumed_budget.items():
+            _required_string(name, "consumed_budget key")
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"consumed_budget[{name!r}] must be a finite non-negative number")
 
     @property
     def actual_samples(self) -> int:

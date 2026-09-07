@@ -73,6 +73,15 @@ def test_protocol_round_trip_and_span_validation():
             "weight_version": "1", "finish_reason": "stop",
         })
 
+    with pytest.raises(ValueError, match="finite non-negative number"):
+        RolloutGroupResult(
+            rollout_job_id="job-invalid-budget",
+            prompt_group_id="group-1",
+            status="completed",
+            max_samples=1,
+            consumed_budget={"parent_status": "step_limit"},
+        )
+
 
 def test_service_idempotency_and_cancel():
     service = GroupRolloutService(lambda request, context: _ResultStrategy(complete_result))

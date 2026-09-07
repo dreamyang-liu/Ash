@@ -41,6 +41,22 @@ class MilesSessionClient:
     def get(self, session_id: str) -> dict[str, Any]:
         return self._request("GET", f"/sessions/{session_id}", None)
 
+    def collect_samples(self, session_id: str) -> bytes:
+        """Ask Miles to materialize all current SessionTree leaves.
+
+        The samples endpoint returns a safetensors payload rather than JSON;
+        the checkpoint strategy only uses this call as a server-side
+        consistency check and leaves decoding/training to Miles.
+        """
+        request = urllib.request.Request(
+            self.endpoint + f"/sessions/{session_id}/samples",
+            data=b"{}",
+            headers={"Accept": "application/octet-stream", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            return response.read()
+
     def delete(self, session_id: str) -> None:
         try:
             self._request("DELETE", f"/sessions/{session_id}", None)
@@ -139,6 +155,9 @@ class MilesSessionAgentRolloutStrategy:
             model = f"openai/{model}"
         max_tokens = sampling.get("max_tokens", sampling.get("max_new_tokens", self.agent_config.max_tokens))
         temperature = sampling.get("temperature", self.agent_config.temperature)
+        extra_body = sampling.get("extra_body")
+        if extra_body is None and "chat_template_kwargs" in sampling:
+            extra_body = {"chat_template_kwargs": sampling["chat_template_kwargs"]}
         return replace(
             self.agent_config,
             model=str(model),
@@ -147,6 +166,7 @@ class MilesSessionAgentRolloutStrategy:
             max_tokens=int(max_tokens),
             temperature=None if temperature is None else float(temperature),
             prompt_cache=False,
+            extra_body=extra_body,
             step_limit=min(self.agent_config.step_limit, request.budgets.max_model_calls),
         )
 
@@ -236,9 +256,17 @@ def _trajectory_from_session(
         prompt_length=prompt_length,
         generated_spans=spans,
         response_text=final_text,
-        status="completed" if status == "completed" else "failed",
+        status=_trajectory_status(status),
         metadata={"strategy": "miles-session-agent-loop", "session": metadata.get("tree", {})},
     )
+
+
+def _trajectory_status(agent_status: str) -> str:
+    if agent_status == "completed":
+        return "completed"
+    if agent_status in {"step_limit", "cost_limit"}:
+        return "truncated"
+    return "failed"
 
 
 def _tool_call_count(messages: list[dict[str, Any]]) -> int:

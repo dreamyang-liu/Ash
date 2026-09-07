@@ -52,13 +52,36 @@ def build_service(
 
         return GroupRolloutService(factory, environment_provider=provider)
 
+    if normalized == "checkpoint-agent-loop-v1":
+        if not image:
+            raise ValueError("checkpoint-agent-loop-v1 service requires an image/template")
+        if not miles_session_endpoint:
+            raise ValueError("checkpoint-agent-loop-v1 service requires miles_session_endpoint")
+        from .ash_environment import AshSessionEnvironmentProvider
+        from .strategies.checkpoint_agent_loop import CheckpointAgentLoopRolloutStrategy
+        from ..models import AgentConfig
+
+        provider = AshSessionEnvironmentProvider(image=image, backend=backend)
+        agent_config = AgentConfig(model=model or "openai/local")
+
+        def factory(_request, _context):
+            return CheckpointAgentLoopRolloutStrategy(
+                agent_config=agent_config,
+                session_server_endpoint=miles_session_endpoint,
+                allow_text_prompt=allow_text_prompt,
+            )
+
+        return GroupRolloutService(factory, environment_provider=provider)
+
     if normalized == "sequential":
         from .strategies.sequential import SequentialRolloutStrategy
 
         return GroupRolloutService(
             lambda _request, _context: SequentialRolloutStrategy(allow_deterministic_fallback=False)
         )
-    raise ValueError(f"unknown rollout strategy {strategy!r}; choose agent-loop or sequential")
+    raise ValueError(
+        f"unknown rollout strategy {strategy!r}; choose agent-loop, checkpoint-agent-loop-v1, or sequential"
+    )
 
 
 class RolloutGroupsHTTPServer(ThreadingHTTPServer):
@@ -137,7 +160,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Ash rollout interface service")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=11001)
-    parser.add_argument("--strategy", choices=["agent-loop", "sequential"], default="agent-loop")
+    parser.add_argument(
+        "--strategy", choices=["agent-loop", "checkpoint-agent-loop-v1", "sequential"], default="agent-loop"
+    )
     parser.add_argument("--image", default=os.environ.get("ASH_ROLLOUT_IMAGE"))
     parser.add_argument(
         "--backend-json",

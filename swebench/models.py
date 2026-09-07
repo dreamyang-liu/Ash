@@ -101,6 +101,9 @@ class AgentConfig:
     cost_limit: float = 3.0
     temperature: Optional[float] = None  # None = use model default
     reasoning_effort: Optional[str] = None  # "low" | "medium" | "high" | "none" (adaptive thinking)
+    # Provider-specific request fields passed through to OpenAI-compatible
+    # endpoints (for example Qwen3's chat_template_kwargs).
+    extra_body: Optional[dict] = None
     prompt_cache: bool = True  # Enable prompt caching for Anthropic/Bedrock models
     tools: str = "default"  # "default" (structured tools) | "bash_only" (single bash tool)
     custom_tools_dir: Optional[str] = None  # manifest dir; None = default configs/custom_tools
