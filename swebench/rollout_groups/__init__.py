@@ -2,8 +2,8 @@
 
 The HTTP service in :mod:`swebench.rollout_groups.server` deliberately knows
 nothing about how a branch is selected. A strategy receives a validated
-rollout-group request and may use Ash checkpoint/cache primitives through the
-small protocols exported here.
+rollout-group request and uses the model and environment contracts exported
+here.
 """
 
 from .protocol import (
@@ -16,6 +16,7 @@ from .protocol import (
     Trajectory,
 )
 from .runner import (
+    EnvironmentCheckpoint,
     EnvironmentProvider,
     GroupRolloutService,
     ModelClient,
@@ -29,6 +30,7 @@ from .strategies import (
 from .server import RolloutGroupsHTTPServer, build_service, serve
 
 __all__ = [
+    "EnvironmentCheckpoint",
     "EnvironmentProvider",
     "GeneratedSpan",
     "GroupRolloutService",

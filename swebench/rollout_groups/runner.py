@@ -12,7 +12,7 @@ import time
 import urllib.request
 import uuid
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from .protocol import (
     GeneratedSpan,
@@ -34,13 +34,42 @@ class ModelClient(Protocol):
                  sampling_params: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]: ...
 
 
+@dataclass(frozen=True)
+class EnvironmentCheckpoint:
+    """Opaque environment state returned to an Ash rollout strategy."""
+
+    checkpoint_id: str
+    owner_job_id: str
+    source_sandbox_id: str
+    backend: str
+    state_scope: Literal["full-runtime", "filesystem-only"]
+    multiple_restore: bool
+    explicit_release: bool
+
+    def __post_init__(self) -> None:
+        for name in ("checkpoint_id", "owner_job_id", "source_sandbox_id", "backend"):
+            if not getattr(self, name):
+                raise ValueError(f"{name} must be non-empty")
+        if self.state_scope not in {"full-runtime", "filesystem-only"}:
+            raise ValueError(
+                "state_scope must be 'full-runtime' or 'filesystem-only'"
+            )
+        for name in ("multiple_restore", "explicit_release"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be a boolean")
+
+
 class EnvironmentProvider(Protocol):
     """Environment lifecycle used by a branch strategy."""
 
     def spawn(self, request: RolloutGroupRequest) -> Any: ...
-    def snapshot(self, sandbox: Any, *, name: str) -> str: ...
-    def restore(self, snapshot_id: str) -> Any: ...
-    def fork(self, sandbox: Any, *, count: int) -> list[Any]: ...
+    def create_checkpoint(
+        self, sandbox: Any, *, owner_job_id: str, name: str | None = None
+    ) -> EnvironmentCheckpoint: ...
+    def restore_checkpoint(
+        self, checkpoint: EnvironmentCheckpoint, *, agent_id: str = ""
+    ) -> Any: ...
+    def release_checkpoint(self, checkpoint: EnvironmentCheckpoint) -> bool: ...
     def destroy(self, sandbox: Any) -> None: ...
 
 
@@ -55,7 +84,6 @@ class RolloutContext:
     cancel_event: threading.Event
     model_client: ModelClient | None
     environment_provider: EnvironmentProvider | None
-    checkpoint_store: Any | None
     job_id: str
     deadline: float | None = None
 
@@ -110,12 +138,10 @@ class GroupRolloutService:
     """In-process asynchronous service backing the three HTTP endpoints."""
 
     def __init__(self, strategy_factory, *, model_client: ModelClient | None = None,
-                 environment_provider: EnvironmentProvider | None = None,
-                 checkpoint_store: Any | None = None):
+                 environment_provider: EnvironmentProvider | None = None):
         self.strategy_factory = strategy_factory
         self.model_client = model_client
         self.environment_provider = environment_provider
-        self.checkpoint_store = checkpoint_store
         self._lock = threading.RLock()
         self._jobs: dict[str, dict[str, Any]] = {}
 
@@ -198,7 +224,6 @@ class GroupRolloutService:
             cancel_event,
             self.model_client,
             self.environment_provider,
-            self.checkpoint_store,
             job_id,
             deadline=time.monotonic() + request.budgets.max_wall_time_seconds,
         )

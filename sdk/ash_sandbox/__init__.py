@@ -2,7 +2,7 @@ from .events import Event, EventBatch
 from .result import ToolResult
 from .backends import Backend, HTTPBackend, MCPBackend, CLIBackend, GatewayBackend
 from .sandbox import Sandbox
-from .pool import DockerPool, MicroVMPool, Pool, SandboxPool
+from .pool import CheckpointCapabilities, DockerPool, MicroVMPool, Pool, SandboxPool
 from .toolset import (
     CustomToolPlan,
     CustomToolSpec,
@@ -23,6 +23,7 @@ __all__ = [
     "Sandbox",
     "Pool",
     "DockerPool",
+    "CheckpointCapabilities",
     "MicroVMPool",
     "SandboxPool",
     "CustomToolPlan",

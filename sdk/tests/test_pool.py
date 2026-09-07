@@ -21,6 +21,8 @@ class FakeAenv(BaseHTTPRequestHandler):
 
     requests: list = []  # (method, path, body, headers)
     next_id = 0
+    next_snapshot_id = 0
+    delete_status = 200
 
     def _read_body(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
@@ -31,9 +33,9 @@ class FakeAenv(BaseHTTPRequestHandler):
         FakeAenv.requests.append((method, self.path, body, dict(self.headers)))
         return body
 
-    def _reply(self, payload: dict | list):
+    def _reply(self, payload: dict | list, *, status: int = 200):
         raw = json.dumps(payload).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
@@ -48,6 +50,11 @@ class FakeAenv(BaseHTTPRequestHandler):
         if self.path == "/sandboxes":
             FakeAenv.next_id += 1
             return self._reply({"sandboxID": f"vm-{FakeAenv.next_id}"})
+        if self.path.endswith("/snapshots"):
+            FakeAenv.next_snapshot_id += 1
+            return self._reply(
+                {"snapshotID": f"snap-{FakeAenv.next_snapshot_id}"}
+            )
         if self.path.endswith("/fork"):
             # AgentENV replies with one result per requested fork, each
             # carrying either `sandbox` or `error` (verified against a live
@@ -68,7 +75,7 @@ class FakeAenv(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         self._record("DELETE")
-        self._reply({})
+        self._reply({}, status=FakeAenv.delete_status)
 
     def log_message(self, *args):
         pass
@@ -78,6 +85,8 @@ class FakeAenv(BaseHTTPRequestHandler):
 def aenv():
     FakeAenv.requests = []
     FakeAenv.next_id = 0
+    FakeAenv.next_snapshot_id = 0
+    FakeAenv.delete_status = 200
     FakeAenv.fork_error = None
     server = HTTPServer(("127.0.0.1", 0), FakeAenv)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -95,6 +104,13 @@ def test_capabilities_are_declared_not_assumed():
     docker = DockerPool.__new__(DockerPool)
     assert not docker.supports_pause()
     assert not docker.supports_fork()
+
+    # Docker does not advertise a full-runtime checkpoint: a container image
+    # would preserve files but lose memory and background processes.
+    assert vm.checkpoint_capabilities().state_scope == "full-runtime"
+    assert vm.checkpoint_capabilities().multiple_restore is True
+    assert vm.checkpoint_capabilities().explicit_release is True
+    assert docker.checkpoint_capabilities() is None
 
 def test_unsupported_capability_refuses_clearly():
     docker = DockerPool.__new__(DockerPool)
@@ -170,6 +186,36 @@ def test_pause_and_resume_hit_the_state_endpoints(aenv):
     # the timeout restarts the sandbox's TTL clock.
     _, _, resume_body, _ = FakeAenv.requests[-1]
     assert resume_body == {"timeout": 600}
+
+def test_agentenv_checkpoint_contract_creates_restores_and_releases(aenv):
+    pool = MicroVMPool(aenv, sandbox_ttl=600)
+
+    async def scenario():
+        source = await pool.spawn(agent_id="parent")
+        checkpoint_id = await pool.create_checkpoint(source, name="job/step 1")
+        child = await pool.restore_checkpoint(checkpoint_id, agent_id="child")
+        await pool.release_checkpoint(checkpoint_id)
+        return source, checkpoint_id, child
+
+    source, checkpoint_id, child = asyncio.run(scenario())
+    assert checkpoint_id == "snap-1"
+    assert source.sandbox_id != child.sandbox_id
+    assert child.agent_id == "child"
+
+    checkpoint_requests = [item for item in FakeAenv.requests if item[1].endswith("/snapshots")]
+    assert checkpoint_requests[0][1] == f"/sandboxes/{source.sandbox_id}/snapshots"
+    assert checkpoint_requests[0][2] == {"name": "job/step 1"}
+    assert paths_of("DELETE")[-1] == "/templates/snap-1"
+
+
+def test_agentenv_checkpoint_release_is_idempotent_when_snapshot_is_absent(aenv):
+    pool = MicroVMPool(aenv)
+    FakeAenv.delete_status = 404
+
+    asyncio.run(pool.release_checkpoint("already-deleted"))
+
+    assert paths_of("DELETE") == ["/templates/already-deleted"]
+
 
 def test_requests_authenticate_with_the_x_api_key_header(aenv):
     # AgentENV validates X-API-KEY; an Authorization: Bearer header is not

@@ -73,6 +73,45 @@ class AshSession:
     def create(self, image: str) -> bool:
         return self._get_loop().run_until_complete(self._create_async(image))
 
+    @property
+    def checkpoint_capabilities(self):
+        if not self._pool:
+            return None
+        return self._pool.checkpoint_capabilities()
+
+    def create_checkpoint(self, *, name: str | None = None) -> str:
+        if not self._pool or not self._sandbox:
+            raise RuntimeError("No active sandbox")
+        if self._pool.checkpoint_capabilities() is None:
+            raise NotImplementedError(f"{type(self._pool).__name__} does not support checkpoints")
+        return self._get_loop().run_until_complete(
+            self._pool.create_checkpoint(self._sandbox, name=name)
+        )
+
+    def restore_checkpoint(self, checkpoint_id: str, *, agent_id: str = "") -> None:
+        if self._pool is not None or self._sandbox is not None:
+            raise RuntimeError("Cannot restore into an active AshSession")
+        self._pool = build_pool(self.backend, runtime_bin=self.runtime_bin)
+        try:
+            if self._pool.checkpoint_capabilities() is None:
+                raise NotImplementedError(f"{type(self._pool).__name__} does not support checkpoints")
+            self._sandbox = self._get_loop().run_until_complete(
+                self._pool.restore_checkpoint(checkpoint_id, agent_id=agent_id)
+            )
+        except Exception:
+            self._get_loop().run_until_complete(self._pool.close())
+            self._pool = None
+            self._sandbox = None
+            raise
+
+    def release_checkpoint(self, checkpoint_id: str) -> None:
+        if not self._pool:
+            raise RuntimeError("No active checkpoint backend")
+        capabilities = self._pool.checkpoint_capabilities()
+        if capabilities is None or not capabilities.explicit_release:
+            raise NotImplementedError(f"{type(self._pool).__name__} cannot release checkpoints")
+        self._get_loop().run_until_complete(self._pool.release_checkpoint(checkpoint_id))
+
     async def _create_async(self, image: str) -> bool:
         try:
             self._pool = build_pool(self.backend, runtime_bin=self.runtime_bin)

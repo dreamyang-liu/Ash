@@ -2,15 +2,30 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 import shutil
 import subprocess
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import quote
 
 import httpx
 
 from .backends import GatewayBackend, HTTPBackend
 from .result import ToolResult
 from .sandbox import Sandbox, _find_free_port
+
+
+@dataclass(frozen=True)
+class CheckpointCapabilities:
+    """State guarantees offered by one environment backend.
+
+    Strategy code must inspect ``state_scope`` instead of treating a
+    filesystem image as equivalent to a full VM checkpoint.
+    """
+
+    state_scope: Literal["full-runtime", "filesystem-only"]
+    multiple_restore: bool
+    explicit_release: bool
 
 
 class Pool(ABC):
@@ -75,6 +90,19 @@ class Pool(ABC):
     def supports_fork(self) -> bool:
         """Whether this pool can split a running sandbox into copies."""
         return False
+
+    def checkpoint_capabilities(self) -> CheckpointCapabilities | None:
+        """Describe durable checkpoint semantics, or return ``None``."""
+        return None
+
+    async def create_checkpoint(self, sandbox: Sandbox, *, name: str | None = None) -> str:
+        raise NotImplementedError(f"{type(self).__name__} does not support durable checkpoints")
+
+    async def restore_checkpoint(self, checkpoint_id: str, *, agent_id: str = "") -> Sandbox:
+        raise NotImplementedError(f"{type(self).__name__} does not support durable checkpoints")
+
+    async def release_checkpoint(self, checkpoint_id: str) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not support checkpoint release")
 
     async def pause(self, sandbox: Sandbox) -> None:
         """Suspend a sandbox, releasing its compute until resumed."""
@@ -291,6 +319,12 @@ class MicroVMPool(Pool):
     def supports_fork(self) -> bool:
         return True
 
+    def checkpoint_capabilities(self) -> CheckpointCapabilities:
+        return CheckpointCapabilities(
+            state_scope="full-runtime",
+            multiple_restore=True,
+            explicit_release=True,
+        )
     # --- Lifecycle ---
 
     async def spawn(
@@ -368,6 +402,37 @@ class MicroVMPool(Pool):
             json={"timeout": self.sandbox_ttl})
         resp.raise_for_status()
 
+    async def create_checkpoint(self, sandbox: Sandbox, *, name: str | None = None) -> str:
+        """Persist a running AgentENV sandbox without stopping its parent."""
+        sid = _require_id(sandbox)
+        response = await self._client.post(
+            f"{self.server_url}/sandboxes/{sid}/snapshots",
+            json={"name": name} if name else {},
+        )
+        if response.is_error:
+            detail = response.text.strip()
+            raise RuntimeError(
+                f"AgentENV checkpoint creation failed ({response.status_code}) "
+                f"for sandbox {sid}: {detail or response.reason_phrase}"
+            )
+        return _snapshot_id(response.json())
+
+    async def restore_checkpoint(self, checkpoint_id: str, *, agent_id: str = "") -> Sandbox:
+        """Start an independent sandbox from a committed AgentENV snapshot."""
+        if not checkpoint_id:
+            raise ValueError("checkpoint_id must be non-empty")
+        return await self.spawn(image=checkpoint_id, agent_id=agent_id)
+
+    async def release_checkpoint(self, checkpoint_id: str) -> None:
+        """Delete the exact committed snapshot returned by AgentENV."""
+        if not checkpoint_id:
+            raise ValueError("checkpoint_id must be non-empty")
+        encoded = quote(checkpoint_id, safe="")
+        response = await self._client.delete(f"{self.server_url}/templates/{encoded}")
+        if response.status_code == 404:
+            return
+        response.raise_for_status()
+
     async def fork(self, sandbox: Sandbox, count: int = 1,
                    agent_ids: list[str] | None = None) -> list[Sandbox]:
         """Split a running VM into `count` copies of its current state.
@@ -423,6 +488,14 @@ def _sandbox_id(body: dict) -> str:
         if body.get(key):
             return str(body[key])
     raise RuntimeError(f"no sandbox id in response: {body}")
+
+
+def _snapshot_id(body: dict) -> str:
+    """Read the stable snapshot id returned by AgentENV."""
+    for key in ("snapshotID", "snapshot_id", "id"):
+        if body.get(key):
+            return str(body[key])
+    raise RuntimeError(f"no snapshot id in response: {body}")
 
 
 def _require_id(sandbox: Sandbox) -> str:
