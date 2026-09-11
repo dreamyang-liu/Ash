@@ -1,0 +1,19 @@
+{
+  "allowed_registries": [
+    "docker.io",
+    "ghcr.io"
+  ],
+  "runtime_artifact": "/opt/ash/bin/ash-runtime",
+  "resource_profiles": {
+    "standard": {
+      "cpu": 2,
+      "memory_mib": 4096
+    }
+  },
+  "runtime_install_path": "/tmp/ash-runtime",
+  "runtime_port": 3000,
+  "cache_prefix": "ash-rollout",
+  "build_timeout_seconds": 900,
+  "sandbox_timeout_seconds": 900,
+  "aenv_bin": "aenv"
+}

@@ -19,6 +19,13 @@ def _request(**overrides):
         "rollout_job_id": "job",
         "rollout_id": 0,
         "prompt_group_id": "group",
+        "task_id": "task",
+        "environment_ref": {
+            "kind": "template",
+            "id": "swebench-runtime",
+            "revision": "sha256:test",
+            "resource_profile": "standard",
+        },
         "sample_slots": [{"sample_slot_id": "slot", "sample_index": 0}],
         "max_samples": 1,
         "minimum_returned_samples": 1,

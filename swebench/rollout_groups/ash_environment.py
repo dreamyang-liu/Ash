@@ -6,6 +6,8 @@ import threading
 from typing import Any
 
 from ..sandbox import AshSession
+from .environment_catalog import EnvironmentCatalog, EnvironmentCatalogEntry
+from .environment_resolver import AgentEnvOCIResolver
 from .runner import EnvironmentCheckpoint
 
 
@@ -19,16 +21,20 @@ class AshSessionEnvironmentProvider:
 
     def __init__(
         self,
-        image: str,
+        catalog: EnvironmentCatalog | None = None,
         *,
+        oci_resolver: AgentEnvOCIResolver | None = None,
         backend: dict[str, Any] | None = None,
         runtime_bin: str | None = None,
         timeout: float = 300.0,
         quiet: bool = True,
     ) -> None:
-        if not image:
-            raise ValueError("image must be non-empty")
-        self.image = image
+        if catalog is not None and not isinstance(catalog, EnvironmentCatalog):
+            raise TypeError("catalog must be an EnvironmentCatalog or None")
+        if catalog is None and oci_resolver is None:
+            raise ValueError("an environment catalog or OCI resolver is required")
+        self.catalog = catalog
+        self.oci_resolver = oci_resolver
         self.backend = dict(backend or {})
         self.runtime_bin = runtime_bin
         self.timeout = timeout
@@ -38,17 +44,75 @@ class AshSessionEnvironmentProvider:
             str, tuple[EnvironmentCheckpoint, AshSession]
         ] = {}
 
-    def spawn(self, _request):
+    def spawn(self, request):
+        self.validate_request(request)
+        resolved = self._resolve(request.environment_ref)
         session = AshSession(
             runtime_bin=self.runtime_bin,
             timeout=self.timeout,
             quiet=self.quiet,
             backend=self.backend,
         )
-        if not session.create(self.image):
+        if not session.create(resolved.spawn_ref):
             session.destroy()
-            raise RuntimeError(f"failed to create Ash sandbox from image {self.image!r}")
+            raise RuntimeError(
+                "failed to create Ash sandbox for environment "
+                f"{request.environment_ref.id!r} at revision "
+                f"{request.environment_ref.revision!r}"
+            )
         return session
+
+    def validate_request(self, request) -> None:
+        """Reject an incompatible or unlisted environment before job enqueue."""
+        ref = request.environment_ref
+        backend = str(self.backend.get("backend") or "docker").strip().lower()
+        if self.catalog is not None and self.catalog.find(ref) is not None:
+            # A deployment may pre-resolve an OCI identity to a runtime-ready
+            # AgentENV template/snapshot. The trusted catalog mapping wins.
+            if backend != "microvm":
+                self._validate_backend_kind(ref.kind)
+            return
+        if backend == "microvm" and ref.kind == "image":
+            if self.oci_resolver is None:
+                raise ValueError(
+                    "the microvm backend requires an OCI resolver for image environments"
+                )
+            self.oci_resolver.validate(ref)
+            return
+        self._validate_backend_kind(ref.kind)
+        if self.catalog is None:
+            raise ValueError("environment_ref is not present in a static catalog")
+        self.catalog.resolve(ref)
+
+    def list_environments(self) -> list[dict[str, str]]:
+        """List deployment-approved logical refs, never native spawn handles."""
+        if self.catalog is None:
+            return []
+        return [ref.to_dict() for ref in self.catalog.list_refs()]
+
+    def _resolve(self, ref) -> EnvironmentCatalogEntry:
+        if self.catalog is not None:
+            entry = self.catalog.find(ref)
+            if entry is not None:
+                return entry
+        backend = str(self.backend.get("backend") or "docker").strip().lower()
+        if backend == "microvm" and ref.kind == "image" and self.oci_resolver:
+            return self.oci_resolver.resolve(ref)
+        raise ValueError(
+            "environment_ref is not allowlisted and no dynamic resolver accepts it: "
+            f"{ref.kind}/{ref.id}@{ref.revision} ({ref.resource_profile})"
+        )
+
+    def _validate_backend_kind(self, kind: str) -> None:
+        backend = str(self.backend.get("backend") or "docker").strip().lower()
+        if backend == "microvm" and kind not in {"template", "snapshot"}:
+            raise ValueError(
+                "the microvm backend requires environment_ref.kind template or snapshot"
+            )
+        if backend != "microvm" and kind != "image":
+            raise ValueError(
+                f"the {backend} backend requires environment_ref.kind image"
+            )
 
     def destroy(self, sandbox) -> None:
         sandbox.destroy()

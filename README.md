@@ -146,6 +146,11 @@ async with SandboxPool(
 
 ## Architecture
 
+The Miles integration is implemented as a strategy-neutral rollout service under
+`swebench/rollout_groups/`. See
+[`docs/ASH_ROLLOUT_INTERFACE.md`](docs/ASH_ROLLOUT_INTERFACE.md) for its versioned
+`/rollout-groups` API, environment selection, and strategy boundary.
+
 ## Runtime
 
 The `ash-runtime` binary runs inside each sandbox container. Single Go binary (~9MB), no dependencies beyond `ripgrep`.
@@ -237,6 +242,7 @@ curl -X DELETE http://control-plane/destroy -d '{"all": true}'
 ├── ash_sandbox/          # Python async client
 ├── swebench/             # SWE-bench evaluation harness
 │   ├── agent.py          # Agent loop (litellm + tool execution)
+│   ├── rollout_groups/   # Strategy-neutral RL rollout service
 │   ├── configs/          # Model configs (YAML)
 │   └── AGENT.md          # System prompt for strong models
 ├── k8s-scaffold/         # K8s infrastructure (Go)

@@ -38,6 +38,12 @@ python -m swebench -c swebench/configs/claude-opus.yaml --harness claude-code
 - Nothing needs installing inside the image: the `ash-runtime` binary is either
   mounted (`--runtime-bin`) or fetched by `bootstrap.sh` at startup.
 
+That bootstrap statement applies to ordinary SWE-bench runs. The AgentENV
+rollout path that creates restorable checkpoints uses a runtime-ready template
+or snapshot; a digest-pinned OCI image is first converted into such a snapshot
+by the rollout environment resolver. See
+[`../docs/ASH_ROLLOUT_INTERFACE.md`](../docs/ASH_ROLLOUT_INTERFACE.md).
+
 ## Layout
 
 ```
@@ -63,7 +69,8 @@ swebench/
 ├── harnesses/        # Pluggable topologies; base.py defines the API
 ├── configs/          # Per-model YAML, composed with `extends:`
 ├── mcp_server.py     # MCP proxy: the same pipeline for external agents
-└── rollout_server.py # RL rollout endpoint (agent + in-sandbox grading)
+├── rollout_server.py # Legacy single-run rollout endpoint
+└── rollout_groups/   # Versioned group rollout service and strategies
 ```
 
 ## How a run works

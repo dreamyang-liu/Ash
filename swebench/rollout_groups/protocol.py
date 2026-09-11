@@ -9,13 +9,16 @@ created.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-PROTOCOL_VERSION = "ash-rollout-v1"
+PROTOCOL_VERSION = "ash-rollout-v2"
 JOB_STATUSES = {"queued", "running", "completed", "early_stopped", "failed", "cancelled"}
 TRAJECTORY_STATUSES = {"completed", "truncated", "failed", "aborted"}
+ENVIRONMENT_KINDS = {"image", "template", "snapshot"}
+OCI_DIGEST = re.compile(r"sha256:[0-9a-fA-F]{64}\Z")
 
 
 def _reject_unknown_keys(value: dict[str, Any], allowed: set[str], name: str) -> None:
@@ -48,11 +51,24 @@ class RolloutBudget:
         model_calls = value.get("max_model_calls")
         tool_calls = value.get("max_tool_calls")
         wall_time = value.get("max_wall_time_seconds")
-        if not isinstance(model_calls, int) or model_calls <= 0:
+        if (
+            not isinstance(model_calls, int)
+            or isinstance(model_calls, bool)
+            or model_calls <= 0
+        ):
             raise ValueError("budgets.max_model_calls must be > 0")
-        if not isinstance(tool_calls, int) or tool_calls < 0:
+        if (
+            not isinstance(tool_calls, int)
+            or isinstance(tool_calls, bool)
+            or tool_calls < 0
+        ):
             raise ValueError("budgets.max_tool_calls must be >= 0")
-        if not isinstance(wall_time, (int, float)) or wall_time <= 0:
+        if (
+            not isinstance(wall_time, (int, float))
+            or isinstance(wall_time, bool)
+            or not math.isfinite(wall_time)
+            or wall_time <= 0
+        ):
             raise ValueError("budgets.max_wall_time_seconds must be > 0")
         return cls(model_calls, tool_calls, float(wall_time))
 
@@ -73,6 +89,50 @@ class SampleSlot:
         )
 
 
+@dataclass(frozen=True)
+class EnvironmentRef:
+    """Trusted logical reference to one sandbox creation artifact."""
+
+    kind: str
+    id: str
+    revision: str
+    resource_profile: str
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "EnvironmentRef":
+        if not isinstance(value, dict):
+            raise ValueError("environment_ref must be an object")
+        _reject_unknown_keys(
+            value,
+            {"kind", "id", "revision", "resource_profile"},
+            "environment_ref",
+        )
+        kind = _required_string(value.get("kind"), "environment_ref.kind")
+        if kind not in ENVIRONMENT_KINDS:
+            raise ValueError(
+                "environment_ref.kind must be one of: image, template, snapshot"
+            )
+        result = cls(
+            kind=kind,
+            id=_required_string(value.get("id"), "environment_ref.id"),
+            revision=_required_string(
+                value.get("revision"), "environment_ref.revision"
+            ),
+            resource_profile=_required_string(
+                value.get("resource_profile"),
+                "environment_ref.resource_profile",
+            ),
+        )
+        if result.kind == "image" and not OCI_DIGEST.fullmatch(result.revision):
+            raise ValueError(
+                "environment_ref.revision must be a sha256 digest when kind is image"
+            )
+        return result
+
+    def to_dict(self) -> dict[str, str]:
+        return asdict(self)
+
+
 def _nonnegative_int(value: Any, name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
@@ -84,6 +144,8 @@ class RolloutGroupRequest:
     rollout_job_id: str
     rollout_id: int
     prompt_group_id: str
+    task_id: str
+    environment_ref: EnvironmentRef
     sample_slots: tuple[SampleSlot, ...]
     max_samples: int
     minimum_returned_samples: int
@@ -112,6 +174,8 @@ class RolloutGroupRequest:
                 "rollout_job_id",
                 "rollout_id",
                 "prompt_group_id",
+                "task_id",
+                "environment_ref",
                 "sample_slots",
                 "max_samples",
                 "minimum_returned_samples",
@@ -140,9 +204,19 @@ class RolloutGroupRequest:
             raise ValueError("sample_index values must be unique")
         max_samples = value.get("max_samples")
         minimum = value.get("minimum_returned_samples", 1)
-        if not isinstance(max_samples, int) or max_samples <= 0 or max_samples > len(slots):
+        if (
+            not isinstance(max_samples, int)
+            or isinstance(max_samples, bool)
+            or max_samples <= 0
+            or max_samples > len(slots)
+        ):
             raise ValueError("max_samples must be between 1 and the number of sample slots")
-        if not isinstance(minimum, int) or minimum < 1 or minimum > max_samples:
+        if (
+            not isinstance(minimum, int)
+            or isinstance(minimum, bool)
+            or minimum < 1
+            or minimum > max_samples
+        ):
             raise ValueError("minimum_returned_samples must be between 1 and max_samples")
         prompt = value.get("prompt")
         if not isinstance(prompt, (str, list)):
@@ -161,6 +235,8 @@ class RolloutGroupRequest:
             rollout_job_id=_required_string(value.get("rollout_job_id"), "rollout_job_id"),
             rollout_id=_nonnegative_int(value.get("rollout_id"), "rollout_id"),
             prompt_group_id=_required_string(value.get("prompt_group_id"), "prompt_group_id"),
+            task_id=_required_string(value.get("task_id"), "task_id"),
+            environment_ref=EnvironmentRef.from_dict(value.get("environment_ref")),
             sample_slots=slots,
             max_samples=max_samples,
             minimum_returned_samples=minimum,
@@ -186,6 +262,7 @@ class RolloutGroupRequest:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["sample_slots"] = [asdict(slot) for slot in self.sample_slots]
+        data["environment_ref"] = self.environment_ref.to_dict()
         data["prompt_token_ids"] = list(self.prompt_token_ids)
         return data
 
@@ -227,7 +304,7 @@ class GeneratedSpan:
         )
         start = _nonnegative_int(value.get("start"), "generated span start")
         end = value.get("end")
-        if not isinstance(end, int) or end <= start:
+        if not isinstance(end, int) or isinstance(end, bool) or end <= start:
             raise ValueError("generated span end must be greater than start")
         output = value.get("output_token_ids")
         inputs = value.get("input_token_ids")
@@ -238,8 +315,18 @@ class GeneratedSpan:
         if len(output) != end - start:
             raise ValueError("output_token_ids length must equal span length")
         logs = value.get("output_token_log_probs")
-        if logs is not None and (not isinstance(logs, list) or len(logs) != len(output)):
-            raise ValueError("output_token_log_probs length must equal span length")
+        if logs is not None:
+            if not isinstance(logs, list) or len(logs) != len(output):
+                raise ValueError("output_token_log_probs length must equal span length")
+            if any(
+                not isinstance(item, (int, float))
+                or isinstance(item, bool)
+                or not math.isfinite(item)
+                for item in logs
+            ):
+                raise ValueError(
+                    "output_token_log_probs must contain finite numbers"
+                )
         return cls(
             response_id=_required_string(value.get("response_id"), "response_id"),
             start=start,
@@ -306,7 +393,12 @@ class Trajectory:
         if any(not isinstance(token, int) or isinstance(token, bool) for token in tokens):
             raise ValueError("trajectory token_ids must be integers")
         prompt_length = value.get("prompt_length")
-        if not isinstance(prompt_length, int) or prompt_length < 1 or prompt_length >= len(tokens):
+        if (
+            not isinstance(prompt_length, int)
+            or isinstance(prompt_length, bool)
+            or prompt_length < 1
+            or prompt_length >= len(tokens)
+        ):
             raise ValueError("prompt_length must leave at least one response token")
         messages = value.get("messages")
         if not isinstance(messages, list) or not messages:
@@ -327,10 +419,30 @@ class Trajectory:
             previous_end = span.end
         parent = value.get("parent_branch_id")
         branch_point = value.get("branch_point_token_count")
+        if parent is not None:
+            parent = _required_string(parent, "parent_branch_id")
         if parent is None and branch_point is not None:
             raise ValueError("root trajectory cannot declare branch_point_token_count")
-        if parent is not None and (not isinstance(branch_point, int) or branch_point < 0):
+        if parent is not None and (
+            not isinstance(branch_point, int)
+            or isinstance(branch_point, bool)
+            or branch_point < 0
+        ):
             raise ValueError("child trajectory must declare branch_point_token_count")
+        metadata = value.get("metadata", {})
+        if not isinstance(metadata, dict):
+            raise ValueError("trajectory metadata must be an object")
+        response_text = value.get("response_text", "")
+        if not isinstance(response_text, str):
+            raise ValueError("response_text must be a string")
+        reward = value.get("reward")
+        if reward is not None and not isinstance(reward, dict):
+            if (
+                not isinstance(reward, (int, float))
+                or isinstance(reward, bool)
+                or not math.isfinite(reward)
+            ):
+                raise ValueError("trajectory reward must be a finite number or object")
         return cls(
             sample_slot_id=_required_string(value.get("sample_slot_id"), "sample_slot_id"),
             branch_id=_required_string(value.get("branch_id"), "branch_id"),
@@ -340,10 +452,10 @@ class Trajectory:
             token_ids=[int(token) for token in tokens],
             prompt_length=prompt_length,
             generated_spans=spans,
-            response_text=str(value.get("response_text", "")),
-            reward=value.get("reward"),
+            response_text=response_text,
+            reward=reward,
             status=status,
-            metadata=dict(value.get("metadata") or {}),
+            metadata=dict(metadata),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -365,10 +477,28 @@ class RolloutGroupResult:
     protocol_version: str = PROTOCOL_VERSION
 
     def __post_init__(self) -> None:
+        _required_string(self.rollout_job_id, "rollout_job_id")
+        _required_string(self.prompt_group_id, "prompt_group_id")
+        if self.protocol_version != PROTOCOL_VERSION:
+            raise ValueError(
+                f"unsupported protocol_version: {self.protocol_version!r}"
+            )
+        if (
+            not isinstance(self.max_samples, int)
+            or isinstance(self.max_samples, bool)
+            or self.max_samples <= 0
+        ):
+            raise ValueError("max_samples must be > 0")
         if self.status not in JOB_STATUSES:
             raise ValueError(f"unknown job status: {self.status!r}")
         if self.status in {"queued", "running"} and self.trajectories:
             raise ValueError("non-terminal result cannot contain trajectories")
+        if (
+            not isinstance(self.search_branches, int)
+            or isinstance(self.search_branches, bool)
+            or self.search_branches < 0
+        ):
+            raise ValueError("search_branches must be a non-negative integer")
         if len(self.trajectories) > self.max_samples:
             raise ValueError("trajectory count exceeds max_samples")
         slots = [item.sample_slot_id for item in self.trajectories]
@@ -410,6 +540,15 @@ class RolloutSubmission:
     status: str
     protocol_version: str = PROTOCOL_VERSION
 
+    def __post_init__(self) -> None:
+        _required_string(self.rollout_job_id, "rollout_job_id")
+        if self.protocol_version != PROTOCOL_VERSION:
+            raise ValueError(
+                f"unsupported protocol_version: {self.protocol_version!r}"
+            )
+        if self.status not in JOB_STATUSES:
+            raise ValueError(f"unknown submission status: {self.status!r}")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "protocol_version": self.protocol_version,
@@ -426,6 +565,10 @@ class RolloutDeletion:
 
     def __post_init__(self) -> None:
         _required_string(self.rollout_job_id, "rollout_job_id")
+        if self.protocol_version != PROTOCOL_VERSION:
+            raise ValueError(
+                f"unsupported protocol_version: {self.protocol_version!r}"
+            )
         if self.status not in {"completed", "early_stopped", "failed", "cancelled"}:
             raise ValueError(f"deletion status must be terminal, got {self.status!r}")
 

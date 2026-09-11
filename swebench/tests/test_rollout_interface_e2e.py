@@ -12,10 +12,17 @@ from swebench.rollout_groups.strategies.sequential import SequentialRolloutStrat
 
 def _request(job_id: str) -> dict:
     return {
-        "protocol_version": "ash-rollout-v1",
+        "protocol_version": "ash-rollout-v2",
         "rollout_job_id": job_id,
         "rollout_id": 1,
         "prompt_group_id": "group-e2e",
+        "task_id": "task-e2e",
+        "environment_ref": {
+            "kind": "template",
+            "id": "swebench-runtime",
+            "revision": "sha256:test",
+            "resource_profile": "standard",
+        },
         "sample_slots": [
             {"sample_slot_id": f"{job_id}:slot:0", "sample_index": 0},
             {"sample_slot_id": f"{job_id}:slot:1", "sample_index": 1},

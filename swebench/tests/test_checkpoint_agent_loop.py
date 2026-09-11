@@ -18,6 +18,13 @@ def _request() -> RolloutGroupRequest:
             "rollout_job_id": "job-branch",
             "rollout_id": 0,
             "prompt_group_id": "group-branch",
+            "task_id": "task-branch",
+            "environment_ref": {
+                "kind": "template",
+                "id": "swebench-runtime",
+                "revision": "sha256:test",
+                "resource_profile": "standard",
+            },
             "sample_slots": [
                 {"sample_slot_id": "slot-parent", "sample_index": 0},
                 {"sample_slot_id": "slot-child", "sample_index": 1},

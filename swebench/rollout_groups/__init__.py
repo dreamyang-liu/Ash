@@ -7,6 +7,7 @@ here.
 """
 
 from .protocol import (
+    EnvironmentRef,
     GeneratedSpan,
     RolloutBudget,
     RolloutDeletion,
@@ -24,6 +25,12 @@ from .runner import (
     RolloutContext,
     RolloutStrategy,
 )
+from .environment_catalog import EnvironmentCatalog, EnvironmentCatalogEntry
+from .environment_resolver import (
+    AgentEnvOCIResolver,
+    AgentEnvOCIResolverConfig,
+    AgentEnvResourceProfile,
+)
 from .session_runtime import (
     MilesSessionClient,
     SessionAgentStrategySupport,
@@ -39,7 +46,13 @@ from .server import RolloutGroupsHTTPServer, build_service, serve
 
 __all__ = [
     "EnvironmentCheckpoint",
+    "EnvironmentCatalog",
+    "EnvironmentCatalogEntry",
     "EnvironmentProvider",
+    "AgentEnvOCIResolver",
+    "AgentEnvOCIResolverConfig",
+    "AgentEnvResourceProfile",
+    "EnvironmentRef",
     "GeneratedSpan",
     "GroupRolloutService",
     "ModelClient",

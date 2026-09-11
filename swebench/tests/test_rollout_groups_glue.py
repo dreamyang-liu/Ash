@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 import urllib.error
@@ -12,10 +13,15 @@ from swebench.rollout_groups.protocol import (
     GeneratedSpan,
     RolloutGroupRequest,
     RolloutGroupResult,
+    RolloutDeletion,
+    RolloutSubmission,
     Trajectory,
 )
 from swebench.rollout_groups.runner import GroupRolloutService
 from swebench.rollout_groups.server import RolloutGroupsHTTPServer
+from swebench.rollout_groups.environment_catalog import EnvironmentCatalog
+from swebench.rollout_groups.ash_environment import AshSessionEnvironmentProvider
+import swebench.rollout_groups.server as server_module
 
 
 def request_payload(job_id="job-1"):
@@ -23,6 +29,13 @@ def request_payload(job_id="job-1"):
         "rollout_job_id": job_id,
         "rollout_id": 0,
         "prompt_group_id": "group-1",
+        "task_id": "task-1",
+        "environment_ref": {
+            "kind": "template",
+            "id": "swebench-runtime",
+            "revision": "sha256:test",
+            "resource_profile": "standard",
+        },
         "sample_slots": [{"sample_slot_id": "slot-0", "sample_index": 0}],
         "max_samples": 1,
         "minimum_returned_samples": 1,
@@ -74,6 +87,69 @@ def test_protocol_round_trip_and_span_validation():
             "weight_version": "1", "finish_reason": "stop",
         })
 
+
+def test_submission_rejects_unknown_status_or_protocol_version():
+    with pytest.raises(ValueError, match="unknown submission status"):
+        RolloutSubmission("job-1", "unknown")
+    with pytest.raises(ValueError, match="unsupported protocol_version"):
+        RolloutSubmission("job-1", "queued", protocol_version="future-version")
+
+
+def test_deletion_rejects_unknown_protocol_version():
+    with pytest.raises(ValueError, match="unsupported protocol_version"):
+        RolloutDeletion("job-1", "completed", protocol_version="future-version")
+
+
+def test_protocol_requires_digest_for_image_environment():
+    payload = request_payload()
+    payload["environment_ref"] = {
+        "kind": "image",
+        "id": "docker.io/example/task-env",
+        "revision": "latest",
+        "resource_profile": "standard",
+    }
+
+    with pytest.raises(ValueError, match="sha256 digest"):
+        RolloutGroupRequest.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("task_id",), "   "),
+        (("model_endpoint",), "\t"),
+        (("environment_ref", "id"), "\n"),
+    ],
+)
+def test_protocol_rejects_blank_required_strings(path, value):
+    payload = request_payload()
+    target = payload
+    for component in path[:-1]:
+        target = target[component]
+    target[path[-1]] = value
+
+    with pytest.raises(ValueError, match="non-empty string"):
+        RolloutGroupRequest.from_dict(payload)
+
+
+def test_protocol_rejects_boolean_integer_fields():
+    payload = request_payload()
+    payload["sample_slots"][0]["sample_index"] = True
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        RolloutGroupRequest.from_dict(payload)
+
+
+@pytest.mark.parametrize("field", ["max_model_calls", "max_tool_calls", "max_wall_time_seconds"])
+def test_protocol_rejects_boolean_budget_fields(field):
+    payload = request_payload()
+    payload["budgets"][field] = True
+
+    with pytest.raises(ValueError):
+        RolloutGroupRequest.from_dict(payload)
+
+
+def test_protocol_rejects_non_numeric_consumed_budget():
     with pytest.raises(ValueError, match="finite non-negative number"):
         RolloutGroupResult(
             rollout_job_id="job-invalid-budget",
@@ -81,6 +157,27 @@ def test_protocol_round_trip_and_span_validation():
             status="completed",
             max_samples=1,
             consumed_budget={"parent_status": "step_limit"},
+        )
+
+
+@pytest.mark.parametrize("reward", [True, float("inf"), float("nan")])
+def test_trajectory_rejects_invalid_numeric_reward(reward):
+    payload = complete_result(RolloutGroupRequest.from_dict(request_payload()), None)
+    trajectory = payload.trajectories[0].to_dict()
+    trajectory["reward"] = reward
+
+    with pytest.raises(ValueError, match="finite number or object"):
+        Trajectory.from_dict(trajectory)
+
+
+def test_result_rejects_unknown_protocol_version():
+    with pytest.raises(ValueError, match="unsupported protocol_version"):
+        RolloutGroupResult(
+            rollout_job_id="job-future-result",
+            prompt_group_id="group-1",
+            status="completed",
+            max_samples=1,
+            protocol_version="future-version",
         )
 
 
@@ -92,7 +189,7 @@ def test_protocol_round_trip_and_span_validation():
         (("sample_slots", 0), "future_slot_field"),
     ],
 )
-def test_protocol_rejects_unknown_v1_request_fields(path, field):
+def test_protocol_rejects_unknown_request_fields(path, field):
     payload = request_payload()
     target = payload
     for component in path:
@@ -113,12 +210,40 @@ def test_service_idempotency_and_delete():
     while time.time() < deadline and service.get(request.rollout_job_id).status in {"queued", "running"}:
         time.sleep(0.01)
     assert service.get(request.rollout_job_id).status == "completed"
+    # A POST response can be lost while the job keeps running. Retrying the
+    # same request is still idempotent after completion and reports the
+    # current state instead of pretending to enqueue another job.
+    assert service.submit(request).status == "completed"
     with pytest.raises(ValueError):
         service.submit(RolloutGroupRequest.from_dict(request_payload(job_id="job-1") | {
             "prompt_group_id": "different",
         }))
     deleted = service.delete(request.rollout_job_id)
     assert deleted.status == "completed"
+    with pytest.raises(KeyError):
+        service.get(request.rollout_job_id)
+
+
+def test_optional_environment_validation_runs_before_enqueue():
+    class _RejectingEnvironment:
+        def __init__(self):
+            self.calls = 0
+
+        def validate_request(self, _request):
+            self.calls += 1
+            raise ValueError("environment_ref is not allowlisted")
+
+    environment = _RejectingEnvironment()
+    service = GroupRolloutService(
+        lambda request, context: _ResultStrategy(complete_result),
+        environment_provider=environment,
+    )
+    request = RolloutGroupRequest.from_dict(request_payload("invalid-environment"))
+
+    with pytest.raises(ValueError, match="not allowlisted"):
+        service.submit(request)
+
+    assert environment.calls == 1
     with pytest.raises(KeyError):
         service.get(request.rollout_job_id)
 
@@ -175,6 +300,12 @@ def test_http_endpoints():
         with urllib.request.urlopen(req) as response:
             assert response.status == 202
             assert json.load(response)["rollout_job_id"] == "http-job"
+        with urllib.request.urlopen(base + "/rollout-environments") as response:
+            assert response.status == 200
+            assert json.load(response) == {
+                "protocol_version": "ash-rollout-v2",
+                "environments": [],
+            }
         deadline = time.time() + 2
         while time.time() < deadline:
             with urllib.request.urlopen(base + "/rollout-groups/http-job") as response:
@@ -192,13 +323,61 @@ def test_http_endpoints():
             assert response.status == 200
             deletion = json.load(response)
             assert deletion == {
-                "protocol_version": "ash-rollout-v1",
+                "protocol_version": "ash-rollout-v2",
                 "rollout_job_id": "http-job",
                 "status": "completed",
             }
         with pytest.raises(urllib.error.HTTPError) as missing:
             urllib.request.urlopen(base + "/rollout-groups/http-job")
         assert missing.value.code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_http_lists_static_environment_refs_without_spawn_handles():
+    catalog = EnvironmentCatalog.from_dict(
+        {
+            "environments": [
+                {
+                    "kind": "template",
+                    "id": "runtime-ready",
+                    "revision": "v1",
+                    "resource_profile": "standard",
+                    "spawn_ref": "agentenv-internal-template-id",
+                }
+            ]
+        }
+    )
+    environment = AshSessionEnvironmentProvider(
+        catalog,
+        backend={"backend": "microvm"},
+    )
+    service = GroupRolloutService(
+        lambda request, context: _ResultStrategy(complete_result),
+        environment_provider=environment,
+    )
+    server = RolloutGroupsHTTPServer(("127.0.0.1", 0), service)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{server.server_port}/rollout-environments"
+        ) as response:
+            payload = json.load(response)
+        assert payload == {
+            "protocol_version": "ash-rollout-v2",
+            "environments": [
+                {
+                    "kind": "template",
+                    "id": "runtime-ready",
+                    "revision": "v1",
+                    "resource_profile": "standard",
+                }
+            ],
+        }
+        assert "spawn_ref" not in json.dumps(payload)
     finally:
         server.shutdown()
         server.server_close()
@@ -225,3 +404,76 @@ def test_strategy_cannot_leave_job_non_terminal():
         time.sleep(0.01)
     assert result.status == "failed"
     assert "terminal" in (result.stop_reason or "")
+
+
+def test_server_shares_agentenv_connection_with_oci_resolver(tmp_path, monkeypatch):
+    resolver_config = tmp_path / "resolver.json"
+    resolver_config.write_text("{}", encoding="utf-8")
+    api_key_file = tmp_path / "agentenv-key"
+    api_key_file.write_text("not-a-real-key", encoding="utf-8")
+    captured = {}
+
+    class _ResolverConfig:
+        @classmethod
+        def from_file(cls, path):
+            captured["resolver_config_path"] = path
+            return object()
+
+    class _Resolver:
+        def __init__(self, config, **kwargs):
+            captured["resolver_config"] = config
+            captured["resolver_kwargs"] = kwargs
+
+    sentinel_service = object()
+
+    def build_service(**kwargs):
+        captured["service_kwargs"] = kwargs
+        return sentinel_service
+
+    def serve(service, **kwargs):
+        captured["served"] = (service, kwargs)
+
+    backend = {
+        "backend": "microvm",
+        "microvm": {
+            "server_url": "http://agentenv.example:8000",
+            "runtime_port": 3000,
+            "api_key_file": str(api_key_file),
+        },
+    }
+    monkeypatch.setattr(server_module, "AgentEnvOCIResolverConfig", _ResolverConfig)
+    monkeypatch.setattr(server_module, "AgentEnvOCIResolver", _Resolver)
+    monkeypatch.setattr(server_module, "build_service", build_service)
+    monkeypatch.setattr(server_module, "serve", serve)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "ash-rollout-server",
+            "--strategy",
+            "checkpoint-agent-loop-v1",
+            "--agentenv-oci-resolver-config",
+            str(resolver_config),
+            "--backend-json",
+            json.dumps(backend),
+            "--miles-session-endpoint",
+            "http://miles-session.example:30000",
+        ],
+    )
+
+    server_module.main()
+
+    assert captured["resolver_config_path"] == str(resolver_config)
+    assert captured["resolver_kwargs"] == {
+        "aenv_server_url": "http://agentenv.example:8000",
+        "aenv_api_key": None,
+        "aenv_api_key_file": str(api_key_file),
+    }
+    assert captured["service_kwargs"]["oci_resolver"].__class__ is _Resolver
+    assert captured["service_kwargs"]["backend"] == backend
+    assert captured["served"] == (sentinel_service, {"host": "0.0.0.0", "port": 11001})
+
+
+def test_cli_sequential_service_has_a_real_model_client():
+    service = server_module.build_service(strategy="sequential")
+    assert service.model_client is not None

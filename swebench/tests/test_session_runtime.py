@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 import swebench.rollout_groups.session_runtime as runtime_module
 from swebench.models import ToolResult
@@ -16,6 +19,13 @@ def _request() -> RolloutGroupRequest:
             "rollout_job_id": "job",
             "rollout_id": 0,
             "prompt_group_id": "group",
+            "task_id": "task",
+            "environment_ref": {
+                "kind": "template",
+                "id": "swebench-runtime",
+                "revision": "sha256:test",
+                "resource_profile": "standard",
+            },
             "sample_slots": [{"sample_slot_id": "slot", "sample_index": 0}],
             "max_samples": 1,
             "minimum_returned_samples": 1,
@@ -49,7 +59,7 @@ def test_session_agent_support_runs_tool_and_captures_model_history(monkeypatch)
 
         def run(self, *, task, instance_id, initial_messages):
             assert task == ""
-            assert instance_id == "slot"
+            assert instance_id == "task"
             assert self.executor("shell", {"command": "true"}).success is True
             self.on_turn_end(
                 1,
@@ -106,3 +116,57 @@ def test_session_client_accepts_empty_success_body_for_delete():
 
     with patch.object(runtime_module.urllib.request, "urlopen", return_value=EmptyResponse()):
         MilesSessionClient("http://miles-session").delete("session")
+
+
+def test_agent_config_maps_only_supported_sampling_fields():
+    support = SessionAgentStrategySupport()
+    request = _request()
+    request = replace(
+        request,
+        sampling_params={
+            "max_new_tokens": 64,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 20,
+            "stop": ["</tool>"],
+            "stop_token_ids": [2],
+            "skip_special_tokens": False,
+            "no_stop_trim": True,
+            "spaces_between_special_tokens": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+    )
+
+    config = support._agent_config(
+        request,
+        MilesSessionClient("http://miles-session"),
+        "session",
+        max_model_calls=3,
+    )
+
+    assert config.max_tokens == 64
+    assert config.temperature == 0.7
+    assert config.extra_body == {
+        "top_p": 0.9,
+        "top_k": 20,
+        "stop": ["</tool>"],
+        "stop_token_ids": [2],
+        "skip_special_tokens": False,
+        "no_stop_trim": True,
+        "spaces_between_special_tokens": False,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    assert not hasattr(config, "top_p")
+
+
+def test_agent_config_rejects_non_object_extra_body():
+    support = SessionAgentStrategySupport()
+    request = replace(_request(), sampling_params={"extra_body": "invalid"})
+
+    with pytest.raises(ValueError, match="extra_body must be an object"):
+        support._agent_config(
+            request,
+            MilesSessionClient("http://miles-session"),
+            "session",
+            max_model_calls=3,
+        )

@@ -47,6 +47,7 @@ There are four independently-versioned pieces:
 │   │   └── tools.py         #   panel compilation + routing (ToolPanel)
 │   ├── harnesses/           # L3 topologies: litellm, claude-code (base.py = the API)
 │   ├── configs/             # Per-model YAML (`extends:`) + tool_panels/
+│   ├── rollout_groups/       # Versioned RL rollout service and strategies
 │   ├── sandbox.py           # AshSession: sandbox lifecycle + the executor seam
 │   ├── mcp_server.py        # MCP proxy: the same chain, for external agents
 │   ├── submission.py        # L4: asking the agent for its own patch
@@ -121,6 +122,14 @@ decision:
 | which topology runs | `--harness` | `harnesses/__init__.py` |
 
 No call site names a `Pool`, a tool schema, or an interceptor class directly.
+
+### RL rollout path
+
+`swebench/rollout_groups/` reuses `AshAgent`, `AshSession`, and the sandbox SDK
+to expose the versioned `/rollout-groups` contract to Miles. Keep HTTP and
+environment lifecycle code strategy-neutral; checkpoint selection and tree
+growth belong in `rollout_groups/strategies/`. The complete contract is in
+`docs/ASH_ROLLOUT_INTERFACE.md`.
 
 ### Scope, and why it keeps mattering
 

@@ -8,14 +8,17 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from .environment_catalog import EnvironmentCatalog
+from .environment_resolver import AgentEnvOCIResolver, AgentEnvOCIResolverConfig
 from .protocol import RolloutGroupRequest
-from .runner import GroupRolloutService
+from .runner import EndpointModelClient, GroupRolloutService
 
 
 def build_service(
     *,
     strategy: str = "agent-loop",
-    image: str | None = None,
+    environment_catalog: EnvironmentCatalog | None = None,
+    oci_resolver: AgentEnvOCIResolver | None = None,
     backend: dict[str, Any] | None = None,
     miles_session_endpoint: str | None = None,
     model: str | None = None,
@@ -33,15 +36,17 @@ def build_service(
     """
     normalized = strategy.strip().lower()
     if normalized == "agent-loop":
-        if not image:
-            raise ValueError("agent-loop service requires an image/template")
+        if environment_catalog is None and oci_resolver is None:
+            raise ValueError("agent-loop service requires an environment catalog or OCI resolver")
         if not miles_session_endpoint:
             raise ValueError("agent-loop service requires miles_session_endpoint")
         from .ash_environment import AshSessionEnvironmentProvider
         from .strategies.agent_loop import MilesSessionAgentRolloutStrategy
         from ..models import AgentConfig
 
-        provider = AshSessionEnvironmentProvider(image=image, backend=backend)
+        provider = AshSessionEnvironmentProvider(
+            catalog=environment_catalog, oci_resolver=oci_resolver, backend=backend
+        )
         agent_config = AgentConfig(model=model or "openai/local")
 
         def factory(_request, _context):
@@ -58,15 +63,19 @@ def build_service(
         )
 
     if normalized == "checkpoint-agent-loop-v1":
-        if not image:
-            raise ValueError("checkpoint-agent-loop-v1 service requires an image/template")
+        if environment_catalog is None and oci_resolver is None:
+            raise ValueError(
+                "checkpoint-agent-loop-v1 service requires an environment catalog or OCI resolver"
+            )
         if not miles_session_endpoint:
             raise ValueError("checkpoint-agent-loop-v1 service requires miles_session_endpoint")
         from .ash_environment import AshSessionEnvironmentProvider
         from .strategies.checkpoint_agent_loop import CheckpointAgentLoopRolloutStrategy
         from ..models import AgentConfig
 
-        provider = AshSessionEnvironmentProvider(image=image, backend=backend)
+        provider = AshSessionEnvironmentProvider(
+            catalog=environment_catalog, oci_resolver=oci_resolver, backend=backend
+        )
         agent_config = AgentConfig(model=model or "openai/local")
 
         def factory(_request, _context):
@@ -87,6 +96,7 @@ def build_service(
 
         return GroupRolloutService(
             lambda _request, _context: SequentialRolloutStrategy(allow_deterministic_fallback=False),
+            model_client=EndpointModelClient(),
             result_ttl_seconds=result_ttl_seconds,
         )
     raise ValueError(
@@ -121,6 +131,9 @@ class RolloutGroupsRequestHandler(BaseHTTPRequestHandler):
             self._send({"error": str(exc)}, 400)
 
     def do_GET(self) -> None:
+        if self.path.rstrip("/") == "/rollout-environments":
+            self._send(self.server.service.list_environments(), 200)
+            return
         prefix = "/rollout-groups/"
         if not self.path.startswith(prefix) or not self.path[len(prefix):]:
             self._send({"error": "unknown path"}, 404)
@@ -173,7 +186,19 @@ def main() -> None:
     parser.add_argument(
         "--strategy", choices=["agent-loop", "checkpoint-agent-loop-v1", "sequential"], default="agent-loop"
     )
-    parser.add_argument("--image", default=os.environ.get("ASH_ROLLOUT_IMAGE"))
+    parser.add_argument(
+        "--environment-catalog",
+        default=os.environ.get("ASH_ROLLOUT_ENVIRONMENT_CATALOG"),
+        help="JSON catalog mapping trusted environment refs to native Ash spawn refs",
+    )
+    parser.add_argument(
+        "--agentenv-oci-resolver-config",
+        default=os.environ.get("ASH_AGENTENV_OCI_RESOLVER_CONFIG"),
+        help=(
+            "optional JSON policy for resolving digest-pinned OCI images into "
+            "runtime-ready AgentENV snapshots"
+        ),
+    )
     parser.add_argument(
         "--backend-json",
         default=os.environ.get("ASH_ROLLOUT_BACKEND_JSON", "{}"),
@@ -196,15 +221,41 @@ def main() -> None:
         backend = json.loads(args.backend_json)
         if not isinstance(backend, dict):
             raise ValueError("--backend-json must decode to an object")
+        environment_catalog = (
+            EnvironmentCatalog.from_file(args.environment_catalog)
+            if args.environment_catalog
+            else None
+        )
+        oci_resolver = None
+        if args.agentenv_oci_resolver_config:
+            microvm = backend.get("microvm") or {}
+            if not isinstance(microvm, dict):
+                raise ValueError("backend.microvm must be an object")
+            aenv_server_url = microvm.get("server_url") or os.environ.get(
+                "AENV_SERVER_URL"
+            )
+            aenv_api_key = microvm.get("api_key") or os.environ.get("AENV_API_KEY")
+            aenv_api_key_file = microvm.get("api_key_file")
+            if aenv_api_key:
+                aenv_api_key_file = None
+            oci_resolver = AgentEnvOCIResolver(
+                AgentEnvOCIResolverConfig.from_file(
+                    args.agentenv_oci_resolver_config
+                ),
+                aenv_server_url=aenv_server_url,
+                aenv_api_key=aenv_api_key,
+                aenv_api_key_file=aenv_api_key_file,
+            )
         service = build_service(
             strategy=args.strategy,
-            image=args.image,
+            environment_catalog=environment_catalog,
+            oci_resolver=oci_resolver,
             backend=backend,
             miles_session_endpoint=args.miles_session_endpoint,
             model=args.model,
             result_ttl_seconds=args.result_ttl_seconds,
         )
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
     serve(service, host=args.host, port=args.port)
 

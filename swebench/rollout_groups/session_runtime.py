@@ -140,7 +140,11 @@ class SessionAgentStrategySupport:
                 on_turn_end(step, messages)
 
         agent.on_turn_end = capture_messages
-        status = agent.run(task="", instance_id=slot.sample_slot_id, initial_messages=initial_messages)
+        status = agent.run(
+            task="",
+            instance_id=request.task_id,
+            initial_messages=initial_messages,
+        )
         if not latest_messages:
             errors = [
                 str(message.get("content") or "")
@@ -169,9 +173,22 @@ class SessionAgentStrategySupport:
             model = f"openai/{model}"
         max_tokens = sampling.get("max_tokens", sampling.get("max_new_tokens", self.agent_config.max_tokens))
         temperature = sampling.get("temperature", self.agent_config.temperature)
-        extra_body = sampling.get("extra_body")
-        if extra_body is None and "chat_template_kwargs" in sampling:
-            extra_body = {"chat_template_kwargs": sampling["chat_template_kwargs"]}
+        raw_extra_body = sampling.get("extra_body")
+        if raw_extra_body is not None and not isinstance(raw_extra_body, dict):
+            raise ValueError("sampling_params.extra_body must be an object")
+        extra_body = dict(raw_extra_body or {})
+        for name in (
+            "top_p",
+            "top_k",
+            "stop",
+            "stop_token_ids",
+            "skip_special_tokens",
+            "no_stop_trim",
+            "spaces_between_special_tokens",
+            "chat_template_kwargs",
+        ):
+            if name in sampling and name not in extra_body:
+                extra_body[name] = sampling[name]
         return replace(
             self.agent_config,
             model=str(model),
@@ -180,7 +197,7 @@ class SessionAgentStrategySupport:
             max_tokens=int(max_tokens),
             temperature=None if temperature is None else float(temperature),
             prompt_cache=False,
-            extra_body=extra_body,
+            extra_body=extra_body or None,
             step_limit=min(self.agent_config.step_limit, max_model_calls),
         )
 

@@ -7,6 +7,8 @@ import pytest
 
 import swebench.rollout_groups.ash_environment as environment_module
 from swebench.rollout_groups.ash_environment import AshSessionEnvironmentProvider
+from swebench.rollout_groups.environment_catalog import EnvironmentCatalog
+from swebench.rollout_groups.protocol import EnvironmentRef
 
 
 class _Session:
@@ -14,9 +16,14 @@ class _Session:
 
     def __init__(self, **_kwargs):
         self.sandbox_id = "restored-child"
+        self.created = None
         self.restored = None
         self.destroyed = False
         self.__class__.instances.append(self)
+
+    def create(self, image):
+        self.created = image
+        return True
 
     def restore_checkpoint(self, checkpoint_id, *, agent_id=""):
         self.restored = (checkpoint_id, agent_id)
@@ -51,9 +58,114 @@ def _provider(monkeypatch):
     _Session.instances.clear()
     monkeypatch.setattr(environment_module, "AshSession", _Session)
     return AshSessionEnvironmentProvider(
-        image="template-1",
+        catalog=EnvironmentCatalog.from_dict(
+            {
+                "environments": [
+                    {
+                        "kind": "template",
+                        "id": "swebench-runtime",
+                        "revision": "sha256:test",
+                        "resource_profile": "standard",
+                        "spawn_ref": "template-1",
+                    }
+                ]
+            }
+        ),
         backend={"backend": "microvm"},
     )
+
+
+def _request(**overrides):
+    values = {
+        "kind": "template",
+        "id": "swebench-runtime",
+        "revision": "sha256:test",
+        "resource_profile": "standard",
+    }
+    values.update(overrides)
+    return SimpleNamespace(environment_ref=EnvironmentRef(**values))
+
+
+def test_provider_resolves_request_environment_at_spawn(monkeypatch):
+    provider = _provider(monkeypatch)
+
+    session = provider.spawn(_request())
+
+    assert session.created == "template-1"
+
+
+def test_provider_rejects_unlisted_or_backend_incompatible_environment(monkeypatch):
+    provider = _provider(monkeypatch)
+
+    with pytest.raises(ValueError, match="not allowlisted"):
+        provider.spawn(_request(revision="sha256:other"))
+    with pytest.raises(ValueError, match="requires an OCI resolver"):
+        provider.spawn(_request(kind="image"))
+
+
+def test_provider_resolves_digest_pinned_image_through_oci_resolver(monkeypatch):
+    class _Resolver:
+        def __init__(self):
+            self.validated = []
+            self.resolved = []
+
+        def validate(self, ref):
+            self.validated.append(ref)
+
+        def resolve(self, ref):
+            self.resolved.append(ref)
+            return SimpleNamespace(spawn_ref="runtime-snapshot-1")
+
+    _Session.instances.clear()
+    monkeypatch.setattr(environment_module, "AshSession", _Session)
+    resolver = _Resolver()
+    provider = AshSessionEnvironmentProvider(
+        catalog=None,
+        oci_resolver=resolver,
+        backend={"backend": "microvm"},
+    )
+    request = _request(
+        kind="image",
+        id="docker.io/example/task-env",
+        revision="sha256:" + "a" * 64,
+    )
+
+    provider.validate_request(request)
+    session = provider.spawn(request)
+
+    assert resolver.validated == [request.environment_ref, request.environment_ref]
+    assert resolver.resolved == [request.environment_ref]
+    assert session.created == "runtime-snapshot-1"
+
+
+def test_provider_can_use_pre_resolved_image_from_static_catalog(monkeypatch):
+    _Session.instances.clear()
+    monkeypatch.setattr(environment_module, "AshSession", _Session)
+    provider = AshSessionEnvironmentProvider(
+        catalog=EnvironmentCatalog.from_dict(
+            {
+                "environments": [
+                    {
+                        "kind": "image",
+                        "id": "docker.io/example/task-env",
+                        "revision": "sha256:" + "a" * 64,
+                        "resource_profile": "standard",
+                        "spawn_ref": "prebuilt-runtime-snapshot",
+                    }
+                ]
+            }
+        ),
+        backend={"backend": "microvm"},
+    )
+    request = _request(
+        kind="image",
+        id="docker.io/example/task-env",
+        revision="sha256:" + "a" * 64,
+    )
+
+    session = provider.spawn(request)
+
+    assert session.created == "prebuilt-runtime-snapshot"
 
 
 def test_provider_creates_restores_and_idempotently_releases_checkpoint(monkeypatch):

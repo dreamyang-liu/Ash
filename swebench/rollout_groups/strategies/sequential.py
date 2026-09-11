@@ -9,6 +9,7 @@ that do not have a model endpoint.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from ..protocol import GeneratedSpan, RolloutGroupRequest, RolloutGroupResult, Trajectory
@@ -132,4 +133,11 @@ def _optional_log_probs(response: dict[str, Any], length: int) -> tuple[float, .
         return None
     if not isinstance(raw, list) or len(raw) != length:
         raise ValueError("model response log-probability count must match output token count")
+    if any(
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        for value in raw
+    ):
+        raise ValueError("model response log probabilities must be finite numbers")
     return tuple(float(value) for value in raw)

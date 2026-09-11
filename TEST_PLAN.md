@@ -159,3 +159,24 @@ Each agent returns a table of case → verdict → evidence, then:
 - Bugs found, each with a minimal reproduction.
 - Anything **BLOCKED** and why (a blocked case is not a passing case).
 - Any case where the test itself was wrong, and the correction.
+
+## Rollout-group interface
+
+Changes under `swebench/rollout_groups/` must also run the focused contract suite:
+
+```bash
+python -m pytest \
+  swebench/tests/test_rollout_groups_glue.py \
+  swebench/tests/test_rollout_interface_e2e.py \
+  swebench/tests/test_rollout_agent_loop.py \
+  swebench/tests/test_checkpoint_agent_loop.py \
+  swebench/tests/test_session_runtime.py \
+  swebench/tests/test_ash_environment.py \
+  swebench/tests/test_environment_catalog.py \
+  swebench/tests/test_environment_resolver.py -q
+```
+
+This suite covers the versioned HTTP lifecycle, trajectory validation, Miles
+Session Server integration, environment resolution, and AgentENV checkpoint
+lifecycle. Real sandbox, SessionTree, and GRPO runs remain separate integration
+evidence and must not be inferred from unit tests.

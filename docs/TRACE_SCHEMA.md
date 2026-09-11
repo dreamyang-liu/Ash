@@ -69,6 +69,7 @@ AshAgent-based harnesses assign identities at the instance boundary:
 | LiteLLM | One per instance | `agent` | Spawned container ID |
 | Manager-worker | Shared by manager and workers | `manager`, `worker-<task>` | One shared container ID |
 | Best-of-N | Shared by all candidates | `candidate-<index>` | One container ID per candidate |
+| Rollout-group strategy | One rollout job | Strategy-owned parent/child identity | Parent or restored child sandbox ID |
 
 Claude Code does not run through `AshAgent`; its tool events will be covered by
 the MCP proxy audit layer rather than this writer.

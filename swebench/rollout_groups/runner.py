@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 from .protocol import (
+    PROTOCOL_VERSION,
     GeneratedSpan,
     RolloutGroupRequest,
     RolloutGroupResult,
@@ -156,6 +157,14 @@ class GroupRolloutService:
         self._jobs: dict[str, dict[str, Any]] = {}
 
     def submit(self, request: RolloutGroupRequest) -> RolloutSubmission:
+        # Environment selection is optional for providers such as the
+        # sequential strategy. Providers that resolve logical environment
+        # references can expose this hook to reject a request before enqueue.
+        validate_environment = getattr(
+            self.environment_provider, "validate_request", None
+        )
+        if callable(validate_environment):
+            validate_environment(request)
         canonical = json.dumps(request.to_dict(), sort_keys=True, separators=(",", ":"))
         with self._lock:
             self._prune_terminal_jobs_locked()
@@ -184,6 +193,22 @@ class GroupRolloutService:
             record["thread"] = worker
             worker.start()
             return RolloutSubmission(request.rollout_job_id, "queued")
+
+    def list_environments(self) -> dict[str, Any]:
+        """Describe the static environment refs accepted by this deployment.
+
+        Dynamic OCI images are policy-validated when submitted and are not
+        persisted in the static catalog merely because their prepared snapshot
+        is cached by the environment backend.
+        """
+        list_environments = getattr(
+            self.environment_provider, "list_environments", None
+        )
+        environments = list_environments() if callable(list_environments) else []
+        return {
+            "protocol_version": PROTOCOL_VERSION,
+            "environments": environments,
+        }
 
     def get(self, job_id: str) -> RolloutGroupResult:
         with self._lock:
