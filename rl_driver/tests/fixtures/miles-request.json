@@ -1,0 +1,39 @@
+{
+  "protocol_version": "ash-rollout-v2",
+  "rollout_job_id": "miles-original-contract",
+  "rollout_id": 1,
+  "prompt_group_id": "group-e2e",
+  "task_id": "task-e2e",
+  "environment_ref": {
+    "kind": "template",
+    "id": "swebench-runtime",
+    "revision": "sha256:test",
+    "resource_profile": "standard"
+  },
+  "sample_slots": [
+    {
+      "sample_slot_id": "miles-original-contract:slot:0",
+      "sample_index": 0
+    },
+    {
+      "sample_slot_id": "miles-original-contract:slot:1",
+      "sample_index": 1
+    }
+  ],
+  "max_samples": 2,
+  "minimum_returned_samples": 2,
+  "prompt": "run the task",
+  "prompt_token_ids": [
+    11,
+    12
+  ],
+  "model_endpoint": "http://unused",
+  "expected_weight_version": "42",
+  "return_rollout_logprobs": false,
+  "sampling_params": {},
+  "budgets": {
+    "max_model_calls": 4,
+    "max_tool_calls": 4,
+    "max_wall_time_seconds": 5
+  }
+}

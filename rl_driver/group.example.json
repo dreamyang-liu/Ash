@@ -1,0 +1,45 @@
+{
+  "protocol_version": "ash-rollout-v2",
+  "rollout_job_id": "miles-17-group-42-example",
+  "rollout_id": 17,
+  "prompt_group_id": "group-42",
+  "task_id": "swebench__repo-123",
+  "environment_ref": {
+    "kind": "template",
+    "id": "swebench-runtime",
+    "revision": "sha256:immutable-revision",
+    "resource_profile": "standard"
+  },
+  "sample_slots": [
+    {
+      "sample_slot_id": "group-42:slot:0",
+      "sample_index": 0
+    },
+    {
+      "sample_slot_id": "group-42:slot:1",
+      "sample_index": 1
+    }
+  ],
+  "max_samples": 2,
+  "minimum_returned_samples": 2,
+  "prompt": "Inspect the workspace and implement the requested fix.",
+  "prompt_token_ids": [
+    1,
+    2,
+    3
+  ],
+  "model_endpoint": "http://model-router:30000",
+  "session_server_endpoint": "http://miles-session:30000",
+  "model": "YOUR_SERVED_MODEL",
+  "expected_weight_version": "1",
+  "return_rollout_logprobs": true,
+  "sampling_params": {
+    "temperature": 0.6,
+    "max_new_tokens": 2048
+  },
+  "budgets": {
+    "max_model_calls": 6,
+    "max_tool_calls": 2,
+    "max_wall_time_seconds": 1800
+  }
+}

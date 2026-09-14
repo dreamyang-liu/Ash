@@ -1,0 +1,40 @@
+{
+  "artifact_root": "/home/ec2-user/ash-runstore-data",
+  "profiles": {
+    "codex": {
+      "python": "/usr/bin/python3.11",
+      "snapshot_repository": "/opt/aenv-bench/home/snapshot-store/repository",
+      "run_defaults": {
+        "slot": "codex",
+        "transport": "http",
+        "tools": "shell_only",
+        "runtime_bin": "/home/ec2-user/projects/LBP/Ash/runtime/ash-runtime",
+        "sandbox_resources": {"cpu": 2, "memory_mb": 12288},
+        "backend": {
+          "backend": "microvm",
+          "microvm": {
+            "server_url": "http://127.0.0.1:18000",
+            "api_key": {"$env": "AENV_API_KEY"},
+            "from_image": true,
+            "runtime_bin": "/home/ec2-user/projects/LBP/Ash/runtime/ash-runtime",
+            "runtime_port": 34122,
+            "image_env": true,
+            "allow_internet": false
+          }
+        }
+      },
+      "env": {"AWS_BEARER_TOKEN_BEDROCK": {"$env": "AWS_BEARER_TOKEN_BEDROCK"}}
+    },
+    "claude": {
+      "python": "/usr/bin/python3.12",
+      "snapshot_repository": "/opt/aenv-bench/home/snapshot-store/repository",
+      "env": {
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "AWS_BEARER_TOKEN_BEDROCK": {"$env": "AWS_BEARER_TOKEN_BEDROCK"}
+      }
+    },
+    "grade": {
+      "python": "/usr/bin/python3.12"
+    }
+  }
+}

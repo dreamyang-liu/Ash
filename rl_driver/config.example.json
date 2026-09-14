@@ -1,0 +1,19 @@
+{
+  "runstore_url": "http://127.0.0.1:18110",
+  "runstore_token_env": "ASH_RUNSTORE_TOKEN",
+  "driver_token_env": null,
+  "ledger": "../runs/rl-driver/groups.sqlite3",
+  "poll_interval_s": 1,
+  "miles": {
+    "profile": "codex",
+    "run_defaults": {"slot": "codex", "tools": "shell_only"},
+    "resources": {"standard": {"cpu": 2, "memory_mb": 12288}},
+    "environment_catalog": {
+      "environments": [{
+        "kind": "template", "id": "swebench-runtime",
+        "revision": "sha256:immutable-revision", "resource_profile": "standard",
+        "spawn_ref": "YOUR_PREPARED_IMAGE_OR_SNAPSHOT"
+      }]
+    }
+  }
+}

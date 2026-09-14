@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light"><title>Run Store v1 · 架构图</title>
+<style>
+:root{--paper:#f6f7fa;--white:#fff;--ink:#17212e;--muted:#667284;--line:#dce2ea;--blue:#245dde;--violet:#7351b8;--green:#25856b;--amber:#a76a24;--mono:ui-monospace,SFMono-Regular,Consolas,monospace}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}button,a{-webkit-tap-highlight-color:transparent}button{font:inherit;cursor:pointer}button:focus-visible,a:focus-visible{outline:3px solid #7aa5ff;outline-offset:4px}button:disabled{cursor:default}a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}[hidden]{display:none!important}
+.shell{max-width:1600px;margin:auto;padding:0 38px}.topbar{display:flex;align-items:center;justify-content:space-between;height:82px;border-bottom:1px solid var(--line);gap:18px}.brand{display:flex;align-items:center;gap:12px;font-size:13px;font-weight:750;letter-spacing:1.8px}.brand svg{width:29px;height:29px}.top-right{display:flex;align-items:center;gap:19px}.document-label{font:11px var(--mono);color:var(--muted);letter-spacing:.6px}.print-button{border:1px solid var(--line);background:white;padding:9px 14px;border-radius:7px;font-size:12px;color:var(--ink)}
+.intro{display:flex;justify-content:space-between;gap:24px;align-items:end;padding:34px 0 28px}.eyebrow{margin:0 0 10px;font:11px var(--mono);letter-spacing:1.8px;color:var(--blue)}h1{margin:0;font-size:34px;letter-spacing:-1.2px;font-weight:680}.subtitle{margin:13px 0 0;font-size:14px;color:var(--muted);line-height:1.7}.version-badge{white-space:nowrap;display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid var(--line);border-radius:6px;background:white;font-size:11px;color:var(--muted);margin-bottom:3px}.version-dot{width:6px;height:6px;background:var(--blue);border-radius:50%}
+.tabs{display:flex;gap:8px;margin:0 0 18px;flex-wrap:wrap}.tab{display:flex;gap:10px;align-items:center;padding:11px 18px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);font-size:13px}.tab span{font:10px var(--mono);opacity:.7}.tab[aria-selected=true]{background:var(--ink);color:white}.tab:not([aria-selected=true]):hover{background:#e9edf4}
+.workspace{display:grid;grid-template-columns:minmax(0,1fr) 282px;gap:18px;align-items:start}.canvas-card{min-width:0;border:1px solid var(--line);background:var(--white);border-radius:12px;overflow:hidden;box-shadow:0 3px 12px #17212e03}.canvas-top{padding:18px 22px 15px;border-bottom:1px solid #edf0f4;display:flex;justify-content:space-between;align-items:center;gap:16px}.canvas-title{font-size:14px;font-weight:650}.canvas-help{font-size:11px;color:var(--muted)}.canvas-scroll{overflow-x:auto;padding:0 10px 8px}.architecture{display:block;width:100%;height:auto;min-width:780px}.canvas-bottom{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:13px 22px;border-top:1px solid #edf0f4;font-size:11px;color:var(--muted)}.legend{display:flex;gap:16px;flex-wrap:wrap}.legend-item{display:flex;gap:7px;align-items:center}.line-sample{width:24px;border-top:2px solid #8b9caf}.line-sample.dashed{border-top-style:dashed}.legend-square{width:8px;height:8px;border-radius:2px;background:#fff;border:1.5px solid var(--green)}
+.zone{fill:#f9fafc;stroke:#e7ebf1}.zone-label{font-size:11px;fill:#68798c;font-weight:600;letter-spacing:.7px}.message-zone{fill:#f5f8fe;stroke:#dce6f8}.node-box{fill:white;stroke:#cfd8e5;stroke-width:1.3;transition:fill .16s,stroke .16s}.node-eyebrow{font-size:10px;fill:#61718a;font-family:var(--mono);letter-spacing:.25px}.node-title{font-size:18px;fill:var(--ink);font-weight:650}.node-copy{font-size:12.5px;fill:#657286}.diagram-node{cursor:pointer;outline:none}.diagram-node:hover .node-box,.diagram-node:focus-visible .node-box{stroke:var(--blue);stroke-width:2.2;fill:#f6f9ff}.diagram-node.selected .node-box{stroke:var(--blue);stroke-width:2.4;fill:#eef4ff}.diagram-node.selected .node-eyebrow{fill:var(--blue)}.green .node-box{stroke:#bcd9cf;fill:#fcfefc}.green .node-eyebrow{fill:var(--green)}.violet .node-box{stroke:#d6ccec;fill:#fdfbff}.violet .node-eyebrow{fill:var(--violet)}.amber .node-box{stroke:#e6d8c0;fill:#fffcf7}.amber .node-eyebrow{fill:var(--amber)}.muted .node-box{stroke:#d6dce5;stroke-dasharray:4 4;fill:#f8f9fb}.muted .node-title{fill:#788392}.edge path{fill:none;stroke:#a6b3c3;stroke-width:1.5;stroke-linejoin:round}.edge.dashed path{stroke-dasharray:4 4}.edge.hot path{stroke:var(--blue);stroke-width:2}.edge-label{fill:#728095;font-size:10.5px;paint-order:stroke;stroke:white;stroke-width:4;stroke-linejoin:round}.edge.hot .edge-label{fill:var(--blue)}.recovery-route{fill:none;stroke:var(--blue);stroke-width:2.5;stroke-linejoin:round}.recovery-route-label{font-size:13px;fill:var(--blue);font-weight:600}.prefix-covered .node-box{fill:#edf3ff;stroke:#91b0ec}.active-point .node-box{fill:#eaf7f1;stroke:#25856b;stroke-width:2.5}
+.inspector{border:1px solid var(--line);border-radius:12px;background:white;overflow:hidden}.inspector-header{padding:16px 20px;border-bottom:1px solid #edf0f4;display:flex;justify-content:space-between;font-size:11px;color:var(--muted)}.inspector-header strong{font-weight:600;color:var(--ink)}.inspector-content{padding:23px 20px 20px}.inspector-category{font:10px var(--mono);color:var(--blue);letter-spacing:.7px;margin-bottom:13px}h2.detail-title{font-size:21px;line-height:1.45;letter-spacing:-.4px;margin:0 0 14px}.detail-description{font-size:12.5px;color:var(--muted);line-height:1.95;margin:0}.detail-items{padding:0;margin:17px 0;list-style:none}.detail-items li{font-size:12px;line-height:1.85;color:#465568;padding:0 0 10px 13px;position:relative}.detail-items li:before{content:"";position:absolute;left:0;top:9px;width:4px;height:4px;background:#a7b7cf;border-radius:50%}.detail-rule{padding:13px 14px;background:#f2f6fd;border-radius:7px;font-size:12px;line-height:1.8;color:#2f5086}.detail-source{padding-top:19px;margin-top:19px;border-top:1px solid #edf0f4;display:flex;flex-direction:column;gap:8px}.detail-source span{font:10px var(--mono);letter-spacing:1px;color:var(--muted)}.detail-source a{font:11px/1.7 var(--mono);overflow-wrap:anywhere}.scope-note{font-size:11px;color:var(--muted);line-height:1.9;padding:15px 5px 0;margin:0}
+.principles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;margin:22px 0 0}.principle{display:flex;align-items:flex-start;gap:12px;padding:19px 20px;border:1px solid var(--line);border-radius:10px;background:#fbfcfe}.principle-index{font:11px var(--mono);color:#94a2b4;padding-top:3px}.principle h3{font-size:13px;font-weight:650;margin:0 0 8px}.principle p{font-size:12px;line-height:1.8;color:var(--muted);margin:0}footer{padding:25px 0 28px;display:flex;justify-content:space-between;gap:16px;font-size:10px;color:#8490a0;line-height:1.8}footer code{font:10px var(--mono)}
+.stages{padding:13px 22px 20px}.stage{display:flex;gap:18px;text-align:left;width:100%;border:0;border-bottom:1px solid #e9eef5;background:white;padding:17px 4px;color:var(--ink);border-radius:5px}.stage:last-child{border-bottom:0}.stage:hover,.stage.selected{background:#f5f8fe}.stage-number{display:grid;place-items:center;flex:none;width:31px;height:31px;border:1px solid #dce5f4;border-radius:8px;color:var(--blue);font:11px var(--mono);background:#f6f9ff}.stage-main{display:flex;flex-direction:column;gap:6px}.stage-main strong{font-size:14px;font-weight:650}.stage-main code{font:11px var(--mono);color:var(--blue)}.stage-main>span{font-size:12px;color:var(--muted);line-height:1.9}.stage-chevron{margin-left:auto;color:#9aa9bc;font-size:18px}.failure-strip{margin:0 22px 21px;padding:14px 16px;background:#fcf8f1;border:1px solid #efe4d1;border-radius:8px;font-size:12px;line-height:1.8;color:#7e653d}.failure-strip strong{font-weight:650}.failure-strip code{font:11px var(--mono)}
+.recovery-controls{padding:15px 22px;display:flex;align-items:center;gap:15px;flex-wrap:wrap;border-bottom:1px solid #edf0f4;font-size:12px;color:var(--muted)}.depth-buttons{display:flex;gap:5px}.depth-button{font:11px var(--mono);border:1px solid #dce3ed;background:white;color:#63758d;border-radius:6px;padding:7px 10px}.depth-button[aria-pressed=true]{background:#edf3ff;color:var(--blue);border-color:#a8bfee}.depth-summary{margin-left:auto;font:11px var(--mono);color:var(--blue)}.recovery-caption{margin:0 22px 19px;border:1px solid #dce6f8;background:#f6f9ff;padding:12px 15px;border-radius:7px;font-size:12px;color:#3c5885;line-height:1.85}
+@media(min-width:1450px){.workspace{grid-template-columns:minmax(0,1fr) 305px}.inspector-content{padding:25px}.canvas-help{font-size:12px}}
+@media(max-width:1090px){.shell{padding:0 22px}.workspace{grid-template-columns:minmax(0,1fr)}.inspector-content{display:grid;grid-template-columns:1fr 1fr;gap:8px 28px}.inspector-category,.detail-title,.detail-description{grid-column:1}.detail-items,.detail-rule,.detail-source{grid-column:2}.detail-items{grid-row:1/4;margin:0}.detail-source{margin-top:4px}.scope-note{padding:10px 2px}.canvas-help{font-size:10px}.architecture{min-width:780px}}
+@media(max-width:600px){.shell{padding:0 15px}.topbar{height:65px}.brand{font-size:11px;letter-spacing:1px}.document-label{display:none}.print-button{font-size:11px;padding:8px 10px}.intro{padding:26px 0 20px;display:block}h1{font-size:28px}.subtitle{font-size:12px}.version-badge{display:inline-flex;margin-top:15px}.tab{padding:10px 11px;font-size:12px;gap:6px}.tabs{gap:2px}.canvas-top{padding:16px}.canvas-help{max-width:112px;line-height:1.6;text-align:right}.canvas-scroll{padding:0 8px 8px}.canvas-bottom{padding:12px 16px;line-height:1.7}.inspector-content{display:block;padding:20px}.detail-items{margin:15px 0}.detail-source{margin-top:17px}.principles{grid-template-columns:1fr;gap:10px;margin-top:16px}.principle{padding:16px}.stage{gap:12px;padding:15px 0}.stages{padding:8px 16px}.stage-main code{line-height:1.65}.depth-summary{margin-left:0}.failure-strip{margin:5px 16px 18px}.recovery-controls{padding:14px 16px;gap:10px}.recovery-caption{margin:0 16px 16px}footer{flex-direction:column;gap:2px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+@media print{body{background:white}.shell{max-width:none;padding:0}.topbar{height:52px}.intro{padding:20px 0}.tabs,.print-button,.inspector,.scope-note,.canvas-help,.recovery-controls{display:none!important}.workspace{display:block}.canvas-card{break-inside:avoid;margin-bottom:24px;box-shadow:none}.canvas-card[hidden]{display:block!important}.architecture{min-width:0}.canvas-scroll{overflow:visible}.principles{gap:10px}.document-label{display:block}.subtitle{font-size:12px}footer{padding:15px 0}.canvas-card:not(:first-child){break-before:page}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="#a6b3c3"/></marker>
+<marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#245dde"/></marker>
+</defs></svg>
+<div class="shell">
+<header class="topbar"><div class="brand"><svg viewBox="0 0 30 30" aria-hidden="true"><rect width="30" height="30" rx="7" fill="#17212e"/><path d="M8 9h5v5H8zm9 7h5v5h-5z" fill="#fff"/><path d="M13 11.5h6.5V16" fill="none" stroke="#94b7ff" stroke-width="1.5"/></svg>ASH <span style="font-weight:400;color:#8a97a7">/</span> ENGINEERING MAP</div><div class="top-right"><span class="document-label">ARCHITECTURE NOTE / 001</span><button class="print-button" id="print-button" type="button">打印 / 保存 PDF ↗</button></div></header>
+<section class="intro"><div><p class="eyebrow">RUN STORE / VERSION 1</p><h1>一次任务，如何走完整条链路。</h1><p class="subtitle">从 RunSpec 入队，到执行、轨迹存储，再从一个完整的 message 续跑或分支。</p></div><div class="version-badge"><span class="version-dot"></span>当前实现 · 单机拓扑 · 仅新 run</div></section>
+<nav class="tabs" role="tablist" aria-label="架构视图">
+<button id="tab-overview" class="tab" type="button" role="tab" aria-selected="true" aria-controls="pane-overview" data-view="overview"><span>01</span> 全局架构</button>
+<button id="tab-execution" class="tab" type="button" role="tab" aria-selected="false" aria-controls="pane-execution" data-view="execution" tabindex="-1"><span>02</span> 从提交到完成</button>
+<button id="tab-recovery" class="tab" type="button" role="tab" aria-selected="false" aria-controls="pane-recovery" data-view="recovery" tabindex="-1"><span>03</span> 恢复与分支</button>
+</nav>
+<main class="workspace">
+<div>
+<section id="pane-overview" class="canvas-card" role="tabpanel" aria-labelledby="tab-overview"><div class="canvas-top"><span class="canvas-title">系统结构</span><span class="canvas-help">点击节点查看职责与代码入口</span></div><div class="canvas-scroll"><svg class="architecture" viewBox="0 0 1160 660" role="group" aria-label="Run Store 全局架构图"><rect class="zone" x="14" y="46" width="1132" height="240" rx="16"/><text class="zone-label" x="32" y="70">同机控制面 · API / 数据库 / 多 Worker</text><text class="zone-label" x="32" y="312">执行与存储 · 每个 attempt 独立，底层服务共享</text><g class="edge " data-from="client" data-to="api"><path d="M216 159 H270" marker-end="url(#arrow)"/><text class="edge-label" x="243" y="145" text-anchor="middle">HTTP</text></g><g class="edge " data-from="api" data-to="db"><path d="M486 159 H560" marker-end="url(#arrow)"/><text class="edge-label" x="523" y="145" text-anchor="middle">入队</text></g><g class="edge " data-from="db" data-to="worker"><path d="M830 159 H908" marker-end="url(#arrow)"/><text class="edge-label" x="869" y="145" text-anchor="middle">领取</text></g><g class="edge dashed" data-from="worker" data-to="db"><path d="M958 214 V264 H744 V234" marker-end="url(#arrow)"/><text class="edge-label" x="837" y="253" text-anchor="middle">心跳 / 事件 / 结果写回</text></g><g class="edge " data-from="worker" data-to="child"><path d="M1018 214 V332" marker-end="url(#arrow)"/><text class="edge-label" x="1070" y="292" text-anchor="middle">stdin payload</text></g><g class="edge " data-from="child" data-to="orchestrator"><path d="M908 387 H840" marker-end="url(#arrow)"/><text class="edge-label" x="874" y="373" text-anchor="middle">RunSpec</text></g><g class="edge " data-from="orchestrator" data-to="slot"><path d="M624 387 H576" marker-end="url(#arrow)"/><text class="edge-label" x="600" y="373" text-anchor="middle">run</text></g><g class="edge " data-from="slot" data-to="executor"><path d="M354 387 H286" marker-end="url(#arrow)"/><text class="edge-label" x="320" y="373" text-anchor="middle">MCP</text></g><g class="edge " data-from="executor" data-to="agentenv"><path d="M159 442 V524" marker-end="url(#arrow)"/><text class="edge-label" x="208" y="500" text-anchor="middle">工具 / 捕获</text></g><g class="edge " data-from="slot" data-to="inference"><path d="M465 442 V524" marker-end="url(#arrow)"/><text class="edge-label" x="509" y="504" text-anchor="middle">模型请求</text></g><g class="edge dashed" data-from="orchestrator" data-to="agentenv"><path d="M732 442 V474 H304 V578 H286" marker-end="url(#arrow)"/><text class="edge-label" x="623" y="465" text-anchor="middle">创建 / 恢复 / 销毁 VM</text></g><g class="edge dashed" data-from="child" data-to="artifacts"><path d="M922 442 V488 H804 V524" marker-end="url(#arrow)"/><text class="edge-label" x="863" y="480" text-anchor="middle">写文件</text></g><g class="edge " data-from="child" data-to="grade"><path d="M1018 442 V524" marker-end="url(#arrow)"/><text class="edge-label" x="1068" y="500" text-anchor="middle">GradeSpec</text></g><g id="overview-client" class="diagram-node blue" data-node="client"
+      transform="translate(32 104)" tabindex="0" role="button"
+      aria-label="调用方，查看说明" aria-pressed="false">
+      <rect class="node-box" width="184" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">01 / SUBMIT</text>
+      <text class="node-title" x="18" y="48">调用方</text><text class="node-copy" x="18" y="72">Eval driver · SDK</text><text class="node-copy" x="18" y="92">提交 / 查询 / wait</text>
+      </g><g id="overview-api" class="diagram-node blue" data-node="api"
+      transform="translate(270 104)" tabindex="0" role="button"
+      aria-label="Run Store API，查看说明" aria-pressed="false">
+      <rect class="node-box" width="216" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">02 / CONTROL PLANE</text>
+      <text class="node-title" x="18" y="48">Run Store API</text><text class="node-copy" x="18" y="72">鉴权 · 幂等 · 冻结配置</text><text class="node-copy" x="18" y="92">提交后返回 job_id</text>
+      </g><g id="overview-db" class="diagram-node violet" data-node="db"
+      transform="translate(560 84)" tabindex="0" role="button"
+      aria-label="PostgreSQL，查看说明" aria-pressed="false">
+      <rect class="node-box" width="270" height="150" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">03 / DURABLE SOURCE</text>
+      <text class="node-title" x="18" y="48">PostgreSQL</text><text class="node-copy" x="18" y="72">jobs · attempts · events</text><text class="node-copy" x="18" y="92">tools · prefix · recovery</text><text class="node-copy" x="18" y="112">队列 / 状态 / 结构化轨迹</text>
+      </g><g id="overview-worker" class="diagram-node blue" data-node="worker"
+      transform="translate(908 104)" tabindex="0" role="button"
+      aria-label="Worker 1 : N，查看说明" aria-pressed="false">
+      <rect class="node-box" width="220" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">04 / WORKER MANAGER</text>
+      <text class="node-title" x="18" y="48">Worker 1 : N</text><text class="node-copy" x="18" y="72">单个领取循环 · 并发上限</text><text class="node-copy" x="18" y="92">独立监管 · lease</text>
+      </g><g id="overview-child" class="diagram-node blue" data-node="child"
+      transform="translate(908 332)" tabindex="0" role="button"
+      aria-label="Attempt Child，查看说明" aria-pressed="false">
+      <rect class="node-box" width="220" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">05 / ISOLATED PROCESS</text>
+      <text class="node-title" x="18" y="48">Attempt Child</text><text class="node-copy" x="18" y="72">每次尝试独立 cwd / logs</text><text class="node-copy" x="18" y="92">按 JobSpec.kind 分发</text>
+      </g><g id="overview-orchestrator" class="diagram-node blue" data-node="orchestrator"
+      transform="translate(624 332)" tabindex="0" role="button"
+      aria-label="Orchestrator，查看说明" aria-pressed="false">
+      <rect class="node-box" width="216" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">06 / ONE ROLLOUT</text>
+      <text class="node-title" x="18" y="48">Orchestrator</text><text class="node-copy" x="18" y="72">run(RunSpec)</text><text class="node-copy" x="18" y="92">接线 · 运行 · 清理</text>
+      </g><g id="overview-slot" class="diagram-node blue" data-node="slot"
+      transform="translate(354 332)" tabindex="0" role="button"
+      aria-label="Codex / Claude，查看说明" aria-pressed="false">
+      <rect class="node-box" width="222" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">07 / AGENT ADAPTER</text>
+      <text class="node-title" x="18" y="48">Codex / Claude</text><text class="node-copy" x="18" y="72">原生 session + transcript</text><text class="node-copy" x="18" y="92">受限工具面 → Ash MCP</text>
+      </g><g id="overview-executor" class="diagram-node green" data-node="executor"
+      transform="translate(32 332)" tabindex="0" role="button"
+      aria-label="Ash Executor，查看说明" aria-pressed="false">
+      <rect class="node-box" width="254" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">08 / TOOL BOUNDARY</text>
+      <text class="node-title" x="18" y="48">Ash Executor</text><text class="node-copy" x="18" y="72">HTTP MCP → ash-runtime</text><text class="node-copy" x="18" y="92">执行 + 捕获共用串行 gate</text>
+      </g><g id="overview-agentenv" class="diagram-node green" data-node="agentenv"
+      transform="translate(32 524)" tabindex="0" role="button"
+      aria-label="AgentENV，查看说明" aria-pressed="false">
+      <rect class="node-box" width="254" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">ENVIRONMENT / SNAPSHOTS</text>
+      <text class="node-title" x="18" y="48">AgentENV</text><text class="node-copy" x="18" y="72">microVM · 文件状态</text><text class="node-copy" x="18" y="92">snapshot layers 存在这里</text>
+      </g><g id="overview-inference" class="diagram-node amber" data-node="inference"
+      transform="translate(354 524)" tabindex="0" role="button"
+      aria-label="Inference，查看说明" aria-pressed="false">
+      <rect class="node-box" width="222" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">MODEL CHANNEL</text>
+      <text class="node-title" x="18" y="48">Inference</text><text class="node-copy" x="18" y="72">直连 / 可选 Ash Gateway</text><text class="node-copy" x="18" y="92">与 AgentENV 是两条链路</text>
+      </g><g id="overview-artifacts" class="diagram-node violet" data-node="artifacts"
+      transform="translate(624 524)" tabindex="0" role="button"
+      aria-label="Artifact Store，查看说明" aria-pressed="false">
+      <rect class="node-box" width="216" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">LOCAL FILE STORAGE</text>
+      <text class="node-title" x="18" y="48">Artifact Store</text><text class="node-copy" x="18" y="72">native logs · patches</text><text class="node-copy" x="18" y="92">journal · test reports</text>
+      </g><g id="overview-grade" class="diagram-node green" data-node="grade"
+      transform="translate(908 524)" tabindex="0" role="button"
+      aria-label="Official Grader，查看说明" aria-pressed="false">
+      <rect class="node-box" width="220" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">OFFICIAL GRADING</text>
+      <text class="node-title" x="18" y="48">Official Grader</text><text class="node-copy" x="18" y="72">Verified / Pro 官方判分</text><text class="node-copy" x="18" y="92">新环境验证，不跑 agent</text>
+      </g></svg></div><div class="canvas-bottom"><div class="legend"><span class="legend-item"><i class="line-sample"></i>任务 / 调用</span><span class="legend-item"><i class="line-sample dashed"></i>管理 / 持久化</span><span class="legend-item"><i class="legend-square"></i>环境与验证</span></div><span>Worker 直接领数据库里的任务，不经过 API 推送。</span></div></section>
+<section id="pane-execution" class="canvas-card" role="tabpanel" aria-labelledby="tab-execution" hidden><div class="canvas-top"><span class="canvas-title">一个 job 的生命周期</span><span class="canvas-help">一条执行链，两种 job kind</span></div><div class="stages"><button class="stage" data-node="client" type="button">
+      <span class="stage-number">01</span><span class="stage-main"><strong>提交任务</strong>
+      <code>RunSpec / GradeSpec → JobSpec</code><span>客户端 POST /v1/jobs，带上幂等键。API 校验并冻结执行配置，立即返回 job_id。</span></span><span class="stage-chevron">↗</span></button><button class="stage" data-node="db" type="button">
+      <span class="stage-number">02</span><span class="stage-main"><strong>任务进入持久队列</strong>
+      <code>state = queued</code><span>PostgreSQL 保存请求。API 或客户端重启，不会把这行待执行任务弄丢。</span></span><span class="stage-chevron">↗</span></button><button class="stage" data-node="worker" type="button">
+      <span class="stage-number">03</span><span class="stage-main"><strong>Worker 领取并登记 attempt</strong>
+      <code>claim → frozen payload → process identity</code><span>Worker 将冻结 payload 存入数据库，登记子进程身份后才经 stdin 交付；不依赖 request.json。</span></span><span class="stage-chevron">↗</span></button><button class="stage" data-node="child" type="button">
+      <span class="stage-number">04</span><span class="stage-main"><strong>子进程按任务类型执行</strong>
+      <code>rollout ≠ grade</code><span>Rollout 调 Orchestrator.run()；Grade 直接走官方判分适配器。两者使用同一个队列，不共用 agent loop。</span></span><span class="stage-chevron">↗</span></button><button class="stage" data-node="executor" type="button">
+      <span class="stage-number">05</span><span class="stage-main"><strong>工具执行，轨迹持续落盘</strong>
+      <code>tool capture → message recovery point</code><span>调用、response 与每个工具的捕获记录持续保留；消息闭合后再配对 snapshot 与原生会话前缀。</span></span><span class="stage-chevron">↗</span></button><button class="stage" data-node="artifacts" type="button">
+      <span class="stage-number">06</span><span class="stage-main"><strong>采集、清理并发布结果</strong>
+      <code>files → worker → PostgreSQL → client</code><span>Worker 读取文件、维护索引；确认进程退出和环境清理后，把结果写回数据库。客户端可以反复查询。</span></span><span class="stage-chevron">↗</span></button></div><div class="failure-strip"><strong>异常不是直接重新跑。</strong><br><code>lease expired → quarantined → fence + stop + reconcile</code><br>确认旧执行已停止、资源已清理，再从有效配对点续跑；基础设施最多追加 2 次尝试，判分未解出不重试 actor。</div></section>
+<section id="pane-recovery" class="canvas-card" role="tabpanel" aria-labelledby="tab-recovery" hidden><div class="canvas-top"><span class="canvas-title">message 级 rollback，tool 级捕获</span><span class="canvas-help">示意数据 · 不会发起真实执行</span></div><div class="recovery-controls"><span>查询前缀到：</span><div class="depth-buttons" role="group" aria-label="查询工具深度"><button class="depth-button" type="button" data-depth="1" aria-pressed="false">Tool 1</button><button class="depth-button" type="button" data-depth="2" aria-pressed="true">Tool 2</button><button class="depth-button" type="button" data-depth="3" aria-pressed="false">Tool 3</button></div><span class="depth-summary" id="depth-summary">matched 2 → recovery 1</span></div><div class="canvas-scroll"><svg class="architecture" viewBox="0 0 1160 660" role="group" aria-label="消息边界、工具快照和分支恢复示意图"><rect class="message-zone" x="32" y="56" width="312" height="210" rx="16"/><rect class="message-zone" x="398" y="56" width="730" height="210" rx="16"/><text class="zone-label" x="48" y="88">MESSAGE 01 · 一个工具调用</text><text class="zone-label" x="416" y="88">MESSAGE 02 · 同一个模型响应包含两个工具调用</text><g class="edge " data-from="tool1" data-to="tool2"><path d="M328 175 H416" marker-end="url(#arrow)"/></g><g class="edge " data-from="tool2" data-to="tool3"><path d="M720 175 H800" marker-end="url(#arrow)"/></g><g class="edge " data-from="tool1" data-to="point1"><path d="M188 230 V334" marker-end="url(#arrow)"/><text class="edge-label" x="231" y="307" text-anchor="middle">捕获 S1</text></g><g class="edge " data-from="tool2" data-to="private"><path d="M568 230 V334" marker-end="url(#arrow)"/><text class="edge-label" x="611" y="307" text-anchor="middle">捕获 S2</text></g><g class="edge " data-from="tool3" data-to="point2"><path d="M956 230 V334" marker-end="url(#arrow)"/><text class="edge-label" x="999" y="307" text-anchor="middle">捕获 S3</text></g><g class="edge " data-from="branch" data-to="db"><path d="M328 591 H416" marker-end="url(#arrow)"/><text class="edge-label" x="372" y="577" text-anchor="middle">submit</text></g><g class="edge " data-from="db" data-to="restore"><path d="M720 591 H800" marker-end="url(#arrow)"/><text class="edge-label" x="760" y="577" text-anchor="middle">claim</text></g><path id="recovery-route" class="recovery-route" d="M188 444 V536" marker-end="url(#arrow-blue)"/><text id="recovery-route-label" class="recovery-route-label" x="330" y="493">查询到 Tool 2 → 回退到 P1</text><g id="recovery-tool1" class="diagram-node blue" data-node="tool1"
+      transform="translate(48 120)" tabindex="0" role="button"
+      aria-label="读取 / 修改 A，查看说明" aria-pressed="false">
+      <rect class="node-box" width="280" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">TOOL 1</text>
+      <text class="node-title" x="18" y="48">读取 / 修改 A</text><text class="node-copy" x="18" y="72">Message 01 的唯一工具</text><text class="node-copy" x="18" y="92">调用与 response 完整记录</text>
+      </g><g id="recovery-tool2" class="diagram-node blue" data-node="tool2"
+      transform="translate(416 120)" tabindex="0" role="button"
+      aria-label="修改 B，查看说明" aria-pressed="false">
+      <rect class="node-box" width="304" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">TOOL 2</text>
+      <text class="node-title" x="18" y="48">修改 B</text><text class="node-copy" x="18" y="72">Message 02 的第一个工具</text><text class="node-copy" x="18" y="92">response 可以单独查询</text>
+      </g><g id="recovery-tool3" class="diagram-node blue" data-node="tool3"
+      transform="translate(800 120)" tabindex="0" role="button"
+      aria-label="运行测试，查看说明" aria-pressed="false">
+      <rect class="node-box" width="312" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">TOOL 3</text>
+      <text class="node-title" x="18" y="48">运行测试</text><text class="node-copy" x="18" y="72">Message 02 的第二个工具</text><text class="node-copy" x="18" y="92">消息闭合 + 全部结果收齐</text>
+      </g><g id="recovery-point1" class="diagram-node green" data-node="point1"
+      transform="translate(48 334)" tabindex="0" role="button"
+      aria-label="P1 · 可恢复点，查看说明" aria-pressed="false">
+      <rect class="node-box" width="280" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">PUBLIC / MESSAGE 01</text>
+      <text class="node-title" x="18" y="48">P1 · 可恢复点</text><text class="node-copy" x="18" y="72">snapshot S1 + native prefix</text><text class="node-copy" x="18" y="92">message_step 1 · tool_depth 1</text>
+      </g><g id="recovery-private" class="diagram-node muted" data-node="private"
+      transform="translate(416 334)" tabindex="0" role="button"
+      aria-label="S2 · 仅工具级捕获，查看说明" aria-pressed="false">
+      <rect class="node-box" width="304" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">CAPTURE ONLY</text>
+      <text class="node-title" x="18" y="48">S2 · 仅工具级捕获</text><text class="node-copy" x="18" y="72">工具记录 / snapshot 仍保留</text><text class="node-copy" x="18" y="92">message 未完整，不开放 rollback</text>
+      </g><g id="recovery-point2" class="diagram-node green" data-node="point2"
+      transform="translate(800 334)" tabindex="0" role="button"
+      aria-label="P2 · 可恢复点，查看说明" aria-pressed="false">
+      <rect class="node-box" width="312" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">PUBLIC / MESSAGE 02</text>
+      <text class="node-title" x="18" y="48">P2 · 可恢复点</text><text class="node-copy" x="18" y="72">snapshot S3 + native prefix</text><text class="node-copy" x="18" y="92">message_step 2 · tool_depth 3</text>
+      </g><g id="recovery-branch" class="diagram-node blue" data-node="branch"
+      transform="translate(48 536)" tabindex="0" role="button"
+      aria-label="新的 RunSpec，查看说明" aria-pressed="false">
+      <rect class="node-box" width="280" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">01 / BRANCH REQUEST</text>
+      <text class="node-title" x="18" y="48">新的 RunSpec</text><text class="node-copy" x="18" y="72">引用选定 point_id</text><text class="node-copy" x="18" y="92">可调整 prompt / model / budget</text>
+      </g><g id="recovery-db" class="diagram-node violet" data-node="db"
+      transform="translate(416 536)" tabindex="0" role="button"
+      aria-label="重新入队，查看说明" aria-pressed="false">
+      <rect class="node-box" width="304" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">02 / SAME QUEUE</text>
+      <text class="node-title" x="18" y="48">重新入队</text><text class="node-copy" x="18" y="72">新 job · 新 attempt</text><text class="node-copy" x="18" y="92">不修改父任务的历史</text>
+      </g><g id="recovery-restore" class="diagram-node green" data-node="restore"
+      transform="translate(800 536)" tabindex="0" role="button"
+      aria-label="恢复 VM + native prefix，查看说明" aria-pressed="false">
+      <rect class="node-box" width="312" height="110" rx="12"/>
+      <text class="node-eyebrow" x="18" y="23">03 / PAIRED RESTORE</text>
+      <text class="node-title" x="18" y="48">恢复 VM + native prefix</text><text class="node-copy" x="18" y="72">磁盘与对话切到同一个边界</text><text class="node-copy" x="18" y="92">然后继续后续生成</text>
+      </g></svg></div><p id="recovery-caption" class="recovery-caption" aria-live="polite"></p></section>
+</div>
+<aside><section class="inspector" aria-label="节点详情"><div class="inspector-header"><strong>COMPONENT DETAIL</strong><span>点击切换 ↖</span></div><div class="inspector-content" aria-live="polite"><div id="detail-category" class="inspector-category"></div><h2 id="detail-title" class="detail-title"></h2><p id="detail-description" class="detail-description"></p><ul id="detail-items" class="detail-items"></ul><div id="detail-rule" class="detail-rule"></div><div class="detail-source"><span>SOURCE OF TRUTH</span><a id="detail-source" href="../runstore/store.py"></a></div></div></section><p class="scope-note">实现结构，不是实时监控。首版未开启实际 cache reuse，也不迁移历史任务。服务常驻部署与 benchmark 启动是另外的操作。</p></aside>
+</main>
+<section class="principles" aria-label="三个关键边界"><article class="principle"><span class="principle-index">A</span><div><h3>调度 ≠ 执行</h3><p>PostgreSQL + Worker 管队列；<br>Orchestrator 只管一次 rollout。</p></div></article><article class="principle"><span class="principle-index">B</span><div><h3>捕获 ≠ 可恢复</h3><p>每个 tool 留记录；完整 message<br>才配对 snapshot 与 native prefix。</p></div></article><article class="principle"><span class="principle-index">C</span><div><h3>判分成功 ≠ 题目解出</h3><p>grade job 可以 succeeded，<br>同时报告 resolved: false。</p></div></article></section>
+<footer><span>基于当前源码 · 2026.09.12 · 无外部依赖，离线可打开</span><span>GENERATED FROM <code>docs/gen_runstore_architecture.py</code></span></footer>
+</div>
+<script id="component-data" type="application/json">{"client": {"category": "入口 / CLIENT", "title": "提交后，立即拿到 job_id", "description": "Eval driver 或 Python Client 只负责提交与查询，不需要一直持有 rollout 的连接。", "items": ["JobSpec.kind 区分 rollout 与 grade。", "RunSpec 描述怎么跑；队列状态不塞进 RunSpec。", "wait() 轮询持久结果，断开客户端不会取消任务。"], "rule": "提交是一回事，执行是另一回事。", "source": "runstore/client.py", "symbol": "def submit(", "line": 20}, "api": {"category": "控制面 / HTTP API", "title": "API 不持有活跃任务", "description": "FastAPI 校验请求、鉴权、冻结 profile 默认值，再把 JobSpec 写进数据库。", "items": ["POST /v1/jobs + Idempotency-Key", "同一个 key 和请求返回同一个 job；冲突返回 409。", "状态、events、tools、recovery-points 都有查询接口。"], "rule": "API 重启不丢队列；Worker 不靠 API 推送来领任务。", "source": "runstore/api.py", "symbol": "def create_app(", "line": 14}, "db": {"category": "持久化核心 / POSTGRESQL", "title": "数据库本身就是队列", "description": "首版不再加 Redis、消息 broker 或一个内存调度服务。待执行 job 就是 PostgreSQL 里的一行。", "items": ["rs_jobs / rs_attempts：请求、冻结 payload、lease、结果。", "rs_events / rs_tools：轨迹事件、工具调用和 response。", "rs_prefix_nodes / rs_recoveries：前缀 DAG 与恢复点元数据。"], "rule": "Worker 直接 claim 数据库；结果先持久化，再由客户端查询。", "source": "runstore/store.py", "symbol": "def claim(", "line": 83}, "worker": {"category": "调度与监管 / WORKER", "title": "一个管理进程，N 个并发任务", "description": "管理循环只领取、分发和回收任务；每个 attempt 的阻塞 I/O 由独立监管线程处理，执行仍使用独立子进程。", "items": ["--concurrency N 控制容量，完成一个就补一个。", "保留数据库 claim 锁及 lease fencing；队列异常退避。", "独立看门狗在超时或 lease 失效时停止执行，不等待索引 I/O。"], "rule": "单任务阻塞仍占用一个槽位，不阻塞其他槽位；管理进程崩溃仍会影响全部监管。", "source": "runstore/manager.py", "symbol": "class WorkerManager:", "line": 14}, "child": {"category": "进程隔离 / ATTEMPT", "title": "一个 attempt，一个子进程", "description": "Worker 先把冻结 payload 存入数据库，启动并记录子进程身份后，再经 stdin 交付。子进程不连接数据库，也不读 request.json。", "items": ["kind=rollout → Orchestrator.run(RunSpec)。", "kind=grade → 官方判分适配器，不启动 agent。", "后端及 worker-only 密钥不传给 agent；配置只保存引用。"], "rule": "进程身份尚未持久化，子进程就不能分配 sandbox。", "source": "runstore/child.py", "symbol": "def execute(", "line": 43}, "orchestrator": {"category": "单次执行 / ORCHESTRATOR", "title": "只管把一次 RunSpec 跑完", "description": "既有 Orchestrator 继续负责 sandbox、MCP、slot、checkpoint 和 teardown；数据库队列是外面的一层。", "items": ["创建或恢复 microVM，并接好 Ash MCP。", "按需启动 inference gateway，选择 Codex / Claude slot。", "注册 checkpoint bridge，运行 agent，最后清理环境。"], "rule": "队列负责调度；Orchestrator 负责一次运行。", "source": "harness/orchestrator/run.py", "symbol": "def run(self, spec:", "line": 303}, "slot": {"category": "AGENT 适配层 / SLOT", "title": "同一个执行面，两种 agent", "description": "Codex SDK 和 Claude Code 使用原生会话，但工具执行都留在 Ash 管理的 sandbox 中。", "items": ["Codex：dynamic tool facade 保留原生 callId，再转发到 Ash MCP。", "Claude：工具 hook 绑定 call identity，并追踪完整 model response。", "内建 shell / edit 等旁路工具被限制，避免在宿主机改文件。"], "rule": "一个 SDK turn 不一定是一个 model response，不能混用它们的边界。", "source": "harness/slots/codex_tools.py", "symbol": "class CodexTools:", "line": 13}, "executor": {"category": "执行面 / ASH MCP", "title": "先执行，再在同一道锁里捕获", "description": "工具副作用和 checkpoint 捕获共用 sandbox 的串行 gate；不是看见 tool.finished 就假设环境已经静止。", "items": ["原生 callId / step 随请求进入执行面。", "工具在 VM 的 ash-runtime 内执行。", "捕获后才能交出 gate；只读工具可复用已有 snapshot。"], "rule": "tool 级捕获 ≠ 每个 tool 都是公开可 rollback 的点。", "source": "harness/execution/server.py", "symbol": "class ToolBoundary:", "line": 556}, "agentenv": {"category": "环境后端 / AGENTENV", "title": "提供 microVM 和 snapshot 机制", "description": "AgentENV 管理虚拟机及 snapshot 存储；何时 checkpoint、哪个消息边界可恢复，仍由 Ash 决定。", "items": ["创建 / 恢复 / 销毁 microVM。", "磁盘层存放在 AgentENV snapshot store，不进 PostgreSQL。", "disk-only 恢复文件状态，不恢复后台进程和外部副作用。"], "rule": "PostgreSQL 存 snapshot_id，不存一份 VM 磁盘。", "source": "harness/execution/session.py", "symbol": "class SandboxSession:", "line": 53}, "inference": {"category": "模型通道 / INFERENCE", "title": "推理与 sandbox 是两条通道", "description": "Agent 向模型提供方发请求；可以直连，也可以显式走 Ash Gateway。这条链路不由 AgentENV 提供。", "items": ["provider URL、model 和凭据由配置选择。", "Gateway 可负责路由、预算及可选 namespace 兼容。", "agent/verifier 的 VM 网络策略不等于宿主机推理网络策略。"], "rule": "排查 502 时，先区分 inference 链路和工具 / AgentENV 链路。", "source": "harness/orchestrator/run.py", "symbol": "def _wire_gateway(", "line": 629}, "artifacts": {"category": "大文件 / ARTIFACT STORE", "title": "本地文件与数据库分工存储", "description": "Child 写 journal、原生日志、patch 和报告；Worker 读取这些文件，把可检索的结构化数据写入数据库。", "items": ["每个 attempt 有独立 artifact 目录。", "native prefix 用共享文件 + byte_length + SHA256 定位。", "保留数据库、native 引用及 snapshot 层，才能以后续跑。"], "rule": "文件不是结果的通知：最终状态和 result 另有数据库持久副本。", "source": "runstore/worker.py", "symbol": "def _ingest(", "line": 102}, "grade": {"category": "独立任务 / OFFICIAL GRADING", "title": "GradeSpec 也排队，但不跑 agent", "description": "判分引用提交 snapshot、固定的数据集和 grader revision，使用隔离环境，不污染 actor 的环境。", "items": ["Verified：snapshot 收集 patch → 官方 SWE-bench Docker evaluator。", "Pro：独立收集 VM + 干净验证 VM，使用官方脚本 / parser。", "判分故障只重试 grade；resolved=false 不是基础设施故障。"], "rule": "判分任务 succeeded 可以同时 resolved=false：执行成功不代表题目解出。", "source": "runstore/grading.py", "symbol": "def grade(", "line": 30}, "tool1": {"category": "示意 / MESSAGE 01", "title": "Tool 1 结束了第一个 message", "description": "这个示例里，Message 01 只有一个工具调用，因此它的工具边界也是完整消息边界。", "items": ["记录 Tool 1 的 call / response。", "执行后捕获 S1。", "配上 Message 01 结束时的 native prefix，形成恢复点 P1。"], "rule": "P1 = snapshot S1 + 对应的完整 native prefix。", "source": "runstore/native.py", "symbol": "def index_native(", "line": 66}, "tool2": {"category": "示意 / MESSAGE 02", "title": "Tool 2 只是这个 message 的一半", "description": "Message 02 一次发出了 Tool 2 和 Tool 3。Tool 2 的 response 可以检索，但这里还不能公开 rollback。", "items": ["Tool 2 的调用、response、捕获 S2 都保留。", "同一 message 里的 Tool 3 尚未全部完成。", "查询到 Tool 2 时，恢复位置要退到 P1，而不是用 S2。"], "rule": "细粒度记录给查询用；完整 message 边界给恢复用。", "source": "runstore/index.py", "symbol": "def query(", "line": 95}, "tool3": {"category": "示意 / MESSAGE 02", "title": "Tool 3 之后才得到完整恢复点", "description": "Message 02 输出已闭合，两个工具的结果都已收齐，且 snapshot/native prefix 可配对，才形成 P2。", "items": ["P2 的 tool_depth 是 3。", "snapshot S3 包含这个 message 的全部工具副作用。", "native prefix 也必须包含这两个工具及其结果。"], "rule": "不能把更早的 snapshot 和更长的新 transcript 拼成一对。", "source": "runstore/native.py", "symbol": "def index_native(", "line": 66}, "point1": {"category": "可恢复点 / P1", "title": "回退到最近的完整 message", "description": "若匹配前缀落在下一个 message 内部，返回 P1 的磁盘和对话两部分，再明确指出需要补走的 suffix。", "items": ["matched_depth 与 recovery_depth 分开返回。", "fallback 必须是匹配路径上的祖先，不能选任意最新快照。", "原始父轨迹和 snapshot 均不被修改。"], "rule": "返回祖先状态，也必须返回祖先那一截 native prefix。", "source": "runstore/index.py", "symbol": "def query(", "line": 95}, "private": {"category": "仅捕获 / S2", "title": "这个 snapshot 存了，但不是公开恢复点", "description": "Tool 级捕获保留细节；公开 rollback 仍只允许完整 message。两个粒度并不冲突。", "items": ["response 仍然可查，便于诊断和未来 cache。", "S2 不会伪装成一个完整消息的会话状态。", "首版 prefix query 不自动跳过工具执行。"], "rule": "首版没有开启实际 cache reuse。", "source": "runstore/index.py", "symbol": "def query(", "line": 95}, "point2": {"category": "可恢复点 / P2", "title": "消息和环境必须同时对齐", "description": "P2 把 S3 与 Message 02 结束时的 native prefix 绑定在一起，提交新分支时会再次检查它们。", "items": ["native prefix 校验长度和 SHA256。", "检查 snapshot 当前可用性；实际 VM restore 最终确认。", "某个边界后来被证伪，会撤销其恢复资格。"], "rule": "message_step=2，tool_depth=3；不是同一个索引。", "source": "runstore/native.py", "symbol": "def read_prefix(", "line": 22}, "branch": {"category": "新分支 / NEW RUNSPEC", "title": "Branch 是新任务，不是在原任务上改历史", "description": "POST /jobs/{id}/branch 引用选中的 point_id，生成带 parent_point 的新 JobSpec，重新进入同一队列。", "items": ["原生 slot、环境及工具配置沿用父任务。", "可改变 prompt、model、timeout 和 budget。", "新 attempt 有自己的工作目录、VM 和日志。"], "rule": "分支不需要第二套调度系统。", "source": "runstore/api.py", "symbol": "def branch(", "line": 109}, "restore": {"category": "恢复 / PAIRED RESTORE", "title": "同时恢复 VM 和原生历史", "description": "Child 将 snapshot 作为环境起点，并通过 agent 对应的原生适配器恢复截断的历史。", "items": ["Codex：从复制出的 native prefix path fork。", "Claude：将前缀注册为一个独立 native session。", "精确前缀不可用时，不会默默改用完整父会话。"], "rule": "只继承分叉点之前的信息，不把未来答案带回过去。", "source": "runstore/native.py", "symbol": "def materialize(", "line": 165}}</script>
+<script>
+"use strict";
+const details = JSON.parse(document.getElementById("component-data").textContent);
+const tabs = [...document.querySelectorAll("[data-view]")];
+const nodes = [...document.querySelectorAll("[data-node]")];
+let activeView = "overview";
+let activeDepth = 2;
+function selectNode(key) {
+  const detail = details[key];
+  if (!detail) return;
+  document.getElementById("detail-category").textContent = detail.category;
+  document.getElementById("detail-title").textContent = detail.title;
+  document.getElementById("detail-description").textContent = detail.description;
+  document.getElementById("detail-rule").textContent = detail.rule;
+  const items = detail.items.map(value => {const element = document.createElement("li"); element.textContent = value; return element;});
+  document.getElementById("detail-items").replaceChildren(...items);
+  const source = document.getElementById("detail-source");
+  source.textContent = detail.source + ":" + detail.line;
+  source.setAttribute("href", "../" + detail.source + "#L" + detail.line);
+  nodes.forEach(element => {element.classList.toggle("selected", element.dataset.node === key); if (element.classList.contains("diagram-node")) element.setAttribute("aria-pressed", String(element.dataset.node === key));});
+  document.querySelectorAll(".edge").forEach(element => element.classList.toggle("hot", element.dataset.from === key || element.dataset.to === key));
+}
+function setDepth(depth) {
+  activeDepth = depth;
+  const recoveryDepth = depth === 3 ? 3 : 1;
+  document.querySelectorAll("[data-depth]").forEach(button => button.setAttribute("aria-pressed", String(Number(button.dataset.depth) === depth)));
+  document.getElementById("depth-summary").textContent = `matched ${depth} → recovery ${recoveryDepth}`;
+  ["tool1", "tool2", "tool3"].forEach((key, index) => document.getElementById("recovery-" + key).classList.toggle("prefix-covered", index < depth));
+  document.getElementById("recovery-point1").classList.toggle("active-point", recoveryDepth === 1);
+  document.getElementById("recovery-point2").classList.toggle("active-point", recoveryDepth === 3);
+  document.getElementById("recovery-route").setAttribute("d", depth === 3 ? "M956 444 V490 H188 V536" : "M188 444 V536");
+  const routeLabel = document.getElementById("recovery-route-label");
+  routeLabel.textContent = depth === 3 ? "查询到 Tool 3 → 从 P2 分支" : `查询到 Tool ${depth} → ${depth === 2 ? "回退到" : "可使用"} P1`;
+  routeLabel.setAttribute("y", depth === 3 ? "477" : "493");
+  document.getElementById("recovery-caption").textContent = depth === 2
+    ? "已匹配 Tool 1、Tool 2 的历史 response，但 Tool 2 位于 Message 02 中间。恢复回到 P1（仅到 Tool 1）；如选择续跑，待补走的 suffix 是 Tool 2。这里只做查询，不自动重放或启用 cache。"
+    : `前缀正好结束于完整的 Message ${depth === 1 ? "01" : "02"}。可以返回 P${depth === 1 ? "1" : "2"} 的 snapshot + native prefix，replay_suffix 为空；实际创建分支仍需显式提交新 job。`;
+  if (activeView === "recovery") selectNode(depth === 2 ? "private" : depth === 1 ? "point1" : "point2");
+}
+function setView(view) {
+  activeView = view;
+  tabs.forEach(tab => {const selected = tab.dataset.view === view; tab.setAttribute("aria-selected", String(selected)); tab.tabIndex = selected ? 0 : -1; document.getElementById(tab.getAttribute("aria-controls")).hidden = !selected;});
+  if (view === "recovery") setDepth(activeDepth);
+  else selectNode(view === "overview" ? "db" : "client");
+}
+tabs.forEach((tab, index) => {
+  tab.addEventListener("click", () => setView(tab.dataset.view));
+  tab.addEventListener("keydown", event => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    setView(tabs[next].dataset.view); tabs[next].focus();
+  });
+});
+nodes.forEach(element => {
+  element.addEventListener("click", () => selectNode(element.dataset.node));
+  if (element.classList.contains("diagram-node")) element.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") {event.preventDefault(); selectNode(element.dataset.node);}
+  });
+});
+document.querySelectorAll("[data-depth]").forEach(button => button.addEventListener("click", () => setDepth(Number(button.dataset.depth))));
+document.getElementById("print-button").addEventListener("click", () => window.print());
+setDepth(2);
+setView("overview");
+document.documentElement.dataset.ready = "true";
+</script>
+</body></html>
