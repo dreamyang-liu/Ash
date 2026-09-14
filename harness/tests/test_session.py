@@ -95,6 +95,92 @@ def _session(pool: FakePool, cls=SandboxSession, **kwargs) -> SandboxSession:
     return session
 
 
+def test_interrupted_drive_cancels_in_original_task():
+    import anyio
+
+    session = SandboxSession(quiet=True)
+    loop = session._get_loop()
+    tasks = []
+
+    async def operation():
+        with anyio.fail_after(60):
+            tasks.append(asyncio.current_task())
+            try:
+                await asyncio.sleep(60)
+            finally:
+                tasks.append(asyncio.current_task())
+
+    def interrupt():
+        raise KeyboardInterrupt("isolated cancellation injection")
+
+    loop.call_later(0.01, interrupt)
+    try:
+        with pytest.raises(KeyboardInterrupt, match="isolated cancellation injection"):
+            session._drive(operation())
+        assert len(tasks) == 2 and tasks[0] is tasks[1]
+        assert not asyncio.all_tasks(loop)
+        assert session._drive(asyncio.sleep(0, result="healthy")) == "healthy"
+    finally:
+        loop.close()
+
+
+def test_unsettled_drive_quarantines_session_until_cleanup_finishes():
+    session = SandboxSession(quiet=True)
+    session._cancel_grace_seconds = 0.01
+    loop = session._get_loop()
+    release = asyncio.Event()
+
+    async def operation():
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await release.wait()
+
+    def interrupt():
+        raise KeyboardInterrupt("isolated cancellation injection")
+
+    loop.call_later(0.01, interrupt)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            session._drive(operation())
+        with pytest.raises(RuntimeError, match="quarantined"):
+            session._drive(asyncio.sleep(0))
+        release.set()
+        loop.run_until_complete(session._unsettled_operation)
+        assert session._drive(asyncio.sleep(0, result="healthy")) == "healthy"
+        assert not asyncio.all_tasks(loop)
+    finally:
+        release.set()
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_session_download_routes_to_pool_and_reports_failure(tmp_path, fails):
+    destination = tmp_path / "logs.tar.gz"
+
+    class DownloadPool(FakePool):
+        def supports_download(self):
+            return True
+
+        async def download_file(self, sandbox, source, target, timeout=None):
+            assert sandbox is self.sandbox
+            assert source == "/tmp/logs.tar.gz" and timeout == 17
+            if fails:
+                raise OSError("download failed")
+            Path(target).write_bytes(b"log bytes\x00")
+
+    session = _session(DownloadPool())
+    try:
+        assert session.download_file("/tmp/logs.tar.gz", destination, timeout=17) is not fails
+        if not fails:
+            assert destination.read_bytes() == b"log bytes\x00"
+    finally:
+        session._loop.close()
+
+
 # --- what the execution plane must NOT know --------------------------------
 def _imported_modules(path: Path) -> set:
     """Every module name this file imports, including deferred ones.

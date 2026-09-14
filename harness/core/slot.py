@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from harness.core.journal import JournalWriter
+from harness.core.control import RunControl
 
 
 @dataclass
@@ -34,6 +35,7 @@ class TaskSpec:
     env: Dict[str, str] = field(default_factory=dict)
     timeout_s: float = 3600.0
     extra: Dict[str, object] = field(default_factory=dict)
+    control: Optional[RunControl] = field(default=None, repr=False)
 
 
 @dataclass

@@ -27,6 +27,7 @@ from harness.execution.backends import (
     backend_config,
     backend_name,
     build_pool,
+    with_sandbox_budget,
 )
 
 
@@ -224,3 +225,28 @@ def test_microvm_accepts_from_image():
                        "microvm": {"server_url": "http://127.0.0.1:8000",
                                    "from_image": True}})
     assert pool.supports_cold_start()
+
+@pytest.mark.parametrize("budget,explicit,expected", [(10800, None, 11400), (1.2, 600, 602),
+                                                      (10800, 600, 11400), (10800, 15000, 15000)])
+def test_vm_lease_covers_budget_and_preserves_longer_explicit_value(budget, explicit, expected):
+    import copy
+    source = {"backend": "microvm", "microvm": {"server_url": "http://aenv", "allow_internet": False}}
+    if explicit is not None:
+        source["microvm"]["sandbox_ttl"] = explicit
+    before = copy.deepcopy(source)
+    bound = with_sandbox_budget(source, budget)
+    assert bound["microvm"]["sandbox_ttl"] == expected
+    assert bound["microvm"]["allow_internet"] is False
+    assert source == before
+    assert with_sandbox_budget(bound, budget) == bound
+    assert build_pool(bound).sandbox_ttl == expected
+
+
+@pytest.mark.parametrize("budget", [None, 0, -1, True, float("inf"), float("nan")])
+def test_vm_lease_rejects_unbounded_or_invalid_budget(budget):
+    with pytest.raises(BackendError, match="operation budget"):
+        with_sandbox_budget({"backend": "microvm"}, budget)
+
+
+def test_vm_budget_does_not_change_docker_defaults():
+    assert with_sandbox_budget({"backend": "docker"}, 10800) == {"backend": "docker"}

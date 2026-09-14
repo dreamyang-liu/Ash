@@ -45,7 +45,7 @@ class FakeAenv(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self._record("POST")
-        if self.path == "/sandboxes":
+        if self.path in ("/sandboxes", "/sandboxes-cold"):
             FakeAenv.next_id += 1
             return self._reply({"sandboxID": f"vm-{FakeAenv.next_id}"})
         if self.path.endswith("/fork"):
@@ -95,6 +95,25 @@ def test_capabilities_are_declared_not_assumed():
     docker = DockerPool.__new__(DockerPool)
     assert not docker.supports_pause()
     assert not docker.supports_fork()
+
+
+def test_failed_delete_keeps_the_sandbox_owned():
+    import httpx
+
+    pool = MicroVMPool("http://agentenv")
+
+    async def scenario():
+        await pool._client.aclose()
+        pool._client = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(500, json={"error": "busy"})))
+        sandbox = pool.attach("owned-vm")
+        with pytest.raises(httpx.HTTPStatusError):
+            await pool.destroy(sandbox)
+        assert sandbox.sandbox_id == "owned-vm"
+        assert pool.list() == [sandbox]
+        await pool._client.aclose()
+
+    asyncio.run(scenario())
 
 def test_unsupported_capability_refuses_clearly():
     docker = DockerPool.__new__(DockerPool)
@@ -171,6 +190,31 @@ def test_pause_and_resume_hit_the_state_endpoints(aenv):
     _, _, resume_body, _ = FakeAenv.requests[-1]
     assert resume_body == {"timeout": 600}
 
+
+def test_long_lease_reaches_create_cold_restore_resume_and_fork(aenv):
+    pool = MicroVMPool(aenv, sandbox_ttl=11400)
+
+    async def scenario():
+        parent = await pool.spawn(image="task-template")
+        await pool.spawn_from_image("registry/task:tag", resources={"cpu": 2, "memory_mb": 8192, "disk_size_mb": 65536})
+        await pool.spawn(image="saved-snapshot")
+        await pool.pause(parent)
+        await pool.resume(parent)
+        await pool.fork(parent, count=2)
+        await pool.close()
+
+    asyncio.run(scenario())
+    timed = [(path, body) for method, path, body, _ in FakeAenv.requests
+             if method == "POST" and "timeout" in body]
+    assert len(timed) == 5
+    assert all(body["timeout"] == 11400 for _, body in timed)
+    assert timed[0][1]["templateID"] == "task-template"
+    assert timed[1][0] == "/sandboxes-cold"
+    assert timed[1][1]["diskSizeMB"] == 65536
+    assert timed[2][1]["templateID"] == "saved-snapshot"
+    assert timed[3][0].endswith("/resume")
+    assert timed[4][0].endswith("/fork")
+
 def test_requests_authenticate_with_the_x_api_key_header(aenv):
     # AgentENV validates X-API-KEY; an Authorization: Bearer header is not
     # checked (observed against a live server: garbage bearer tokens pass).
@@ -226,6 +270,26 @@ def test_allow_internet_reaches_every_create_payload(aenv):
     asyncio.run(default_scenario())
     _, _, body, _ = FakeAenv.requests[0]
     assert "allowInternetAccess" not in body
+
+
+@pytest.mark.parametrize("allow", [True, False])
+@pytest.mark.parametrize("cold_start", [True, False])
+def test_explicit_network_policy_reaches_cold_and_restored_sandboxes(aenv, allow, cold_start):
+    pool = MicroVMPool(aenv, allow_internet=allow)
+
+    async def scenario():
+        if cold_start:
+            await pool.spawn_from_image("fixture/image")
+        else:
+            await pool.spawn(image="fixture-snapshot")
+        await pool.close()
+
+    asyncio.run(scenario())
+    _, path, body, _ = FakeAenv.requests[0]
+    assert path == ("/sandboxes-cold" if cold_start else "/sandboxes")
+    assert body["allowInternetAccess"] is allow
+    if not cold_start:
+        assert body["allow_internet_access"] is allow
 
 def test_spawn_refuses_what_a_template_cannot_express(aenv):
     # entrypoint and resources are container-pool concepts; a microVM template

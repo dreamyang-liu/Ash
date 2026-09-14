@@ -69,13 +69,19 @@ parameters under names of your choosing, and describe both the tool and those
 parameters for the task rather than for the runtime. `bash_only` mode is one such view:
 a single tool with only `command`.
 
-Four panels ship, under `harness/tool_panels/`. `default` is what a caller gets without
+Five panels ship, under `harness/tool_panels/`. `default` is what a caller gets without
 asking: `shell` and `text_editor` — enough to run commands and to read, write and modify
 files, which is the whole job for most tasks. It withholds `background` (and so also
 `process`), because a backgrounded command outlives the call that started it while a
 disk-only checkpoint captures the filesystem and not processes, so replaying such a step
 diverges. `full` offers all seven runtime tools and is what the SWE-bench configs name;
 `bash_only` offers one; `no_web` is `full` without `web_fetch` and `web_search`.
+
+Claude Code runs use `shell_only` in place of the default panel. It retains the
+shell's `command`, `working_dir`, `timeout`, and `tail` arguments and removes
+`text_editor`. The Claude Code slot also denies MCP `text_editor` calls through
+its SDK configuration and permission hooks, including on externally supplied
+MCP servers. The runtime editor remains available to graders and other slots.
 
 Note that `swebench` pins `full` explicitly rather than inheriting `default`. Narrowing
 a benchmark's tool surface changes what it measures, so old and new numbers would stop

@@ -27,6 +27,7 @@ ownership of the sandbox after the stream closes (needed for grading).
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 from harness.core.events import (
@@ -41,6 +42,8 @@ from harness.core.events import (
     Usage,
 )
 from harness.core.journal import JournalWriter
+from harness.core.checkpoint_identity import CALL_IDENTITY_KEY
+from harness.core.control import RunAborted
 from harness.core.slot import (
     AgentSlot,
     McpWiring,
@@ -49,6 +52,7 @@ from harness.core.slot import (
     TaskSpec,
 )
 from harness.normalize import claude_code as cc_normalize
+from harness.normalize.claude_turns import ModelTurnTracker
 
 #: Builtin tools that would execute on the host instead of in the sandbox --
 #: plus everything that acts outside this run: scheduling, cross-session
@@ -87,9 +91,14 @@ DENIED_BUILTINS = (
 )
 
 _DENY_REASON = (
-    "Builtin tools are disabled in this harness: they would run outside the "
-    "sandbox. Use the MCP sandbox tools instead."
+    "This tool is disabled in this harness. Use the MCP sandbox shell for "
+    "reading, editing, and executing commands."
 )
+
+DEFAULT_MAX_BUFFER_SIZE = 16 * 1024 * 1024
+DEFAULT_MCP_TOOL_TIMEOUT_MS = 600_000
+DEFAULT_MCP_TOOL_IDLE_TIMEOUT_MS = 600_000
+DEFAULT_MCP_SERVER_TIMEOUT_MS = 600_000
 
 
 class ClaudeCodeSlot(AgentSlot):
@@ -115,6 +124,9 @@ class ClaudeCodeSlot(AgentSlot):
         self._tool_index = 0
         self._denied: List[str] = []
         self._boundaries = 0
+        self._journal = None
+        self._checkpoint_server = None
+        self._control = None
 
     # --- public ------------------------------------------------------------
     @property
@@ -149,6 +161,10 @@ class ClaudeCodeSlot(AgentSlot):
             journal.emit(RUN_FINISHED, status="error", error=message)
             return SlotResult(status="error", error=message)
 
+        self._journal = journal
+        self._control = task.control
+        self._checkpoint_server = (mcp.name if mcp else "ash") if (
+            task.extra or {}).get("checkpoint_identity") else None
         mcp_servers, allowed = self._mcp_config(task, mcp)
         options = self._build_options(ClaudeAgentOptions, task, mcp_servers, allowed)
 
@@ -162,8 +178,16 @@ class ClaudeCodeSlot(AgentSlot):
             config={
                 "mcp_servers": sorted(mcp_servers),
                 "allowed_tools": allowed,
-                "disallowed_tools": list(DENIED_BUILTINS),
+                "disallowed_tools": self._disallowed_tools(mcp_servers),
                 "permission_mode": getattr(options, "permission_mode", None),
+                "max_buffer_size": getattr(options, "max_buffer_size", None),
+                "mcp_tool_timeout_ms": (getattr(options, "env", None) or {}).get("MCP_TOOL_TIMEOUT"),
+                "mcp_tool_idle_timeout_ms": (getattr(options, "env", None) or {}).get(
+                    "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"),
+                "mcp_server_timeouts_ms": {
+                    name: config.get("timeout") for name, config in mcp_servers.items()
+                    if isinstance(config, dict) and config.get("timeout") is not None
+                },
             },
         )
 
@@ -174,10 +198,13 @@ class ClaudeCodeSlot(AgentSlot):
         status = "completed"
         error: Optional[str] = None
         stream = None
+        model_turns = ModelTurnTracker(journal)
 
         try:
             stream = query(prompt=task.prompt, options=options)
-            async for message in _with_timeout(stream, task.timeout_s):
+            async for message in _with_timeout(stream, task.timeout_s, task.control):
+                if task.control is not None:
+                    task.control.raise_if_stopped()
                 for event_type, payload in cc_normalize.normalize(message):
                     journal.emit(event_type, **payload)
                     if event_type == TURN_COMPLETED and payload.get("usage"):
@@ -188,6 +215,11 @@ class ClaudeCodeSlot(AgentSlot):
                         result_text = payload["text"]
                     elif event_type == AGENT_MESSAGE and payload.get("text"):
                         last_text = payload["text"]
+                model_turns.observe(message)
+        except RunAborted as exc:
+            status = "error"
+            error = str(exc)
+            journal.emit(AGENT_ERROR, message=error, reason="execution_uncertain")
         except asyncio.TimeoutError:
             status = "timeout"
             error = "timed out after %ss" % task.timeout_s
@@ -197,7 +229,9 @@ class ClaudeCodeSlot(AgentSlot):
             error = "%s: %s" % (type(exc).__name__, exc)
             journal.emit(AGENT_ERROR, message=error)
         finally:
-            await _aclose(stream)
+            # _with_timeout owns iteration AND close in one task. The SDK may
+            # keep cancellation scopes across yields; do not close it elsewhere.
+            self._control = None
 
         journal.emit(
             RUN_FINISHED,
@@ -220,6 +254,10 @@ class ClaudeCodeSlot(AgentSlot):
         extra = task.extra or {}
         servers: Dict[str, Any] = {}
         name = mcp.name if mcp else str(extra.get("mcp_name", "ash"))
+        server_timeout_ms = extra.get("mcp_server_timeout_ms", DEFAULT_MCP_SERVER_TIMEOUT_MS)
+        if (not isinstance(server_timeout_ms, int) or isinstance(server_timeout_ms, bool)
+                or server_timeout_ms <= 0):
+            raise ValueError("mcp_server_timeout_ms must be a positive integer")
 
         sdk_server = extra.get("sdk_mcp_server")
         if sdk_server is not None:
@@ -229,19 +267,20 @@ class ClaudeCodeSlot(AgentSlot):
                 "type": "stdio",
                 "command": mcp.command[0],
                 "args": list(mcp.command[1:]),
+                "timeout": server_timeout_ms,
             }
             if mcp.env:
                 entry["env"] = dict(mcp.env)
             servers[name] = entry
         elif mcp and mcp.url:
-            entry = {"type": "http", "url": mcp.url}
+            entry = {"type": "http", "url": mcp.url, "timeout": server_timeout_ms}
             if mcp.headers:
                 entry["headers"] = dict(mcp.headers)
             servers[name] = entry
 
         tools = extra.get("mcp_tools")
         if tools:
-            allowed = ["mcp__%s__%s" % (name, t) for t in tools]
+            allowed = ["mcp__%s__%s" % (name, tool) for tool in tools if tool != "text_editor"]
         elif servers:
             allowed = ["mcp__%s" % name]  # whole server
         else:
@@ -250,12 +289,17 @@ class ClaudeCodeSlot(AgentSlot):
 
     def _build_options(self, options_cls, task: TaskSpec, mcp_servers, allowed):
         extra = task.extra or {}
+        max_buffer_size = extra.get("max_buffer_size", DEFAULT_MAX_BUFFER_SIZE)
+        if (not isinstance(max_buffer_size, int) or isinstance(max_buffer_size, bool)
+                or max_buffer_size <= 0):
+            raise ValueError("max_buffer_size must be a positive integer (bytes)")
         kwargs: Dict[str, Any] = {
             "cwd": task.cwd,
             "mcp_servers": mcp_servers,
             "allowed_tools": allowed,
-            "disallowed_tools": list(DENIED_BUILTINS),
+            "disallowed_tools": self._disallowed_tools(mcp_servers),
             "permission_mode": extra.get("permission_mode", "bypassPermissions"),
+            "max_buffer_size": max_buffer_size,
             # PreToolUse is the seam that actually fires under bypassPermissions.
             "hooks": self._hooks(),
         }
@@ -283,8 +327,15 @@ class ClaudeCodeSlot(AgentSlot):
                 kwargs["resume_session_at"] = extra["resume_session_at"]
         if extra.get("max_turns"):
             kwargs["max_turns"] = extra["max_turns"]
+        # The inner command timeout does not configure the CLI's outer MCP wait.
+        # Populate this even when the caller has no other task-specific env.
+        env = dict(task.env)
+        env.setdefault("MCP_TOOL_TIMEOUT", os.environ.get("MCP_TOOL_TIMEOUT")
+                       or str(DEFAULT_MCP_TOOL_TIMEOUT_MS))
+        env.setdefault("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT",
+                       os.environ.get("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT")
+                       or str(DEFAULT_MCP_TOOL_IDLE_TIMEOUT_MS))
         if task.env:
-            env = dict(task.env)
             if "ANTHROPIC_BASE_URL" in env:
                 # The run routed this agent's LLM traffic somewhere -- a gateway,
                 # a vLLM, an RL checkpoint. The CLI's provider-direct modes
@@ -296,7 +347,7 @@ class ClaudeCodeSlot(AgentSlot):
                 # Explicit settings in the task env still win.
                 env.setdefault("CLAUDE_CODE_USE_BEDROCK", "0")
                 env.setdefault("CLAUDE_CODE_USE_VERTEX", "0")
-            kwargs["env"] = env
+        kwargs["env"] = env
 
         for key in list(kwargs):
             # Tolerate SDK version differences rather than crashing on an
@@ -316,6 +367,11 @@ class ClaudeCodeSlot(AgentSlot):
 
     async def _pre_tool_use(self, input_data: dict, tool_use_id, context: Any = None):
         """The live verdict point (fires even under bypassPermissions)."""
+        if self._control is not None and self._control.reason is not None:
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "permissionDecision": "deny",
+                "permissionDecisionReason": self._control.reason,
+            }}
         tool_name = (input_data or {}).get("tool_name") or ""
         tool_input = (input_data or {}).get("tool_input") or {}
 
@@ -329,6 +385,20 @@ class ClaudeCodeSlot(AgentSlot):
                 }
             }
 
+        if self._checkpoint_server and tool_name.startswith(
+                "mcp__%s__" % self._checkpoint_server):
+            call_id = tool_use_id or (input_data or {}).get("tool_use_id")
+            if not call_id:
+                return {"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse", "permissionDecision": "deny",
+                    "permissionDecisionReason": "Missing tool identity for checkpoint pairing",
+                }}
+            clean_input = dict(tool_input)
+            clean_input.pop(CALL_IDENTITY_KEY, None)
+            record = self._journal.emit(TOOL_STARTED, call_id=call_id,
+                                        name=tool_name, args=clean_input)
+            tool_input = dict(clean_input)
+            tool_input[CALL_IDENTITY_KEY] = {"call_id": call_id, "step": record["step"]}
         self._note_boundary()
         return {
             "hookSpecificOutput": {
@@ -347,9 +417,13 @@ class ClaudeCodeSlot(AgentSlot):
         return {"behavior": "allow", "updatedInput": input_data}
 
     @staticmethod
+    def _disallowed_tools(mcp_servers) -> list[str]:
+        return [*DENIED_BUILTINS, *[f"mcp__{name}__text_editor" for name in mcp_servers]]
+
+    @staticmethod
     def _is_denied(tool_name: str) -> bool:
         if tool_name.startswith("mcp__"):
-            return False
+            return tool_name.rsplit("__", 1)[-1] == "text_editor"
         return tool_name in DENIED_BUILTINS
 
     def _note_boundary(self) -> None:
@@ -374,25 +448,65 @@ def _accepts(cls, name: str) -> bool:
         return True
 
 
-async def _with_timeout(stream, timeout_s: Optional[float]):
-    """Yield from an async iterator with a per-item timeout budget."""
-    if not timeout_s:
-        async for item in stream:
-            yield item
-        return
+async def _with_timeout(stream, timeout_s: Optional[float], control=None):
+    """One stream owner, with a deadline and a cross-thread abort wakeup.
 
-    loop = asyncio.get_event_loop()
-    deadline = loop.time() + timeout_s
-    iterator = stream.__aiter__()
-    while True:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            raise asyncio.TimeoutError
+    Cancellation must interrupt a silent stream too. A dedicated producer keeps
+    the SDK's async-generator/cancel-scope lifetime in ONE task, including close.
+    """
+    loop = asyncio.get_running_loop()
+    queue = asyncio.Queue(maxsize=1)
+    stop = asyncio.Event()
+    unsubscribe = (control.subscribe(lambda: loop.call_soon_threadsafe(stop.set))
+                   if control is not None else lambda: None)
+
+    async def produce():
         try:
-            item = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
-        except StopAsyncIteration:
-            return
-        yield item
+            async for item in stream:
+                await queue.put(("item", item))
+            await queue.put(("done", None))
+        except Exception as exc:
+            await queue.put(("error", exc))
+        finally:
+            await _aclose(stream)
+
+    producer = asyncio.create_task(produce())
+    stopped = asyncio.create_task(stop.wait())
+    pending = None
+    stream_ended = False
+    deadline = loop.time() + timeout_s if timeout_s else None
+    try:
+        while True:
+            if control is not None:
+                control.raise_if_stopped()
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                raise asyncio.TimeoutError
+            pending = asyncio.create_task(queue.get())
+            done, _ = await asyncio.wait((pending, stopped), timeout=remaining,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if stopped in done:
+                raise RunAborted(control.reason)
+            if pending not in done:
+                raise asyncio.TimeoutError
+            kind, value = pending.result()
+            pending = None
+            if kind == "done":
+                stream_ended = True
+                return
+            if kind == "error":
+                stream_ended = True
+                raise value
+            yield value
+    finally:
+        unsubscribe()
+        for task in (pending, stopped):
+            if task is not None and not task.done():
+                task.cancel()
+        if not stream_ended and not producer.done():
+            producer.cancel()
+        await asyncio.gather(*(task for task in (pending, stopped, producer)
+                               if task is not None), return_exceptions=True)
 
 
 async def _aclose(stream) -> None:

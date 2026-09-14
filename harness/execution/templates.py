@@ -112,6 +112,8 @@ def template_name(image: str, runtime_fingerprint: str, port: int,
     shape = ""
     if resources:
         shape = f"{resources.get('cpu', '')}x{resources.get('memory_mb', '')}"
+        if "disk_size_mb" in resources:
+            shape += f"x{resources['disk_size_mb']}"
     parts = [image, runtime_fingerprint, str(port), shape]
     if salt:
         parts.append(salt)
@@ -178,7 +180,8 @@ def image_config_env(image: str, regctl: Path, timeout: float = 120.0) -> "list[
     return [str(e) for e in env if "=" in str(e)]
 
 
-def start_command(port: int, env: "Optional[list[str]]" = None) -> str:
+def start_command(port: int, env: "Optional[list[str]]" = None,
+                  runtime_init: str = "") -> str:
     """The template's startCmd: the runtime, under the image's ENV when given.
 
     ``env K=V ... runtime`` rather than exporting in a shell profile: it is
@@ -188,6 +191,8 @@ def start_command(port: int, env: "Optional[list[str]]" = None) -> str:
     """
     import shlex
     base = f"{RUNTIME_PATH} --port {port}"
+    if runtime_init:
+        base = "bash -c " + shlex.quote(runtime_init + " && exec " + base)
     if not env:
         return base
     return "env " + " ".join(shlex.quote(item) for item in env) + " " + base
@@ -227,6 +232,7 @@ class TemplateBuilder:
     #: Launch the runtime under the image's OCI ENV (read with ``regctl_bin``).
     #: Changes the template's name, so it never collides with a plain build.
     image_env: bool = False
+    runtime_init: str = ""
     regctl_bin: Optional[Path] = None
     _resolved: dict[str, str] = field(default_factory=dict)
     _env_cache: dict[str, "list[str]"] = field(default_factory=dict)
@@ -259,6 +265,8 @@ class TemplateBuilder:
         # without rg must not be reused once rg is available.
         if self.ripgrep_bin is not None:
             self._fingerprint += ":" + runtime_fingerprint(self.ripgrep_bin)
+        if self.runtime_init:
+            self._fingerprint += ":init:" + hashlib.sha256(self.runtime_init.encode()).hexdigest()[:16]
 
     def template_for(self, image: str,
                      resources: "Optional[dict]" = None) -> str:
@@ -421,6 +429,8 @@ class TemplateBuilder:
                 payload["cpuCount"] = int(resources["cpu"])
             if resources.get("memory_mb"):
                 payload["memoryMB"] = int(resources["memory_mb"])
+            if resources.get("disk_size_mb"):
+                payload["diskSizeMB"] = int(resources["disk_size_mb"])
         created = client.post("/sandboxes-cold", json=payload,
                               timeout=max(self.request_timeout,
                                           COLD_START_TIMEOUT_SECONDS))
@@ -479,6 +489,8 @@ class TemplateBuilder:
                 payload["cpuCount"] = int(resources["cpu"])
             if resources.get("memory_mb"):
                 payload["memoryMB"] = int(resources["memory_mb"])
+            if resources.get("disk_size_mb"):
+                payload["diskSizeMB"] = int(resources["disk_size_mb"])
         created = client.post("/v3/templates", json=payload)
         if created.status_code == 409 or (
                 created.status_code == 400 and "already points" in created.text):
@@ -500,7 +512,7 @@ class TemplateBuilder:
                 # not carry the mode bit.
                 "steps": [{"type": "RUN", "args": [
                     f"chmod +x {RUNTIME_PATH}; chmod +x {RIPGREP_PATH} 2>/dev/null || true"]}],
-                "startCmd": start_command(self.runtime_port, self._env_for(image)),
+                "startCmd": start_command(self.runtime_port, self._env_for(image), self.runtime_init),
                 # Cold boots re-run startCmd, so readiness has to mean "the
                 # runtime is accepting connections", not "the process exists".
                 "readyCmd": f"timeout 1 bash -c '</dev/tcp/127.0.0.1/{self.runtime_port}'",
@@ -609,5 +621,6 @@ def builder_from_backend(backend: dict) -> Optional[TemplateBuilder]:
         runtime_port=int(section.get("runtime_port", DEFAULT_RUNTIME_PORT)),
         request_timeout=float(section.get("request_timeout", 120.0)),
         image_env=image_env,
+        runtime_init=str(section.get("runtime_init") or ""),
         regctl_bin=regctl,
     )

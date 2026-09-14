@@ -1,6 +1,6 @@
 """codex slot driven through the official SDK (``openai-codex``).
 
-Verified against openai-codex 0.147.0 / codex-cli 0.145.0. The SDK is a typed
+Verified against openai-codex 0.147.0 and its bundled app-server. The SDK is a typed
 wrapper over ``codex app-server`` (JSON-RPC), which is why this replaces the old
 ``codex exec --json`` driver: that parsed a stdout stream with no version field,
 and could not branch a run at all.
@@ -37,7 +37,8 @@ installed code, not the docs.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+import threading
+from typing import Any, Dict, Optional
 
 from harness.core import events as E
 from harness.core.journal import JournalWriter
@@ -64,6 +65,9 @@ class CodexSdkSlot(ServerSlot):
         self._turn: Any = None
         self.thread_id: Optional[str] = None
         self._journal: Optional[JournalWriter] = None
+        self._tool_config: dict = {}
+        self._mcp_name: Optional[str] = None
+        self._exact_tools: Any = None
 
     # --- run ---------------------------------------------------------------
     def run(
@@ -82,6 +86,15 @@ class CodexSdkSlot(ServerSlot):
 
         extra = task.extra or {}
         self._journal = journal
+        self._mcp_name = mcp.name if mcp else None
+        self._tool_config = {}
+        self._exact_tools = None
+        if mcp is not None:
+            import tomllib
+            from harness.slots.codex_config import _mcp_config_pairs, _mcp_tool_policy
+
+            self._tool_config = {**_mcp_tool_policy(),
+                                 **tomllib.loads("\n".join(_mcp_config_pairs(mcp)))}
 
         journal.emit(
             E.RUN_STARTED,
@@ -91,7 +104,9 @@ class CodexSdkSlot(ServerSlot):
             task_prompt=task.prompt,
             cwd=task.cwd,
             transport="sdk(app-server jsonrpc)",
-            config={"mcp": bool(mcp), "sandbox": extra.get("sandbox")},
+            config={"mcp": bool(mcp), "sandbox": extra.get("sandbox"),
+                    "tool_policy": "mcp-plus-resources" if mcp else "native",
+                    "allowed_mcp_server": self._mcp_name},
         )
 
         config = CodexConfig(
@@ -100,12 +115,35 @@ class CodexSdkSlot(ServerSlot):
             config_overrides=self._config_overrides(mcp, extra),
             client_name="ash-harness",
         )
+        if mcp is not None:
+            from openai_codex.client import _resolve_codex_bin
+            from harness.slots.codex_config import _configured_mcp_servers, _disabled_mcp_overrides
+
+            try:
+                blocked = [name for name in _configured_mcp_servers(
+                    str(_resolve_codex_bin(config)), task, list(config.config_overrides)) if name != mcp.name]
+            except Exception as error:
+                return self._fail(journal, str(error))
+            config.config_overrides += tuple([*_disabled_mcp_overrides(blocked), *_mcp_config_pairs(mcp)])
+            self._tool_config["mcp_servers"].update({name: {"enabled": False} for name in blocked})
+
+        if extra.get("checkpoint_identity"):
+            from harness.slots.codex_tools import CodexTools
+            from harness.slots.codex_config import _config_pairs
+
+            if mcp is None:
+                return self._fail(journal, "Exact Codex capture requires owned HTTP MCP")
+            self._exact_tools = CodexTools(mcp, journal, task.timeout_s)
+            self._tool_config["mcp_servers"][mcp.name]["enabled"] = False
+            config.config_overrides += tuple(_config_pairs({"mcp_servers": {
+                mcp.name: self._tool_config["mcp_servers"][mcp.name]}}))
 
         sandbox = self._sandbox(Sandbox, extra)
         client = CodexClient(
             config=config,
             approval_handler=lambda method, params: self._on_approval(method, params),
         )
+        unsubscribe = None
         try:
             client.start()
             client.initialize()
@@ -118,6 +156,11 @@ class CodexSdkSlot(ServerSlot):
             handle = thread.turn(task.prompt, cwd=task.cwd, model=task.model,
                                  sandbox=sandbox, effort=extra.get("effort"))
             self._turn = handle
+            if task.control is not None:
+                # The SDK reader can be inside a tool callback when stopped.
+                # Interrupt on another thread so it can keep reading the reply.
+                unsubscribe = task.control.subscribe(
+                    lambda: threading.Thread(target=self.interrupt, daemon=True).start())
             # One pass over the stream, journalling as it goes. `handle.run()`
             # would consume the same stream, so calling both deadlocks: the
             # second consumer waits forever for notifications the first already
@@ -127,6 +170,8 @@ class CodexSdkSlot(ServerSlot):
         except Exception as exc:  # noqa: BLE001 - report, never propagate
             return self._fail(journal, "%s: %s" % (type(exc).__name__, exc))
         finally:
+            if unsubscribe is not None:
+                unsubscribe()
             try:
                 client.close()
             except Exception:  # noqa: BLE001
@@ -143,6 +188,8 @@ class CodexSdkSlot(ServerSlot):
         high-level ``Codex.thread_fork``.
         """
         params: Dict[str, Any] = {"cwd": task.cwd}
+        if self._tool_config:
+            params["config"] = self._tool_config
         if task.model:
             params["model"] = task.model
         if sandbox is not None:
@@ -151,6 +198,16 @@ class CodexSdkSlot(ServerSlot):
             params["baseInstructions"] = extra["base_instructions"]
 
         resume_id = extra.get("resume_session_id")
+        if extra.get("native_prefix"):
+            import hashlib
+            from pathlib import Path
+
+            prefix = extra["native_prefix"]
+            path = Path(prefix["path"])
+            if hashlib.sha256(path.read_bytes()).hexdigest() != prefix["sha256"]:
+                raise ValueError("Native Codex prefix changed")
+            params["path"] = str(path.resolve())
+            return _thread_id_of(client.thread_fork(resume_id or "prefix", params))
         if resume_id and extra.get("fork"):
             # Branch first so the parent thread is untouched by this run.
             if extra.get("fork_turn_id"):
@@ -167,6 +224,8 @@ class CodexSdkSlot(ServerSlot):
             return thread_id
         if resume_id:
             return _thread_id_of(client.thread_resume(resume_id, params))
+        if self._exact_tools is not None:
+            params["dynamicTools"] = self._exact_tools.definitions()
         return _thread_id_of(client.thread_start(params))
 
     def _finish(self, journal, result, usage: dict, thread_id: str) -> SlotResult:
@@ -203,13 +262,23 @@ class CodexSdkSlot(ServerSlot):
         deny can happen for codex. Mapping to the protocol's decision vocabulary
         (see CommandExecutionApprovalDecision): ``accept`` / ``decline``.
         """
+        if method == "item/tool/call" and self._exact_tools is not None:
+            return self._exact_tools.call(params or {})
         kind = _APPROVAL_KINDS.get(method, "tool")
         payload = dict(params or {})
         journal = self._journal
-        if journal is None:  # pragma: no cover - run() always sets it
+        allowed_server = payload.get("serverName", payload.get("server_name"))
+        restricted = self._mcp_name is not None and (
+            method != "mcpServer/elicitation/request" or allowed_server != self._mcp_name)
+        if restricted:
+            verdict, reason = DENY, "Codex native tools are disabled for MCP-wired runs"
+            if journal is not None:
+                journal.emit("policy.verdict", kind=kind, verdict=verdict,
+                             reason=reason, request=dict(payload, method=method))
+        elif journal is None:  # pragma: no cover - run() always sets it
             return {"decision": "accept"}
-
-        verdict, reason = self.decide(kind, dict(payload, method=method), journal)
+        else:
+            verdict, reason = self.decide(kind, dict(payload, method=method), journal)
         if method == "mcpServer/elicitation/request":
             # MCP elicitation speaks its own vocabulary: {action, content}, with
             # content answering `requestedSchema` (an empty form for a plain
@@ -249,11 +318,10 @@ class CodexSdkSlot(ServerSlot):
         only when a wiring was present, which is why every bare run passed and
         the first orchestrator-wired one did not.
 
-        Serialization is the CLI slot's, imported rather than restated: the two
-        slots configure the same binary, and a second copy of the quoting rules
-        is a second place for them to drift.
+        Serialization and tool isolation live in the dedicated codex_config
+        helpers, separate from native execution and history handling.
         """
-        from harness.slots.codex import _mcp_config_pairs
+        from harness.slots.codex_config import _mcp_only_overrides
 
         overrides: list[str] = []
         base = extra.get("config_overrides")
@@ -262,13 +330,13 @@ class CodexSdkSlot(ServerSlot):
             overrides += ["%s=%s" % (k, v) for k, v in base.items()]
         elif base:
             overrides += [str(v) for v in base]
-        overrides += _mcp_config_pairs(mcp)
+        overrides += _mcp_only_overrides(mcp)
         return tuple(overrides)
 
     def _sandbox(self, Sandbox, extra: dict):
         """Map ``extra["sandbox"]`` onto the SDK's preset enum.
 
-        Default: ``read-only`` -- the same default the CLI slot has always set,
+        Default: ``read-only`` -- side effects belong in the Ash sandbox,
         and for the same reason: side effects belong in the ash sandbox via MCP,
         not on the host. This used to be None ("codex's own policy"), and a live
         fork demo showed what that policy does: codex preferred its built-in
@@ -303,6 +371,8 @@ class CodexSdkSlot(ServerSlot):
         if self._client is None:
             raise RuntimeError("fork_at requires an open client (call inside run)")
         params: Dict[str, Any] = dict(kwargs)
+        if self._tool_config:
+            params["config"] = {**params.get("config", {}), **self._tool_config}
         if last_turn_id:
             params["lastTurnId"] = last_turn_id
         return _thread_id_of(self._client.thread_fork(thread_id, params))

@@ -92,6 +92,7 @@ class CheckpointRecord:
     #: True when background processes may have been alive at this step. A
     #: disk-only replay of such a step will not have them.
     live_background: bool = False
+    delta_empty: Optional[bool] = None
 
 
 @dataclass
@@ -203,6 +204,7 @@ class Checkpointer:
             memory_layers=snapshot.memory_layers,
             chain_size_mb=snapshot.chain_size_mb,
             live_background=live_background,
+            delta_empty=getattr(snapshot, "delta_empty", None),
         )
 
         # Every uncompacted capture adds exactly one layer to each chain it

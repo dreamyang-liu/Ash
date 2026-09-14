@@ -27,11 +27,12 @@ Fork support differs per slot (:class:`SlotCapabilities`):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional
 
 from harness.core.events import CHECKPOINT_CAPTURED
 from harness.core.journal import JournalWriter, read_journal
+from harness.normalize.claude_turns import completed_turn_steps
 
 
 @dataclass
@@ -41,6 +42,10 @@ class Checkpoint:
     snapshot_id: Optional[str]
     session_ckpt: Optional[str] = None
     reason: str = "captured"
+    delta_empty: Optional[bool] = None
+    call_id: Optional[str] = None
+    pairing: Optional[str] = None
+    prefix_complete: Optional[bool] = None
 
     def is_complete(self) -> bool:
         """Both halves present -> a full rollback point."""
@@ -77,6 +82,10 @@ class RollbackLedger:
             snapshot_id=snapshot_id,
             session_ckpt=session_ckpt,
             reason=reason,
+            delta_empty=extra.get("delta_empty"),
+            call_id=extra.get("call_id"),
+            pairing=extra.get("pairing"),
+            prefix_complete=extra.get("prefix_complete"),
         )
         self.checkpoints.append(checkpoint)
         return checkpoint
@@ -94,10 +103,10 @@ class RollbackLedger:
         return best
 
 
-def load_checkpoints(journal_path) -> List[Checkpoint]:
+def load_checkpoints(journal_path, *, events=None) -> List[Checkpoint]:
     """Read checkpoint pairs back out of a journal (for resume/fork tooling)."""
     out: List[Checkpoint] = []
-    for record in read_journal(journal_path):
+    for record in read_journal(journal_path) if events is None else events:
         if record.get("type") != CHECKPOINT_CAPTURED:
             continue
         out.append(
@@ -107,9 +116,62 @@ def load_checkpoints(journal_path) -> List[Checkpoint]:
                 snapshot_id=record.get("snapshot_id"),
                 session_ckpt=record.get("session_ckpt"),
                 reason=record.get("reason") or "captured",
+                delta_empty=record.get("delta_empty"),
+                call_id=record.get("call_id"),
+                pairing=record.get("pairing"),
+                prefix_complete=record.get("prefix_complete"),
             )
         )
     return out
+
+
+def branch_checkpoints(journal_path, *, events=None) -> Dict[int, Checkpoint]:
+    """Exact successful/clean ledger pairs, not a server or native-cut probe."""
+    latest: Dict[int, Checkpoint] = {}
+    events = list(read_journal(journal_path) if events is None else events)
+    exact = any(r.get("type") == "checkpoint.policy" and
+                r.get("pairing") == "call-id-v1" for r in events)
+    calls = [r.get("call_id") for r in events
+             if r.get("type") == "tool.started" and r.get("call_id")]
+    for checkpoint in load_checkpoints(journal_path, events=events):
+        if type(checkpoint.step) is not int or checkpoint.step < 1:
+            continue
+        if checkpoint.reason == "session_ref_backfill":
+            previous = latest.get(checkpoint.step)
+            if previous and previous.snapshot_id == checkpoint.snapshot_id:
+                latest[checkpoint.step] = replace(
+                    previous, session_ckpt=checkpoint.session_ckpt or previous.session_ckpt)
+        else:
+            latest[checkpoint.step] = checkpoint
+
+    eligible = {}
+    current_snapshot = None
+    for step, checkpoint in sorted(latest.items()):
+        if exact or checkpoint.pairing is not None:
+            if (checkpoint.pairing != "call-id-v1" or checkpoint.prefix_complete is not True
+                    or step > len(calls) or checkpoint.call_id != calls[step - 1]):
+                current_snapshot = None
+                continue
+        if checkpoint.reason == "captured":
+            current_snapshot = checkpoint.snapshot_id
+        elif checkpoint.reason != "clean" or checkpoint.snapshot_id != current_snapshot:
+            current_snapshot = None
+            continue
+        if checkpoint.is_complete():
+            eligible[step] = checkpoint
+    return eligible
+
+
+def turn_branch_checkpoints(journal_path) -> Dict[int, Checkpoint]:
+    """Preserve the storage ledger; expose only completed turns for new runs.
+
+    Native cut availability must still be checked by the slot-specific caller.
+    Legacy journals retain their prior ledger interpretation.
+    """
+    events = list(read_journal(journal_path))
+    points = branch_checkpoints(journal_path, events=events)
+    turns = completed_turn_steps(events)
+    return points if turns is None else {s: p for s, p in points.items() if s in turns}
 
 
 def fork_plan(journal_path, step: int) -> dict:
@@ -119,6 +181,15 @@ def fork_plan(journal_path, step: int) -> dict:
     ``is_copied_context``.
     """
     checkpoints = load_checkpoints(journal_path)
+    exact = any(r.get("type") == "checkpoint.policy" and r.get("pairing") == "call-id-v1"
+                for r in read_journal(journal_path))
+    if exact:
+        candidate = turn_branch_checkpoints(journal_path).get(step)
+        if candidate is None:
+            raise ValueError("no exact restorable checkpoint at step %s" % step)
+        return {"step": step, "snapshot_id": candidate.snapshot_id,
+                "session_ckpt": candidate.session_ckpt, "copied_through_seq": candidate.seq,
+                "call_id": candidate.call_id, "complete": True}
     candidate = None
     for checkpoint in checkpoints:
         if checkpoint.step <= step and checkpoint.snapshot_id:

@@ -39,6 +39,7 @@ class Snapshot:
     #: from it cold-boot instead of resuming.
     disk_only: bool = False
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
+    delta_empty: bool | None = None
 
     @classmethod
     def from_api(cls, body: dict[str, Any], *, disk_only: bool = False) -> "Snapshot":
@@ -49,6 +50,7 @@ class Snapshot:
             memory_layers=body.get("memoryLayerCount"),
             chain_size_mb=body.get("chainSizeMB"),
             disk_only=disk_only,
+            delta_empty=body.get("deltaEmpty") if isinstance(body.get("deltaEmpty"), bool) else None,
             raw=body,
         )
 
@@ -142,6 +144,13 @@ class Pool(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} cannot upload files; "
             "check supports_upload() first")
+
+    def supports_download(self) -> bool:
+        return False
+
+    async def download_file(self, sandbox: Sandbox, source: str, destination,
+                            timeout: float | None = None) -> None:
+        raise NotImplementedError(f"{type(self).__name__} cannot download files")
 
     async def pause(self, sandbox: Sandbox) -> None:
         """Suspend a sandbox, releasing its compute until resumed."""
@@ -433,6 +442,33 @@ class MicroVMPool(Pool):
                 timeout=timeout or 300.0)
         resp.raise_for_status()
 
+    def supports_download(self) -> bool:
+        return True
+
+    async def download_file(self, sandbox: Sandbox, source: str, destination,
+                            timeout: float | None = None) -> None:
+        """Stream a guest file to an atomic host destination, outside the runtime."""
+        from pathlib import Path
+        import tempfile
+
+        destination = Path(destination)
+        headers = {self.SANDBOX_ID_HEADER: _require_id(sandbox),
+                   self.TARGET_PORT_HEADER: self.ENVD_PORT}
+        temporary = None
+        try:
+            async with self._client.stream(
+                    "GET", f"{self.server_url}/files", params={"path": source},
+                    headers=headers, timeout=timeout or 120.0) as response:
+                response.raise_for_status()
+                with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as handle:
+                    temporary = Path(handle.name)
+                    async for chunk in response.aiter_bytes():
+                        handle.write(chunk)
+                temporary.replace(destination)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
     # --- Lifecycle ---
 
     async def spawn(
@@ -512,6 +548,8 @@ class MicroVMPool(Pool):
                 payload["cpuCount"] = int(resources["cpu"])
             if "memory_mb" in resources:
                 payload["memoryMB"] = int(resources["memory_mb"])
+            if "disk_size_mb" in resources:
+                payload["diskSizeMB"] = int(resources["disk_size_mb"])
         if self.allow_internet is not None:
             payload["allowInternetAccess"] = self.allow_internet
         resp = await self._client.post(f"{self.server_url}/sandboxes-cold",
@@ -526,7 +564,9 @@ class MicroVMPool(Pool):
             sid = sb._container_id
             if not sid or sid not in self._sandboxes:
                 continue
-            await self._client.delete(f"{self.server_url}/sandboxes/{sid}")
+            response = await self._client.delete(f"{self.server_url}/sandboxes/{sid}")
+            if response.status_code != 404:
+                response.raise_for_status()
             del self._sandboxes[sid]
             sb._container_id = None
 

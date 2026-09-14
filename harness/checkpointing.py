@@ -9,8 +9,9 @@ It hooks in without any slot knowing:
 
 - subscribes to the journal, so ``session.ref`` events keep the conversation
   reference current (a native session id for claude-code/codex/opencode);
-- fires a checkpoint at each **quiesce point** -- ``turn.completed`` for CLI
-  slots, or the PreToolUse boundary callback for the SDK slot;
+- pairs captures at the executor's serialized tool boundary with the native
+  call identity supplied by the approval hook (not with a completion counter);
+- retains turn-boundary capture for legacy callers without exact identities;
 - records the resulting pair via :class:`~harness.rollback.RollbackLedger`, so
   ``fork-plan`` can resolve both halves at any step.
 
@@ -23,8 +24,8 @@ Usage::
     bridge = SnapshotBridge.install(journal, session)          # CLI slots
     slot.run(task, journal, mcp)
 
-    bridge = SnapshotBridge.install(journal, session)          # SDK slot
-    slot = ClaudeCodeSlot(on_tool_boundary=bridge.on_tool_boundary)
+    # The orchestrator wires exact_mode, the slot's identity hook and the
+    # server's ToolBoundary together; an approval hook must NOT take a snapshot.
 
 ``session`` only needs the ``supports_snapshot`` / ``snapshot`` /
 ``swap_sandbox`` / ``squash_snapshot`` surface (an ``AshSession``, or a small
@@ -34,10 +35,12 @@ test double).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import threading
 from typing import Any, Optional
 
 from harness.core.events import SESSION_REF, TOOL_FINISHED, TOOL_STARTED, TURN_COMPLETED
 from harness.core.journal import JournalWriter
+from harness.core.checkpoint_identity import CALL_IDENTITY_VERSION
 from harness.rollback import Checkpoint, RollbackLedger
 
 
@@ -59,6 +62,11 @@ class SnapshotBridge:
     #: Captures declined because the caller was on an event loop thread.
     _skipped_on_loop: int = 0
     records: list = field(default_factory=list)
+    exact_mode: bool = False
+    _executed: set = field(default_factory=set)
+    _capture_identity: dict = field(default_factory=dict)
+    _record_lock: Any = field(default_factory=threading.RLock, repr=False)
+    _closed: bool = False
 
     # --- construction ------------------------------------------------------
     @classmethod
@@ -72,6 +80,7 @@ class SnapshotBridge:
         name_prefix: str = "",
         tracker: Any = None,
         checkpointer: Any = None,
+        exact_mode: bool = False,
     ) -> "SnapshotBridge":
         """Wire a bridge onto ``journal``.
 
@@ -86,6 +95,7 @@ class SnapshotBridge:
             session=session,
             ledger=RollbackLedger(journal),
             always=always,
+            exact_mode=exact_mode,
         )
         if checkpointer is None:
             checkpointer = _build_checkpointer(
@@ -100,10 +110,14 @@ class SnapshotBridge:
             _chain_on_checkpoint(checkpointer, bridge._on_checkpoint)
         bridge.checkpointer = checkpointer
         journal.subscribe(bridge._on_event)
+        if exact_mode:
+            journal.emit("checkpoint.policy", pairing=CALL_IDENTITY_VERSION)
         return bridge
 
     # --- journal subscription ---------------------------------------------
     def _on_event(self, record: dict) -> None:
+        if self._closed:
+            return
         etype = record.get("type")
 
         if etype == SESSION_REF:
@@ -125,20 +139,72 @@ class SnapshotBridge:
             self._inflight = max(0, self._inflight - 1)
             return
 
-        if etype == TURN_COMPLETED:
+        if etype == TURN_COMPLETED and not self.exact_mode:
             self.maybe_checkpoint()
 
     # --- checkpoint triggers ----------------------------------------------
-    def on_tool_boundary(self, index: int) -> Optional[Checkpoint]:
+    def validate_call(self, identity: dict, name: str, args: dict) -> None:
+        """Only an approved native call may claim an exact execution boundary."""
+        call_id = identity["call_id"]
+        record = next((r for r in self.journal.tool_calls()
+                       if r["call_id"] == call_id), None)
+        if (record is None or record["step"] != identity["step"]
+                or record["name"].split("__", 2)[-1] != name
+                or record["args"] != args):
+            raise ValueError("checkpoint identity does not match the approved tool call")
+        if self.journal.tool_finished(call_id):
+            # A timed-out request that arrived late must not modify a later
+            # prefix after that prefix has already been captured.
+            raise ValueError("tool call already finished or timed out before dispatch")
+
+    def record_unavailable(self, step: int, call_id: Optional[str], reason: str, *, detail=None) -> None:
+        self.record_pair(step, None, captured=False, reason=reason,
+                         call_id=call_id, pairing=CALL_IDENTITY_VERSION,
+                         prefix_complete=False, execution_detail=detail)
+
+    def finalize_calls(self) -> None:
+        """Keep holes explicit; never renumber a call that did reach execution."""
+        if not self.exact_mode:
+            return
+        recorded = {c.call_id for c in self.ledger.checkpoints}
+        for record in self.journal.tool_calls():
+            if record["call_id"] not in recorded:
+                self.record_unavailable(record["step"], record["call_id"], "not_executed")
+
+    def close(self) -> None:
+        """No late capture may publish into a journal whose owner has left."""
+        with self._record_lock:
+            self._closed = True
+
+    def on_tool_boundary(self, index: int, *, call_id: Optional[str] = None) -> Optional[Checkpoint]:
         """Step boundary for an external agent: its tool call just executed.
 
-        ``force`` is required here. The caller is asserting the executor has
-        returned, but the journal's ``tool.finished`` event is emitted later (the
-        SDK surfaces the ToolResultBlock on the next message), so the in-flight
-        guard would still see depth 1 and skip every checkpoint -- the bug that
-        made a rollback-capable run record zero snapshots.
+        The server holds the same-sandbox gate through execution and capture.
+        Journal tool.finished may arrive later (or early on a client timeout),
+        so that event is not an executor-quiescence lock. Exact captures also
+        carry call_id and proof that executed calls form this linear prefix.
         """
-        return self.maybe_checkpoint(step=index, force=True)
+        if self._closed:
+            return None
+        if self.exact_mode and not call_id:
+            self.record_unavailable(index, None, "missing_call_identity")
+            return None
+        if call_id:
+            self._executed.add(call_id)
+            calls = self.journal.tool_calls()
+            prefix_complete = all(
+                (r["call_id"] in self._executed or self.journal.tool_finished(r["call_id"]))
+                if r["step"] <= index else r["call_id"] not in self._executed
+                for r in calls)
+            self._capture_identity = dict(call_id=call_id, pairing=CALL_IDENTITY_VERSION,
+                                          prefix_complete=prefix_complete)
+        try:
+            checkpoint = self.maybe_checkpoint(step=index, force=True)
+            if checkpoint is None and call_id:
+                self.record_unavailable(index, call_id, "capture_unavailable")
+            return checkpoint
+        finally:
+            self._capture_identity = {}
 
     def maybe_checkpoint(
         self, step: Optional[int] = None, *, force: bool = False
@@ -157,8 +223,9 @@ class SnapshotBridge:
             self._skipped_on_loop += 1
             return None
         self.step = step if step is not None else self.step + 1
+        previous_records = len(self.records)
         record = self.checkpointer.after_step(self.step)
-        if record is None:
+        if record is None or len(self.records) == previous_records:
             return None
         return self.records[-1] if self.records else None
 
@@ -176,7 +243,7 @@ class SnapshotBridge:
 
     def record_pair(self, step: int, snapshot_id: Optional[str], *,
                     captured: bool = True, reason: str = "captured",
-                    **extra) -> None:
+                    **extra) -> Optional[Checkpoint]:
         """Record a pair whose snapshot somebody ELSE took.
 
         The stdio server captures in its own process and streams the map back as
@@ -186,26 +253,29 @@ class SnapshotBridge:
         that arrives after the pair was recorded corrects it retroactively
         rather than leaving half a pair.
         """
-        self.ledger.record(step, snapshot_id, session_ckpt=self.session_ref,
-                           reason=reason, captured=captured, **extra)
-        if snapshot_id and not self.session_ref:
-            self._pending = True
+        with self._record_lock:
+            if self._closed:
+                return None
+            checkpoint = self.ledger.record(step, snapshot_id, session_ckpt=self.session_ref,
+                                            reason=reason, captured=captured, **extra)
+            self.records.append(checkpoint)
+            if snapshot_id and not self.session_ref:
+                self._pending = True
+            return checkpoint
 
     # --- Checkpointer callback --------------------------------------------
     def _on_checkpoint(self, record: Any) -> None:
         snapshot_id = getattr(record, "snapshot_id", None)
         reason = getattr(record, "reason", "captured")
-        checkpoint = self.ledger.record(
+        self.record_pair(
             getattr(record, "turn", self.step),
             snapshot_id,
-            session_ckpt=self.session_ref,
             reason=reason,
             captured=bool(getattr(record, "captured", False)),
             disk_only=bool(getattr(record, "disk_only", True)),
+            delta_empty=getattr(record, "delta_empty", None),
+            **self._capture_identity,
         )
-        self.records.append(checkpoint)
-        if snapshot_id and not self.session_ref:
-            self._pending = True
 
     def _backfill_session_ref(self, ref: str) -> None:
         """Attach a late-arriving session id to the pairs already recorded.
@@ -222,6 +292,10 @@ class SnapshotBridge:
                     checkpoint.snapshot_id,
                     session_ckpt=ref,
                     reason="session_ref_backfill",
+                    delta_empty=checkpoint.delta_empty,
+                    call_id=checkpoint.call_id,
+                    pairing=checkpoint.pairing,
+                    prefix_complete=checkpoint.prefix_complete,
                 )
 
 

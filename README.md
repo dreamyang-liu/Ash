@@ -51,10 +51,13 @@ classes in `sympy/core/numbers.py` override comparison, so unknown-type comparis
 never reach `Basic.__eq__` — branched at the step before that edit, and **2 of 3
 branches came back resolved**, all 89 `PASS_TO_PASS` regressions passing.
 
-Three agent CLIs are supported and each has been driven through this end to end:
-`claude-code` (resume + `fork_session`), `codex` (`thread_fork`), `opencode`
+Three agent integrations are supported:
+`claude-code` (resume + `fork_session`), `codex` (SDK `thread_fork`), `opencode`
 (`/session/{id}/fork`). The infrastructure is agent-agnostic: one orchestrator, one
 checkpoint mechanism, one MCP server.
+
+`--slot codex` uses the SDK/app-server; the unused `codex-cli` execution adapter
+has been removed. Historical trajectories and their readers are retained.
 
 ## SWE-bench Verified
 

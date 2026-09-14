@@ -7,7 +7,7 @@ import pytest
 from harness.atif import ATIF_VERSION, journal_to_atif
 from harness.core import events as E
 from harness.core.journal import JournalWriter, read_journal
-from harness.rollback import RollbackLedger, fork_plan, load_checkpoints
+from harness.rollback import Checkpoint, RollbackLedger, branch_checkpoints, fork_plan, load_checkpoints
 
 
 def build_journal(path, *, with_checkpoints=True):
@@ -113,6 +113,50 @@ def test_incomplete_pair_is_detected(tmp_path):
         checkpoint = ledger.record(1, "snap-1")  # no session_ckpt
     assert checkpoint.is_complete() is False
     assert fork_plan(path, 1)["complete"] is False
+
+
+def test_branch_pairs_keep_clean_steps_but_exclude_failed_and_missing_steps(monkeypatch):
+    from harness import rollback
+
+    records = [Checkpoint(1, 1, "s1", "session"),
+               Checkpoint(2, 2, "s1", "session", "clean"),
+               Checkpoint(3, 3, "s1", "session", "failed"),
+               Checkpoint(4, 4, "s1", "session", "clean"),
+               Checkpoint(5, 5, "s5", "session"),
+               Checkpoint(7, 7, "s5", "session", "clean")]
+    monkeypatch.setattr(rollback, "load_checkpoints", lambda _, **kwargs: records)
+    monkeypatch.setattr(rollback, "read_journal", lambda _: [])
+    pairs = branch_checkpoints("unused")
+    assert set(pairs) == {1, 2, 5, 7}
+    assert pairs[2].snapshot_id == pairs[1].snapshot_id
+    assert 3 not in pairs and 6 not in pairs
+
+
+def test_session_backfill_preserves_capture_reason_and_original_boundary(monkeypatch):
+    from harness import rollback
+
+    records = [Checkpoint(1, 10, "s1"),
+               Checkpoint(2, 20, "s1", reason="failed"),
+               Checkpoint(1, 30, "s1", "session", "session_ref_backfill"),
+               Checkpoint(2, 40, "s1", "session", "session_ref_backfill")]
+    monkeypatch.setattr(rollback, "load_checkpoints", lambda _, **kwargs: records)
+    monkeypatch.setattr(rollback, "read_journal", lambda _: [])
+    pairs = branch_checkpoints("unused")
+    assert set(pairs) == {1}
+    assert pairs[1].seq == 10 and pairs[1].reason == "captured"
+    assert pairs[1].session_ckpt == "session"
+
+
+def test_incomplete_or_unexplained_clean_pairs_are_not_branch_candidates(monkeypatch):
+    from harness import rollback
+
+    records = [Checkpoint(1, 1, "s0", "session", "clean"),
+               Checkpoint(2, 2, "s2"),
+               Checkpoint(3, 3, "other", "session", "clean"),
+               Checkpoint(4, 4, "s4", "session", "session_ref_backfill")]
+    monkeypatch.setattr(rollback, "load_checkpoints", lambda _, **kwargs: records)
+    monkeypatch.setattr(rollback, "read_journal", lambda _: [])
+    assert branch_checkpoints("unused") == {}
 
 
 def test_fork_plan_picks_latest_snapshot_at_or_before_step(tmp_path):

@@ -79,7 +79,7 @@ def check_cli_flags(contract: dict, report: Report) -> None:
 
     slot = contract["slot"]
     argv = {
-        "codex": [binary, "exec", "--help"],
+        "codex": [binary, "app-server", "--help"],
         "opencode": [binary, "run", "--help"],
     }.get(slot, [binary, "--help"])
     text = cli_help(binary, argv)
@@ -148,8 +148,7 @@ def check_normalizer_alignment(contract: dict, report: Report) -> None:
     """The normalizer must still map every event/usage key the contract lists."""
     slot = contract["slot"]
     module = {
-        "codex": "harness.normalize.codex",
-        "codex-sdk": "harness.normalize.codex_sdk",
+        "codex": "harness.normalize.codex_sdk",
         "opencode": "harness.normalize.opencode",
         "opencode-server": "harness.normalize.opencode_server",
         "claude-code": "harness.normalize.claude_code",

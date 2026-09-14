@@ -1,9 +1,8 @@
 """The gateway HTTP server.
 
-Anthropic Messages API shape only (``POST /v1/messages`` + ``GET /v1/models``),
-which is all any Claude-speaking agent needs. Requests are forwarded verbatim
-except for the two things we own: the credential (agent's slot token -> the
-route's real key) and, optionally, the model name.
+Supports Anthropic Messages and OpenAI Responses, plus model discovery.
+Requests preserve their protocol except for credentials, optional model renaming
+and explicitly enabled Responses namespace adaptation for compatible routes.
 
 Implementation notes that are not obvious:
 
@@ -14,10 +13,9 @@ Implementation notes that are not obvious:
   per-subagent attribution. Rewriting response bytes is likewise avoided --
   unknown fields (thinking-block signatures) must survive byte-exact or the next
   request is rejected upstream.
-- **Streaming is a passthrough with a parser tap.** SSE frames are relayed as
-  they arrive (so the agent sees no added latency) while a side parser
-  accumulates ``message_start`` / ``message_delta`` usage for the journal. We do
-  not buffer whole responses, and we do not modify frames -- verdict-style
+- **Streaming defaults to passthrough with a parser tap.** Optional namespace
+  adaptation buffers one SSE event and restores tool references; unrelated
+  frames remain unchanged. It never buffers an entire response. Verdict-style
   rewriting on the model stream is not this layer's job.
 - **Budget is checked before forwarding**, refused with a NON-RETRYABLE 400 and
   a JSON error the agent can read. Enforcement here is real, unlike asking an
@@ -74,11 +72,13 @@ class GatewayServer:
         port: int = 0,
         timeout_s: float = 900.0,
         require_token: bool = True,
+        request_policy=None,
     ) -> None:
         self.table = table
         self.journal = journal
         self.timeout_s = timeout_s
         self.require_token = require_token
+        self.request_policy = request_policy
         self._httpd = ThreadingHTTPServer((host, port), _make_handler(self))
         self._httpd.daemon_threads = True
         self._thread: Optional[threading.Thread] = None
@@ -229,6 +229,22 @@ def _make_handler(gateway: GatewayServer):
             route = gateway.table.route_for(requested_model)
             if route.upstream_model:
                 payload["model"] = route.upstream_model
+            adapter = None
+            if shape == "responses" and route.flatten_tool_namespaces:
+                from harness.gateway.responses_compat import ResponsesNamespaceAdapter
+
+                try:
+                    adapter = ResponsesNamespaceAdapter(payload)
+                    payload = adapter.payload
+                except ValueError as error:
+                    self._error(400, str(error), "invalid_request_error")
+                    return
+            if gateway.request_policy is not None:
+                try:
+                    payload = gateway.request_policy.prepare_model_request(payload, shape)
+                except ValueError as error:
+                    self._error(400, str(error), "invalid_request_error")
+                    return
             body = json.dumps(payload).encode()
             streaming = bool(payload.get("stream"))
 
@@ -237,7 +253,7 @@ def _make_handler(gateway: GatewayServer):
 
             try:
                 self._forward(route, body, streaming, token, requested_model,
-                              shape)
+                              shape, adapter)
             except Exception as exc:  # noqa: BLE001 - report, never crash the server
                 gateway.record(
                     agent_id=getattr(token, "agent_id", None),
@@ -273,7 +289,7 @@ def _make_handler(gateway: GatewayServer):
             return headers
 
         def _forward(self, route, body: bytes, streaming: bool, token,
-                     requested_model, shape: str = "messages") -> None:
+                     requested_model, shape: str = "messages", adapter=None) -> None:
             import httpx
 
             url = route.base_url.rstrip("/") + "/v1/" + shape
@@ -282,8 +298,11 @@ def _make_handler(gateway: GatewayServer):
             with httpx.Client(timeout=gateway.timeout_s) as client:
                 if not streaming:
                     upstream = client.post(url, content=body, headers=headers)
-                    self._relay_head(upstream.status_code, upstream.headers, len(upstream.content))
-                    self.wfile.write(upstream.content)
+                    content = upstream.content
+                    if adapter is not None and upstream.is_success:
+                        content = json.dumps(adapter.restore(upstream.json())).encode()
+                    self._relay_head(upstream.status_code, upstream.headers, len(content))
+                    self.wfile.write(content)
                     usage, model = _usage_from_response(upstream)
                     self._tap(token, requested_model, model, route, upstream.status_code, usage, False)
                     return
@@ -297,10 +316,16 @@ def _make_handler(gateway: GatewayServer):
                         if not chunk:
                             continue
                         # Chunked framing: relay immediately, no buffering.
-                        self.wfile.write(b"%X\r\n%s\r\n" % (len(chunk), chunk))
-                        self.wfile.flush()
+                        frames = adapter.feed(chunk) if adapter is not None else [chunk]
+                        for frame in frames:
+                            self.wfile.write(b"%X\r\n%s\r\n" % (len(frame), frame))
+                            self.wfile.flush()
                         found = scanner.feed(chunk, usage)
                         model = model or found
+                    if adapter is not None:
+                        remaining = adapter.finish()
+                        if remaining:
+                            self.wfile.write(b"%X\r\n%s\r\n" % (len(remaining), remaining))
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
                     self._tap(token, requested_model, model, route, upstream.status_code, usage, True)

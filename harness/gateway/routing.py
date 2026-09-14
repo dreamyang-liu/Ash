@@ -55,6 +55,7 @@ class ModelRoute:
     #: everything and charge nothing -- ``budget_usd`` then never binds. Config,
     #: not code: prices change and differ per route (an RL checkpoint is free).
     pricing: Dict[str, float] = field(default_factory=dict)
+    flatten_tool_namespaces: bool = False
 
     def price(self, usage) -> float:
         """USD for one request's usage, 0.0 when this route has no pricing.
@@ -81,6 +82,9 @@ class ModelRoute:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "ModelRoute":
+        flatten = payload.get("flatten_tool_namespaces", False)
+        if not isinstance(flatten, bool):
+            raise ValueError("flatten_tool_namespaces must be a boolean")
         return cls(
             base_url=payload.get("base_url") or "https://api.anthropic.com",
             api_key=payload.get("api_key"),
@@ -88,6 +92,7 @@ class ModelRoute:
             upstream_model=payload.get("upstream_model"),
             headers=dict(payload.get("headers") or {}),
             pricing=dict(payload.get("pricing") or {}),
+            flatten_tool_namespaces=flatten,
         )
 
 

@@ -32,6 +32,7 @@ Both respect ``quiet``.
 from __future__ import annotations
 
 import asyncio
+import threading
 import sys
 from typing import Any, Callable, Optional
 
@@ -85,6 +86,7 @@ class SandboxSession:
         #: started (digest-pinned for a cold start). Unchanged by re-boarding.
         self._base_image: str = ""
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_lock = threading.RLock()
         #: Why the last :meth:`create` returned False. Kept because ``create``
         #: reports through a bool and the reason through ``_warn`` -- and a quiet
         #: caller (the orchestrator is one) then had nothing to put in its own
@@ -116,6 +118,44 @@ class SandboxSession:
             self._loop = asyncio.new_event_loop()
         return self._loop
 
+    def _drive(self, coroutine):
+        """One owner for the session loop, even across checkpoint workers."""
+        with self._loop_lock:
+            unsettled = getattr(self, "_unsettled_operation", None)
+            if unsettled is not None and not unsettled.done():
+                if asyncio.isfuture(coroutine):
+                    coroutine.cancel()
+                else:
+                    coroutine.close()
+                raise RuntimeError("Previous sandbox operation has not settled; session is quarantined")
+            if unsettled is not None:
+                try:
+                    unsettled.result()
+                except BaseException:
+                    pass
+            self._unsettled_operation = None
+            loop = self._get_loop()
+            task = asyncio.ensure_future(coroutine, loop=loop)
+            try:
+                return loop.run_until_complete(task)
+            except BaseException:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        loop.run_until_complete(asyncio.wait(
+                            {task}, timeout=getattr(self, "_cancel_grace_seconds", 5.0)))
+                    except BaseException as cleanup_error:
+                        self._warn("Interrupted operation cleanup failed: %s" % cleanup_error)
+                if task.done():
+                    try:
+                        task.result()
+                    except BaseException:
+                        pass
+                else:
+                    self._unsettled_operation = task
+                    self._warn("Interrupted sandbox operation did not settle; quarantining session")
+                raise
+
     # --- lifecycle ---------------------------------------------------------
     @property
     def sandbox_id(self) -> str:
@@ -146,7 +186,7 @@ class SandboxSession:
         """``resources``: e.g. ``{"cpu": 4, "memory_mb": 16384}``. A task that
         declares its needs must get them: running a build-heavy task in the
         backend's default (2 CPUs, 1 GB) OOMs it rather than failing loudly."""
-        return self._get_loop().run_until_complete(
+        return self._drive(
             self._create_async(image, resources))
 
     async def _create_async(self, image: str,
@@ -212,7 +252,7 @@ class SandboxSession:
         if self._sandbox:
             container_id = getattr(self._sandbox, "_container_id", "") or ""
             try:
-                self._get_loop().run_until_complete(self._destroy_async())
+                self._drive(self._destroy_async())
             except Exception:  # noqa: BLE001
                 # Last resort for a local container the pool could not remove: a
                 # leaked container holds its image and ports. Only meaningful for
@@ -248,11 +288,23 @@ class SandboxSession:
         if not self._sandbox or not self.supports_upload():
             return False
         try:
-            self._get_loop().run_until_complete(
+            self._drive(
                 self._pool.upload_file(self._sandbox, source, destination))
             return True
         except Exception as e:  # noqa: BLE001
             self._warn("upload failed: %s" % e)
+            return False
+
+    def download_file(self, source: str, destination, timeout: float = 120.0) -> bool:
+        """Copy a guest file to the host without runtime output truncation."""
+        if not self._sandbox or not self._pool or not self._pool.supports_download():
+            return False
+        try:
+            self._drive(self._pool.download_file(
+                self._sandbox, source, destination, timeout=timeout))
+            return True
+        except Exception as error:
+            self._warn("download failed: %s" % error)
             return False
 
     # --- provenance --------------------------------------------------------
@@ -303,7 +355,7 @@ class SandboxSession:
         if not self._sandbox or not self.supports_snapshot():
             return None
         try:
-            return self._get_loop().run_until_complete(
+            return self._drive(
                 self._pool.snapshot(self._sandbox, name=name,
                                     disk_only=disk_only))
         except Exception as e:  # noqa: BLE001
@@ -320,7 +372,7 @@ class SandboxSession:
         if not self.supports_snapshot():
             return snapshot
         try:
-            return self._get_loop().run_until_complete(
+            return self._drive(
                 self._pool.squash(snapshot, name=name))
         except Exception as e:  # noqa: BLE001
             self._warn("squash failed: %s" % e)
@@ -360,7 +412,7 @@ class SandboxSession:
         snapshot_id = getattr(snapshot, "id", snapshot)
         previous = self._sandbox
         try:
-            replacement = self._get_loop().run_until_complete(
+            replacement = self._drive(
                 self._pool.spawn(image=snapshot_id,
                                  agent_id=previous.agent_id))
         except Exception as e:  # noqa: BLE001
@@ -372,11 +424,11 @@ class SandboxSession:
         # startup command that launches it; adopting an unreachable replacement
         # would turn every later tool call into a transport error and kill the
         # episode. Keeping the old sandbox instead costs only a deeper layer chain.
-        if not self._get_loop().run_until_complete(self._reachable(replacement)):
+        if not self._drive(self._reachable(replacement)):
             self._warn("re-board target has no runtime; keeping sandbox (does "
                        "the template declare a startup command?)")
             try:
-                self._get_loop().run_until_complete(
+                self._drive(
                     self._pool.destroy(replacement))
             except Exception:  # noqa: BLE001
                 pass
@@ -392,7 +444,7 @@ class SandboxSession:
             except Exception as e:  # noqa: BLE001
                 self._warn("swap listener failed: %s" % e)
         try:
-            self._get_loop().run_until_complete(self._pool.destroy(previous))
+            self._drive(self._pool.destroy(previous))
         except Exception as e:  # noqa: BLE001
             # The replacement is live and serving calls; a stranded old sandbox is
             # a leak for the TTL to reap, not a run failure.
@@ -444,7 +496,7 @@ class SandboxSession:
         if not self._sandbox:
             return ToolResult(success=False, output="", error="No active sandbox")
         try:
-            return self._get_loop().run_until_complete(
+            return self._drive(
                 self._execute_async(tool_name, args, timeout, agent_id)
             )
         except Exception as e:  # noqa: BLE001

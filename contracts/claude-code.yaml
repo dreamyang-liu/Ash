@@ -28,6 +28,7 @@ options_fields:
   - model
   - system_prompt
   - max_turns
+  - max_buffer_size
 
 sdk_exports:
   - query

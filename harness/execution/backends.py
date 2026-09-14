@@ -27,6 +27,7 @@ look like a connection failure.
 
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,7 @@ from typing import Any
 from ash_sandbox import DockerPool, MicroVMPool, Pool, SandboxPool
 
 __all__ = ["build_pool", "backend_config", "backend_name", "BACKENDS",
-           "BackendError", "resolve_microvm_endpoint"]
+           "BackendError", "resolve_microvm_endpoint", "with_sandbox_budget"]
 
 
 class BackendError(ValueError):
@@ -42,6 +43,31 @@ class BackendError(ValueError):
 
 
 DEFAULT_BACKEND = "docker"
+VM_LIFETIME_MARGIN_S = 600
+
+
+def with_sandbox_budget(config: dict, budget_s: float) -> dict:
+    """Cover a bounded operation's wall budget without changing its timeout.
+
+    A VM lease is not an idle/tool timeout. Preserve a longer explicit lease,
+    but lift a missing/short one to budget + provisioning/teardown allowance.
+    Leave the generic pool defaults and non-microVM backends unchanged.
+    """
+    result = dict(config)
+    if backend_name(config) != "microvm":
+        return result
+    if (isinstance(budget_s, bool) or not isinstance(budget_s, (int, float))
+            or not math.isfinite(budget_s) or budget_s <= 0):
+        raise BackendError("VM lifetime requires a finite positive operation budget")
+    section = _section(config, "microvm")
+    explicit = section.get("sandbox_ttl", 0)
+    if (isinstance(explicit, bool) or not isinstance(explicit, (int, float))
+            or not math.isfinite(explicit) or explicit < 0):
+        raise BackendError("microvm.sandbox_ttl must be a finite non-negative number")
+    section["sandbox_ttl"] = max(math.ceil(explicit), math.ceil(budget_s) + VM_LIFETIME_MARGIN_S)
+    result["microvm"] = section
+    return result
+
 
 #: Recognised keys per backend, so a typo is reported rather than ignored.
 _ALLOWED_KEYS = {
@@ -68,7 +94,7 @@ _ALLOWED_KEYS = {
                 # OCI ENV (PATH included), read with regctl at build time. The
                 # guest agent otherwise rebuilds PATH and drops e.g. a venv's
                 # bin. Opt-in so existing template names stay stable.
-                "image_env"},
+                "image_env", "runtime_init"},
     "k8s": {"control_plane_url", "gateway_url", "default_image"},
 }
 

@@ -80,7 +80,7 @@ python -m swebench.fork_eval \
     --instance sympy__sympy-13091 \
     --slot codex --model openai.gpt-5.6-luna \
     --analyst-model openai.gpt-5.6-luna \
-    --rounds 2 --branches 3 \
+    --rounds 2 --branches 3 --fork-full-conversation \
     -o runs/fork-eval
 ```
 
@@ -88,8 +88,8 @@ What happens, in order (`swebench/fork_eval.py`):
 
 1. **Attempt.** One orchestrator run on a fresh microVM. Every step that could
    have mutated the filesystem leaves a `(snapshot, session)` pair in the
-   journal; read-only steps map to the previous snapshot for free, so *every*
-   step is a valid branch point without paying for a snapshot per step.
+   journal; read-only steps can map to the previous snapshot for free. Missing
+   or failed capture records are not valid exact branch points.
 2. **Grade.** The **last snapshot is restored into a NEW microVM** and the tests
    run there. Grading in a restored sandbox rather than the live one proves the
    snapshot carries the work, and lets grading happen after the agent is gone.
@@ -98,10 +98,11 @@ What happens, in order (`swebench/fork_eval.py`):
 3. **Branch on failure.** The analyst gets the journal rendered as one line per
    step **plus the grading verdict** (which test failed, the patch, the output).
    That verdict is the point: on a benchmark the agent usually believes it
-   succeeded, so "what went wrong" is only answerable from outside. It returns a
-   branch step and K diverse directions; each becomes another run whose sandbox
-   image *is* that step's snapshot and whose conversation forks the parent's.
-4. **Repeat** from the best-scoring attempt, up to `--rounds`.
+   succeeded, so "what went wrong" is only answerable from outside. Analysts
+   return diagnoses and candidate steps without receiving the supplied hint.
+   A separate reviewer chooses branches under the selected count mode, each
+   with its own base/step/hint. Positions may repeat in both modes.
+4. **Repeat** using the reviewer's selected bases/steps, up to `--rounds`.
 
 Scores: `3` resolved, `2` target tests pass but something regressed, `1` a patch
 exists, `0` nothing. `summary.json` and every journal land in `-o`.
@@ -117,11 +118,13 @@ resolved** with all 89 `PASS_TO_PASS` regressions passing.
 - `--analyst-tokens 100000` — how much trajectory the analyst sees. The budget is
   spent per-line first: tool *results* get 6000 characters, kept **head and
   tail**, because a test run's verdict is at the end.
-- `--branches`, `--rounds` — width and depth. Branches within a round are
-  independent; each gets its own sandbox off the same snapshot, so siblings
-  cannot contaminate each other.
-- `--slot claude-code|codex|opencode` — all three verified end to end on this
-  loop.
+- `--branches`, `--rounds` — per-round count and depth. Each branch gets an
+  independent sandbox from its selected snapshot; multiple hints may use the
+  same position, but need not. `--branch-count-mode adaptive` (default) treats
+  the count as a maximum; `fixed` requires exactly that many branches per round.
+- `--slot claude-code|codex|opencode` — all three have historical loop runs.
+  Exact indexed conversation cuts currently use Claude Code transcripts;
+  other slots require explicit full-conversation mode for branching.
 - `--parent-from runs/prev/final.json|runs/prev/` — branch from a RECORDED
   single-pass parent instead of running a fresh one: the journal is copied in
   as `parent.jsonl`, its last snapshot graded, then round 1. A fresh parent
@@ -130,6 +133,19 @@ resolved** with all 89 `PASS_TO_PASS` regressions passing.
   `branching-fullconv-2026-09-04`): see below.
 
 ### What a branch actually inherits
+
+Snapshot responses from servers with disk-delta measurement expose optional
+`deltaEmpty`; the SDK reads it as `Snapshot.delta_empty`, and captured checkpoint
+events record `delta_empty`. It describes the newly captured rootfs/attached-disk
+modification layers before compaction, not memory or a hash of complete state.
+Writing the same bytes again still counts as nonempty. Missing/unsupported
+measurements are `None`, never assumed empty. Clean-skipped and failed captures
+do not inherit a previous capture's flag. The flag is observational only: it
+does not change capture, snapshot reuse, branching or retention policy.
+Guest filesystem metadata and logging count as writes; envd logging its `sync`
+command can make a nominally read-only interval nonempty. Verification and the
+controlled log-to-tmpfs test setup are documented in
+`../artifacts/delta-empty-20260906-EP5n6E/`.
 
 A checkpoint pair is `(snapshot after step N, native session id)`. For
 `claude-code` the session id alone cannot express "up to step N":
@@ -144,20 +160,79 @@ remembers exactly what its disk holds. Measured on DeepSWE's 82 failures, same
 parents, same analyst: rescued 70/82 vs 58/82, per-branch success 48% vs 36%,
 cheaper branches ($1.33 vs $1.44). 414/418 branches verified truncated.
 
-Two cases cannot be cut, and are recorded rather than hidden
+In the historical runs above, two cases could not be cut and were recorded
 (`origin.cut_note`): a parent whose conversation Claude Code **auto-compacted**
 before the fork step (entries before `compact_boundary` are not loadable; 11 of
 82 DeepSWE parents were compacted, and after compaction Claude Code stopped
 transcribing tool results altogether), and a cut the CLI refuses at runtime
-("No message found with message.uuid"). Both fall back to the full
-conversation for that branch; the report counts them.
+("No message found with message.uuid"). Those runs fell back to full
+conversation for that branch; the report counts them. Since the 2026-09-06
+adaptive per-branch change, normal mode instead rejects unavailable cuts before
+launch; a runtime refusal is recorded without an untruncated retry. Explicit
+`--fork-full-conversation` remains available and is labelled in origins.
 
-The branch message (`deepswe.bench.branch_note`) is a `<system-reminder>` — the
-form Claude Code uses for environment feedback — carrying the verifier's facts
-(failing test ids, regression counts, patch state), the analyst's
-failure_reason and lesson, and the reviewer's hint; not the task text, not the
-tool primer, not the parent's later diff. SWE-bench keeps its original
-`BRANCH_PROMPT`.
+Current reviewer output is `{"synthesis": ..., "branches": [{"name": ...,
+"base": ..., "branch_step": ..., "why": ..., "hint": ...}, ...]}`.
+`--branch-count-mode adaptive --branches 4,3` treats the schedule as upper bounds;
+`--branch-count-mode fixed --branches 4,3` requires exactly four, then three
+branches when each round is needed. This never requires distinct positions.
+Fixed mode changes both the reviewer's instructions and the controller's count
+check: a wrong-count plan is recorded and rejected, not padded, rewritten or
+silently reduced. The analyst can still suggest fewer candidate positions.
+Analyst suggestions are limited by the current allowance; both stages receive
+recorded eligible snapshot/session steps. The chosen native cut is checked in
+that checkpoint's paired session before execution. Failed captures, incomplete
+pairs and missing steps are excluded; safe clean reuse is retained. There is
+no nearest-snapshot substitution or silent step clamping in this loop.
+
+Plans retain the raw review, limit, eligible steps and resolved selections or a
+validation error. Plans/origins/summaries record `branch_count_mode`. New summaries
+label `branch_policy=per-branch` and `branch_schedule_semantics=upper_bounds`
+or `exact_counts`; readers still accept historical `adaptive-per-branch` records.
+Old results retain their original metadata and policy.
+Reporting/export supports both schemas, uses executed origins when available,
+and follows a branch's actual ancestry instead of assuming every base is parent.
+
+The measured runs above used a feedback-rich `<system-reminder>` carrying
+verifier facts, analyst failure_reason/lesson, and the reviewer's hint;
+SWE-bench used a longer branch prompt. Those historical results retain that
+protocol. The current branch message contains the reviewer's hint followed by
+a short request to continue directly with code-focused reasoning, without an
+acknowledgment or recap (`harness/core/guidance.py`). There is no XML reminder,
+task restatement or injected verifier/analyst report. Explicit full-conversation
+mode still explains that the filesystem was restored; DeepSWE still asks
+the agent to commit its work.
+
+After the 2026-09-05 continuity pilot, the user requested rollback of the added
+hint sanitation stage. The loop is again **analyst -> reviewer -> actor**:
+the hint is delivered verbatim, without keyword gating, another model call,
+or automatic rewriting. `plan-roundN.json` keeps the original review, and
+`fork.origin` records `actor_hint` and `hint_delivery: "reviewer-direct"`.
+Historical `hint-*.json` audits remain unchanged; new direct deliveries do not
+produce a sanitation audit. This avoids downstream paraphrasing, but does not
+guarantee the reviewer itself always follows the prompt.
+
+The analyst now identifies a useful connection to the retained work. As of
+2026-09-06 it receives task, observed trajectory, patch and verification evidence,
+not the attempt's supplied hint. The trajectory renderer already excludes the
+injected run.started note and fork.origin metadata; actual recorded agent speech
+is not scrubbed. Reviewer reports still include hint_given so it can distinguish
+directions already tried. Meanwhile,
+the reviewer writes a concise, specific code-level lead and checks whether the
+next response would make sense after removing that lead. Reviewer instructions
+withhold unseen test/report references, avoid source narration and preserve
+useful technical meaning. Naturalness must not mean vague advice or invented
+agent reasoning. These are prompt-level objectives, not a lexical pass/fail
+guarantee; assess full continuations and task outcomes separately.
+
+The old pilot (`runs/coherence-pilot-20260905-2109/`) exposed semantic drift in
+Arcane's automatic rewrite; its third preparation was held before actor launch.
+The user superseded that approach with direct prompt improvement. Pre-rollback
+sources and the intermediate direct-delivery state are preserved under
+`runs/prompt-reset-20260905-Nabyvr/`; old pilot scripts require their archived
+source versions because the sanitation helpers were removed. No live run of
+the new prompts has been launched. See workspace-root `../STATUS.md` for scope
+before starting experiments; SWE-bench remains cancelled.
 
 ---
 
@@ -179,6 +254,9 @@ agent talks to it (`http` = an MCP server inside this process, `stdio` = a
 subprocess). Both checkpoint at the tool boundary. Add `--gateway --routes
 routes.json --budget-usd 5` to route the model traffic through the inference
 gateway (model swap, real accounting, enforced budget).
+
+`--slot codex` uses the Codex SDK/app-server. The unused `codex-cli` adapter has
+been removed; preserve the SDK's bundled binary and historical event readers.
 
 Then inspect and branch by hand:
 
@@ -332,7 +410,26 @@ python3.11 scripts/deepswe_branch_report.py runs/deepswe-branch [runs/deepswe-br
 python3.11 scripts/deepswe_export_resolved.py --single runs/deepswe-final.json \
     --branch runs/deepswe-branch runs/deepswe-branch-fix --details runs/deepswe-details.jsonl -o traj.tar.gz
 python3.11 scripts/trajectory_view.py runs/.../r1b2-x.jsonl --with-parent --full -o one.md   # any journal
+
+# 5. do not trust "resolved": their grader resets only the hidden test.patch files, so an
+#    agent's edits to PRE-EXISTING tests reach grading. Re-collect every resolved patch,
+#    classify it, and re-verify with those test edits stripped (load-bearing => strict count).
+#    (runs/deepswe-winners.json = list of the resolving attempts, one per task, from the reports)
+python3.11 scripts/deepswe_audit_patches.py runs/deepswe-winners.json -o runs/deepswe-audit --workers 8
+                                                                  # audit.jsonl, patches/, REPORT.md
+python3.11 scripts/deepswe_audit_reverify.py runs/deepswe-audit --workers 8   # reverify.jsonl
+#    then have a stronger model read each final patch against instruction.md, the hidden
+#    tests and the reference: two lenses (spec fidelity, test-gaming) + arbiter, as a
+#    Workflow of Opus agents (see runs/deepswe-judge/manifest.json for the per-task inputs);
+#    the collector reads the workflow's own journal, so nothing depends on the chat result.
+python3.11 scripts/deepswe_judge_report.py <workflow transcript dir> \
+    --manifest runs/deepswe-judge/manifest.json -o runs/deepswe-judge [--extra rerun.json]
 ```
+
+Measured 2026-09-05 on the 101 resolved: 3 load-bearing test edits (strict
+98/113 = 86.7%); Opus judge GENUINE 86 / PARTIAL 14 / HACK 1 (the same
+load-bearing case) / TEST_SHAPED 0 — the guidance inflates the number, the
+patches themselves are not test-shaped.
 
 `scripts/rerun_deepswe_affected.sh` reruns tasks whose journals carry the
 proxy-404 signature (a sandbox Ash destroyed mid-run, Failure log #7 in

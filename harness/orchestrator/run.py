@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -174,13 +174,18 @@ class CheckpointTail:
                 entry = _json.loads(line)
             except ValueError:
                 continue
-            if not entry.get("snapshot_id"):
+            if "step" not in entry:
                 continue
             self.bridge.record_pair(
                 int(entry.get("step", 0)),
-                entry["snapshot_id"],
+                entry.get("snapshot_id"),
                 captured=bool(entry.get("captured", True)),
                 reason=entry.get("reason") or "tool_boundary_stdio",
+                delta_empty=entry.get("delta_empty"),
+                call_id=entry.get("call_id"),
+                pairing=entry.get("pairing"),
+                prefix_complete=entry.get("prefix_complete"),
+                execution_detail=entry.get("execution_detail"),
             )
 
     def stop(self) -> None:
@@ -267,6 +272,7 @@ class RunOutcome:
     gateway_url: Optional[str] = None
     checkpoints: int = 0
     error: Optional[str] = None
+    stop_reason: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -297,6 +303,8 @@ class Orchestrator:
     def run(self, spec: RunSpec) -> RunOutcome:
         from harness.slots import load_slot
 
+        if spec.slot == "claude-code" and spec.tools in (None, "default") and not spec.mcp_url:
+            spec = replace(spec, tools="shell_only")
         run_id = spec.run_id or new_run_id()
         journal_path = Path(spec.journal_path or self.out_dir / ("%s.jsonl" % run_id))
         slot = load_slot(spec.slot)()
@@ -307,8 +315,10 @@ class Orchestrator:
         gateway = None
         bridge = None
         tail = None
+        rollout_controls = None
         result: Optional[SlotResult] = None
         error: Optional[str] = None
+        control = None
 
         # ExitStack so the ledger's run context (which marks the run done even on
         # exception) is optional without duplicating the body under an if.
@@ -322,11 +332,37 @@ class Orchestrator:
             claim = (stack.enter_context(self.ledger.run(run_id))
                      if self.ledger is not None else None)
             try:
+                from harness.core.control import RunControl
+                control = RunControl()
+                if extra.get("rollout_contract") is not None:
+                    from harness.rollout import RolloutControls
+
+                    if spec.transport != "http" or spec.mcp_url:
+                        raise ValueError("Rollout controls require an owned HTTP execution server")
+                    rollout_controls = RolloutControls(extra["rollout_contract"], journal, control)
+                    rollout_controls.start()
                 provisioned, mcp = self._wire_sandbox(spec, claim)
+                if rollout_controls is not None:
+                    from harness.execution.pipeline import ToolPipeline
+
+                    server = getattr(provisioned, "server", None)
+                    if server is None or server.pipeline is None:
+                        raise ValueError("Rollout tool budget has no execution pipeline")
+                    server.pipeline = ToolPipeline([rollout_controls, *server.pipeline.interceptors])
+
+                def abort_on_unsafe_execution(record):
+                    if (record.get("type") == "checkpoint.captured"
+                            and record.get("reason") == "execution_uncertain"):
+                        control.request_stop(
+                            "execution_uncertain at step %s (call %s); terminating rollout" %
+                            (record.get("step"), record.get("call_id")))
+
+                journal.subscribe(abort_on_unsafe_execution)
                 task = TaskSpec(
                     prompt=spec.prompt, cwd=spec.cwd, model=spec.model,
-                    timeout_s=spec.timeout_s, extra=extra,
+                    timeout_s=spec.timeout_s, extra=extra, control=control,
                 )
+                task._rollout_controls = rollout_controls
                 gateway = self._wire_gateway(spec, journal, task, run_id)
 
                 # Both of these subscribe to the journal, and a subscriber only
@@ -346,11 +382,18 @@ class Orchestrator:
                     tail = CheckpointTail(provisioned.checkpoint_log,
                                           bridge).start()
 
+                if getattr(bridge, "exact_mode", False):
+                    task.extra["checkpoint_identity"] = True
                 result = slot.run(task, journal, mcp)
+                if control.reason is not None:
+                    error = control.reason
+                    journal.emit("run.finished", status="error", error=error)
             except Exception as exc:  # noqa: BLE001 - a run reports, it does not raise
                 error = "%s: %s" % (type(exc).__name__, exc)
                 journal.emit("run.finished", status="error", error=error)
             finally:
+                if rollout_controls is not None:
+                    rollout_controls.finish()
                 # Before teardown, so the journal says what happened while the
                 # journal is still open; and in `finally`, because a run that died
                 # is exactly one whose missing snapshots matter most. The tail's
@@ -359,12 +402,19 @@ class Orchestrator:
                 if tail is not None:
                     tail.stop()
                 self._report_missing_checkpoints(spec, journal, bridge)
-                self._teardown(spec, gateway, provisioned, claim)
+                stopped = self._teardown(spec, gateway, provisioned, claim)
+                if stopped is False:
+                    error = "tool execution/capture did not settle during shutdown; sandbox retained"
+                    journal.emit("run.finished", status="error", error=error)
+                if getattr(bridge, "exact_mode", False):
+                    bridge.finalize_calls()
+                if bridge is not None and hasattr(bridge, "close"):
+                    bridge.close()
 
         return RunOutcome(
             run_id=run_id,
             journal_path=journal_path,
-            status=(result.status if result else "error"),
+            status=(result.status if result and not error else "error"),
             final_text=(result.final_text if result else ""),
             usage=(result.usage if result else {}),
             native_session_id=(result.native_session_id if result else None),
@@ -372,6 +422,8 @@ class Orchestrator:
             gateway_url=(gateway.base_url if gateway else None),
             checkpoints=len(bridge.ledger.checkpoints) if bridge else 0,
             error=error or (result.error if result else None),
+            stop_reason=(getattr(control, "stop_reason", None)
+                         or ("timeout" if result and result.status == "timeout" else None)),
         )
 
     # --- steps -------------------------------------------------------------
@@ -455,6 +507,7 @@ class Orchestrator:
         cannot attach is therefore refused here, with the alternative named,
         rather than failing later as an unexplained tool error.
         """
+        from harness.execution.backends import with_sandbox_budget
         from harness.execution.session import SandboxSession
         from harness.execution.wiring import stdio_wiring
 
@@ -463,7 +516,7 @@ class Orchestrator:
                              % spec.transport)
 
         session = SandboxSession(runtime_bin=spec.runtime_bin,
-                                 backend=dict(spec.backend), quiet=True)
+                                 backend=with_sandbox_budget(spec.backend, spec.timeout_s), quiet=True)
         if not session.create(spec.sandbox_image, spec.sandbox_resources):
             # The session is quiet here (its progress lines are not this run's
             # output), so the reason has to travel in the exception or it is lost.
@@ -500,6 +553,8 @@ class Orchestrator:
                     owned.checkpoint_log = self.out_dir / (
                         "%s.ckpt.jsonl" % session.sandbox_id[:12])
                     args += ["--checkpoint-log", str(owned.checkpoint_log)]
+                    if spec.slot == "claude-code":
+                        args += ["--checkpoint-call-identity"]
                     if spec.snapshot_every_step:
                         args += ["--checkpoint-always"]
                 owned.mcp = stdio_wiring(args=args)
@@ -515,10 +570,10 @@ class Orchestrator:
     def _serve_in_process(self, spec: RunSpec, owned: "OwnedSandbox") -> McpWiring:
         """An MCP server in this process, serving the sandbox we already hold.
 
-        ``adopt``, not ``attach``: attach re-derives a handle from an id, which
-        needs a backend that can and yields a second handle to the same sandbox.
-        We have the handle -- so any backend works here, Docker included, and the
-        pool is told not to destroy what it did not create.
+        Backends offering independent handles give the server its own client,
+        keeping session probes and MCP calls on separate event loops. Other
+        backends lend their existing handle. The pool never destroys the VM;
+        it closes only the independent clients created for serving it.
         """
         from harness.execution.interceptors import MutationTracker
         from harness.execution.panel import load_panel
@@ -541,21 +596,20 @@ class Orchestrator:
         # the run, while checkpoints keep landing on the new one. Seen on
         # DeepSWE the first time chain compaction fired mid-run.
         listeners = getattr(owned.session, "on_swap", None)
+        def follow_swap(replacement, _entry=entry, _session=owned.session):
+            fresh = None
+            make = getattr(getattr(_session, "_pool", None), "handle", None)
+            container = getattr(replacement, "_container_id", None)
+            if make is not None and container:
+                fresh = make(container,
+                             agent_id=getattr(replacement, "agent_id", ""),
+                             base_ref=getattr(replacement, "base_ref", ""))
+            if fresh is not None:
+                _entry.owned_handles.append(fresh)
+            _entry.sandbox = fresh or replacement
+
+        follow_swap(owned.session.sandbox)
         if listeners is not None:
-            def follow_swap(replacement, _entry=entry, _session=owned.session):
-                # The session probed `replacement` on ITS loop, which bound the
-                # handle's HTTP client there; served from the server's loop the
-                # first call then failed ("Event ... bound to a different event
-                # loop", measured 1-3 times per re-boarded run). A fresh handle
-                # binds to whichever loop uses it first -- the server's.
-                fresh = None
-                make = getattr(getattr(_session, "_pool", None), "handle", None)
-                container = getattr(replacement, "_container_id", None)
-                if make is not None and container:
-                    fresh = make(container,
-                                 agent_id=getattr(replacement, "agent_id", ""),
-                                 base_ref=getattr(replacement, "base_ref", ""))
-                _entry.sandbox = fresh or replacement
             listeners.append(follow_swap)
         # The tracker is the interceptor half of checkpointing, and it must sit
         # on THIS pipeline -- the one that serves the calls. It is created here
@@ -574,16 +628,43 @@ class Orchestrator:
 
     def _wire_gateway(self, spec: RunSpec, journal, task: TaskSpec, run_id: str):
         """Start a gateway and point the agent at it, when this run needs one."""
-        if not (spec.use_gateway or spec.routes_file or spec.budget_usd):
+        controls = getattr(task, "_rollout_controls", None)
+        if not (spec.use_gateway or spec.routes_file or spec.budget_usd or controls):
             return None
         from harness.gateway import GatewayServer, RoutingTable
 
         table = (RoutingTable.from_file(spec.routes_file) if spec.routes_file
                  else RoutingTable())
-        gateway = GatewayServer(table, journal=journal, port=spec.gateway_port).start()
+        kwargs = {}
+        if controls is not None:
+            from harness.gateway.routing import ModelRoute
+
+            previous = table.route_for(spec.model)
+            route = ModelRoute(base_url=controls.base_url,
+                               upstream_model=controls.contract.get("model"),
+                               api_key_env=controls.contract.get("api_key_env"),
+                               flatten_tool_namespaces=previous.flatten_tool_namespaces)
+            # An endpoint in the request must never inherit another provider's
+            # credential. Only the explicitly configured rollout key may travel.
+            table = RoutingTable({"default": route})
+            kwargs["request_policy"] = controls
+        gateway = GatewayServer(table, journal=journal, port=spec.gateway_port, **kwargs).start()
         token = table.mint(spec.agent_id, run_id=run_id, budget_usd=spec.budget_usd)
         # Env, not config: this is the one wiring every agent understands.
         task.env.update(gateway.env_for(token))
+        if spec.slot == "codex":
+            import json
+
+            task.env["ASH_GATEWAY_TOKEN"] = token.token
+            task.extra["config_overrides"] = {
+                **task.extra.get("config_overrides", {}),
+                "model_provider": '"ash-gateway"',
+                "model_providers.ash-gateway.name": '"Ash gateway"',
+                "model_providers.ash-gateway.base_url": json.dumps(gateway.base_url + "/v1"),
+                "model_providers.ash-gateway.wire_api": '"responses"',
+                "model_providers.ash-gateway.env_key": '"ASH_GATEWAY_TOKEN"',
+                "model_providers.ash-gateway.requires_openai_auth": "false",
+            }
         self.on_event("gateway", {"url": gateway.base_url, "budget_usd": spec.budget_usd})
         return gateway
 
@@ -607,9 +688,13 @@ class Orchestrator:
             return None
         from harness.checkpointing import SnapshotBridge
 
+        exact = (spec.slot == "claude-code" or
+                 (spec.slot == "codex" and spec.extra.get("exact_capture"))) and bool(
+            getattr(owned, "server", None) or getattr(owned, "checkpoint_log", None))
         bridge = SnapshotBridge.install(journal, session,
                                         always=spec.snapshot_every_step,
-                                        tracker=getattr(owned, "tracker", None))
+                                        tracker=getattr(owned, "tracker", None),
+                                        exact_mode=exact)
         # The in-process server now has something to fire at each tool boundary.
         # Attached here rather than at server construction because the bridge
         # cannot exist before the journal, and the journal opens after the
@@ -618,7 +703,10 @@ class Orchestrator:
         if server is not None:
             from harness.execution.server import ToolBoundary
 
-            server.boundary = ToolBoundary(bridge.on_tool_boundary)
+            server.boundary = ToolBoundary(
+                bridge.on_tool_boundary,
+                validate_call=bridge.validate_call if exact else None,
+                on_unavailable=bridge.record_unavailable if exact else None)
         return bridge
 
     def _report_missing_checkpoints(self, spec: RunSpec, journal, bridge) -> None:
@@ -656,7 +744,7 @@ class Orchestrator:
                       {"skipped": skipped, "transport": spec.transport,
                        "reason": advice})
 
-    def _teardown(self, spec: RunSpec, gateway, provisioned, claim) -> None:
+    def _teardown(self, spec: RunSpec, gateway, provisioned, claim) -> bool:
         """Release in reverse. Each step is independent: one failure must not
         strand the others, which is why they are separately guarded."""
         if gateway is not None:
@@ -670,6 +758,10 @@ class Orchestrator:
         if stop_server is not None:
             try:
                 stop_server()
+            except TimeoutError:
+                # An active worker may still touch the VM. Do not destroy it
+                # underneath that worker; TTL/resource-ledger cleanup remains.
+                return False
             except Exception:  # noqa: BLE001
                 pass
         if provisioned is not None and not spec.keep_sandbox:
@@ -679,3 +771,4 @@ class Orchestrator:
                     claim.released("sandbox", provisioned.sandbox_id)
             except Exception:  # noqa: BLE001 - `harness reap` is the backstop
                 pass
+        return True

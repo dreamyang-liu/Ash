@@ -1,8 +1,7 @@
-"""``codex exec --json`` JSONL events -> journal events.
+"""Historical ``codex exec --json`` JSONL events -> journal events.
 
-Verified against codex-cli 0.145.0. The stdout event stream (NOT the on-disk
-rollout under ~/.codex/sessions, which carries no version field and is
-explicitly unstable) is the contract we build on.
+Retained for archived stdout records and parser fixtures from codex-cli 0.145.0.
+New Codex runs use the SDK adapter and the separate codex_sdk normalizer.
 
 Observed shapes::
 

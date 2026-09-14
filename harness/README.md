@@ -32,11 +32,15 @@ effect it can cause travels through MCP into the sandbox.
 | slot | driver | resume | fork | notes |
 |---|---|---|---|---|
 | `claude-code` | claude-agent-sdk (typed messages + PreToolUse hook) | yes | yes (`fork_session`) | builtin tools denied; verdict seam enforced in-process |
-| `codex` | `codex exec --json` | yes (`exec resume`) | no | host sandbox `read-only` by default |
+| `codex` | openai-codex SDK / app-server | yes (`thread_resume`) | yes (`thread_fork`) | host sandbox `read-only`; exact capture uses Ash dynamic tools |
 | `opencode` | `opencode run --format json` | yes | **yes, natively** (`--session --fork`) | `--pure` to ignore local plugins |
 
-Verified against claude-agent-sdk 0.2.145 / claude 2.1.239, codex-cli 0.145.0,
+Verified against claude-agent-sdk 0.2.145 / claude 2.1.239, openai-codex 0.147.0,
 opencode 1.18.5. Those versions are asserted by `contracts/ci_check.py`.
+
+The unused `codex-cli` execution adapter has been removed. Use `--slot codex`;
+the SDK still needs its bundled Codex app-server binary. Historical CLI event
+parsing remains available for archived trajectories, but cannot launch an agent.
 
 ## Usage
 
@@ -79,7 +83,8 @@ core/events.py     unified event model (v2), Usage with separated dimensions
 core/journal.py    append-only JSONL writer + in-process event bus (subscribe)
 core/slot.py       AgentSlot contract: run/kill/version + TaskSpec/McpWiring/SlotResult
 normalize/*.py     native events -> journal events. Pure mapping tables, no I/O.
-slots/cli_base.py  shared driver for JSONL-on-stdout CLIs (codex, opencode)
+slots/cli_base.py  driver for JSONL-on-stdout CLIs (opencode-cli)
+slots/codex_config.py  SDK TOML overrides, MCP inventory and tool isolation
 slots/*.py         per-agent drivers: command construction, MCP wiring, capabilities
 execution/wiring.py  how a slot is told to reach the MCP proxy (stdio | http)
 execution/session.py sandbox lifecycle + snapshots + the (tool, args) executor seam
@@ -228,8 +233,8 @@ put other Bedrock models behind the codex scaffold.
 ## Inference gateway
 
 Speaks BOTH wire shapes: `/v1/messages` (Anthropic -- claude-code and opencode)
-and `/v1/responses` (OpenAI -- codex). **All three agents verified live through
-it**, each needing its own translation of "this run is routed" plus its own
+and `/v1/responses` (OpenAI -- codex). Historical live checks used agent-specific
+configuration, each needing its own translation of "this run is routed" plus its own
 provider-direct kill switch, because every one of them silently bypasses the
 gateway otherwise: claude-code takes ANTHROPIC_BASE_URL from env but needs
 CLAUDE_CODE_USE_BEDROCK/VERTEX=0; opencode ignores the variable entirely and
@@ -242,8 +247,9 @@ whole response body, so the SSE scanner buffers split lines across chunks --
 stateless scanning recorded zero tokens for every streaming codex request.
 
 
-The model seam (`harness/gateway/`). Wiring is one environment variable, which is
-why it works for any agent:
+The model seam (`harness/gateway/`). Automatic orchestration currently injects
+Anthropic environment settings; Codex still needs an explicit custom provider
+pointing at the gateway and its scoped token:
 
 ```bash
 python -m harness gateway --routes routes.json --mint agent-1 --budget-usd 2.50
@@ -267,14 +273,51 @@ Three things no slot can provide:
 Implementation constraints worth knowing: headers pass through untouched
 (`anthropic-beta`, `x-claude-code-session-id`/`-agent-id`/`-parent-agent-id` —
 dropping them changes behaviour or loses subagent attribution); response bytes
-are relayed verbatim (unknown fields such as thinking-block signatures must
-survive byte-exact); streaming is a passthrough with a side parser for usage, so
-the agent sees no added latency and frames are never modified; `/v1/models` must
+are relayed verbatim by default; optional namespace adaptation only rewrites
+tool references. Unknown fields such as thinking-block signatures are retained.
+Streaming uses a side parser for usage; `/v1/models` must
 answer because Claude Code treats discovery failure as fatal. The agent only ever
 holds its own slot token — provider credentials stay in the routing table.
 
 Verdict-style rewriting is *not* here: tool-call policy belongs in the MCP proxy
 (L2) where a call is semantically addressable. This layer speaks HTTP and tokens.
+
+### Flat-function Responses backends
+
+Some backends accept Responses requests but do not expose tools inside
+`namespace` definitions to the model. Set `flatten_tool_namespaces: true` on
+that route to expand namespaced function tools, translate matching history/tool
+selection references, and restore namespaces on returned tool calls. JSON and
+SSE responses are supported. Name collisions and unsupported nested tool kinds
+are rejected rather than silently dropping or misrouting tools. The default is
+false; this is not a Responses-to-Chat-Completions protocol translator.
+
+```json
+{
+  "routes": {
+    "Qwen/Qwen3.8-27B": {
+      "base_url": "https://sglang.example",
+      "api_key_env": "SGLANG_API_KEY",
+      "flatten_tool_namespaces": true
+    }
+  }
+}
+```
+
+Route `base_url` excludes `/v1`, which the gateway appends; the Codex custom
+provider points to the gateway's `/v1` base instead. Keep the real upstream key
+only in the gateway process and give Codex a scoped gateway token. MCP-wired
+Codex runs also disable `features.shell_snapshot`, independently of AgentENV
+disk checkpoints, to avoid persisting environment credentials in native caches.
+This does not erase old caches or change interactive Codex outside the harness.
+
+A real Qwen endpoint smoke passed on2026-09-12 through an explicit diagnostic
+relay using this adapter:2 inference requests,1 Ash shell execution and its
+result continuation, with no credential/environment snapshot saved. Evidence:
+`runs/codex-qwen38-adapted-20260912-01/audit.json`. The reusable gateway integration
+has offline JSON/SSE and real-Codex/fake-upstream tests; automatic eval provider
+selection remains separate. The diagnostic relay buffers responses for capture;
+the reusable gateway streams per event. No benchmark result is claimed.
 
 ## Batch runs and resource reclamation
 

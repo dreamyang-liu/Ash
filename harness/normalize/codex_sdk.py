@@ -138,6 +138,10 @@ def map_usage(native: Any, cost_usd: float = 0.0) -> dict:
 
 
 def _tool_name(item: Any, kind: str) -> str:
+    if kind in ("dynamicToolCall", "dynamic_tool_call"):
+        namespace = _attr(item, "namespace", default="") or ""
+        tool = _attr(item, "tool", default="") or ""
+        return (namespace + "__" + tool).strip("_")
     if kind in ("commandExecution", "command_execution"):
         return "shell"
     if kind in ("mcpToolCall", "mcp_tool_call"):
@@ -265,7 +269,7 @@ def _tool_args(item: Any, kind: str) -> Dict[str, Any]:
             "command": _plain(_attr(item, "command")),
             "cwd": _plain(_attr(item, "cwd")),
         }
-    if kind in ("mcpToolCall", "mcp_tool_call"):
+    if kind in ("mcpToolCall", "mcp_tool_call", "dynamicToolCall", "dynamic_tool_call"):
         args = _attr(item, "arguments", "args")
         plain = _plain(args)
         return plain if isinstance(plain, dict) else {"raw": plain}

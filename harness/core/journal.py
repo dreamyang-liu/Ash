@@ -18,7 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, List, Optional, Union
 
-from harness.core.events import JOURNAL_SCHEMA_VERSION
+from harness.core.events import JOURNAL_SCHEMA_VERSION, TOOL_STARTED, TOOL_FINISHED
+from harness.core.checkpoint_identity import CALL_IDENTITY_KEY
 
 
 #: Directories the OS empties on reboot (and tmpwatch empties sooner). A journal
@@ -83,6 +84,8 @@ class JournalWriter:
         self._fh = self.path.open("a", encoding="utf-8")
         self._subscribers: List[Callable[[dict], None]] = []
         self._notifying = threading.local()
+        self._tools: dict[str, dict] = {}
+        self._tool_results: set[str] = set()
 
     def subscribe(self, callback: Callable[[dict], None]) -> Callable[[dict], None]:
         """Register an observer of every subsequent event. Returns ``callback``."""
@@ -92,6 +95,18 @@ class JournalWriter:
     def emit(self, event_type: str, **payload) -> dict:
         """Append one event; returns the full record (including seq)."""
         with self._lock:
+            call_id = payload.get("call_id")
+            if event_type == TOOL_STARTED and call_id:
+                # The approval hook and native stream can announce the same
+                # call in either order. They share ONE identity and ordinal.
+                if call_id in self._tools:
+                    return self._tools[call_id]
+                payload["step"] = len(self._tools) + 1
+                if isinstance(payload.get("args"), dict):
+                    payload["args"] = {k: v for k, v in payload["args"].items()
+                                       if k != CALL_IDENTITY_KEY}
+            elif event_type == TOOL_FINISHED and call_id:
+                self._tool_results.add(call_id)
             self._seq += 1
             record = {
                 "v": JOURNAL_SCHEMA_VERSION,
@@ -103,11 +118,22 @@ class JournalWriter:
                 "sandbox_id": self.sandbox_id,
             }
             record.update(payload)
+            if event_type == TOOL_STARTED and call_id:
+                self._tools[call_id] = record
             self._fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
             self._fh.flush()
 
         self._notify(record)
         return record
+
+    def tool_calls(self) -> list[dict]:
+        """Registered calls in canonical start order (including undelivered ones)."""
+        with self._lock:
+            return list(self._tools.values())
+
+    def tool_finished(self, call_id: str) -> bool:
+        with self._lock:
+            return call_id in self._tool_results
 
     def _notify(self, record: dict) -> None:
         """Deliver ``record`` to every subscriber, then anything they emitted.

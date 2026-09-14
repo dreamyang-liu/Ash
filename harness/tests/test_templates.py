@@ -9,6 +9,47 @@ from harness.execution.templates import (RUNTIME_PATH, TemplateBuilder, Template
 IMAGE = "swebench/sweb.eval.x86_64.django__django-11848:latest"
 
 
+def test_runtime_init_changes_template_identity_and_startup(monkeypatch, runtime_bin):
+    from harness.execution.templates import start_command
+    plain = TemplateBuilder("http://s", "key", runtime_bin)
+    activated = TemplateBuilder("http://s", "key", runtime_bin,
+                                runtime_init=". /conda.sh && conda activate testbed")
+    assert plain._fingerprint != activated._fingerprint
+    command = start_command(3000, ["PATH=/base/bin:/usr/bin:/bin"], activated.runtime_init)
+    assert command.startswith("env PATH=/base/bin:/usr/bin:/bin bash -c ")
+    assert "conda activate testbed && exec" in command
+    assert start_command(3000) == f"{RUNTIME_PATH} --port 3000"
+
+
+def test_runtime_init_is_wired_from_backend(monkeypatch, runtime_bin):
+    import harness.execution.templates as templates
+    monkeypatch.setattr(templates, "ensure_ripgrep", lambda: None)
+    prepared = builder_from_backend({"backend": "microvm", "microvm": {
+        "server_url": "http://s", "api_key": "key", "runtime_bin": str(runtime_bin),
+        "runtime_init": ". /conda.sh && conda activate testbed"}})
+    assert prepared.runtime_init == ". /conda.sh && conda activate testbed"
+
+
+def test_disk_shape_changes_identity_and_reaches_staging_and_template(monkeypatch, runtime_bin):
+    resources = {"cpu": 2, "memory_mb": 2048, "disk_size_mb": 65536}
+    assert template_name(IMAGE, "runtime", 3000, resources) != template_name(
+        IMAGE, "runtime", 3000, {**resources, "disk_size_mb": 131072})
+    payloads = []
+
+    class CaptureClient(FakeClient):
+        def post(self, path, json=None, **kwargs):
+            if path in {"/sandboxes-cold", "/v3/templates"}:
+                payloads.append((path, json))
+            return super().post(path, json=json, **kwargs)
+
+    client = CaptureClient()
+    builder = TemplateBuilder("http://s", "key", runtime_bin)
+    builder._stage_runtime(client, IMAGE, "template", resources)
+    builder._build_from(client, "template", IMAGE, "staged-snap", resources)
+    assert len(payloads) == 2
+    assert all(body["diskSizeMB"] == 65536 for path, body in payloads)
+
+
 def test_names_are_legal_stable_and_input_sensitive():
     first = template_name(IMAGE, "fp1", 3000)
     assert first == template_name(IMAGE, "fp1", 3000), "same inputs, same name"
@@ -176,6 +217,16 @@ def test_build_stages_the_runtime_then_declares_startup(monkeypatch, runtime_bin
     # Cold boots re-run startCmd, so readiness must mean the port answers.
     assert "/dev/tcp/127.0.0.1/3000" in payload["readyCmd"]
     assert f"chmod +x {RUNTIME_PATH}" in payload["steps"][0]["args"][0]
+
+
+def test_custom_port_changes_template_identity_startup_and_readiness(monkeypatch, runtime_bin):
+    client = FakeClient(exists=False)
+    configured = builder(monkeypatch, client, runtime_bin)
+    configured.runtime_port = 34122
+    name = configured.template_for(IMAGE)
+    assert name != template_name(IMAGE, configured._fingerprint, 3000)
+    assert client.build_payload["startCmd"] == f"{RUNTIME_PATH} --port 34122"
+    assert "/dev/tcp/127.0.0.1/34122" in client.build_payload["readyCmd"]
 
 
 def test_staging_sandbox_is_deleted_even_when_snapshotting_fails(

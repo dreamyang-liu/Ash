@@ -42,6 +42,7 @@ from ash_sandbox import Pool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
 
 from harness.core.result import ToolResult
+from harness.core.checkpoint_identity import CALL_IDENTITY_KEY
 from harness.execution.backends import BACKENDS, BackendError, build_pool
 from harness.execution.interceptors import GuardrailInterceptor, TruncateInterceptor
 from harness.execution.pipeline import CallContext, ToolPipeline, load_pipeline
@@ -68,6 +69,7 @@ class SandboxEntry:
     #: Scratch space for a SandboxPool subclass. The execution plane never
     #: reads it.
     meta: dict = field(default_factory=dict)
+    owned_handles: list[Sandbox] = field(default_factory=list)
 
     def visible_to(self, session_groups: list[str]) -> bool:
         return bool(set(self.groups) & set(session_groups))
@@ -358,6 +360,9 @@ class SandboxPool:
         if not entry:
             return
         if entry.external:
+            for handle in entry.owned_handles:
+                await handle.backend.close()
+            entry.owned_handles.clear()
             # Stop serving it; leave it running. Its owner is still holding it.
             self._log(f"released {sb_id} (owned elsewhere)")
             return
@@ -549,15 +554,16 @@ class AttachedSandboxSession:
 
 
 class ToolBoundary:
-    """Drives the checkpointer after every exec call this server completes.
+    """Serializes execution plus capture, preserving the admitted call identity.
 
     ONE mechanism for both transports. The checkpoint machinery is the
     ``MutationTracker`` interceptor (mounted on the serving pipeline, so it sees
     every call and knows a ``text_editor view`` changed nothing) plus
     ``Checkpointer.after_step`` (capture when dirty, map to the previous snapshot
     when clean, layer-chain upkeep either way). This class is only the trigger:
-    count the step, run the sync checkpointer on a worker thread, swallow its
-    failures.
+    retain the native step/call_id, run the sync checkpointer on a worker thread,
+    and keep failed boundaries unavailable without renumbering later calls.
+    Legacy clients reserve an ordinal before execution, not on completion.
 
     Fires after *every* exec call, not just apparently-mutating ones. The old
     trigger pre-filtered on a hand-written ``{shell, text_editor, process}`` set,
@@ -573,24 +579,123 @@ class ToolBoundary:
     the http server in the orchestrator's process, the stdio server in its own.
     """
 
-    def __init__(self, after_step: "Any", label: str = "ckpt"):
+    def __init__(self, after_step: "Any", label: str = "ckpt", *,
+                 validate_call=None, on_unavailable=None, require_identity=False):
         self._after_step = after_step
         self._label = label
         self.step = 0
+        self._lock = asyncio.Lock()
+        self.validate_call = validate_call
+        self.on_unavailable = on_unavailable
+        self.require_identity = require_identity or validate_call is not None
+        self._identity = None
+        self._admitted = set()
+        self._uncertain = False
+        self._uncertain_detail = None
+        self._closing = False
 
-    async def after_call(self) -> None:
-        self.step += 1
+    async def drain(self):
+        """Stop admission, then wait for the active execution/capture to settle."""
+        self._closing = True
+        async with self._lock:
+            pass
+
+    async def run_call(self, operation, *, identity=None, name="", args=None):
+        """Keep execution AND capture exclusive, even if the caller disconnects.
+
+        Cancelling to_thread does not stop its worker. Releasing this lock on
+        cancellation would let the next command race that worker or its capture.
+        Reserve the ordinal on admission, never on successful completion.
+        """
+        if identity is not None:
+            if (not isinstance(identity, dict) or type(identity.get("step")) is not int
+                    or identity["step"] < 1 or not isinstance(identity.get("call_id"), str)
+                    or not identity["call_id"]):
+                raise ValueError("invalid checkpoint call identity")
+            step = identity["step"]
+            self.step = max(self.step, step)
+        elif self.require_identity:
+            raise ValueError("missing checkpoint call identity; refusing unpaired execution")
+        else:
+            self.step += 1
+            step = self.step
+        async with self._lock:
+            if self._closing:
+                return _err("Sandbox execution is shutting down; call was not executed.")
+            call_id = identity["call_id"] if identity else None
+            if self.validate_call is not None:
+                self.validate_call(identity, name, args)
+            if call_id in self._admitted:
+                raise ValueError("duplicate checkpoint call identity")
+            if call_id:
+                self._admitted.add(call_id)
+            if self._uncertain:
+                self._unavailable(step, call_id, "execution_uncertain", self._uncertain_detail)
+                return _err("Previous tool execution did not settle; sandbox is not safe to continue.")
+            self._identity = identity
+
+            async def execute_and_capture():
+                content = await operation(step)
+                uncertainty = content.pop("_execution_uncertain", None)
+                if uncertainty:
+                    self._uncertain = True
+                    self._uncertain_detail = {"origin_step": step, **uncertainty}
+                    self._unavailable(step, call_id, "execution_uncertain", self._uncertain_detail)
+                else:
+                    await self.after_call(step)
+                return content
+
+            task = asyncio.create_task(execute_and_capture())
+            cancelled = False
+            try:
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                if cancelled:
+                    if not task.cancelled():
+                        task.exception()
+                    self._unavailable(step, call_id, "cancelled")
+                    raise asyncio.CancelledError
+                return task.result()
+            except Exception as exc:
+                self._uncertain = True
+                self._uncertain_detail = {"kind": "executor_exception", "origin_step": step,
+                                          "exception": type(exc).__name__, "message": str(exc)[:1000]}
+                self._unavailable(step, call_id, "execution_uncertain", self._uncertain_detail)
+                raise
+            finally:
+                self._identity = None
+
+    def _unavailable(self, step, call_id, reason, detail=None):
+        if self.on_unavailable is not None:
+            if detail is None:
+                self.on_unavailable(step, call_id, reason)
+            else:
+                self.on_unavailable(step, call_id, reason, detail=detail)
+
+    async def after_call(self, step=None) -> None:
+        if step is None:  # direct legacy callers; handlers reserve before exec
+            self.step += 1
+            step = self.step
         try:
             # A worker thread, for two reasons: the checkpointer is synchronous
             # and may block for seconds, and its session drives its own loop via
             # run_until_complete, which cannot be entered from a thread that
             # already has a running loop -- this one.
-            await asyncio.to_thread(self._after_step, self.step)
+            if self._identity:
+                await asyncio.to_thread(self._after_step, step,
+                                        call_id=self._identity["call_id"])
+            else:
+                await asyncio.to_thread(self._after_step, step)
         except Exception as e:  # noqa: BLE001
             # A checkpoint is an optimisation for later analysis. Failing the
             # agent's tool call over it would be strictly worse than a gap.
             sys.stderr.write(f"[ash-{self._label}] checkpoint at step "
-                             f"{self.step} failed: {e}\n")
+                             f"{step} failed: {e}\n")
+            self._unavailable(step, self._identity["call_id"] if self._identity else None,
+                              "capture_failed")
 
 
 # ---------------------------------------------------------------------------
@@ -619,8 +724,8 @@ class SessionHandler:
         # pipeline: L2 interceptor chain (shared across sessions — coordination
         # state must span agents). None = dispatch exactly as before (default).
         self.pipeline = pipeline
-        # boundary: checkpoint trigger, fired after every exec call. Lives on
-        # the server (its step counter spans requests), passed per handler.
+        # Shared across handlers: its gate must span execution AND capture,
+        # including requests whose client has already timed out.
         self.boundary = boundary
 
     def _resolve(self, sandbox_id: str | None) -> SandboxEntry | None:
@@ -635,6 +740,18 @@ class SessionHandler:
         return None
 
     async def call_tool(self, name: str, args: dict) -> dict:
+        args = dict(args)
+        identity = args.pop(CALL_IDENTITY_KEY, None)
+        if self.boundary is not None:
+            try:
+                return await self.boundary.run_call(
+                    lambda step: self._call_tool(name, args, step),
+                    identity=identity, name=name, args=args)
+            except ValueError as exc:
+                return _err(str(exc))
+        return await self._call_tool(name, args)
+
+    async def _call_tool(self, name: str, args: dict, step=None) -> dict:
         # -- Lifecycle tools --
         if name == "sandbox_create":
             # Always include the caller's owner group; add any extra shared groups.
@@ -690,8 +807,16 @@ class SessionHandler:
                 result: SdkToolResult = await entry.sandbox.call(name, **args)
                 content = {"type": "text", "text": result.output,
                            "isError": result.is_error}
+                if self.boundary:
+                    uncertainty = _uncertain_outcome(result)
+                    if uncertainty:
+                        content["_execution_uncertain"] = uncertainty
         except Exception as e:
-            return _err(str(e))
+            content = _err(str(e))
+            if self.boundary:
+                content["_execution_uncertain"] = {"kind": "transport_exception",
+                    "exception": type(e).__name__, "message": str(e)[:1000]}
+            return content
 
         if self.notify_mutations and name in self._MUTATING:
             # `entry` is the sandbox the call just ran in -- reuse it. This used to
@@ -701,14 +826,6 @@ class SessionHandler:
             # nothing is bound, so the resolve failed and a SandboxPool subclass
             # hooking mutations was never called at all.
             await self.pool.after_mutating_call(entry, name, args)
-
-        if self.boundary is not None:
-            # Every exec call, mutating or not: the tracker on the pipeline
-            # decides capture vs reuse, and a read-only step still needs its map
-            # entry -- see ToolBoundary. After `content`, so the call is complete
-            # and nothing is in flight (the stdio loop is sequential; the http
-            # in-process server serves one bound slot).
-            await self.boundary.after_call()
 
         return content
 
@@ -723,11 +840,19 @@ class SessionHandler:
         session identity; sandbox_id is the resolved sandbox.
         """
         loop = asyncio.get_running_loop()
+        uncertain = None
 
         def raw_executor(tool: str, tool_args: dict) -> ToolResult:
+            nonlocal uncertain
             future = asyncio.run_coroutine_threadsafe(
                 entry.sandbox.call(tool, **tool_args), loop)
-            sdk = future.result()
+            try:
+                sdk = future.result()
+            except BaseException as exc:
+                uncertain = {"kind": "transport_exception", "exception": type(exc).__name__,
+                             "message": str(exc)[:1000]}
+                raise
+            uncertain = uncertain or _uncertain_outcome(sdk)
             # from_sdk, so a command's outcome reaches interceptors on this path too
             # (a presenter rendering it, audit reading its byte counts).
             result = ToolResult.from_sdk(sdk)
@@ -741,7 +866,18 @@ class SessionHandler:
         result = await asyncio.to_thread(self.pipeline.execute, ctx, raw_executor)
         text = result.output if (result.success or result.output) \
             else f"Error: {result.error or 'unknown error'}"
-        return {"type": "text", "text": text, "isError": not result.success}
+        content = {"type": "text", "text": text, "isError": not result.success}
+        if uncertain and self.boundary:
+            content["_execution_uncertain"] = uncertain
+        return content
+
+
+def _uncertain_outcome(result):
+    if result.running or (result.timed_out and result.exit_code is None):
+        return {"kind": "runtime_timeout" if result.timed_out else "runtime_still_running",
+                "running": result.running, "timed_out": result.timed_out,
+                "exit_code": result.exit_code}
+    return None
 
 
 def _tool_response(id_, content: dict) -> dict:
@@ -938,10 +1074,13 @@ class HttpMcpServer:
         try:
             await (stop or asyncio.Event()).wait()
         finally:
+            await site.stop()
+            if self.boundary is not None:
+                await self.boundary.drain()
+            await runner.cleanup()
             # An adopted sandbox is *released* here, not destroyed: its owner is
             # still holding it (see SandboxPool.adopt).
             await self.pool.destroy_all()
-            await runner.cleanup()
 
     # --- in-process transport ----------------------------------------------
     def start(self) -> "HttpMcpServer":
@@ -995,6 +1134,8 @@ class HttpMcpServer:
         thread = getattr(self, "_thread", None)
         if thread is not None:
             thread.join(timeout=timeout)
+            if thread.is_alive():
+                raise TimeoutError("MCP execution/capture is still draining; retain the sandbox")
             self._thread = None
 
     def _log(self, text: str):
@@ -1145,6 +1286,8 @@ def main(pool_cls=None):
                              "that owns the sandbox folds this into its journal "
                              "-- it cannot see a tool boundary that happens in "
                              "this process.")
+    parser.add_argument("--checkpoint-call-identity", action="store_true",
+                        help="Require native tool-call identities on checkpointed requests")
     parser.add_argument("--checkpoint-always", action="store_true",
                         help="With --checkpoint-log: a distinct snapshot per "
                              "step, instead of letting clean steps reuse the "
@@ -1261,21 +1404,45 @@ def _stdio_checkpoints(args, tracker, pool: SandboxPool,
     from harness.execution.checkpoints import Checkpointer
 
     session = AttachedSandboxSession(asyncio.get_running_loop(), pool, entry)
+    identity_meta = {}
+    executed = set()
+
+    def write(entry) -> None:
+        with open(args.checkpoint_log, "a", encoding="utf-8") as fh:
+            fh.write(_json.dumps(entry) + "\n")
 
     def append(record) -> None:
         # Every step gets a line, reused ones included: the map must be complete,
         # and it must land per capture so a killed run keeps what it earned.
-        line = _json.dumps({"step": record.turn,
+        write({"step": record.turn,
                             "snapshot_id": record.snapshot_id,
                             "captured": bool(record.captured),
-                            "reason": record.reason})
-        with open(args.checkpoint_log, "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+                            "reason": record.reason,
+                            "delta_empty": record.delta_empty,
+                            **identity_meta})
 
     checkpointer = Checkpointer(session=session, tracker=tracker,
                                 always=bool(args.checkpoint_always),
                                 disk_only=True, on_checkpoint=append)
-    return ToolBoundary(checkpointer.after_step)
+    def unavailable(step, call_id, reason, detail=None):
+        write({"step": step, "call_id": call_id, "snapshot_id": None,
+               "captured": False, "reason": reason, "pairing": "call-id-v1",
+               "prefix_complete": False, "execution_detail": detail})
+
+    def after_step(step, *, call_id=None):
+        if call_id:
+            executed.add(step)
+            identity_meta.update(call_id=call_id, pairing="call-id-v1",
+                                 prefix_complete=executed == set(range(1, step + 1)))
+        try:
+            record = checkpointer.after_step(step)
+            if record is None and call_id:
+                unavailable(step, call_id, "capture_unavailable")
+        finally:
+            identity_meta.clear()
+
+    return ToolBoundary(after_step, on_unavailable=unavailable,
+                        require_identity=bool(getattr(args, "checkpoint_call_identity", False)))
 
 
 if __name__ == "__main__":

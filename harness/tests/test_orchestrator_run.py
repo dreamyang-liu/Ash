@@ -5,7 +5,8 @@ happen before the one that depends on it, and "too late" is silently wrong rathe
 than an error) and **teardown** (everything acquired is released, including when
 the slot raises).
 
-A fake slot stands in for an agent, so no model, sandbox or network is involved.
+A fake slot stands in for an agent. Transport regressions use loopback HTTP;
+no model or VM is involved.
 """
 
 from __future__ import annotations
@@ -271,6 +272,24 @@ def test_opencode_gets_an_isolated_session_store(tmp_path):
     assert data_home.endswith("state/t1")
 
 
+@pytest.mark.parametrize("slot,expected", [("claude-code", "shell_only"), ("codex", "default")])
+def test_claude_code_default_panel_removes_editor_before_server_wiring(tmp_path, monkeypatch, slot, expected):
+    from harness.execution.panel import load_panel
+
+    seen = []
+    orch = Orchestrator(out_dir=tmp_path)
+
+    def wire(run_spec, claim):
+        seen.append(run_spec.tools)
+        raise RuntimeError("stop before environment creation")
+
+    monkeypatch.setattr(orch, "_wire_sandbox", wire)
+    orch.run(spec(tmp_path, slot=slot, tools="default"))
+    assert seen == [expected]
+    names = [tool["name"] for tool in load_panel(expected, format="raw").schema]
+    assert ("text_editor" in names) == (slot != "claude-code")
+
+
 def test_resume_and_fork_are_passed_through(tmp_path):
     Orchestrator(out_dir=tmp_path).run(
         spec(tmp_path, resume_session_id="ses_old", fork=True))
@@ -493,7 +512,11 @@ def test_the_server_takes_a_fresh_handle_on_reboard_when_the_pool_offers_one(tmp
 
     class Pool:
         def handle(self, sandbox_id, agent_id="", base_ref=""):
-            h = SimpleNamespace(_container_id=sandbox_id, agent_id=agent_id, base_ref=base_ref, fresh=True)
+            from unittest.mock import AsyncMock
+
+            h = SimpleNamespace(_container_id=sandbox_id, agent_id=agent_id,
+                                base_ref=base_ref, fresh=True,
+                                backend=SimpleNamespace(close=AsyncMock()))
             made.append(h)
             return h
 
@@ -511,6 +534,101 @@ def test_the_server_takes_a_fresh_handle_on_reboard_when_the_pool_offers_one(tmp
         assert served._container_id == "sb-second" and served.base_ref == "snap-9"
     finally:
         owned.stop_server()
+
+
+@pytest.mark.parametrize("probe_before_serving", [True, False])
+def test_http_startup_probe_and_actor_use_independent_clients(tmp_path, probe_before_serving):
+    import asyncio
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import json
+    import threading
+    from types import SimpleNamespace
+
+    import httpx
+
+    from ash_sandbox.pool import MicroVMPool
+    from harness.orchestrator.run import OwnedSandbox
+
+    class RuntimeHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            calls.append((self.headers[MicroVMPool.SANDBOX_ID_HEADER],
+                          payload["params"]["arguments"]))
+            body = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
+                "content": [{"type": "text", "text": "runtime-ok"}],
+                "isError": False,
+            }}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+
+        def log_message(self, *args):
+            pass
+
+    calls = []
+    runtime = ThreadingHTTPServer(("127.0.0.1", 0), RuntimeHandler)
+    thread = threading.Thread(target=runtime.serve_forever, daemon=True)
+    thread.start()
+    pool = MicroVMPool(server_url="http://127.0.0.1:%s" % runtime.server_port)
+    loop = asyncio.new_event_loop()
+    initial = pool.handle("sb-first", agent_id="actor", base_ref="snap-first")
+    replacement = pool.handle("sb-second", agent_id="actor", base_ref="snap-second")
+    session = SimpleNamespace(sandbox=initial, sandbox_id="sb-first", _pool=pool, on_swap=[])
+    owned = OwnedSandbox(session=session, sandbox_id="sb-first")
+    served_handles = []
+
+    def probe(handle):
+        result = loop.run_until_complete(handle.call(
+            "shell", command="sha256sum /usr/local/bin/ash-runtime"))
+        assert result.output == "runtime-ok"
+
+    try:
+        if probe_before_serving:
+            probe(initial)
+        wiring = Orchestrator(out_dir=tmp_path)._serve_in_process(
+            RunSpec(prompt="x", transport="http", tools="default"), owned)
+        if not probe_before_serving:
+            probe(initial)
+        for handle in (initial, replacement):
+            if handle is replacement:
+                probe(replacement)
+                session.sandbox = replacement
+                session.on_swap[0](replacement)
+            served = owned.server.pool.get("sb-first").sandbox
+            served_handles.append(served)
+            response = httpx.post(wiring.url, headers=wiring.headers, json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "shell", "arguments": {"command": "actor-call"}},
+            }, timeout=5)
+            response.raise_for_status()
+            result = response.json()["result"]
+            assert not result.get("isError"), result
+            assert result["content"][0]["text"] == "runtime-ok"
+            assert served is not handle
+            assert served.agent_id == "actor"
+            assert served.base_ref == handle.base_ref
+            probe(handle)
+        assert [sandbox for sandbox, args in calls if args["command"] == "actor-call"] == [
+            "sb-first", "sb-second"]
+        owned.stop_server()
+        assert all(handle.backend._client.is_closed for handle in served_handles)
+        assert not initial.backend._client.is_closed
+        assert not replacement.backend._client.is_closed
+        probe(replacement)
+    finally:
+        owned.stop_server()
+        for handle in (initial, replacement):
+            loop.run_until_complete(handle.backend.close())
+        loop.run_until_complete(pool._client.aclose())
+        loop.close()
+        runtime.shutdown()
+        runtime.server_close()
+        thread.join(timeout=5)
 
 
 def test_a_sandbox_is_not_leaked_when_wiring_fails(monkeypatch):
@@ -545,7 +663,7 @@ def test_owning_the_sandbox_gives_checkpoints_without_the_caller_asking(monkeypa
 
     monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
                         classmethod(lambda cls, journal, session, always=False,
-                                    tracker=None:
+                                    tracker=None, exact_mode=False:
                                     installed.append(session) or FakeBridge()))
     session = _FakeSession()
     owned = OwnedSandbox(session=session, sandbox_id="sb-owned")
@@ -618,7 +736,7 @@ def test_the_bridge_reads_the_same_tracker_the_pipeline_feeds(monkeypatch):
         def on_tool_boundary(self, index):
             pass
 
-    def fake_install(cls, journal, session, always=False, tracker=None):
+    def fake_install(cls, journal, session, always=False, tracker=None, exact_mode=False):
         seen["tracker"] = tracker
         return FakeBridge()
 
@@ -640,10 +758,16 @@ def test_the_boundary_lands_on_the_server_after_the_bridge_exists(monkeypatch):
         def on_tool_boundary(self, index):
             self.fired = index
 
+        def validate_call(self, identity, name, args):
+            pass
+
+        def record_unavailable(self, step, call_id, reason):
+            pass
+
     bridge = FakeBridge()
     monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
                         classmethod(lambda cls, journal, session, always=False,
-                                    tracker=None: bridge))
+                                    tracker=None, exact_mode=False: bridge))
 
     class FakeServer:
         boundary = None
@@ -902,7 +1026,7 @@ def test_the_bridge_reads_the_same_tracker_the_pipeline_feeds(monkeypatch):
         def on_tool_boundary(self, index):
             pass
 
-    def fake_install(cls, journal, session, always=False, tracker=None):
+    def fake_install(cls, journal, session, always=False, tracker=None, exact_mode=False):
         seen["tracker"] = tracker
         return FakeBridge()
 
@@ -924,10 +1048,16 @@ def test_the_boundary_lands_on_the_server_after_the_bridge_exists(monkeypatch):
         def on_tool_boundary(self, index):
             self.fired = index
 
+        def validate_call(self, identity, name, args):
+            pass
+
+        def record_unavailable(self, step, call_id, reason):
+            pass
+
     bridge = FakeBridge()
     monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
                         classmethod(lambda cls, journal, session, always=False,
-                                    tracker=None: bridge))
+                                    tracker=None, exact_mode=False: bridge))
 
     class FakeServer:
         boundary = None

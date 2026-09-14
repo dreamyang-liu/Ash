@@ -1,0 +1,9 @@
+agent_tools:
+  - name: shell
+    description: |-
+      Execute a shell command inside the sandbox. Use it for searching, reading,
+      editing files, building, and testing. Each call starts a fresh process;
+      set working_dir when needed. Use timeout for long commands and tail to
+      limit noisy output.
+    arguments: [command, working_dir, timeout, tail]
+    required: [command]
