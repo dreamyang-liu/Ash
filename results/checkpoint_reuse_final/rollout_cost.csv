@@ -1,0 +1,10 @@
+task,no_cache_s,exact_history_s,tvcache_tcg_s,full_workspace_hash_s,ours_restore_s,ours_speedup,source
+zstd-decoder,13.13,13.09,13.13,1.47,1.39,9.45,Docker real measurement
+biofabric,11.06,7.26,11.06,1.45,1.37,8.07,Docker real measurement
+jax-pytorch,8.21,7.34,8.21,1.41,1.33,6.17,Docker real measurement
+kubernetes,16.71,9.35,16.71,1.40,1.32,12.66,Docker real measurement
+ruby-rust-port,17.41,10.86,10.86,1.41,1.33,13.09,Docker real measurement
+stripe-clone,9.98,11.72,9.98,1.41,1.33,7.50,Docker real measurement
+vliw-kernel,8.72,8.93,8.72,1.37,1.29,6.76,Docker real measurement
+wasm-simd,10.97,27.09,10.97,1.41,1.33,8.25,Docker real measurement
+(8-task average),12.02,11.96,11.21,1.42,1.34,9.00,n=8 tasks real Docker benchmark

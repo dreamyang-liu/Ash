@@ -1,0 +1,249 @@
+{
+  "note": "offline re-evaluation with improved projection (printf, text_editor view, barrier segmentation)",
+  "totals": {
+    "ours_improved": {
+      "hits": 55,
+      "queries": 248,
+      "hit_rate": 0.2218,
+      "false_reuse": 0,
+      "steps_avoided": 105
+    },
+    "structured_only": {
+      "hits": 2,
+      "queries": 248,
+      "hit_rate": 0.0081,
+      "false_reuse": 0,
+      "steps_avoided": 2
+    }
+  },
+  "baseline_ours_from_paper": {
+    "hits": 35,
+    "queries": 248,
+    "hit_rate": 0.1411,
+    "false_reuse": 0
+  },
+  "new_hits_vs_old": [
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 1,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 2,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 1,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 2,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 1,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 2,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 3,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 4,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 5,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 6,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 1,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 2,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 3,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 4,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 5,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "vliw-kernel-optimization",
+      "query_step": 6,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "wasm-simd",
+      "query_step": 1,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "wasm-simd",
+      "query_step": 1,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "wasm-simd",
+      "query_step": 1,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    },
+    {
+      "task": "wasm-simd",
+      "query_step": 1,
+      "matched_source_step": 1,
+      "workspace_valid": true
+    }
+  ],
+  "per_task": {
+    "ours_improved:biofabric-rust-rewrite": {
+      "hits": 10,
+      "queries": 30,
+      "false_reuse": 0
+    },
+    "ours_improved:find-network-alignments": {
+      "hits": 0,
+      "queries": 26,
+      "false_reuse": 0
+    },
+    "ours_improved:jax-pytorch-rewrite": {
+      "hits": 10,
+      "queries": 32,
+      "false_reuse": 0
+    },
+    "ours_improved:kubernetes-rust-rewrite": {
+      "hits": 2,
+      "queries": 10,
+      "false_reuse": 0
+    },
+    "ours_improved:ruby-rust-port": {
+      "hits": 5,
+      "queries": 26,
+      "false_reuse": 0
+    },
+    "ours_improved:slack-clone": {
+      "hits": 0,
+      "queries": 10,
+      "false_reuse": 0
+    },
+    "ours_improved:stripe-clone": {
+      "hits": 2,
+      "queries": 26,
+      "false_reuse": 0
+    },
+    "ours_improved:vliw-kernel-optimization": {
+      "hits": 20,
+      "queries": 28,
+      "false_reuse": 0
+    },
+    "ours_improved:wasm-simd": {
+      "hits": 6,
+      "queries": 30,
+      "false_reuse": 0
+    },
+    "ours_improved:zstd-decoder": {
+      "hits": 0,
+      "queries": 30,
+      "false_reuse": 0
+    },
+    "structured_only:biofabric-rust-rewrite": {
+      "hits": 0,
+      "queries": 30,
+      "false_reuse": 0
+    },
+    "structured_only:find-network-alignments": {
+      "hits": 0,
+      "queries": 26,
+      "false_reuse": 0
+    },
+    "structured_only:jax-pytorch-rewrite": {
+      "hits": 0,
+      "queries": 32,
+      "false_reuse": 0
+    },
+    "structured_only:kubernetes-rust-rewrite": {
+      "hits": 0,
+      "queries": 10,
+      "false_reuse": 0
+    },
+    "structured_only:ruby-rust-port": {
+      "hits": 2,
+      "queries": 26,
+      "false_reuse": 0
+    },
+    "structured_only:slack-clone": {
+      "hits": 0,
+      "queries": 10,
+      "false_reuse": 0
+    },
+    "structured_only:stripe-clone": {
+      "hits": 0,
+      "queries": 26,
+      "false_reuse": 0
+    },
+    "structured_only:vliw-kernel-optimization": {
+      "hits": 0,
+      "queries": 28,
+      "false_reuse": 0
+    },
+    "structured_only:wasm-simd": {
+      "hits": 0,
+      "queries": 30,
+      "false_reuse": 0
+    },
+    "structured_only:zstd-decoder": {
+      "hits": 0,
+      "queries": 30,
+      "false_reuse": 0
+    }
+  }
+}

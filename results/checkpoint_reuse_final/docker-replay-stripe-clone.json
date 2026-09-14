@@ -1,0 +1,53 @@
+{
+  "image": "ash-swemarathon:lightstage-stripe-clone-ef3700d55939",
+  "branches": 3,
+  "source_snapshot": "ash-snapshot:relaxed-replay-source-3d368d4a82a8",
+  "source_snapshot_ms": 993.586,
+  "source_cache_registration_ms": 4.245,
+  "source_projection_state_hash": "3ca4acd62d715faa455596930bbce972ca104d12f6a50b7fc2516c785f3721c0",
+  "exact_query_hit": {
+    "mode": "exact",
+    "hit": false,
+    "snapshot_id": null,
+    "match_kind": null,
+    "relaxed_tier": null,
+    "exact_history_match": null,
+    "environment_reusable": false,
+    "model_prefix_reusable": false,
+    "kv_reuse": false,
+    "target_message_count": 7
+  },
+  "relaxed_query_hit": {
+    "mode": "relaxed",
+    "hit": true,
+    "snapshot_id": "ash-snapshot:relaxed-replay-source-3d368d4a82a8",
+    "match_kind": "relaxed",
+    "relaxed_tier": "projection",
+    "exact_history_match": false,
+    "environment_reusable": true,
+    "model_prefix_reusable": false,
+    "kv_reuse": false,
+    "target_message_count": 7
+  },
+  "target_history_preserved": true,
+  "no_cache": {
+    "min_ms": 7855.892,
+    "mean_ms": 9980.746,
+    "max_ms": 13862.54
+  },
+  "exact": {
+    "min_ms": 8003.682,
+    "mean_ms": 11718.828,
+    "max_ms": 18111.234
+  },
+  "relaxed_projection": {
+    "min_ms": 1308.413,
+    "mean_ms": 1329.146,
+    "max_ms": 1360.055
+  },
+  "exact_vs_relaxed_speedup": 8.8168,
+  "saved_per_branch_ms": 10389.681,
+  "materialization_break_even_branches": 1,
+  "model_prefix_reusable": false,
+  "kv_reuse": false
+}

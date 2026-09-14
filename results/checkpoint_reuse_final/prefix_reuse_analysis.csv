@@ -1,0 +1,255 @@
+task,source,query,method,total_query_steps,reusable_prefix_length,reuse_ratio,partial_reuse_steps,partial_reuse_ratio,max_reuse_depth,avg_reuse_depth
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-182909,biofabric-rust-rewrite-20260901-183348-f6b03654,ours,4,3,0.75,3,0.75,3,2
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-182909,biofabric-rust-rewrite-20260901-183348-f6b03654,full_workspace_hash,4,4,1.0,4,1.0,4,2.5
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-182909,biofabric-rust-rewrite-20260901-183348-f6b03654,exact_history,4,0,0.0,0,0.0,0,0.0
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-182909,biofabric-rust-rewrite-20260901-183348-f6b03654,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-182909,biofabric-rust-rewrite-20260901-183422-298ee0c3,ours,4,1,0.25,1,0.25,1,1
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-182909,biofabric-rust-rewrite-20260901-183422-298ee0c3,full_workspace_hash,4,3,0.75,3,0.75,3,2
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-182909,biofabric-rust-rewrite-20260901-183422-298ee0c3,exact_history,4,0,0.0,0,0.0,0,0.0
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-182909,biofabric-rust-rewrite-20260901-183422-298ee0c3,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183348-f6b03654,biofabric-rust-rewrite-20260901-182909,ours,7,1,0.1429,1,0.1429,1,1
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183348-f6b03654,biofabric-rust-rewrite-20260901-182909,full_workspace_hash,7,1,0.1429,1,0.1429,1,1
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183348-f6b03654,biofabric-rust-rewrite-20260901-182909,exact_history,7,0,0.0,0,0.0,0,0.0
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183348-f6b03654,biofabric-rust-rewrite-20260901-182909,tvcache_tcg,7,0,0.0,0,0.0,0,0.0
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183348-f6b03654,biofabric-rust-rewrite-20260901-183422-298ee0c3,ours,4,1,0.25,1,0.25,1,1
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183348-f6b03654,biofabric-rust-rewrite-20260901-183422-298ee0c3,full_workspace_hash,4,3,0.75,3,0.75,3,2
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183348-f6b03654,biofabric-rust-rewrite-20260901-183422-298ee0c3,exact_history,4,0,0.0,0,0.0,0,0.0
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183348-f6b03654,biofabric-rust-rewrite-20260901-183422-298ee0c3,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183422-298ee0c3,biofabric-rust-rewrite-20260901-182909,ours,7,1,0.1429,1,0.1429,1,1
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183422-298ee0c3,biofabric-rust-rewrite-20260901-182909,full_workspace_hash,7,1,0.1429,1,0.1429,1,1
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183422-298ee0c3,biofabric-rust-rewrite-20260901-182909,exact_history,7,0,0.0,0,0.0,0,0.0
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183422-298ee0c3,biofabric-rust-rewrite-20260901-182909,tvcache_tcg,7,0,0.0,0,0.0,0,0.0
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183422-298ee0c3,biofabric-rust-rewrite-20260901-183348-f6b03654,ours,4,3,0.75,3,0.75,3,2
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183422-298ee0c3,biofabric-rust-rewrite-20260901-183348-f6b03654,full_workspace_hash,4,4,1.0,4,1.0,4,2.5
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183422-298ee0c3,biofabric-rust-rewrite-20260901-183348-f6b03654,exact_history,4,0,0.0,0,0.0,0,0.0
+biofabric-rust-rewrite,biofabric-rust-rewrite-20260901-183422-298ee0c3,biofabric-rust-rewrite-20260901-183348-f6b03654,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183027,find-network-alignments-20260901-183550-0ef49fc5,ours,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183027,find-network-alignments-20260901-183550-0ef49fc5,full_workspace_hash,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183027,find-network-alignments-20260901-183550-0ef49fc5,exact_history,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183027,find-network-alignments-20260901-183550-0ef49fc5,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183027,find-network-alignments-20260901-183612-62bf705d,ours,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183027,find-network-alignments-20260901-183612-62bf705d,full_workspace_hash,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183027,find-network-alignments-20260901-183612-62bf705d,exact_history,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183027,find-network-alignments-20260901-183612-62bf705d,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183550-0ef49fc5,find-network-alignments-20260901-183027,ours,5,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183550-0ef49fc5,find-network-alignments-20260901-183027,full_workspace_hash,5,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183550-0ef49fc5,find-network-alignments-20260901-183027,exact_history,5,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183550-0ef49fc5,find-network-alignments-20260901-183027,tvcache_tcg,5,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183550-0ef49fc5,find-network-alignments-20260901-183612-62bf705d,ours,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183550-0ef49fc5,find-network-alignments-20260901-183612-62bf705d,full_workspace_hash,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183550-0ef49fc5,find-network-alignments-20260901-183612-62bf705d,exact_history,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183550-0ef49fc5,find-network-alignments-20260901-183612-62bf705d,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183612-62bf705d,find-network-alignments-20260901-183027,ours,5,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183612-62bf705d,find-network-alignments-20260901-183027,full_workspace_hash,5,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183612-62bf705d,find-network-alignments-20260901-183027,exact_history,5,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183612-62bf705d,find-network-alignments-20260901-183027,tvcache_tcg,5,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183612-62bf705d,find-network-alignments-20260901-183550-0ef49fc5,ours,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183612-62bf705d,find-network-alignments-20260901-183550-0ef49fc5,full_workspace_hash,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183612-62bf705d,find-network-alignments-20260901-183550-0ef49fc5,exact_history,4,0,0.0,0,0.0,0,0.0
+find-network-alignments,find-network-alignments-20260901-183612-62bf705d,find-network-alignments-20260901-183550-0ef49fc5,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-182955,jax-pytorch-rewrite-20260901-183429-fc340c07,ours,4,3,0.75,3,0.75,3,2
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-182955,jax-pytorch-rewrite-20260901-183429-fc340c07,full_workspace_hash,4,3,0.75,3,0.75,3,2
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-182955,jax-pytorch-rewrite-20260901-183429-fc340c07,exact_history,4,0,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-182955,jax-pytorch-rewrite-20260901-183429-fc340c07,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-182955,jax-pytorch-rewrite-20260901-183453-811031fb,ours,4,1,0.25,1,0.25,1,1
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-182955,jax-pytorch-rewrite-20260901-183453-811031fb,full_workspace_hash,4,3,0.75,3,0.75,3,2
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-182955,jax-pytorch-rewrite-20260901-183453-811031fb,exact_history,4,0,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-182955,jax-pytorch-rewrite-20260901-183453-811031fb,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183429-fc340c07,jax-pytorch-rewrite-20260901-182955,ours,8,1,0.125,1,0.125,1,1
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183429-fc340c07,jax-pytorch-rewrite-20260901-182955,full_workspace_hash,8,1,0.125,1,0.125,1,1
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183429-fc340c07,jax-pytorch-rewrite-20260901-182955,exact_history,8,0,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183429-fc340c07,jax-pytorch-rewrite-20260901-182955,tvcache_tcg,8,0,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183429-fc340c07,jax-pytorch-rewrite-20260901-183453-811031fb,ours,4,1,0.25,1,0.25,1,1
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183429-fc340c07,jax-pytorch-rewrite-20260901-183453-811031fb,full_workspace_hash,4,3,0.75,3,0.75,3,2
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183429-fc340c07,jax-pytorch-rewrite-20260901-183453-811031fb,exact_history,4,0,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183429-fc340c07,jax-pytorch-rewrite-20260901-183453-811031fb,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183453-811031fb,jax-pytorch-rewrite-20260901-182955,ours,8,1,0.125,1,0.125,1,1
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183453-811031fb,jax-pytorch-rewrite-20260901-182955,full_workspace_hash,8,1,0.125,1,0.125,1,1
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183453-811031fb,jax-pytorch-rewrite-20260901-182955,exact_history,8,0,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183453-811031fb,jax-pytorch-rewrite-20260901-182955,tvcache_tcg,8,0,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183453-811031fb,jax-pytorch-rewrite-20260901-183429-fc340c07,ours,4,3,0.75,3,0.75,3,2
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183453-811031fb,jax-pytorch-rewrite-20260901-183429-fc340c07,full_workspace_hash,4,3,0.75,3,0.75,3,2
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183453-811031fb,jax-pytorch-rewrite-20260901-183429-fc340c07,exact_history,4,0,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,jax-pytorch-rewrite-20260901-183453-811031fb,jax-pytorch-rewrite-20260901-183429-fc340c07,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+kubernetes-rust-rewrite,kubernetes-rust-rewrite-20260901-182909,kubernetes-rust-rewrite-20260901-183348-25f97c19,ours,4,1,0.25,1,0.25,1,1
+kubernetes-rust-rewrite,kubernetes-rust-rewrite-20260901-182909,kubernetes-rust-rewrite-20260901-183348-25f97c19,full_workspace_hash,4,4,1.0,4,1.0,4,2.5
+kubernetes-rust-rewrite,kubernetes-rust-rewrite-20260901-182909,kubernetes-rust-rewrite-20260901-183348-25f97c19,exact_history,4,0,0.0,0,0.0,0,0.0
+kubernetes-rust-rewrite,kubernetes-rust-rewrite-20260901-182909,kubernetes-rust-rewrite-20260901-183348-25f97c19,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+kubernetes-rust-rewrite,kubernetes-rust-rewrite-20260901-183348-25f97c19,kubernetes-rust-rewrite-20260901-182909,ours,6,1,0.1667,1,0.1667,1,1
+kubernetes-rust-rewrite,kubernetes-rust-rewrite-20260901-183348-25f97c19,kubernetes-rust-rewrite-20260901-182909,full_workspace_hash,6,1,0.1667,1,0.1667,1,1
+kubernetes-rust-rewrite,kubernetes-rust-rewrite-20260901-183348-25f97c19,kubernetes-rust-rewrite-20260901-182909,exact_history,6,0,0.0,0,0.0,0,0.0
+kubernetes-rust-rewrite,kubernetes-rust-rewrite-20260901-183348-25f97c19,kubernetes-rust-rewrite-20260901-182909,tvcache_tcg,6,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-182955,ruby-rust-port-20260901-183441-5baee8b8,ours,4,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-182955,ruby-rust-port-20260901-183441-5baee8b8,full_workspace_hash,4,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-182955,ruby-rust-port-20260901-183441-5baee8b8,exact_history,4,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-182955,ruby-rust-port-20260901-183441-5baee8b8,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-182955,ruby-rust-port-20260901-183519-e9a0c320,ours,4,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-182955,ruby-rust-port-20260901-183519-e9a0c320,full_workspace_hash,4,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-182955,ruby-rust-port-20260901-183519-e9a0c320,exact_history,4,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-182955,ruby-rust-port-20260901-183519-e9a0c320,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-183441-5baee8b8,ruby-rust-port-20260901-182955,ours,5,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-183441-5baee8b8,ruby-rust-port-20260901-182955,full_workspace_hash,5,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-183441-5baee8b8,ruby-rust-port-20260901-182955,exact_history,5,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-183441-5baee8b8,ruby-rust-port-20260901-182955,tvcache_tcg,5,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-183441-5baee8b8,ruby-rust-port-20260901-183519-e9a0c320,ours,4,2,0.5,2,0.5,2,1.5
+ruby-rust-port,ruby-rust-port-20260901-183441-5baee8b8,ruby-rust-port-20260901-183519-e9a0c320,full_workspace_hash,4,4,1.0,4,1.0,4,2.5
+ruby-rust-port,ruby-rust-port-20260901-183441-5baee8b8,ruby-rust-port-20260901-183519-e9a0c320,exact_history,4,1,0.25,1,0.25,1,1
+ruby-rust-port,ruby-rust-port-20260901-183441-5baee8b8,ruby-rust-port-20260901-183519-e9a0c320,tvcache_tcg,4,4,1.0,4,1.0,1,1
+ruby-rust-port,ruby-rust-port-20260901-183519-e9a0c320,ruby-rust-port-20260901-182955,ours,5,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-183519-e9a0c320,ruby-rust-port-20260901-182955,full_workspace_hash,5,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-183519-e9a0c320,ruby-rust-port-20260901-182955,exact_history,5,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-183519-e9a0c320,ruby-rust-port-20260901-182955,tvcache_tcg,5,0,0.0,0,0.0,0,0.0
+ruby-rust-port,ruby-rust-port-20260901-183519-e9a0c320,ruby-rust-port-20260901-183441-5baee8b8,ours,4,3,0.75,3,0.75,3,2
+ruby-rust-port,ruby-rust-port-20260901-183519-e9a0c320,ruby-rust-port-20260901-183441-5baee8b8,full_workspace_hash,4,4,1.0,4,1.0,4,2.5
+ruby-rust-port,ruby-rust-port-20260901-183519-e9a0c320,ruby-rust-port-20260901-183441-5baee8b8,exact_history,4,1,0.25,1,0.25,1,1
+ruby-rust-port,ruby-rust-port-20260901-183519-e9a0c320,ruby-rust-port-20260901-183441-5baee8b8,tvcache_tcg,4,4,1.0,4,1.0,1,1
+slack-clone,slack-clone-20260904-091312,slack-clone-20260904-091800-cc597f4a,ours,4,0,0.0,0,0.0,0,0.0
+slack-clone,slack-clone-20260904-091312,slack-clone-20260904-091800-cc597f4a,full_workspace_hash,4,2,0.5,2,0.5,2,1.5
+slack-clone,slack-clone-20260904-091312,slack-clone-20260904-091800-cc597f4a,exact_history,4,0,0.0,0,0.0,0,0.0
+slack-clone,slack-clone-20260904-091312,slack-clone-20260904-091800-cc597f4a,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+slack-clone,slack-clone-20260904-091800-cc597f4a,slack-clone-20260904-091312,ours,6,0,0.0,0,0.0,0,0.0
+slack-clone,slack-clone-20260904-091800-cc597f4a,slack-clone-20260904-091312,full_workspace_hash,6,6,1.0,6,1.0,6,3.5
+slack-clone,slack-clone-20260904-091800-cc597f4a,slack-clone-20260904-091312,exact_history,6,0,0.0,0,0.0,0,0.0
+slack-clone,slack-clone-20260904-091800-cc597f4a,slack-clone-20260904-091312,tvcache_tcg,6,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-182955,stripe-clone-20260901-183418-991e5ad0,ours,4,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-182955,stripe-clone-20260901-183418-991e5ad0,full_workspace_hash,4,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-182955,stripe-clone-20260901-183418-991e5ad0,exact_history,4,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-182955,stripe-clone-20260901-183418-991e5ad0,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-182955,stripe-clone-20260901-183422-0d3154f5,ours,4,1,0.25,1,0.25,1,1
+stripe-clone,stripe-clone-20260901-182955,stripe-clone-20260901-183422-0d3154f5,full_workspace_hash,4,1,0.25,1,0.25,1,1
+stripe-clone,stripe-clone-20260901-182955,stripe-clone-20260901-183422-0d3154f5,exact_history,4,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-182955,stripe-clone-20260901-183422-0d3154f5,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183418-991e5ad0,stripe-clone-20260901-182955,ours,5,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183418-991e5ad0,stripe-clone-20260901-182955,full_workspace_hash,5,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183418-991e5ad0,stripe-clone-20260901-182955,exact_history,5,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183418-991e5ad0,stripe-clone-20260901-182955,tvcache_tcg,5,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183418-991e5ad0,stripe-clone-20260901-183422-0d3154f5,ours,4,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183418-991e5ad0,stripe-clone-20260901-183422-0d3154f5,full_workspace_hash,4,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183418-991e5ad0,stripe-clone-20260901-183422-0d3154f5,exact_history,4,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183418-991e5ad0,stripe-clone-20260901-183422-0d3154f5,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183422-0d3154f5,stripe-clone-20260901-182955,ours,5,1,0.2,1,0.2,1,1
+stripe-clone,stripe-clone-20260901-183422-0d3154f5,stripe-clone-20260901-182955,full_workspace_hash,5,1,0.2,1,0.2,1,1
+stripe-clone,stripe-clone-20260901-183422-0d3154f5,stripe-clone-20260901-182955,exact_history,5,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183422-0d3154f5,stripe-clone-20260901-182955,tvcache_tcg,5,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183422-0d3154f5,stripe-clone-20260901-183418-991e5ad0,ours,4,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183422-0d3154f5,stripe-clone-20260901-183418-991e5ad0,full_workspace_hash,4,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183422-0d3154f5,stripe-clone-20260901-183418-991e5ad0,exact_history,4,0,0.0,0,0.0,0,0.0
+stripe-clone,stripe-clone-20260901-183422-0d3154f5,stripe-clone-20260901-183418-991e5ad0,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183011,vliw-kernel-optimization-20260901-183459-b793d37f,ours,4,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183011,vliw-kernel-optimization-20260901-183459-b793d37f,full_workspace_hash,4,2,0.5,2,0.5,2,1.5
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183011,vliw-kernel-optimization-20260901-183459-b793d37f,exact_history,4,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183011,vliw-kernel-optimization-20260901-183459-b793d37f,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183011,vliw-kernel-optimization-20260901-183540-74b9e1cb,ours,4,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183011,vliw-kernel-optimization-20260901-183540-74b9e1cb,full_workspace_hash,4,2,0.5,2,0.5,2,1.5
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183011,vliw-kernel-optimization-20260901-183540-74b9e1cb,exact_history,4,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183011,vliw-kernel-optimization-20260901-183540-74b9e1cb,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183459-b793d37f,vliw-kernel-optimization-20260901-183011,ours,6,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183459-b793d37f,vliw-kernel-optimization-20260901-183011,full_workspace_hash,6,6,1.0,6,1.0,6,3.5
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183459-b793d37f,vliw-kernel-optimization-20260901-183011,exact_history,6,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183459-b793d37f,vliw-kernel-optimization-20260901-183011,tvcache_tcg,6,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183459-b793d37f,vliw-kernel-optimization-20260901-183540-74b9e1cb,ours,4,2,0.5,2,0.5,2,1.5
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183459-b793d37f,vliw-kernel-optimization-20260901-183540-74b9e1cb,full_workspace_hash,4,2,0.5,2,0.5,2,1.5
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183459-b793d37f,vliw-kernel-optimization-20260901-183540-74b9e1cb,exact_history,4,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183459-b793d37f,vliw-kernel-optimization-20260901-183540-74b9e1cb,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183540-74b9e1cb,vliw-kernel-optimization-20260901-183011,ours,6,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183540-74b9e1cb,vliw-kernel-optimization-20260901-183011,full_workspace_hash,6,6,1.0,6,1.0,6,3.5
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183540-74b9e1cb,vliw-kernel-optimization-20260901-183011,exact_history,6,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183540-74b9e1cb,vliw-kernel-optimization-20260901-183011,tvcache_tcg,6,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183540-74b9e1cb,vliw-kernel-optimization-20260901-183459-b793d37f,ours,4,2,0.5,2,0.5,2,1.5
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183540-74b9e1cb,vliw-kernel-optimization-20260901-183459-b793d37f,full_workspace_hash,4,2,0.5,2,0.5,2,1.5
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183540-74b9e1cb,vliw-kernel-optimization-20260901-183459-b793d37f,exact_history,4,0,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,vliw-kernel-optimization-20260901-183540-74b9e1cb,vliw-kernel-optimization-20260901-183459-b793d37f,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-182909,wasm-simd-20260901-183348-fcb6497c,ours,4,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-182909,wasm-simd-20260901-183348-fcb6497c,full_workspace_hash,4,4,1.0,4,1.0,4,2.5
+wasm-simd,wasm-simd-20260901-182909,wasm-simd-20260901-183348-fcb6497c,exact_history,4,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-182909,wasm-simd-20260901-183348-fcb6497c,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-182909,wasm-simd-20260901-183422-44812ba4,ours,4,1,0.25,1,0.25,1,1
+wasm-simd,wasm-simd-20260901-182909,wasm-simd-20260901-183422-44812ba4,full_workspace_hash,4,4,1.0,4,1.0,4,2.5
+wasm-simd,wasm-simd-20260901-182909,wasm-simd-20260901-183422-44812ba4,exact_history,4,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-182909,wasm-simd-20260901-183422-44812ba4,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-183348-fcb6497c,wasm-simd-20260901-182909,ours,7,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-183348-fcb6497c,wasm-simd-20260901-182909,full_workspace_hash,7,1,0.1429,1,0.1429,1,1
+wasm-simd,wasm-simd-20260901-183348-fcb6497c,wasm-simd-20260901-182909,exact_history,7,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-183348-fcb6497c,wasm-simd-20260901-182909,tvcache_tcg,7,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-183348-fcb6497c,wasm-simd-20260901-183422-44812ba4,ours,4,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-183348-fcb6497c,wasm-simd-20260901-183422-44812ba4,full_workspace_hash,4,4,1.0,4,1.0,4,2.5
+wasm-simd,wasm-simd-20260901-183348-fcb6497c,wasm-simd-20260901-183422-44812ba4,exact_history,4,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-183348-fcb6497c,wasm-simd-20260901-183422-44812ba4,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-183422-44812ba4,wasm-simd-20260901-182909,ours,7,1,0.1429,1,0.1429,1,1
+wasm-simd,wasm-simd-20260901-183422-44812ba4,wasm-simd-20260901-182909,full_workspace_hash,7,1,0.1429,1,0.1429,1,1
+wasm-simd,wasm-simd-20260901-183422-44812ba4,wasm-simd-20260901-182909,exact_history,7,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-183422-44812ba4,wasm-simd-20260901-182909,tvcache_tcg,7,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-183422-44812ba4,wasm-simd-20260901-183348-fcb6497c,ours,4,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-183422-44812ba4,wasm-simd-20260901-183348-fcb6497c,full_workspace_hash,4,4,1.0,4,1.0,4,2.5
+wasm-simd,wasm-simd-20260901-183422-44812ba4,wasm-simd-20260901-183348-fcb6497c,exact_history,4,0,0.0,0,0.0,0,0.0
+wasm-simd,wasm-simd-20260901-183422-44812ba4,wasm-simd-20260901-183348-fcb6497c,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-182909,zstd-decoder-20260901-183348-6b196d58,ours,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-182909,zstd-decoder-20260901-183348-6b196d58,full_workspace_hash,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-182909,zstd-decoder-20260901-183348-6b196d58,exact_history,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-182909,zstd-decoder-20260901-183348-6b196d58,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-182909,zstd-decoder-20260901-183422-df78cf98,ours,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-182909,zstd-decoder-20260901-183422-df78cf98,full_workspace_hash,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-182909,zstd-decoder-20260901-183422-df78cf98,exact_history,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-182909,zstd-decoder-20260901-183422-df78cf98,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183348-6b196d58,zstd-decoder-20260901-182909,ours,7,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183348-6b196d58,zstd-decoder-20260901-182909,full_workspace_hash,7,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183348-6b196d58,zstd-decoder-20260901-182909,exact_history,7,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183348-6b196d58,zstd-decoder-20260901-182909,tvcache_tcg,7,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183348-6b196d58,zstd-decoder-20260901-183422-df78cf98,ours,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183348-6b196d58,zstd-decoder-20260901-183422-df78cf98,full_workspace_hash,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183348-6b196d58,zstd-decoder-20260901-183422-df78cf98,exact_history,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183348-6b196d58,zstd-decoder-20260901-183422-df78cf98,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183422-df78cf98,zstd-decoder-20260901-182909,ours,7,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183422-df78cf98,zstd-decoder-20260901-182909,full_workspace_hash,7,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183422-df78cf98,zstd-decoder-20260901-182909,exact_history,7,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183422-df78cf98,zstd-decoder-20260901-182909,tvcache_tcg,7,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183422-df78cf98,zstd-decoder-20260901-183348-6b196d58,ours,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183422-df78cf98,zstd-decoder-20260901-183348-6b196d58,full_workspace_hash,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183422-df78cf98,zstd-decoder-20260901-183348-6b196d58,exact_history,4,0,0.0,0,0.0,0,0.0
+zstd-decoder,zstd-decoder-20260901-183422-df78cf98,zstd-decoder-20260901-183348-6b196d58,tvcache_tcg,4,0,0.0,0,0.0,0,0.0
+,,,,,,,,,,
+biofabric-rust-rewrite,(task aggregate),n=6 pairs,exact_history,30,,0.0,0,0.0,0,0.0
+biofabric-rust-rewrite,(task aggregate),n=6 pairs,full_workspace_hash,30,,0.631,16,0.631,4,1.83
+biofabric-rust-rewrite,(task aggregate),n=6 pairs,ours,30,,0.381,10,0.381,3,1.33
+biofabric-rust-rewrite,(task aggregate),n=6 pairs,tvcache_tcg,30,,0.0,0,0.0,0,0.0
+find-network-alignments,(task aggregate),n=6 pairs,exact_history,26,,0.0,0,0.0,0,0.0
+find-network-alignments,(task aggregate),n=6 pairs,full_workspace_hash,26,,0.0,0,0.0,0,0.0
+find-network-alignments,(task aggregate),n=6 pairs,ours,26,,0.0,0,0.0,0,0.0
+find-network-alignments,(task aggregate),n=6 pairs,tvcache_tcg,26,,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,(task aggregate),n=6 pairs,exact_history,32,,0.0,0,0.0,0,0.0
+jax-pytorch-rewrite,(task aggregate),n=6 pairs,full_workspace_hash,32,,0.5417,14,0.5417,3,1.67
+jax-pytorch-rewrite,(task aggregate),n=6 pairs,ours,32,,0.375,10,0.375,3,1.33
+jax-pytorch-rewrite,(task aggregate),n=6 pairs,tvcache_tcg,32,,0.0,0,0.0,0,0.0
+kubernetes-rust-rewrite,(task aggregate),n=2 pairs,exact_history,10,,0.0,0,0.0,0,0.0
+kubernetes-rust-rewrite,(task aggregate),n=2 pairs,full_workspace_hash,10,,0.5834,5,0.5834,4,1.75
+kubernetes-rust-rewrite,(task aggregate),n=2 pairs,ours,10,,0.2083,2,0.2083,1,1
+kubernetes-rust-rewrite,(task aggregate),n=2 pairs,tvcache_tcg,10,,0.0,0,0.0,0,0.0
+ruby-rust-port,(task aggregate),n=6 pairs,exact_history,26,,0.0833,2,0.0833,1,0.33
+ruby-rust-port,(task aggregate),n=6 pairs,full_workspace_hash,26,,0.3333,8,0.3333,4,0.83
+ruby-rust-port,(task aggregate),n=6 pairs,ours,26,,0.2083,5,0.2083,3,0.58
+ruby-rust-port,(task aggregate),n=6 pairs,tvcache_tcg,26,,0.3333,8,0.3333,1,0.33
+slack-clone,(task aggregate),n=2 pairs,exact_history,10,,0.0,0,0.0,0,0.0
+slack-clone,(task aggregate),n=2 pairs,full_workspace_hash,10,,0.75,8,0.75,6,2.5
+slack-clone,(task aggregate),n=2 pairs,ours,10,,0.0,0,0.0,0,0.0
+slack-clone,(task aggregate),n=2 pairs,tvcache_tcg,10,,0.0,0,0.0,0,0.0
+stripe-clone,(task aggregate),n=6 pairs,exact_history,26,,0.0,0,0.0,0,0.0
+stripe-clone,(task aggregate),n=6 pairs,full_workspace_hash,26,,0.075,2,0.075,1,0.33
+stripe-clone,(task aggregate),n=6 pairs,ours,26,,0.075,2,0.075,1,0.33
+stripe-clone,(task aggregate),n=6 pairs,tvcache_tcg,26,,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,(task aggregate),n=6 pairs,exact_history,28,,0.0,0,0.0,0,0.0
+vliw-kernel-optimization,(task aggregate),n=6 pairs,full_workspace_hash,28,,0.6667,20,0.6667,6,2.17
+vliw-kernel-optimization,(task aggregate),n=6 pairs,ours,28,,0.1667,4,0.1667,2,0.5
+vliw-kernel-optimization,(task aggregate),n=6 pairs,tvcache_tcg,28,,0.0,0,0.0,0,0.0
+wasm-simd,(task aggregate),n=6 pairs,exact_history,30,,0.0,0,0.0,0,0.0
+wasm-simd,(task aggregate),n=6 pairs,full_workspace_hash,30,,0.7143,18,0.7143,4,2.0
+wasm-simd,(task aggregate),n=6 pairs,ours,30,,0.0655,2,0.0655,1,0.33
+wasm-simd,(task aggregate),n=6 pairs,tvcache_tcg,30,,0.0,0,0.0,0,0.0
+zstd-decoder,(task aggregate),n=6 pairs,exact_history,30,,0.0,0,0.0,0,0.0
+zstd-decoder,(task aggregate),n=6 pairs,full_workspace_hash,30,,0.0,0,0.0,0,0.0
+zstd-decoder,(task aggregate),n=6 pairs,ours,30,,0.0,0,0.0,0,0.0
+zstd-decoder,(task aggregate),n=6 pairs,tvcache_tcg,30,,0.0,0,0.0,0,0.0
+,,,,,,,,,,
+(GRAND TOTAL),n=52 pairs,n=248 queries,exact_history,248,,0.0096,2,0.0081,1,0.04
+(GRAND TOTAL),n=52 pairs,n=248 queries,full_workspace_hash,248,,0.393,91,0.3669,6,1.18
+(GRAND TOTAL),n=52 pairs,n=248 queries,ours,248,,0.1547,35,0.1411,3,0.55
+(GRAND TOTAL),n=52 pairs,n=248 queries,tvcache_tcg,248,,0.0385,8,0.0323,1,0.04

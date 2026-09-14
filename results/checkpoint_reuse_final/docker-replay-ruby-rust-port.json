@@ -1,0 +1,53 @@
+{
+  "image": "ash-swemarathon:lightstage-ruby-rust-port-5be6b309bc8b",
+  "branches": 3,
+  "source_snapshot": "ash-snapshot:relaxed-replay-source-336459a01737",
+  "source_snapshot_ms": 1086.135,
+  "source_cache_registration_ms": 3.044,
+  "source_projection_state_hash": "3ca4acd62d715faa455596930bbce972ca104d12f6a50b7fc2516c785f3721c0",
+  "exact_query_hit": {
+    "mode": "exact",
+    "hit": false,
+    "snapshot_id": null,
+    "match_kind": null,
+    "relaxed_tier": null,
+    "exact_history_match": null,
+    "environment_reusable": false,
+    "model_prefix_reusable": false,
+    "kv_reuse": false,
+    "target_message_count": 7
+  },
+  "relaxed_query_hit": {
+    "mode": "relaxed",
+    "hit": true,
+    "snapshot_id": "ash-snapshot:relaxed-replay-source-336459a01737",
+    "match_kind": "relaxed",
+    "relaxed_tier": "projection",
+    "exact_history_match": false,
+    "environment_reusable": true,
+    "model_prefix_reusable": false,
+    "kv_reuse": false,
+    "target_message_count": 7
+  },
+  "target_history_preserved": true,
+  "no_cache": {
+    "min_ms": 8005.932,
+    "mean_ms": 17413.793,
+    "max_ms": 24827.094
+  },
+  "exact": {
+    "min_ms": 7606.063,
+    "mean_ms": 10862.315,
+    "max_ms": 17235.767
+  },
+  "relaxed_projection": {
+    "min_ms": 1302.221,
+    "mean_ms": 1328.59,
+    "max_ms": 1358.9
+  },
+  "exact_vs_relaxed_speedup": 8.1758,
+  "saved_per_branch_ms": 9533.724,
+  "materialization_break_even_branches": 1,
+  "model_prefix_reusable": false,
+  "kv_reuse": false
+}
