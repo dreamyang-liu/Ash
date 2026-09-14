@@ -1,0 +1,31 @@
+schema_version = "1.4"
+
+[metadata]
+name = "AgentENV separate verifier gate"
+
+[agent]
+timeout_sec = 120
+
+[verifier]
+environment_mode = "separate"
+timeout_sec = 60
+
+[[verifier.collect]]
+command = "mkdir -p /logs/artifacts; if test -f /app/answer.txt; then cp /app/answer.txt /logs/artifacts/answer.txt; fi"
+timeout_sec = 30
+
+[verifier.environment]
+network_mode = "no-network"
+cpus = 1
+memory_mb = 512
+storage_mb = 65536
+workdir = "/"
+
+[environment]
+docker_image = "python:3.11-slim"
+network_mode = "no-network"
+build_timeout_sec = 240
+cpus = 1
+memory_mb = 512
+storage_mb = 65536
+workdir = "/"

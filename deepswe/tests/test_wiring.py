@@ -28,7 +28,10 @@ def test_backend_turns_egress_off_for_deepswe_and_not_for_swebench(tmp_path):
     swe = fork_eval.backend_for(args(benchmark="swebench"), fork_eval.SweBench())
     assert "allow_internet" not in swe["microvm"]
     # No benchmark given: the historical SWE-bench payload, byte for byte.
-    assert fork_eval.backend_for(args()) == swe
+    historical = fork_eval.backend_for(args())
+    assert {key: value for key, value in swe["microvm"].items() if key != "runtime_init"} == historical["microvm"]
+    assert "conda activate testbed" in swe["microvm"]["runtime_init"]
+    assert "runtime_init" not in deep["microvm"]
 
 
 def test_gate_uses_the_same_backend_as_a_real_attempt(tmp_path):
@@ -64,11 +67,16 @@ def test_instance_prompt_and_resources_come_from_the_task(tmp_path):
     assert "NO internet" in prompt and "COMMITTED" in prompt
     assert PRIMER in prompt
 
+    instance["slot"] = "claude-code"
+    shell_prompt = bench.prompt(instance)
+    assert "text_editor" not in shell_prompt
+    assert "one sandbox tool" in shell_prompt and "/app" in shell_prompt
+
     branch = bench.branch_prompt(instance, verdict="resolved=False", hint="try X")
-    assert "resolved=False" in branch and "try X" in branch and "/testbed" not in branch
+    assert "resolved=False" not in branch and "try X" in branch and "/testbed" not in branch
 
 
-def test_branch_note_for_a_truncated_fork_reads_as_environment_feedback(tmp_path):
+def test_branch_note_contains_only_action_guidance(tmp_path):
     from swebench.fork_eval import Grade
     make_task(tmp_path)
     bench = DeepSWE(tmp_path)
@@ -81,19 +89,21 @@ def test_branch_note_for_a_truncated_fork_reads_as_environment_feedback(tmp_path
                 "salvage": "everything on disk at step 60"}
     note = bench.branch_prompt(instance, verdict="IGNORED RAW VERDICT", hint="handle negative steps",
                                truncated=True, step=25, grade=grade, analysis=analysis)
-    assert note.startswith("<system-reminder>") and note.rstrip().endswith("</system-reminder>")
-    assert "step 25" in note
-    assert "target tests: 5/6" in note and "pkg.TestStep" in note
-    assert "regression tests: 6/6" in note
-    assert "committed and applied cleanly" in note
-    assert "the step parser dropped the sign" in note and "negative steps exist" in note
+    assert note.startswith("handle negative steps")
+    assert "system-reminder" not in note
+    assert "step 25" not in note
+    assert "target tests: 5/6" not in note and "pkg.TestStep" not in note
+    assert "regression tests: 6/6" not in note
+    assert "committed and applied cleanly" not in note
+    assert "the step parser dropped the sign" not in note and "negative steps exist" not in note
     assert "handle negative steps" in note
+    assert "Commit your changes" in note
     # not restated: the task, the tool primer, the raw verdict, the salvage note
     assert "Add `Query`" not in note and "Your tools" not in note
     assert "IGNORED RAW VERDICT" not in note and "everything on disk" not in note
-    # an untruncated fork still gets the full prompt that explains the rolled-back disk
-    full = bench.branch_prompt(instance, verdict="V", hint="H")
-    assert "ITS EDITS ARE ON DISK" in full and "Add `Query`" in full
+    full = bench.branch_prompt(instance, verdict="PRIVATE_VERDICT", hint="Inspect the current code.")
+    assert "restored to an earlier checkpoint" in full
+    assert "Add `Query`" not in full and "PRIVATE_VERDICT" not in full
 
 
 def test_run_attempt_passes_shape_and_offline_backend_to_the_orchestrator(tmp_path):
@@ -116,4 +126,27 @@ def test_run_attempt_passes_shape_and_offline_backend_to_the_orchestrator(tmp_pa
     assert spec.sandbox_resources == {"cpu": 2, "memory_mb": 8192}
     assert spec.backend["microvm"]["allow_internet"] is False
     assert spec.timeout_s == 10800.0
+    assert spec.backend["microvm"]["sandbox_ttl"] == 11400
     assert spec.sandbox_image == instance["image"]
+
+
+def test_grading_routes_artifacts_next_to_the_attempt_journal(tmp_path, monkeypatch):
+    from harness.core.journal import JournalWriter
+
+    make_task(tmp_path)
+    bench = DeepSWE(tmp_path)
+    instance = bench.instance(bench.catalogue(None)["demo-task"])
+    journal_path = tmp_path / "attempts" / "parent.jsonl"
+    journal_path.parent.mkdir()
+    with JournalWriter(journal_path) as journal:
+        journal.emit("checkpoint.captured", step=1, snapshot_id="snapshot-1")
+    calls = []
+
+    def capture(snapshot, task, backend, *, artifacts_dir=None):
+        calls.append((snapshot, task, artifacts_dir))
+        return fork_eval.Grade()
+
+    monkeypatch.setattr("deepswe.bench.grade_snapshot", capture)
+    fork_eval.grade_attempt(SimpleNamespace(journal_path=journal_path), instance, args(), bench)
+    assert calls == [("snapshot-1", instance["task"], str(journal_path.parent / "parent.verifier"))]
+    assert "verifier_artifacts_dir" not in instance

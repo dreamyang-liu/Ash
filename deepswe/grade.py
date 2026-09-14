@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import json
 import posixpath
+import sys
 import tempfile
+from datetime import datetime, timezone
+from uuid import uuid4
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -107,6 +110,10 @@ class VerifierOutcome:
     error: Optional[str] = None
     failed_tests: List[str] = field(default_factory=list)
     exit_code: int = 0
+    timed_out: Optional[bool] = None
+    running: Optional[bool] = None
+    artifacts_dir: Optional[str] = None
+    artifact_error: Optional[str] = None
 
 
 def _place(session, source: Path, destination: str) -> bool:
@@ -145,15 +152,58 @@ def _failed_from_ctrf(text: Optional[str], limit: int = 25) -> List[str]:
     return out
 
 
-def verify_patch(task: Task, patch: str, backend: dict) -> VerifierOutcome:
+def _retain_verifier_logs(session, task: Task, outcome: VerifierOutcome,
+                          directory: Path, started_at: str) -> None:
+    errors = []
+    archive = "/tmp/ash-verifier-%s.tar.gz" % uuid4().hex
+    try:
+        out, err, code = shell_parts(_sh(
+            session, "tar -czf %s -C %s ." % (archive, VERIFIER_DIR), 60))
+        if code != 0:
+            errors.append("archive command exited %s: %s" % (code, (err or out)[-2000:]))
+        if not session.download_file(archive, directory / "verifier-logs.tar.gz"):
+            errors.append("archive download failed or is unsupported")
+    except Exception as error:
+        errors.append("%s: %s" % (type(error).__name__, error))
+    try:
+        (directory / "stdout.txt").write_text(outcome.output, encoding="utf-8")
+    except OSError as error:
+        errors.append("stdout retention failed: %s" % error)
+    outcome.artifact_error = "; ".join(errors) or None
+    metadata = {
+        "task": task.task_id, "sandbox_id": getattr(session, "sandbox_id", None),
+        "started_at": started_at, "finished_at": datetime.now(timezone.utc).isoformat(),
+        "verifier_timeout_s": task.verifier_timeout_s,
+        "exit_code": outcome.exit_code, "timed_out": outcome.timed_out,
+        "running": outcome.running, "grading_error": outcome.error,
+        "artifact_error": outcome.artifact_error,
+        "archive": "verifier-logs.tar.gz" if (directory / "verifier-logs.tar.gz").exists() else None,
+    }
+    try:
+        (directory / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    except OSError as error:
+        errors.append("metadata retention failed: %s" % error)
+        outcome.artifact_error = "; ".join(errors)
+    if outcome.artifact_error:
+        print("Verifier log retention failed: %s (%s)" % (outcome.artifact_error, directory),
+              file=sys.stderr)
+
+
+def verify_patch(task: Task, patch: str, backend: dict, *,
+                 artifacts_dir: Optional[Path] = None, session_factory=None) -> VerifierOutcome:
     """Replay tests/Dockerfile on a pristine offline VM and run the verifier."""
     outcome = VerifierOutcome()
-    session = SandboxSession(quiet=True, backend=dict(backend))
-    if not session.create(task.image, {"cpu": task.cpus, "memory_mb": task.memory_mb}):
-        outcome.error = "could not start verifier VM from %s: %s" % (
-            task.image, session.create_error)
-        return outcome
+    log_root = Path(artifacts_dir) if artifacts_dir is not None else Path("runs/verifier-logs")
+    log_root.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="verify-", dir=log_root)).resolve()
+    outcome.artifacts_dir = str(directory)
+    started_at = datetime.now(timezone.utc).isoformat()
+    session = (session_factory or SandboxSession)(quiet=True, backend=dict(backend))
     try:
+        if not session.create(task.image, {"cpu": task.cpus, "memory_mb": task.memory_mb}):
+            outcome.error = "could not start verifier VM from %s: %s" % (
+                task.image, session.create_error)
+            return outcome
         dirs = {posixpath.dirname(f.destination) for f in task.verifier_files}
         dirs |= {ARTIFACTS_DIR, VERIFIER_DIR}
         _sh(session, "mkdir -p %s" % " ".join(sorted(d for d in dirs if d)), 60)
@@ -182,6 +232,10 @@ def verify_patch(task: Task, patch: str, backend: dict) -> VerifierOutcome:
         out, err, rc = shell_parts(result)
         outcome.exit_code = rc
         outcome.output = out + (("\n[stderr]\n" + err) if err else "")
+        command_outcome = getattr(result, "outcome", None)
+        if command_outcome is not None:
+            outcome.timed_out = command_outcome.timed_out
+            outcome.running = command_outcome.running
 
         reward_text = _cat(session, VERIFIER_DIR + "/reward.json")
         if reward_text is None:
@@ -196,10 +250,15 @@ def verify_patch(task: Task, patch: str, backend: dict) -> VerifierOutcome:
             outcome.error = "reward.json is not JSON: %r" % reward_text[:200]
             return outcome
         outcome.failed_tests = _failed_from_ctrf(_cat(session, VERIFIER_DIR + "/ctrf.json"))
-    except Exception as exc:  # noqa: BLE001 - an ungradeable attempt is a zero
+    except BaseException as exc:
         outcome.error = "%s: %s" % (type(exc).__name__, exc)
+        if not isinstance(exc, Exception):
+            raise
     finally:
-        session.destroy()
+        try:
+            _retain_verifier_logs(session, task, outcome, directory, started_at)
+        finally:
+            session.destroy()
     return outcome
 
 
@@ -213,7 +272,8 @@ def grade_from_verifier(patch: str, outcome: VerifierOutcome,
     analysts read; ``apply_failed`` means the patch never landed, which is a
     failed attempt rather than a grading error (the grader said so itself).
     """
-    grade = Grade(patch=patch)
+    grade = Grade(patch=patch, verifier_artifacts=outcome.artifacts_dir,
+                  verifier_artifact_error=outcome.artifact_error)
     notes = []
     diagnostics = diagnostics or {}
     if diagnostics:
@@ -291,9 +351,10 @@ def verdict_facts(grade: Grade) -> dict:
     return facts
 
 
-def grade_snapshot(snapshot_id: str, task: Task, backend: dict) -> Grade:
+def grade_snapshot(snapshot_id: str, task: Task, backend: dict, *,
+                   artifacts_dir: Optional[Path] = None, session_factory=None) -> Grade:
     """The whole path: restore, collect, verify on a pristine VM, read reward."""
-    session = SandboxSession(quiet=True, backend=dict(backend))
+    session = (session_factory or SandboxSession)(quiet=True, backend=dict(backend))
     if not session.create(snapshot_id):
         return Grade(error="could not restore %s: %s" % (snapshot_id,
                                                          session.create_error))
@@ -303,4 +364,6 @@ def grade_snapshot(snapshot_id: str, task: Task, backend: dict) -> Grade:
         return Grade(error="collect failed: %s: %s" % (type(exc).__name__, exc))
     finally:
         session.destroy()
-    return grade_from_verifier(patch, verify_patch(task, patch, backend), diagnostics)
+    return grade_from_verifier(
+        patch, verify_patch(task, patch, backend, artifacts_dir=artifacts_dir,
+                            session_factory=session_factory), diagnostics)

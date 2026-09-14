@@ -108,6 +108,11 @@ class FakeSession:
         self.uploads.append((Path(source).read_text(), destination))
         return True
 
+    def download_file(self, source, destination):
+        assert not self.destroyed
+        Path(destination).write_bytes(b"raw test log\x00" * 1000)
+        return True
+
     def execute(self, tool, args, timeout=None):
         assert tool == "shell", tool
         cmd = args["command"]
@@ -133,7 +138,7 @@ def test_grade_snapshot_collects_in_the_snapshot_and_verifies_on_a_pristine_vm(
     task = load_task(make_task(tmp_path))
     backend = {"backend": "microvm", "microvm": {"allow_internet": False}}
 
-    grade = grade_snapshot("snap-123", task, backend)
+    grade = grade_snapshot("snap-123", task, backend, artifacts_dir=tmp_path / "logs")
 
     collect, verify = FakeSession.instances
     # 1. the snapshot: their collect command, then the patch and the repo state
@@ -160,6 +165,7 @@ def test_grade_snapshot_collects_in_the_snapshot_and_verifies_on_a_pristine_vm(
     # 3. the verdict is theirs
     assert grade.resolved and grade.patch.startswith("diff --git")
     assert "branch=feature/x" in grade.detail
+    assert (Path(grade.verifier_artifacts) / "verifier-logs.tar.gz").read_bytes() == b"raw test log\x00" * 1000
 
 
 def test_grade_snapshot_reports_a_snapshot_that_will_not_restore(monkeypatch, tmp_path):
@@ -172,3 +178,88 @@ def test_grade_snapshot_reports_a_snapshot_that_will_not_restore(monkeypatch, tm
     task = load_task(make_task(tmp_path))
     grade = grade_snapshot("snap-x", task, {})
     assert grade.error and "snap-x" in grade.error and "gone" in grade.error
+
+
+@pytest.mark.parametrize("failure", [None, "timeout", "transport", "setup", "invalid_reward", "interrupt"])
+def test_verifier_exports_raw_logs_before_cleanup_on_every_exit(tmp_path, monkeypatch, failure):
+    events = []
+
+    class LoggedSession(FakeSession):
+        def execute(self, tool, args, timeout=None):
+            command = args["command"]
+            if command == "bash /tests/test.sh":
+                if failure == "interrupt":
+                    raise KeyboardInterrupt()
+                if failure == "transport":
+                    raise TimeoutError("transport lost")
+                response = envelope("base mode rc=0", exit_code=137 if failure == "timeout" else 0)
+                response.outcome = SimpleNamespace(timed_out=failure == "timeout", running=False)
+                return response
+            if failure == "setup" and command.startswith("chmod "):
+                return envelope(stderr="chmod failed", exit_code=1)
+            if command == "cat /logs/verifier/reward.json":
+                if failure == "timeout":
+                    return envelope(stderr="missing", exit_code=1)
+                if failure == "invalid_reward":
+                    return result("not json")
+            return super().execute(tool, args, timeout)
+
+        def download_file(self, source, destination):
+            events.append("export")
+            return super().download_file(source, destination)
+
+        def destroy(self):
+            events.append("destroy")
+            assert events[-2] == "export"
+            super().destroy()
+
+    monkeypatch.setattr(grade_mod, "SandboxSession", LoggedSession)
+    task = load_task(make_task(tmp_path))
+    artifact_root = tmp_path / "artifacts"
+    if failure == "interrupt":
+        with pytest.raises(KeyboardInterrupt):
+            grade_mod.verify_patch(task, "diff", {}, artifacts_dir=artifact_root)
+    else:
+        outcome = grade_mod.verify_patch(task, "diff", {}, artifacts_dir=artifact_root)
+        assert bool(outcome.error) == (failure is not None)
+        assert outcome.artifact_error is None
+        grade = grade_from_verifier("diff", outcome)
+        assert grade.verifier_artifacts == outcome.artifacts_dir
+        assert grade.verifier_artifact_error is None
+    directory = next(artifact_root.iterdir())
+    assert (directory / "verifier-logs.tar.gz").read_bytes() == b"raw test log\x00" * 1000
+    metadata = json.loads((directory / "metadata.json").read_text())
+    assert bool(metadata["grading_error"]) == (failure is not None)
+    if failure == "timeout":
+        assert metadata["timed_out"] is True and metadata["exit_code"] == 137
+        assert (directory / "stdout.txt").read_text() == "base mode rc=0"
+    assert events == ["export", "destroy"]
+
+
+def test_failed_log_export_is_visible_without_changing_reward_or_leaking_vm(tmp_path, monkeypatch, capsys):
+    class BrokenDownload(FakeSession):
+        def download_file(self, source, destination):
+            raise OSError("disk full")
+
+    FakeSession.instances = []
+    monkeypatch.setattr(grade_mod, "SandboxSession", BrokenDownload)
+    task = load_task(make_task(tmp_path))
+    outcome = grade_mod.verify_patch(task, "diff", {}, artifacts_dir=tmp_path / "logs")
+    grade = grade_from_verifier("diff", outcome)
+    assert grade.resolved and grade.error is None
+    assert "disk full" in grade.verifier_artifact_error
+    metadata = json.loads((Path(grade.verifier_artifacts) / "metadata.json").read_text())
+    assert "disk full" in metadata["artifact_error"]
+    assert metadata["archive"] is None
+    assert FakeSession.instances[-1].destroyed
+    assert "Verifier log retention failed" in capsys.readouterr().err
+
+
+def test_repeated_verification_does_not_overwrite_logs(tmp_path, monkeypatch):
+    monkeypatch.setattr(grade_mod, "SandboxSession", FakeSession)
+    task = load_task(make_task(tmp_path))
+    first = grade_mod.verify_patch(task, "first", {}, artifacts_dir=tmp_path / "logs")
+    second = grade_mod.verify_patch(task, "second", {}, artifacts_dir=tmp_path / "logs")
+    assert first.artifacts_dir != second.artifacts_dir
+    assert (Path(first.artifacts_dir) / "metadata.json").exists()
+    assert (Path(second.artifacts_dir) / "metadata.json").exists()

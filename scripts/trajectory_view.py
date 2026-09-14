@@ -19,12 +19,104 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from swebench.branching import planned_branch
+
 
 def load(path):
-    return [json.loads(l) for l in Path(path).read_text(encoding="utf-8").splitlines() if l.strip()]
+    with Path(path).open(encoding="utf-8") as source:
+        return [json.loads(line) for line in source if line.strip()]
+
+
+def fork_metadata(path, events=None):
+    """Prefer the executed origin; accept historical and per-branch plans."""
+    path = Path(path)
+    events = load(path) if events is None else events
+    origin = next((e for e in events if e.get("type") == "fork.origin"), None)
+    if origin is None:
+        origin = next((e.get("origin") for e in events if e.get("type") == "run.started"), {}) or {}
+    match = re.match(r"r(\d+)b\d+-", path.stem)
+    planned = None
+    if match:
+        round_no = int(match.group(1))
+        plan_path = path.parent / ("plan-round%d.json" % round_no)
+        if plan_path.exists():
+            plan = json.loads(plan_path.read_text())
+            if not plan.get("validation_error"):
+                planned = planned_branch(plan.get("review") or {}, path.stem, round_no)
+    if not origin.get("parent_run_id") and not planned:
+        return None
+    info = dict(planned or {})
+    info.update(base=origin.get("parent_run_id", info.get("base", "parent")),
+                branch_step=origin.get("branch_step", info.get("branch_step")),
+                hint=origin.get("actor_hint", info.get("hint")),
+                why=origin.get("selection_reason", info.get("why", "")))
+    for key in ("snapshot_id", "conversation_cut", "cut_note", "branch_policy", "branch_count_mode"):
+        if key in origin:
+            info[key] = origin[key]
+    return info
+
+
+def lineage_journals(path, seen=None):
+    path = Path(path).resolve()
+    seen = set() if seen is None else set(seen)
+    if path in seen:
+        raise ValueError("cyclic branch lineage: %s" % path)
+    seen.add(path)
+    info = fork_metadata(path)
+    if not info:
+        return [path]
+    base = info["base"]
+    if not isinstance(base, str) or Path(base).name != base:
+        raise ValueError("invalid parent run id: %r" % base)
+    return lineage_journals(path.parent / (base + ".jsonl"), seen) + [path]
+
+
+def through_tool_result(events, step):
+    count = 0
+    target = None
+    kept = []
+    for event in events:
+        kept.append(event)
+        if event.get("type") == "tool.started":
+            count += 1
+            if count == step:
+                target = event.get("call_id")
+        elif event.get("type") == "tool.finished" and target and event.get("call_id") == target:
+            return kept
+    raise ValueError("no completed tool result at step %s" % step)
+
+
+def render_with_ancestry(path, *, max_output, full):
+    chain = lineage_journals(path)
+
+    def visit(index, upto=None):
+        current = chain[index]
+        events = load(current)
+        info = fork_metadata(current, events)
+        lines, offset = [], 0
+        if index:
+            full_resume = info.get("cut_note") in {
+                "explicit-full-conversation", "compacted-before-fork", "cut-refused-by-cli"}
+            lines, offset = visit(index - 1, None if full_resume else info["branch_step"])
+            lines += ["", "**Branch `%s` from `%s` at disk step %s**" %
+                      (current.stem, info["base"], info["branch_step"]), ""]
+            if full_resume:
+                lines += ["_Full-conversation resume: history is not cut at the disk step; "
+                          "this is a journal lineage view, not the native compacted prompt._", ""]
+        if upto is not None:
+            events = through_tool_result(events, int(upto))
+        lines += render(events, max_output=max_output, full=full, step_offset=offset,
+                        prompt_as="message" if index else "header")
+        return lines, offset + sum(e.get("type") == "tool.started" for e in events)
+
+    return visit(len(chain) - 1)[0]
 
 
 def clip(text: str, limit: int, full: bool) -> str:
@@ -126,26 +218,11 @@ def main() -> int:
     args = ap.parse_args()
 
     journal = Path(args.journal)
-    events = load(journal)
-    lines = []
     if args.with_parent:
-        parent = journal.parent / "parent.jsonl"
-        rs = next((e for e in events if e.get("type") == "run.started"), {})
-        origin = rs.get("origin") or {}
-        fork_step = origin.get("branch_step")
-        if fork_step is None:
-            plan_files = sorted(journal.parent.glob("plan-round*.json"))
-            rnd = journal.name[1] if journal.name.startswith("r") else None
-            for p in plan_files:
-                if rnd and p.name.endswith("round%s.json" % rnd):
-                    fork_step = (json.loads(p.read_text()).get("review") or {}).get("branch_step")
-        if parent.exists() and fork_step:
-            lines += render(load(parent), max_output=args.max_output, full=args.full,
-                            upto_step=int(fork_step), title="PARENT — %s (up to fork step %s)" % (journal.parent.name, fork_step))
-        else:
-            lines += ["_(no parent.jsonl / fork step found next to %s)_" % journal.name, ""]
-    lines += render(events, max_output=args.max_output, full=args.full,
-                    title="%s — %s" % (journal.stem, journal.parent.name))
+        lines = render_with_ancestry(journal, max_output=args.max_output, full=args.full)
+    else:
+        lines = render(load(journal), max_output=args.max_output, full=args.full,
+                       title="%s — %s" % (journal.stem, journal.parent.name))
     text = "\n".join(lines)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")

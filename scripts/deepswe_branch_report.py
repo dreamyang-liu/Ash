@@ -18,9 +18,36 @@ import datetime as dt
 import glob
 import json
 import statistics
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from swebench.branching import branch_run_name, review_branches
+
+
+def fork_positions(plan: dict, attempts: list, round_no: int):
+    if plan.get("validation_error"):
+        return ("branches" if plan.get("branch_policy") in ("adaptive-per-branch", "per-branch") else "rounds"), []
+    review = plan.get("review") or {}
+    reports = plan.get("reports") or {}
+    if plan.get("branch_policy") in ("adaptive-per-branch", "per-branch") or (
+            "base" not in review and any("base" in b for b in review.get("branches") or [])):
+        outcomes = {a["name"]: a for a in attempts}
+        positions = []
+        for index, branch in enumerate(review_branches(review), 1):
+            attempt = outcomes.get(branch_run_name(round_no, index, branch.get("name")))
+            total = reports.get(branch.get("base"), {}).get("steps")
+            step = branch.get("branch_step")
+            if attempt is not None and total and step:
+                positions.append((int(step) / int(total), bool(attempt["resolved"])))
+        return "branches", positions
+    base = str(review.get("base") or "parent")
+    total, step = reports.get(base, {}).get("steps"), review.get("branch_step")
+    return "rounds", ([(int(step) / int(total), any(a["resolved"] for a in attempts))]
+                      if step and total else [])
 
 def journal_cost_wall(path: str):
     first = last = None
@@ -89,7 +116,8 @@ def main() -> int:
         for j in tdir.glob("r*.jsonl"):
             try:
                 head = j.open().readline()
-                if '"cut_note": "compacted-before-fork"' in head or '"cut_note": "cut-refused-by-cli"' in head:
+                if any('"cut_note": "%s"' % reason in head for reason in (
+                        "compacted-before-fork", "cut-refused-by-cli", "explicit-full-conversation")):
                     fallbacks += 1
             except OSError:
                 pass
@@ -100,7 +128,7 @@ def main() -> int:
     branch_cost = []
     branch_wall = []
     branch_steps = []
-    fork_pos = []               # (fraction of base trajectory, success)
+    fork_pos = {"rounds": [], "branches": []}
     rescued = []
     unrescued = []
     for task, (inst, tdir) in sorted(tasks.items()):
@@ -108,7 +136,7 @@ def main() -> int:
         by_round = defaultdict(list)
         for a in attempts:
             name = a["name"]
-            rnd = 0 if name == "parent" else int(name[1])
+            rnd = 0 if name == "parent" else int(name[1:].split("b", 1)[0])
             by_round[rnd].append(a)
             if rnd:
                 per_branch[rnd] += 1
@@ -125,24 +153,21 @@ def main() -> int:
             stage["unrescued"] += 1
         else:
             rescued.append(task)
-            stage["parent (recorded single pass)" if winner == "parent" else "round %s" % winner[1]] += 1
+            stage["parent (recorded single pass)" if winner == "parent" else
+                  "round %s" % winner[1:].split("b", 1)[0]] += 1
         # fork positions from plan files
         for plan_path in sorted(tdir.glob("plan-round*.json")):
             plan = json.loads(plan_path.read_text())
-            review = plan.get("review") or {}
-            base = str(review.get("base") or "parent")
-            step = review.get("branch_step")
-            steps_total = (plan.get("reports") or {}).get(base, {}).get("steps")
-            rnd = int(plan_path.stem[-1])
-            if step and steps_total:
-                ok = any(a["resolved"] for a in by_round.get(rnd, []))
-                fork_pos.append((int(step) / int(steps_total), ok))
+            rnd = int(plan_path.stem.removeprefix("plan-round"))
+            unit, positions = fork_positions(plan, by_round.get(rnd, []), rnd)
+            fork_pos[unit].extend(positions)
 
     n = len(tasks)
     out = []
     out.append("## DeepSWE branching (`%s`): the %d tasks the single pass failed\n" % (", ".join(map(str, roots)), len(planned) or n))
-    out.append("Recipe: recorded single-pass parent as base (no re-run), verifier-guided branching, "
-               "2 rounds, width 4 then 3; analyst = agent model. %d/%d tasks finished.\n" % (n, len(planned) or n))
+    out.append("Recipe: recorded single-pass parents (no re-run), verifier-guided branching; "
+               "per-run limits and policy are recorded in summary.json. %d/%d tasks finished.\n" %
+               (n, len(planned) or n))
     out.append("| | |")
     out.append("|---|---:|")
     out.append("| rescued | **%d/%d = %.1f%%** |" % (len(rescued), n, 100.0 * len(rescued) / n if n else 0))
@@ -151,10 +176,10 @@ def main() -> int:
             out.append("| — by %s | %d |" % (k, stage[k]))
     out.append("| unrescued | %d |" % stage.get("unrescued", 0))
     if fallbacks:
-        out.append("| branches run with the FULL conversation (parent compacted before the fork step) | %d |" % fallbacks)
+        out.append("| branches recorded with FULL-conversation context | %d |" % fallbacks)
     total_branches = sum(per_branch.values())
     total_ok = sum(branch_ok.values())
-    out.append("| per-branch success rate (%d graded branches) | %.0f%% |" % (total_branches, 100.0 * total_ok / total_branches if total_branches else 0))
+    out.append("| per-branch success rate (%d recorded branches) | %.0f%% |" % (total_branches, 100.0 * total_ok / total_branches if total_branches else 0))
     for rnd in sorted(per_branch):
         out.append("| — round %d branches | %d/%d = %.0f%% |" % (rnd, branch_ok[rnd], per_branch[rnd], 100.0 * branch_ok[rnd] / per_branch[rnd]))
     out.append("")
@@ -171,15 +196,18 @@ def main() -> int:
                       s_res, s_n, 100.0 * s_res / s_n))
         s_cost = sum((t.get("cost_usd") or 0) for t in single["tasks"]) if single["tasks"] and "cost_usd" in single["tasks"][0] else None
     out.append("")
-    if fork_pos:
-        out.append("### Where forks were placed (reviewer's chosen step / base trajectory length)\n")
-        out.append("| fork position | rounds | round rescued |")
+    for unit, positions in fork_pos.items():
+        if not positions:
+            continue
+        out.append("### Where forks were placed (%s; chosen step / base trajectory length)\n" % unit)
+        out.append("| fork position | %s | %s |" %
+                   (unit, "round rescued" if unit == "rounds" else "branch resolved"))
         out.append("|---|---:|---:|")
         for lo, hi, label in ((0, 1 / 3, "0–33%"), (1 / 3, 2 / 3, "33–66%"), (2 / 3, 1.01, "66–100%")):
-            rows = [ok for pos, ok in fork_pos if lo <= pos < hi]
+            rows = [ok for pos, ok in positions if lo <= pos < hi]
             if rows:
                 out.append("| %s | %d | %.0f%% |" % (label, len(rows), 100.0 * sum(rows) / len(rows)))
-        out.append("\nmedian chosen position: %.0f%%" % (100 * statistics.median(p for p, _ in fork_pos)))
+        out.append("\nmedian chosen position: %.0f%%" % (100 * statistics.median(p for p, _ in positions)))
         out.append("")
     if args.details:
         shapes = {}

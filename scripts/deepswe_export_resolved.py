@@ -30,6 +30,14 @@ import tarfile
 import time
 from pathlib import Path
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from swebench.branching import review_branches
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from trajectory_view import fork_metadata, lineage_journals, render_with_ancestry
+
 
 README = """\
 # DeepSWE resolved trajectories
@@ -134,17 +142,11 @@ def main() -> int:
                 if winner["name"] != "parent":
                     journals["%s.jsonl" % winner["name"]] = winner["journal"]
                 plans = sorted(str(p) for p in tdir.glob("plan-round*.json"))
-                fork = None
-                rnd = winner["name"][1] if winner["name"].startswith("r") else None
-                for p in plans:
-                    if rnd and p.endswith("plan-round%s.json" % rnd):
-                        review = (json.loads(Path(p).read_text()).get("review") or {})
-                        fork = {"base": review.get("base"), "branch_step": review.get("branch_step"),
-                                "why": review.get("why"), "hint": None}
-                        for b in review.get("branches") or []:
-                            slug = str(b.get("name") or "").lower()
-                            if slug and slug.replace(" ", "-")[:24] in winner["name"]:
-                                fork["hint"] = b.get("hint")
+                fork = fork_metadata(winner["journal"]) if winner["name"] != "parent" else None
+                rnd = winner["name"][1:].split("b", 1)[0] if winner["name"].startswith("r") else None
+                if winner["name"] != "parent":
+                    for ancestor in lineage_journals(winner["journal"]):
+                        journals[ancestor.name] = str(ancestor)
                 entries[inst["instance"]] = {
                     "task": inst["instance"], "stage": "branching",
                     "resolved_by": winner["name"], "round": int(rnd) if rnd else 0,
@@ -173,25 +175,9 @@ def main() -> int:
                 sys.path.insert(0, str(Path(__file__).resolve().parent))
                 from trajectory_view import load as tv_load, render as tv_render
                 parent_events = tv_load(e["journals"]["parent.jsonl"])
-                # TRAJECTORY.md: exactly what the resolving run experienced, as one
-                # linear transcript -- the parent's steps up to the fork, the
-                # system-reminder that arrived there, then the branch's steps
-                # (numbering continues). The parent's post-fork steps are NOT here
-                # (see parent.md): the branch never saw them.
-                fork_step = (e.get("fork") or {}).get("branch_step") if e["stage"] == "branching" else None
                 story = ["# %s — trajectory of the resolving run" % task, "",
-                         "Resolved by: **%s** (%s)%s" % (e["resolved_by"], e["stage"],
-                         "; forked from the parent after step %s" % fork_step if fork_step else ""), ""]
-                if e["stage"] == "branching" and fork_step:
-                    story += tv_render(parent_events, max_output=10**9, full=True, upto_step=int(fork_step))
-                    # replace the generic marker line with a precise one
-                    story = [ln if "fork point:" not in ln else
-                             "**⋯ fork: conversation and filesystem continue from here (after step %s); the parent's own "
-                             "later steps are not part of this run ⋯**" % fork_step for ln in story]
-                    story += tv_render(tv_load(e["winner_journal"]), max_output=10**9, full=True,
-                                       step_offset=int(fork_step), prompt_as="message")
-                else:
-                    story += tv_render(parent_events, max_output=10**9, full=True)
+                         "Resolved by: **%s** (%s)" % (e["resolved_by"], e["stage"]), ""]
+                story += render_with_ancestry(e["winner_journal"], max_output=10**9, full=True)
                 add_bytes("%s/TRAJECTORY.md" % task, "\n".join(story).encode())
                 if e["stage"] == "branching":
                     ana = ["# %s — verdict and analysis behind the fork" % task, ""]
@@ -205,23 +191,17 @@ def main() -> int:
                                     "- salvage: %s" % rep.get("salvage", ""),
                                     "- branch_candidates: `%s`" % json.dumps(rep.get("branch_candidates")), ""]
                         rv = plan.get("review") or {}
-                        ana += ["### reviewer plan", "", "- base: `%s` at step %s" % (rv.get("base"), rv.get("branch_step")),
-                                "- why: %s" % rv.get("why", ""), "- synthesis: %s" % rv.get("synthesis", ""), ""]
-                        for b in rv.get("branches") or []:
-                            ana += ["- **%s**: %s" % (b.get("name"), b.get("hint")), ""]
+                        ana += ["### reviewer plan", "", "- synthesis: %s" % rv.get("synthesis", ""), ""]
+                        for b in review_branches(rv):
+                            ana += ["- **%s** — `%s` at step %s: %s" %
+                                    (b.get("name"), b.get("base"), b.get("branch_step"), b.get("hint")),
+                                    "  - why: %s" % b.get("why", ""), ""]
                     add_bytes("%s/ANALYSIS.md" % task, "\n".join(ana).encode())
                 add_bytes("%s/parent.md" % task, "\n".join(tv_render(
                     parent_events, max_output=10**9, full=True,
                     title="PARENT — %s (single pass)" % task)).encode())
                 if e["stage"] == "branching":
-                    fork_step = (e.get("fork") or {}).get("branch_step")
-                    lines = []
-                    if fork_step:
-                        lines += tv_render(parent_events, max_output=10**9, full=True,
-                                           upto_step=int(fork_step),
-                                           title="PARENT — %s (up to fork step %s)" % (task, fork_step))
-                    lines += tv_render(tv_load(e["winner_journal"]), max_output=10**9, full=True,
-                                       title="%s — %s" % (e["resolved_by"], task))
+                    lines = render_with_ancestry(e["winner_journal"], max_output=10**9, full=True)
                     add_bytes("%s/%s-with-parent.md" % (task, e["resolved_by"]), "\n".join(lines).encode())
             if not args.no_atif:
                 atif = atif_export(Path(e["winner_journal"]))

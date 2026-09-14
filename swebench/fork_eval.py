@@ -9,7 +9,7 @@ the answer is wrong.
 
     python -m swebench.fork_eval --instance sympy__sympy-13091 \
         --slot codex --model openai.gpt-5.6-luna \
-        --rounds 2 --branches 3 -o runs/fork-eval
+        --rounds 2 --branches 3 --fork-full-conversation -o runs/fork-eval
 
 The loop:
 
@@ -20,10 +20,11 @@ The loop:
    it proves the snapshot carries the work, and it lets grading happen after the
    agent's sandbox is gone.
 3. **Branch on failure**, in two analyst stages. *Map:* every failed attempt is
-   analysed separately -- its transcript, its verdict, the hint it was given --
+   analysed separately -- its transcript and verdict, without its supplied hint --
    into a failure_reason, a lesson, and candidate branch steps. *Reduce:* a
-   reviewer reads ALL the analyses (parent included) and picks ONE base attempt
-   + step + K divergent directions. Each direction becomes another attempt whose
+   reviewer reads ALL the analyses and follows the configured branch count rule.
+   Each branch has its own base, step and direction; locations may repeat.
+   Each becomes an attempt whose
    sandbox image IS that step's snapshot and whose conversation forks the
    base's. The reviewer may go BACK to an earlier attempt when later ones are
    deeper in a dead end -- the escape hatch winner-take-all lacked.
@@ -48,9 +49,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+from harness.core.guidance import render_branch_note
+from swebench.test_environment import CONDA_INIT, test_command, validate_test_execution
 from harness.core.journal import read_journal, volatile_reason
 from harness.orchestrator.run import Orchestrator, RunOutcome, RunSpec
-from harness.rollback import fork_plan, load_checkpoints
+from harness.rollback import Checkpoint, branch_checkpoints, load_checkpoints, turn_branch_checkpoints
+from harness.normalize.claude_turns import completed_turn_steps
+from harness.execution.backends import with_sandbox_budget
+from harness.slots.claude_history import PrefixSource, find_prefix_source, prepare_prefix
+from swebench.branching import BRANCH_COUNT_MODES, branch_count_rule, branch_run_name
 from swebench.dataset import (SYMPY_RUNNER, build_batch_test_command,
                               load_instances, malformed_test_ids,
                               needs_file_runner, parse_test_list, resolve_image,
@@ -102,6 +109,22 @@ noisy.
                 # whole-file write; for NEW files (e.g. a repro script)
 """
 
+SHELL_TOOL_PRIMER = """\
+You have one sandbox tool, served over MCP as `shell`. Use it for searching,
+reading, editing files, and running tests. Your built-in tools are disabled.
+Each shell call starts a fresh process: set working_dir when needed and use
+timeout (seconds) for long commands. Use tail to limit noisy output.
+
+    shell {"command": "python -m pytest tests/test_x.py -x -q",
+           "working_dir": "/testbed", "timeout": 600, "tail": 50}
+"""
+
+
+def tool_primer(slot: str = "", workdir: str = "/testbed") -> str:
+    primer = SHELL_TOOL_PRIMER if slot == "claude-code" else TOOL_PRIMER
+    return primer.replace("/testbed", workdir)
+
+
 PROMPT = """\
 You are fixing a bug in the {repo} repository, checked out at /testbed inside \
 your sandbox.
@@ -135,35 +158,6 @@ regression suite: fix causes, not symptoms.
 
 {primer}"""
 
-BRANCH_PROMPT = """\
-You are continuing work on a bug in the {repo} repository at /testbed in your \
-sandbox. The filesystem already holds an earlier attempt's work -- ITS EDITS ARE \
-ON DISK. Start from the files as they are: run `git diff` in /testbed to see \
-exactly what the earlier attempt changed before you touch anything.
-
-## Problem statement
-{problem}
-
-## What the earlier attempt produced, and how it was graded
-{verdict}
-
-## Your direction for this attempt
-{hint}
-
-## Workflow
-
-1. `git diff` in /testbed -- know what is already changed.
-2. Reproduce the remaining failure with a small script before editing.
-3. Follow your direction above: fix forward or revert-and-redo, but keep the \
-change minimal.
-4. Re-run the reproduction, probe edge cases, then the project's own tests.
-
-Do NOT edit test files -- grading restores the official tests and discards your \
-edits to them.
-
-{primer}"""
-
-
 # --- analysts: one per failed case, then one review over all of them --------
 #
 # Two stages on purpose. A single analyst reading only the best attempt threw
@@ -176,42 +170,112 @@ edits to them.
 # parent.
 
 _CASE_PROMPT = """\
-You are analysing ONE failed attempt at a software bug fix. Your analysis will
-be pooled with analyses of the other attempts, and a reviewer will decide where
-a fresh attempt should branch from this attempt's per-step snapshots.
+You are analysing ONE failed coding attempt. Your private analysis will be
+pooled with other attempts so a reviewer can choose a checkpoint and useful
+directions for continuing from it. The continuing agent remembers only the
+conversation up to that checkpoint.
+
+The goal is a natural and effective continuation: if the added direction is
+later removed, the next reasoning and actions should still make sense from the
+retained work and the agent's own observations. Diagnose the missed code-level
+connection that could plausibly occur to the agent at that point.
 
 ## The problem it was solving
 {problem}
 
-## The direction this attempt was given (empty if it was the original attempt)
-{hint}
-
-## How it was graded (ground truth the attempt itself could not see)
+## Private grading evidence (not observed by the continuing agent)
 {verdict}
 
 ## The attempt, one line per tool step ("[N] tool(args) -> result")
 {transcript}
 
-## Rules
-- Valid steps: integers {lo}..{hi}. A branch at step N resumes from the
-  environment AS IT STOOD AFTER step N.
-- branch_candidates: up to 3 steps worth branching from, LATER IS BETTER (every
-  step kept preserves work) but strictly BEFORE this attempt's decisive wrong
-  turn. If the whole attempt was poisoned from the start, say so with step {lo}.
-- Be specific about MECHANISM: "changed __eq__ but numeric subclasses override
-  it" is a failure_reason; "the fix was incomplete" is not.
+## Recorded snapshot/session pairs available for selection
+{checkpoint_steps}
+
+## Translate evidence into repair directions
+- Your output should help the reviewer choose a repair direction, not reproduce
+  the grading report. In every returned field, omit verifier-only filenames,
+  test names/IDs and grader paths. Translate their useful information into the
+  affected program behavior, code relationship or invariant instead.
+- A path in verifier output is not evidence that the actor can open it. Refer
+  to a repository file or symbol only when the task or retained prefix
+  establishes it is available at that candidate checkpoint. Do not ask the
+  actor to read, locate or recreate a hidden test, or retrieve a grading artifact.
+  Suggest inspecting accessible implementation/callers or constructing a small
+  local check from the public task and available code instead.
+- If the cause is established, state the correction directly and explain the
+  relevant constraint. Otherwise give the strongest supported hypothesis: what
+  code relationship may be involved, why it is plausible, what remains unknown,
+  and one accessible check with what would support or rule it out. If no specific
+  cause is supported, say the cause is unresolved and identify the nearest
+  evidence-backed area to investigate, rather than inventing a precise fix.
+- Do not merely add 'possibly' to an invented explanation. In particular, do
+  not guess how an unseen test constructs its fixtures, router groups or inputs.
+  A symptom does not establish those details. Prefer a check that distinguishes
+  plausible mechanisms before recommending a behavior-changing edit.
+- Keep private observations distinct from what the actor already knows. In
+  lesson and each candidate's why, express a code-level direction and its
+  connection to the retained work, not instructions to consult external evidence.
+
+Example of translating a route-lookup failure into a qualified direction:
+"The route prefix may be composed inconsistently between the registration helper
+and its caller. Trace the group prefix and route suffix in the available code,
+then compare the resulting URL with the task's required endpoint. Check for a
+missing or duplicated segment before changing registration. The evidence does
+not yet establish whether a caller-owned or handler-owned prefix is appropriate."
+This is an example of reasoning, not a diagnosis to reuse for unrelated tasks.
+
+## Evidence and output rules
+- Use the verdict and the whole transcript as private diagnostic evidence.
+  failure_reason and lesson are controller-only reports, not actor messages.
+  Retain the specific mechanism, useful correction and important constraints;
+  do not dilute a diagnosis into generic advice to inspect code or run tests.
+- Separate observed facts from inferences. Distinguish the required behavior,
+  a suspected cause, and a possible repair. An external failure can motivate
+  a hypothesis without proving its cause. Do not change a behavioral contract
+  simply because another implementation would be easier to check.
+- For each candidate, identify the code, decision or observation that connects
+  the retained work to the next useful question. Explain what a concrete action
+  would establish, without assuming the agent has seen the discarded suffix.
+- Preserve behavior outside the suspected bug. Identify relevant accepted
+  inputs, boundary cases or API responsibilities that a repair must retain.
+  Express the issue in program behavior rather than relying on test labels.
+- Do not compose the continuing agent's inner monologue or invent observations.
+  The reviewer needs a useful lead, not text the agent must repeat or a story
+  about receiving feedback.
+
+## Checkpoint rules
+- Tool steps span {lo}..{hi}, but only the recorded steps listed above have
+  eligible snapshot/session pairs. Choose candidates from that list; a matching
+  native conversation cut is checked separately before launch. A branch at
+  step N must resume the environment AS IT STOOD AFTER step N.
+- branch_candidates: up to {candidate_limit} useful steps, not a quota. LATER IS BETTER when it preserves
+  sound work, but choose before the decisive wrong turn. If the approach was
+  already wrong at the start, propose the earliest eligible point and explain why.
+- Describe salvage relative to the state after each candidate step, not the
+  final tree. Later edits, files, dependencies and observations are not already
+  present at an earlier checkpoint.
+- Each candidate's why should name the prefix connection and the next useful
+  check. Avoid requiring the continuation to redo reasoning or checks that
+  the retained prefix already established.
 
 Return ONLY a JSON object, no prose:
-{{"failure_reason": "<the mechanism, specific>",
-  "lesson": "<what the next attempt must know that this one proved>",
-  "salvage": "<what on this attempt's disk is worth keeping, or 'nothing'>",
-  "branch_candidates": [{{"step": <int>, "why": "<one sentence>"}}]}}
+{{"failure_reason": "<observed behavior; supported mechanism or hypothesis; remaining uncertainty>",
+  "lesson": "<concrete repair direction or discriminating check; constraints to preserve>",
+  "salvage": "<work present at the candidate steps, or 'nothing'>",
+  "branch_candidates": [{{"step": <int>, "why": "<visible prefix connection; next check and what it distinguishes>"}}]}}
 """
 
 _REVIEW_PROMPT = """\
-You are the REVIEWER for a failed software bug fix. Several attempts have been
-made; each failed attempt has been analysed separately below. Decide where the
-next round of {branches} parallel attempts should start.
+You are the REVIEWER for a failed coding task. Use the pooled analyses to
+choose branches following the count requirement below, each with its own checkpoint and direction.
+Each agent will have the selected conversation prefix and restored filesystem,
+not the other attempts or the discarded suffix.
+
+Your priority is natural and effective continuation. An added direction may
+later be removed from the recorded conversation: the agent's subsequent
+reasoning should then still read as a plausible next thought about its task,
+not a response to an invisible reminder or outside report.
 
 ## The problem
 {problem}
@@ -219,30 +283,72 @@ next round of {branches} parallel attempts should start.
 ## Every attempt so far ("parent" is the original; branches were given a hint)
 {reports}
 
-## Rules
-- Pick ONE base attempt and a branch_step from ITS branch_candidates (you may
-  choose a different step of the same attempt if the analyses justify it). The
-  new attempts resume from that attempt's environment after that step, and they
-  inherit that attempt's conversation up to it.
-- Going BACK to an earlier attempt (including parent) is legitimate when later
-  attempts are deeper in a dead end -- weigh salvage against contamination.
-- Synthesise across the analyses: a hypothesis two attempts each half-proved is
-  the most valuable thing you can hand the next round.
-- Produce {branches} genuinely DIVERSE directions, disjoint from every
-  hint_given above. Each hint must be self-contained (4-10 sentences): what is
-  on the base's disk and trustworthy, what the pooled lessons established, and
-  what to do differently.
+## Branch count requirement
+{count_rule}
+
+## Selection rules
+- For EACH branch, choose its own base attempt and branch_step. Select a step
+  from that base's available_steps, using its branch_candidates as diagnostic
+  suggestions rather than a mandatory list. The branch inherits that base's
+  state AFTER branch_step. Never select a missing or failed checkpoint.
+- An earlier attempt, including parent, can be preferable to a deeper dead end.
+  Preserve useful work and distinguish prefix evidence from later discoveries.
+- Positions do NOT need to be distinct. Several useful directions may share
+  the same base and step, or use different positions or bases. Let the evidence
+  decide; do not spread branches artificially. Vary useful hypotheses or repair
+  strategies, not just the wording. Use prior hint_given records to avoid an
+  already-exhausted direction, not to force unrelated new directions.
+
+## Hint and output rules
+- Each branches[].hint is delivered VERBATIM to the agent, with no diagnostic
+  report or later rewriting stage. Write the final actor-facing direction now.
+  The analyses and grades are private diagnostic evidence, not text to forward.
+- Start with the specific code-level connection worth pursuing from that
+  checkpoint: a missed case, an invariant, a suspicious operation or a candidate
+  correction with its reason. Prefer 2-5 concise sentences. Make it useful
+  enough to change the next action, not a generic "inspect more carefully".
+- Anchor the direction in the task and the selected prefix. Say work is already
+  present or already verified only when that prefix supports it. A later
+  discovery can suggest what to examine, not become a fabricated prior fact.
+- Preserve the intended behavior and technical constraints. Do not make a
+  precise diagnosis vague for the sake of smoother prose, turn a chosen
+  contract into competing alternatives, or replace it with an easier check.
+  A concrete repair suggestion is welcome when supported; an uncertain cause
+  should remain a hypothesis the agent can check through its own tools.
+- Include a small discriminating case or boundary check when useful. Use the
+  real implementation and its caller, preserve already-supported behavior,
+  and build on existing checks rather than demanding a fresh ritual every time.
+- In branches[].hint, do not include test names or IDs, grader paths,
+  pass/fail counts, scores, raw verifier output, or final patch excerpts.
+  Do not refer to reviewers, other branches, future failures or external
+  feedback. Keep diagnostic specificity by describing the behavior itself.
+- Do not label the text as a reminder, review or feedback; ask for an
+  acknowledgment; restate the task; or give a long reset/checklist. Do not
+  suggest openings such as "let me read the reminder" or "according to the
+  feedback". The next response should concern the code, not receiving advice.
+- Do not fabricate the agent's reasoning, prescribe first-person self-talk,
+  claim it independently discovered something, or invent tool observations.
+  Naturalness comes from a good connection to the retained work.
+- Before returning, mentally remove the hint and consider the likely next
+  response. Would the next question or action still make sense from the prefix,
+  and could its conclusions be supported by the agent's observations? Also
+  check that the useful diagnosis and behavioral constraints are still intact.
+  Simply omitting the word "hint" is not enough.
+
+Example of a code-level lead (adapt the reasoning, not the wording):
+"The child still needs every input spelling its deserializer accepts. Check
+whether isolating the flattened child's keys drops aliases or passes unrelated
+parent keys through; a small parent/child case can distinguish those failures."
 
 Return ONLY a JSON object, no prose:
-{{"base": "<attempt name>", "branch_step": <int>,
-  "why": "<why this base and step>",
-  "synthesis": "<the pooled diagnosis>",
-  "branches": [{{"name": "<slug>", "hint": "<4-10 sentences>"}}]}}
+{{"synthesis": "<the pooled diagnosis and why this allocation>",
+  "branches": [{{"name": "<slug>", "base": "<attempt name>",
+                 "branch_step": <int>, "why": "<why this point and direction>",
+                 "hint": "<concise code-level lead>"}}]}}
 """
 
-
-#: A diagnosis plus K self-contained hints (each 4-10 sentences that must stand
-#: alone without the conversation) does not fit in 4k, and a truncated JSON object
+#: A diagnosis plus several self-contained branch directions may not fit in
+#: 4k, and a truncated JSON object
 #: fails to parse -- losing the whole round.
 ANALYST_MAX_TOKENS = 32_000
 
@@ -392,6 +498,8 @@ class Grade:
     patch: str = ""
     detail: str = ""
     error: Optional[str] = None
+    verifier_artifacts: Optional[str] = None
+    verifier_artifact_error: Optional[str] = None
     #: Names of the PASS_TO_PASS tests this attempt broke, when the runner said
     #: which. The single most useful thing an analyst can be told about a
     #: regression: without it a branch can only guess what it broke.
@@ -409,6 +517,7 @@ class Grade:
     #: target tests fail, and reporting that skip as "FAIL" reads as a
     #: regression that was never measured.
     p2p_ran: bool = False
+    grading_snapshot: Optional[dict] = None
 
     def summary(self) -> str:
         if self.error:
@@ -433,12 +542,18 @@ def grade_snapshot(snapshot_id: str, instance: dict, backend: dict,
     from harness.execution.session import SandboxSession
 
     grade = Grade()
-    session = SandboxSession(quiet=True, backend=dict(backend))
+    session = SandboxSession(quiet=True, backend=with_sandbox_budget(backend, 2 * timeout + 600))
     if not session.create(snapshot_id):
         grade.error = "could not restore %s: %s" % (snapshot_id,
                                                     session.create_error)
         return grade
+    owned_session = session
+    recorder = None
     try:
+        if instance.get("verifier_artifacts_dir"):
+            from swebench.verifier_logs import VerifierLogSession
+            recorder = VerifierLogSession(session, Path(instance["verifier_artifacts_dir"]))
+            session = recorder
         diff = session.execute("shell", {"command": "cd /testbed && git diff",
                                          "timeout": 120})
         grade.patch = (diff.output or "") if diff.success else ""
@@ -537,7 +652,11 @@ def grade_snapshot(snapshot_id: str, instance: dict, backend: dict,
     except Exception as exc:  # noqa: BLE001 - an ungradeable attempt is a zero
         grade.error = "%s: %s" % (type(exc).__name__, exc)
     finally:
-        session.destroy()
+        try:
+            if recorder is not None:
+                recorder.finish(grade)
+        finally:
+            owned_session.destroy()
     return grade
 
 
@@ -566,8 +685,9 @@ def _grade_django(session, instance: dict, f2p: List[str], p2p: List[str],
         command = ("cd /testbed && PYTHONIOENCODING=utf-8 "
                    "./tests/runtests.py --verbosity 2 --parallel 1 %s"
                    % " ".join(modules))
-        result = session.execute("shell", {"command": command,
+        result = session.execute("shell", {"command": test_command(command, needs_pytest=False),
                                            "timeout": int(timeout)})
+        validate_test_execution(result)
         text = ""
         try:
             body = json.loads(result.output or "{}")
@@ -618,8 +738,10 @@ def _run_tests(session, repo: str, test_ids: List[str],
     else:
         command = "cd /testbed && %s" % build_batch_test_command(
             repo, test_ids, files)
-    return session.execute("shell", {"command": command, "timeout": timeout,
-                                     "tail": 60})
+    result = session.execute("shell", {"command": test_command(command, needs_pytest=runner is None),
+                                      "timeout": timeout, "tail": 60})
+    validate_test_execution(result)
+    return result
 
 
 #: How each runner announces a failure. sympy's own runner and the direct-call
@@ -707,7 +829,8 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
                 fork: bool = False, origin: Optional[dict] = None,
                 resources: Optional[dict] = None,
                 bench: "Optional[Benchmark]" = None,
-                resume_at: Optional[str] = None) -> RunOutcome:
+                resume_at: Optional[str] = None,
+                cwd: Optional[Path] = None) -> RunOutcome:
     """One attempt. Parent and branches differ only in the arguments.
 
     ``out_dir`` is per instance: eight instances writing `parent.jsonl` into one
@@ -715,6 +838,9 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
     record a killed run leaves.
     """
     runtime_bin = str(Path(args.runtime_bin).resolve())
+    if getattr(args, "agent_network", None) is not None:
+        network = network_policy_for(args, bench, "agent")
+        prompt += f"\n\nSandbox internet access for this attempt: {network}."
     extra: dict = {}
     if args.slot == "codex":
         # Native Bedrock provider: OpenAI's own models are hosted there, so no
@@ -727,11 +853,13 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
         # Transcript entry (uuid) the resumed conversation ends at. The slot
         # passes it to the SDK's resume_session_at; see conversation_cut.
         extra["resume_session_at"] = resume_at
+    if origin and origin.get("conversation_restore") == "original-prefix":
+        extra["setting_sources"] = []
     spec = RunSpec(
-        prompt=prompt, slot=args.slot, cwd="/tmp", model=args.model,
+        prompt=prompt, slot=args.slot, cwd=str(cwd) if cwd is not None else "/tmp", model=args.model,
         timeout_s=args.timeout, run_id=name,
         journal_path=out_dir / ("%s.jsonl" % name),
-        transport="http", tools="default",
+        transport="http", tools="shell_only" if args.slot == "claude-code" else "default",
         backend=backend_for(args, bench), runtime_bin=runtime_bin,
         sandbox_image=image, sandbox_resources=resources,
         resume_session_id=resume, fork=fork, origin=origin, extra=extra,
@@ -739,26 +867,69 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
     return orch.run(spec)
 
 
-def backend_for(args, bench: "Optional[Benchmark]" = None) -> dict:
+def network_policy_for(args, bench: "Optional[Benchmark]" = None, phase: str = "agent") -> str:
+    if phase not in ("agent", "verifier"):
+        raise ValueError("Network phase must be agent or verifier")
+    requested = getattr(args, f"{phase}_network", None)
+    if requested is not None:
+        if requested not in ("allow", "deny"):
+            raise ValueError(f"Invalid {phase} network policy: {requested}")
+        return requested
+    return "deny" if getattr(bench, "no_network", False) else "backend-default"
+
+
+def network_summary(args, bench: "Optional[Benchmark]" = None) -> dict:
+    policy = {phase: network_policy_for(args, bench, phase) for phase in ("agent", "verifier")}
+    return {"network_policy": policy,
+            "network_requested": {phase: getattr(args, f"{phase}_network", None) for phase in policy},
+            "no_network": policy["agent"] == "deny" if policy["agent"] == policy["verifier"] else None}
+
+
+def backend_for(args, bench: "Optional[Benchmark]" = None, phase: str = "agent") -> dict:
     microvm: dict = {"from_image": True,
                      "runtime_bin": str(Path(args.runtime_bin).resolve())}
-    if bench is not None and bench.no_network:
-        # One policy for the attempt AND the grading VM: a benchmark that says
-        # no-network means the verifier ran offline too.
-        microvm["allow_internet"] = False
+    if bench is not None and getattr(bench, "runtime_port", None) is not None:
+        microvm["runtime_port"] = bench.runtime_port
+    network = network_policy_for(args, bench, phase)
+    if network != "backend-default":
+        microvm["allow_internet"] = network == "allow"
     if bench is not None and bench.image_env:
         microvm["image_env"] = True
-    return {"backend": "microvm", "microvm": microvm}
+    if bench is not None and getattr(bench, "runtime_init", ""):
+        microvm["runtime_init"] = bench.runtime_init
+    return with_sandbox_budget(
+        {"backend": "microvm", "microvm": microvm}, getattr(args, "timeout", 1800.0))
 
 
 def grade_attempt(outcome: RunOutcome, instance: dict, args,
                   bench: "Optional[Benchmark]" = None) -> Grade:
-    checkpoints = load_checkpoints(outcome.journal_path)
-    usable = [c for c in checkpoints if c.snapshot_id]
-    if not usable:
-        return Grade(error="no snapshot recorded -- nothing to grade")
+    journal = Path(outcome.journal_path)
+    instance = {**instance, "verifier_artifacts_dir": str(journal.parent / (journal.stem + ".verifier"))}
+    events = list(read_journal(outcome.journal_path))
+    captures = [(index, record) for index, record in enumerate(events)
+                if record.get("type") == "checkpoint.captured" and record.get("snapshot_id")
+                and (record.get("reason") or "captured") == "captured"
+                and record.get("captured") is not False]
+    if not captures:
+        return Grade(error="no successful snapshot recorded -- nothing to grade")
+    selected_index, selected = captures[-1]
+    tail = events[selected_index + 1:]
+    snapshot = {
+        "policy": "last_successful_snapshot",
+        "snapshot_id": selected["snapshot_id"],
+        "capture_step": selected.get("step"),
+        "capture_seq": selected.get("seq"),
+        "later_tool_calls": [{key: record.get(key) for key in ("step", "call_id", "name")}
+                             for record in tail if record.get("type") == "tool.started"],
+        "later_checkpoint_issues": [{key: record.get(key) for key in ("step", "call_id", "reason")}
+                                    for record in tail if record.get("type") == "checkpoint.captured"
+                                    and record.get("reason") not in ("captured", "clean", "session_ref_backfill")],
+    }
     bench = bench or SweBench()
-    return bench.grade(usable[-1].snapshot_id, instance, backend_for(args, bench))
+    snapshot["network_policy"] = network_policy_for(args, bench, "verifier")
+    grade = bench.grade(selected["snapshot_id"], instance, backend_for(args, bench, "verifier"))
+    grade.grading_snapshot = snapshot
+    return grade
 
 
 # --- benchmarks --------------------------------------------------------------
@@ -802,6 +973,7 @@ class Benchmark:
 
 class SweBench(Benchmark):
     name = "swebench"
+    runtime_init = CONDA_INIT
 
     def catalogue(self, args) -> dict:
         return {i["instance_id"]: i for i in load_instances(args.subset)}
@@ -818,15 +990,15 @@ class SweBench(Benchmark):
         }
 
     def prompt(self, instance: dict) -> str:
-        return PROMPT.format(repo=instance["repo"], problem=instance["problem"],
-                             primer=TOOL_PRIMER)
+        prompt = PROMPT.format(repo=instance["repo"], problem=instance["problem"],
+                               primer=tool_primer(instance.get("slot", "")))
+        if instance.get("agent_network") == "deny":
+            prompt += "\n\nThe sandbox has no internet access. Use the files and dependencies already available."
+        return prompt
 
     def branch_prompt(self, instance: dict, verdict: str, hint: str, **context) -> str:
-        # Unchanged wording for SWE-bench (the 93.0% recipe); the conversation
-        # cut applies to it too, so "its edits are on disk" is now literally the
-        # state the agent remembers.
-        return BRANCH_PROMPT.format(repo=instance["repo"], problem=instance["problem"],
-                                    verdict=verdict, hint=hint, primer=TOOL_PRIMER)
+        return render_branch_note(
+            hint, truncated=bool(context.get("truncated")))
 
     def grade(self, snapshot_id: str, instance: dict, backend: dict) -> Grade:
         return grade_snapshot(snapshot_id, instance, backend)
@@ -839,7 +1011,10 @@ def select_benchmark(args) -> Benchmark:
     if name == "deepswe":
         from deepswe.bench import DeepSWE
         return DeepSWE(getattr(args, "tasks_dir", None))
-    raise SystemExit("unknown --benchmark %r; choose swebench or deepswe" % name)
+    if name == "swebench-pro":
+        from swebench_pro.bench import SWEbenchPro
+        return SWEbenchPro(args)
+    raise SystemExit("unknown --benchmark %r; choose swebench, deepswe or swebench-pro" % name)
 
 
 # --- truncating the forked conversation ---------------------------------------
@@ -857,7 +1032,20 @@ def select_benchmark(args) -> Benchmark:
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 
-def conversation_cut(journal_path, step: int) -> Optional[str]:
+def _compaction_preserves_cut(entry: dict, cut: str) -> bool:
+    metadata = entry.get("compactMetadata")
+    if not isinstance(metadata, dict):
+        return False
+    preserved = metadata.get("preservedMessages")
+    if not isinstance(preserved, dict):
+        return False
+    uuids = preserved.get("uuids")
+    return (isinstance(uuids, list) and all(isinstance(uuid, str) for uuid in uuids)
+            and cut in uuids)
+
+
+def _find_conversation_cut(journal_path, step: int, session_ref: Optional[str] = None,
+                           *, allow_prefix: bool = False) -> Optional[str]:
     """uuid of the transcript entry that ends step ``step`` of ``journal_path``.
 
     None when it cannot be found -- the journal has no such step, the native
@@ -866,46 +1054,123 @@ def conversation_cut(journal_path, step: int) -> Optional[str]:
     silently: that is the bug this exists to fix.
     """
     journal_path = Path(journal_path)
+    events = read_journal(journal_path)
+    turns = completed_turn_steps(events)
+    if turns is not None and step not in turns:
+        return None
     calls: List[str] = []
-    session_id = None
-    for record in read_journal(journal_path):
+    session_id = session_ref
+    for record in events:
         kind = record.get("type")
         if kind == "tool.started" and record.get("call_id"):
             calls.append(str(record["call_id"]))
-        elif kind == "session.ref" and record.get("native_session_id"):
+        elif not session_ref and kind == "session.ref" and record.get("native_session_id"):
             session_id = str(record["native_session_id"])
     if not session_id or step < 1 or step > len(calls):
         return None
     call_id = calls[step - 1]
+    # New records name their tool explicitly. Never repair a mismatched label by
+    # silently cutting at a different native call. Legacy journals lack this field.
+    checkpoint = next((c for c in reversed(load_checkpoints(journal_path))
+                       if c.step == step and c.reason != "session_ref_backfill"), None)
+    if checkpoint and checkpoint.pairing is not None:
+        if (checkpoint.call_id != call_id or checkpoint.prefix_complete is not True
+                or checkpoint.reason not in ("captured", "clean")):
+            return None
     for transcript in CLAUDE_PROJECTS_DIR.glob("*/%s.jsonl" % session_id):
-        found = None
+        # One response can be split across native assistant entries, including
+        # entries after an early tool result. Scan its complete tool group first.
+        entries = []
+        groups, call_groups = {}, {}
         with transcript.open(encoding="utf-8") as fh:
             for line in fh:
-                if found is not None:
-                    # Claude Code auto-compacts a long conversation: a
-                    # `compact_boundary` entry, then a summary; on resume only
-                    # entries AFTER the boundary are loadable, so a cut before
-                    # it is rejected ("No message found with message.uuid").
-                    # Measured: 11 of 82 DeepSWE parents were compacted.
-                    if '"compact_boundary"' in line:
-                        return None
-                    continue
-                if call_id not in line or '"tool_result"' not in line:
-                    continue
                 try:
                     entry = json.loads(line)
                 except ValueError:
                     continue
-                if entry.get("type") != "user":
+                entries.append(entry)
+                message = entry.get("message") or {}
+                if entry.get("type") != "assistant" or not isinstance(message.get("content"), list):
                     continue
-                content = (entry.get("message") or {}).get("content")
-                if isinstance(content, list) and any(
-                        isinstance(b, dict) and b.get("type") == "tool_result"
-                        and b.get("tool_use_id") == call_id for b in content):
-                    found = entry.get("uuid")
+                group_id = message.get("id") or entry.get("uuid")
+                for block in message["content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id"):
+                        cid = block["id"]
+                        groups.setdefault(group_id, set()).add(cid)
+                        call_groups[cid] = group_id
+        required_group = groups.get(call_groups.get(call_id), {call_id})
+        found = None
+        post_cut_message = False
+        preserved_compaction = False
+        pending = set()
+        seen_results = set()
+        call_positions = {cid: n for n, cid in enumerate(calls, 1)}
+        for entry in entries:
+            if found is not None:
+                if entry.get("subtype") == "compact_boundary":
+                    if (preserved_compaction or post_cut_message
+                            or not _compaction_preserves_cut(entry, found)):
+                        if not allow_prefix:
+                            return None
+                    preserved_compaction = True
+                elif (entry.get("type") in ("assistant", "user")
+                      and (entry.get("message") or {}).get("content")):
+                    post_cut_message = True
+                elif entry.get("type") == "attachment":
+                    attachment = entry.get("attachment")
+                    if (not isinstance(attachment, dict)
+                            or attachment.get("type") != "total_tokens_reminder"):
+                        post_cut_message = True
+                continue
+            content = (entry.get("message") or {}).get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use" and block.get("id"):
+                    pending.add(block["id"])
+                elif block.get("type") == "tool_result" and block.get("tool_use_id"):
+                    cid = block["tool_use_id"]
+                    pending.discard(cid)
+                    seen_results.add(cid)
+            if entry.get("type") == "user" and call_id in seen_results:
+                # Never cut through a response, an unresolved tool, or future results.
+                if (pending or not required_group <= seen_results
+                        or any(call_positions.get(cid, 0) > step for cid in seen_results)
+                        or not set(calls[:step]).issubset(seen_results)):
+                    return None
+                found = entry.get("uuid")
         if found is not None:
             return found
     return None
+
+
+def conversation_cut(journal_path, step: int, session_ref: Optional[str] = None) -> Optional[str]:
+    """A UUID loadable from the original session without prefix reconstruction."""
+    return _find_conversation_cut(journal_path, step, session_ref)
+
+
+def conversation_restore(journal_path, step: int, session_ref: str) -> tuple[str, PrefixSource | None] | None:
+    """Choose a direct native cut or a validated original-prefix source."""
+    cut = conversation_cut(journal_path, step, session_ref)
+    if cut is not None:
+        return cut, None
+    cut = _find_conversation_cut(journal_path, step, session_ref, allow_prefix=True)
+    if cut is not None:
+        source = find_prefix_source(CLAUDE_PROJECTS_DIR, session_ref, cut)
+        if source is not None:
+            return cut, source
+    return None
+
+
+def available_branch_points(journal_path, *, full_conversation=False):
+    """The same candidate definition for analysts, reviewers and batch canaries."""
+    points = turn_branch_checkpoints(journal_path)
+    if full_conversation:
+        return points
+    return {s: p for s, p in points.items()
+            if conversation_restore(journal_path, s, p.session_ckpt)}
 
 
 # --- reusing a recorded parent -----------------------------------------------
@@ -916,6 +1181,65 @@ def conversation_cut(journal_path, step: int) -> Optional[str]:
 # per task and tells the branches nothing. With the prompt unchanged, the
 # recorded single-pass journal IS the parent: copy it into the run directory,
 # grade its last snapshot, and go straight to round 1.
+
+@dataclass(frozen=True)
+class BranchChoice:
+    run_name: str
+    base: Attempt
+    checkpoint: Checkpoint
+    cut: Optional[str]
+    hint: str
+    why: str
+    prefix: Optional[PrefixSource] = None
+
+
+def prepare_branches(plan: dict, *, limit: int, round_no: int,
+                     attempts: dict, checkpoints: dict,
+                     full_conversation: bool = False,
+                     count_mode: str = "adaptive") -> List[BranchChoice]:
+    """Resolve each selected point exactly before any continuation starts."""
+    if count_mode not in BRANCH_COUNT_MODES:
+        raise ValueError("unknown branch count mode: %r" % count_mode)
+    branches = plan.get("branches") if isinstance(plan, dict) else None
+    if not isinstance(branches, list):
+        raise ValueError("reviewer must return a branches list")
+    if count_mode == "fixed" and len(branches) != limit:
+        raise ValueError("fixed branch count requires exactly %d branches; reviewer returned %d" %
+                         (limit, len(branches)))
+    if len(branches) > limit:
+        raise ValueError("reviewer returned %d branches above limit %d" % (len(branches), limit))
+    choices = []
+    cuts = {}
+    for index, branch in enumerate(branches, 1):
+        if not isinstance(branch, dict):
+            raise ValueError("branch %d is not an object" % index)
+        base_name = branch.get("base")
+        if not isinstance(base_name, str) or base_name not in attempts:
+            raise ValueError("branch %d names an unknown base %r" % (index, base_name))
+        step = branch.get("branch_step")
+        if type(step) is not int or step not in checkpoints.get(base_name, {}):
+            raise ValueError("branch %d has no eligible checkpoint at %s:%r" % (index, base_name, step))
+        hint = branch.get("hint")
+        if not isinstance(hint, str) or not hint.strip():
+            raise ValueError("branch %d must supply a non-empty hint" % index)
+        base = attempts[base_name]
+        cut = None
+        prefix = None
+        if not full_conversation:
+            key = (base_name, step)
+            if key not in cuts:
+                cuts[key] = conversation_restore(
+                    base.outcome.journal_path, step, checkpoints[base_name][step].session_ckpt)
+            restoration = cuts[key]
+            if restoration is None:
+                raise ValueError("branch %d has no native conversation cut at %s:%d" %
+                                 (index, base_name, step))
+            cut, prefix = restoration
+        choices.append(BranchChoice(
+            branch_run_name(round_no, index, branch.get("name")), base,
+            checkpoints[base_name][step], cut, hint, str(branch.get("why") or ""), prefix))
+    return choices
+
 
 def existing_parent(source: str, instance_id: str) -> Optional[Path]:
     """The recorded parent journal for ``instance_id`` under ``source``.
@@ -930,6 +1254,21 @@ def existing_parent(source: str, instance_id: str) -> Optional[Path]:
             if entry.get("task") == instance_id and entry.get("journal"):
                 return Path(entry["journal"])
         return None
+    manifest_path = root / "manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text())
+        if manifest.get("failure_policy") == "isolated":
+            item = next((item for item in manifest["tasks"] if item["id"] == instance_id), None)
+            if item is None:
+                return None
+            worker_path = root / f"shard-{item['index']:03d}" / "worker.json"
+            worker = json.loads(worker_path.read_text()) if worker_path.is_file() else {}
+            if not (worker.get("finished_at") and worker.get("evidence_valid") and worker.get("journal_path")):
+                return None
+            journal = Path(worker["journal_path"])
+            if not journal.resolve().is_relative_to(root.resolve()) or not journal.is_file():
+                return None
+            return journal
     hits = sorted(root.glob("**/%s/parent.jsonl" % instance_id))
     return hits[0] if hits else None
 
@@ -984,6 +1323,7 @@ def regrade(args, out_dir: Path, bench: "Optional[Benchmark]" = None) -> int:
 
     results, changed = [], []
     directories = sorted(d for d in out_dir.iterdir() if d.is_dir())
+    expected_ids = [directory.name for directory in directories if directory.name in catalogue]
     for position, directory in enumerate(directories, 1):
         instance_id = directory.name
         raw = catalogue.get(instance_id)
@@ -997,11 +1337,10 @@ def regrade(args, out_dir: Path, bench: "Optional[Benchmark]" = None) -> int:
         verdicts, resolved_by = [], None
         for journal in journals:
             pairs = [c for c in load_checkpoints(journal) if c.snapshot_id]
-            if not pairs:
+            if not pairs and not getattr(bench, "stop_on_grading_error", False):
                 print("   %-30s no snapshot" % journal.stem)
                 continue
-            grade = bench.grade(pairs[-1].snapshot_id, instance,
-                                backend_for(args, bench))
+            grade = grade_attempt(outcome_from_journal(journal), instance, args, bench)
             print("   %-30s %s" % (journal.stem, grade.summary()))
             verdicts.append({"name": journal.stem, "resolved": grade.resolved,
                              "f2p_pass": grade.f2p_pass,
@@ -1009,6 +1348,9 @@ def regrade(args, out_dir: Path, bench: "Optional[Benchmark]" = None) -> int:
                              "p2p_pass": grade.p2p_pass,
                              "skipped_ids": len(grade.skipped_ids),
                              "broken": grade.broken,
+                             "verifier_artifacts": grade.verifier_artifacts,
+                             "grading_snapshot": grade.grading_snapshot,
+                             "verifier_artifact_error": grade.verifier_artifact_error,
                              "grading_error": grade.error})
             if grade.resolved:
                 resolved_by = journal.stem
@@ -1021,7 +1363,10 @@ def regrade(args, out_dir: Path, bench: "Optional[Benchmark]" = None) -> int:
                         "attempts": verdicts})
         (out_dir / "regrade.json").write_text(json.dumps(
             {"slot": args.slot, "model": args.model, "regraded": True,
-             "instances": results}, indent=2, ensure_ascii=False),
+             "network_policy": {"agent": "not-rerun", "verifier": network_policy_for(args, bench, "verifier")},
+             "network_requested": {"verifier": getattr(args, "verifier_network", None)},
+             "instances": results,
+             **(bench.summary(results, expected_ids=expected_ids) if hasattr(bench, "summary") else {})}, indent=2, ensure_ascii=False),
             encoding="utf-8")
 
     solved = [r for r in results if r["resolved"]]
@@ -1037,6 +1382,8 @@ def regrade(args, out_dir: Path, bench: "Optional[Benchmark]" = None) -> int:
             print("  %-34s %s -> %s" % (name, "pass" if was else "fail",
                                         "pass" if now else "fail"))
     print("\nwrote %s" % (out_dir / "regrade.json"))
+    if hasattr(bench, "summary") and not bench.summary(results, expected_ids=expected_ids).get("grading_complete", True):
+        return 2
     return 0
 
 
@@ -1052,15 +1399,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--rounds", type=int, default=2,
                        help="branching rounds after the first attempt")
     parser.add_argument("--branches", default="3", metavar="N[,N...]",
-                        help="branches per round: one number for every round, or "
-                             "a comma list to vary it (e.g. 4,3 -- four "
-                             "directions first, three in the round after). A "
+                        help="branch count per round: a maximum in adaptive mode, "
+                             "an exact count in fixed mode. "
+                             "One number for every round, or a comma list "
+                             "(e.g. 4,3). A "
                              "round only happens if the one before it produced "
                              "no resolved attempt.")
+    parser.add_argument("--branch-count-mode", choices=BRANCH_COUNT_MODES, default="adaptive",
+                        help="adaptive: reviewer chooses up to --branches; "
+                             "fixed: require exactly --branches valid directions per round")
     parser.add_argument("--analyst-tokens", type=int, default=100_000,
                         help="transcript budget handed to the analyst")
     parser.add_argument("--timeout", type=float, default=1800.0)
     parser.add_argument("--runtime-bin", default="runtime/ash-runtime")
+    parser.add_argument("--agent-network", choices=["allow", "deny"], default=None,
+                        help="actor sandbox egress; omitted uses the benchmark default")
+    parser.add_argument("--verifier-network", choices=["allow", "deny"], default=None,
+                        help="verifier/patch-collector sandbox egress; omitted uses the benchmark default")
     parser.add_argument("-o", "--out", default="runs/fork-eval")
     parser.add_argument("--volatile-ok", action="store_true",
                         help="allow -o under /tmp and friends. Refused by "
@@ -1072,15 +1427,26 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "a snapshot, so a grader fix can be applied to "
                              "results that already exist")
     parser.add_argument("--benchmark", default="swebench",
-                        choices=["swebench", "deepswe"],
+                        choices=["swebench", "deepswe", "swebench-pro"],
                         help="which benchmark supplies tasks, prompts and the "
                              "grader (default: swebench, unchanged behaviour)")
     parser.add_argument("--tasks-dir", default=None,
                         help="deepswe: the dataset's tasks/ directory")
+    parser.add_argument("--pro-repo", help="swebench-pro: pinned official SWE-bench_Pro-os checkout")
+    parser.add_argument("--pro-data", help="swebench-pro: local CSV/JSONL instead of the public dataset")
+    parser.add_argument("--pro-dataset-revision", help="swebench-pro: dataset commit SHA (default: pinned public revision)")
+    parser.add_argument("--pro-cpus", type=int, default=4)
+    parser.add_argument("--pro-memory-mb", type=int, default=16384)
+    parser.add_argument("--pro-verifier-timeout", type=int, default=3600)
+    parser.add_argument("--pro-runtime-port", type=int, default=None)
+    parser.add_argument("--pro-collector-runtime-port", type=int, default=None)
+    parser.add_argument("--pro-block-network", action="store_true",
+                        help="legacy Pro default: deny both phases unless their explicit network flags override it")
     parser.add_argument("--fork-full-conversation", action="store_true",
                         help="branch with the parent's WHOLE conversation (the "
                              "pre-2026-09-04 behaviour, tag branching-fullconv-"
-                             "2026-09-04) instead of cutting it at the fork step")
+                             "2026-09-04) instead of cutting it at the fork step; "
+                             "normal mode rejects unavailable cuts without automatic fallback")
     parser.add_argument("--parent-from", default=None,
                         help="reuse each instance's recorded parent journal from "
                              "this batch dir or aggregate .json instead of running "
@@ -1094,6 +1460,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         raise SystemExit("--branches wants numbers, got %r" % args.branches)
     if not schedule:
         raise SystemExit("--branches cannot be empty")
+    if any(limit < 1 for limit in schedule):
+        raise SystemExit("--branches limits must be positive; use --rounds 0 for no branching")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1110,6 +1478,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     wanted = [x.strip() for x in str(args.instance).split(",") if x.strip()]
     catalogue = bench.catalogue(args)
+    if bench.name == "swebench-pro" and wanted == ["all"]:
+        wanted = list(catalogue)
     missing = [x for x in wanted if x not in catalogue]
     if missing:
         raise SystemExit("not in %s: %s" % (
@@ -1136,7 +1506,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                           "p2p_ran": a.grade.p2p_ran,
                           "p2p_pass": a.grade.p2p_pass,
                           "grading_error": a.grade.error,
+                          "verifier_artifacts": a.grade.verifier_artifacts,
+                          "grading_snapshot": a.grade.grading_snapshot,
+                          "verifier_artifact_error": a.grade.verifier_artifact_error,
                           "patch_lines": a.grade.patch.count("\n"),
+                          "network_policy": {
+                              "agent": "recorded" if getattr(args, "parent_from", None) and a.name == "parent"
+                              else network_policy_for(args, bench, "agent"),
+                              "verifier": network_policy_for(args, bench, "verifier")},
                           "journal": str(a.outcome.journal_path)}
                          for a in attempts],
         })
@@ -1148,9 +1525,14 @@ def main(argv: Optional[List[str]] = None) -> int:
              "parent_from": getattr(args, "parent_from", None),
              "fork_conversation": ("full" if getattr(args, "fork_full_conversation", False)
                                    else "truncated_at_fork_step"),
-             "timeout": args.timeout, "no_network": bench.no_network,
+             "timeout": args.timeout, **network_summary(args, bench),
+             "sandbox_ttl": backend_for(args, bench)["microvm"]["sandbox_ttl"],
              "branch_schedule": schedule, "rounds": args.rounds,
-             "instances": results}, indent=2, ensure_ascii=False),
+             "branch_schedule_semantics": ("exact_counts" if args.branch_count_mode == "fixed" else "upper_bounds"),
+             "branch_count_mode": args.branch_count_mode,
+             "branch_policy": "per-branch",
+             "instances": results,
+             **(bench.summary(results, expected_ids=wanted) if hasattr(bench, "summary") else {})}, indent=2, ensure_ascii=False),
             encoding="utf-8")
 
     print("\n" + "=" * 72)
@@ -1163,21 +1545,29 @@ def main(argv: Optional[List[str]] = None) -> int:
               % (mark, r["instance"], best,
                  ", ".join(r["resolved_by"]) or ""))
     print("\nwrote %s" % (out_dir / "summary.json"))
+    if hasattr(bench, "summary") and not bench.summary(results, expected_ids=wanted).get("grading_complete", True):
+        print("Grading incomplete; resolved count is a lower bound. Inspect grading_error_ids.")
+        return 2
     return 0 if len(solved) == len(results) else 1
 
 
 def run_one(orch: Orchestrator, args, raw, schedule: List[int],
             out_dir: Path, bench: "Optional[Benchmark]" = None) -> List["Attempt"]:
     """One instance: attempt, grade, and branch until resolved or out of rounds."""
+    count_mode = getattr(args, "branch_count_mode", "adaptive")
+    if count_mode not in BRANCH_COUNT_MODES:
+        raise ValueError("unknown branch count mode: %r" % count_mode)
     bench = bench or SweBench()
     out_dir.mkdir(parents=True, exist_ok=True)
     instance = bench.instance(raw)
+    instance["slot"] = args.slot
+    instance["agent_network"] = network_policy_for(args, bench, "agent")
     resources = bench.resources(instance)
     print("== %s (%s) ==" % (instance["instance_id"], instance["repo"]))
     print("   image %s" % instance["image"])
     print("   F2P %d · P2P %d · slot %s · model %s%s%s"
           % (len(instance["f2p"]), len(instance["p2p"]), args.slot, args.model,
-             " · offline" if bench.no_network else "",
+             " · offline" if instance["agent_network"] == "deny" else "",
              " · %s" % resources if resources else ""))
     attempts: List[Attempt] = []
 
@@ -1198,14 +1588,21 @@ def run_one(orch: Orchestrator, args, raw, schedule: List[int],
         raise SystemExit("--parent-from %s has no parent journal for %s"
                          % (source, instance["instance_id"]))
     else:
+        image = instance["image"]
+        prepare_image = getattr(bench, "prepare_image", None)
+        if prepare_image is not None:
+            image = prepare_image(instance, backend_for(args, bench), out_dir / "preparation")
         outcome = run_attempt(orch, args, instance, name="parent",
                               prompt=bench.prompt(instance),
-                              image=instance["image"], out_dir=out_dir,
+                              image=image, out_dir=out_dir,
                               resources=resources, bench=bench)
     parent = Attempt("parent", outcome, grade_attempt(outcome, instance, args, bench))
     attempts.append(parent)
     report(parent)
     print("   wall       %.0fs" % (time.time() - started))
+    if getattr(bench, "stop_on_grading_error", False) and (
+            parent.grade.error or parent.grade.verifier_artifact_error):
+        return attempts
 
     case_reports: dict = {}
     by_name: dict = {"parent": parent}
@@ -1214,9 +1611,12 @@ def run_one(orch: Orchestrator, args, raw, schedule: List[int],
             print("\n== resolved; no further rounds ==")
             break
         width = schedule[min(round_no - 1, len(schedule) - 1)]
-        print("\n== round %d (%d branches) ==" % (round_no, width))
+        print("\n== round %d (%s %d branches) ==" %
+              (round_no, "exactly" if count_mode == "fixed" else "up to", width))
+        points = {a.name: available_branch_points(
+            a.outcome.journal_path,
+            full_conversation=bool(getattr(args, "fork_full_conversation", False))) for a in attempts}
 
-        # -- map: analyse every failed attempt not yet analysed ----------------
         for attempt in attempts:
             if attempt.name in case_reports:
                 continue
@@ -1224,7 +1624,7 @@ def run_one(orch: Orchestrator, args, raw, schedule: List[int],
                 attempt.outcome.journal_path, token_budget=args.analyst_tokens)
             if hi < 1:
                 case_reports[attempt.name] = {
-                    "failure_reason": "no tool steps recorded",
+                    "failure_reason": "no tool steps recorded", "steps": 0,
                     "lesson": "", "salvage": "nothing", "branch_candidates": []}
                 continue
             print("   analysing %s (%d steps)..." % (attempt.name, hi))
@@ -1232,129 +1632,131 @@ def run_one(orch: Orchestrator, args, raw, schedule: List[int],
                 case = extract_json(ask_analyst(
                     args.analyst_model, _CASE_PROMPT.format(
                         problem=instance["problem"][:20000],
-                        hint=attempt.hint or "(none -- original attempt)",
                         verdict=attempt.verdict_text(), transcript=transcript,
-                        lo=lo, hi=hi)))
-            except Exception as exc:  # noqa: BLE001
+                        checkpoint_steps=json.dumps(sorted(s for s in points[attempt.name] if s <= hi)),
+                        candidate_limit=width, lo=lo, hi=hi)))
+            except Exception as exc:
                 case = {"failure_reason": "analysis failed: %s" % exc,
-                        "lesson": "", "salvage": "unknown",
-                        "branch_candidates": []}
+                        "lesson": "", "salvage": "unknown", "branch_candidates": []}
             case["steps"] = hi
             case_reports[attempt.name] = case
             print("      %s" % str(case.get("failure_reason"))[:150])
 
-        # -- reduce: one reviewer over all reports ------------------------------
+        points = {name: {step: pair for step, pair in pairs.items()
+                         if step <= case_reports.get(name, {}).get("steps", 0)}
+                  for name, pairs in points.items()}
+        plan_path = out_dir / ("plan-round%d.json" % round_no)
+        plan_record = {
+            "reports": case_reports, "branch_policy": "per-branch",
+            "branch_limit": width, "branch_count_mode": count_mode,
+            "available_steps": {name: sorted(pairs) for name, pairs in points.items()},
+        }
+        if not any(points.values()):
+            plan_record.update(review=None, validation_error="no eligible snapshot/session pairs: no native conversation cut at a complete-turn boundary")
+            plan_path.write_text(json.dumps(plan_record, indent=2, ensure_ascii=False), encoding="utf-8")
+            print("   no eligible snapshot/session pairs -- stopping")
+            break
+
         reports_text = json.dumps(
-            [{"name": a.name, "round": a.round_no, "hint_given": a.hint or None,
-              "grade": a.grade.summary(), **case_reports.get(a.name, {})}
-             for a in attempts], indent=1, ensure_ascii=False)
+            [{**case_reports.get(a.name, {}), "name": a.name, "round": a.round_no,
+              "hint_given": a.hint or None, "grade": a.grade.summary(),
+              "available_steps": sorted(points[a.name])} for a in attempts],
+            indent=1, ensure_ascii=False)
         try:
             plan = extract_json(ask_analyst(
                 args.analyst_model, _REVIEW_PROMPT.format(
                     problem=instance["problem"][:20000],
-                    reports=reports_text, branches=width)))
-        except Exception as exc:  # noqa: BLE001
+                    reports=reports_text, count_rule=branch_count_rule(count_mode, width))))
+        except Exception as exc:
+            plan_record.update(review=None, validation_error="reviewer failed: %s" % exc)
+            plan_path.write_text(json.dumps(plan_record, indent=2, ensure_ascii=False), encoding="utf-8")
             print("   reviewer failed: %s -- stopping" % exc)
             break
-        base = by_name.get(str(plan.get("base")))
-        if base is None:
-            base = max(attempts, key=lambda a: a.score)
-            print("   reviewer named unknown base %r; falling back to %s"
-                  % (plan.get("base"), base.name))
-        hi = case_reports.get(base.name, {}).get("steps", 1)
-        step = max(1, min(hi, int(plan.get("branch_step") or hi)))
-        print("   base %s @ step %d — %s" % (base.name, step,
-                                             str(plan.get("why"))[:160]))
-        print("   synthesis   %s" % str(plan.get("synthesis"))[:200])
-        (out_dir / ("plan-round%d.json" % round_no)).write_text(
-            json.dumps({"reports": case_reports, "review": plan}, indent=2,
-                       ensure_ascii=False), encoding="utf-8")
-
+        plan_record["review"] = plan
+        full_conversation = bool(getattr(args, "fork_full_conversation", False))
         try:
-            pair = fork_plan(base.outcome.journal_path, step)
+            choices = prepare_branches(
+                plan, limit=width, round_no=round_no, attempts=by_name,
+                checkpoints=points, full_conversation=full_conversation, count_mode=count_mode)
         except ValueError as exc:
-            print("   %s -- stopping" % exc)
+            plan_record["validation_error"] = str(exc)
+            plan_path.write_text(json.dumps(plan_record, indent=2, ensure_ascii=False), encoding="utf-8")
+            print("   invalid branch plan: %s -- stopping without fallback" % exc)
+            break
+        plan_record["selected_branches"] = [
+            {"run_name": choice.run_name, "base": choice.base.name,
+             "branch_step": choice.checkpoint.step,
+             "snapshot_id": choice.checkpoint.snapshot_id,
+             "conversation_cut": choice.cut,
+             "conversation_restore": "original-prefix" if choice.prefix else "native"} for choice in choices]
+        plan_path.write_text(json.dumps(plan_record, indent=2, ensure_ascii=False), encoding="utf-8")
+        print("   reviewer selected %d/%d branches" % (len(choices), width))
+        print("   synthesis   %s" % str(plan.get("synthesis"))[:200])
+        if not choices:
+            print("   no useful branches selected -- stopping")
             break
 
         round_attempts: List[Attempt] = []
-        for index, branch in enumerate((plan.get("branches") or [])[:width], 1):
-            name = "r%db%d-%s" % (round_no, index,
-                                  re.sub(r"[^a-z0-9]+", "-",
-                                         str(branch.get("name") or "b").lower())[:24])
+        for choice in choices:
+            name, base, checkpoint = choice.run_name, choice.base, choice.checkpoint
             print("\n== attempt: %s ==" % name)
-            print("   hint  %s" % str(branch.get("hint"))[:200].replace("\n", " "))
+            print("   base %s @ step %d -- %s" % (base.name, checkpoint.step, choice.why[:160]))
+            print("   hint  %s" % choice.hint[:200].replace("\n", " "))
             started = time.time()
-            # A branch's conversation must end where its filesystem does.
-            # `fork_session` alone resumes the WHOLE parent transcript; the cut
-            # uuid makes it stop at step `step`'s tool result.
-            cut = None
-            if not getattr(args, "fork_full_conversation", False):
-                # A step whose tool result never reached the transcript (the
-                # run died mid-call) cannot be a cut point; fork at the latest
-                # earlier step that can, moving the snapshot with it so the
-                # conversation and the filesystem still agree.
-                chosen = step
-                while chosen >= 1 and cut is None:
-                    cut = conversation_cut(base.outcome.journal_path, chosen)
-                    if cut is None:
-                        chosen -= 1
-                cut_note = None
-                if cut is None:
-                    # No loadable cut at or before the fork step (the parent's
-                    # conversation was compacted after it). The disk still
-                    # forks where the reviewer said; the conversation cannot,
-                    # so this branch gets the full one -- recorded, not hidden.
-                    cut_note = "compacted-before-fork"
-                    print("   no loadable transcript cut at or before step %d "
-                          "(conversation compacted); branching with the full "
-                          "conversation" % step)
-                elif chosen != step:
-                    print("   fork step %d has no transcript cut; using step %d"
-                          % (step, chosen))
-                    step = chosen
-                    pair = fork_plan(base.outcome.journal_path, step)
-
-            def branch_run(cut_uuid, cut_reason):
-                return run_attempt(
-                    orch, args, instance, name=name, out_dir=out_dir,
-                    prompt=bench.branch_prompt(
-                        instance, verdict=base.verdict_text()[:20000],
-                        hint=str(branch.get("hint") or ""),
-                        truncated=cut_uuid is not None, step=step, grade=base.grade,
-                        analysis=case_reports.get(base.name)),
-                    image=pair["snapshot_id"],
-                    resume=pair.get("session_ckpt"), fork=True, resume_at=cut_uuid,
-                    origin={"parent_run_id": base.name, "branch_step": step,
-                            "snapshot_id": pair["snapshot_id"],
-                            "conversation_cut": cut_uuid, "cut_note": cut_reason,
-                            "round": round_no, "direction": branch.get("name")},
-                    bench=bench)
-
-            outcome = branch_run(cut, cut_note)
-            if cut is not None and "No message found with message.uuid" in str(outcome.error or ""):
-                # The CLI could not load the cut entry after all. Same fallback,
-                # same record; the journal of the refused start stays on disk
-                # under the name the retry overwrites... so rename it first.
-                refused = Path(outcome.journal_path)
-                if refused.exists():
-                    refused.rename(refused.with_suffix(".cut-refused.jsonl"))
-                print("   cut %s refused by Claude Code; retrying with the full "
-                      "conversation" % cut[:8])
-                outcome = branch_run(None, "cut-refused-by-cli")
-            attempt = Attempt(name, outcome,
-                              grade_attempt(outcome, instance, args, bench), plan,
-                              hint=str(branch.get("hint") or ""),
-                              round_no=round_no)
+            resume_session = checkpoint.session_ckpt
+            actor_cwd = None
+            prefix_origin = {}
+            if choice.prefix is not None:
+                try:
+                    prepared = prepare_prefix(
+                        choice.prefix, out_dir / "actor-workspaces" / name,
+                        out_dir / "conversation-prefixes" / name, CLAUDE_PROJECTS_DIR)
+                except (OSError, ValueError, ImportError) as error:
+                    plan_record["validation_error"] = "prefix preparation failed: %s" % error
+                    plan_path.write_text(json.dumps(plan_record, indent=2, ensure_ascii=False))
+                    raise
+                resume_session = prepared["resume_session_id"]
+                actor_cwd = Path(prepared["cwd"])
+                prefix_origin = {"conversation_restore": "original-prefix",
+                                 "source_session_id": checkpoint.session_ckpt,
+                                 "resume_session_id": resume_session,
+                                 "conversation_prefix_manifest": prepared["manifest_path"]}
+                selected = next(item for item in plan_record["selected_branches"] if item["run_name"] == name)
+                selected.update(prefix_origin)
+                plan_path.write_text(json.dumps(plan_record, indent=2, ensure_ascii=False))
+            outcome = run_attempt(
+                orch, args, instance, name=name, out_dir=out_dir,
+                prompt=bench.branch_prompt(
+                    instance, verdict="", hint=choice.hint,
+                    truncated=choice.cut is not None, step=checkpoint.step),
+                image=checkpoint.snapshot_id, resume=resume_session, cwd=actor_cwd,
+                fork=True, resume_at=choice.cut,
+                origin={"parent_run_id": base.name, "branch_step": checkpoint.step,
+                        "snapshot_id": checkpoint.snapshot_id,
+                        "conversation_cut": choice.cut,
+                        "cut_note": "explicit-full-conversation" if full_conversation else None,
+                        "actor_hint": choice.hint, "hint_delivery": "reviewer-direct",
+                        "branch_policy": "per-branch", "branch_count_mode": count_mode,
+                        "selection_reason": choice.why,
+                        "round": round_no, "direction": name.split("-", 1)[-1],
+                        **prefix_origin},
+                bench=bench)
+            if choice.cut is not None and "No message found with message.uuid" in str(outcome.error or ""):
+                grade = Grade(error="selected native cut refused; no full-conversation retry")
+            else:
+                grade = grade_attempt(outcome, instance, args, bench)
+            attempt = Attempt(name, outcome, grade, plan, hint=choice.hint, round_no=round_no)
             round_attempts.append(attempt)
             attempts.append(attempt)
             by_name[name] = attempt
             report(attempt)
             print("   wall       %.0fs" % (time.time() - started))
+            if getattr(bench, "stop_on_grading_error", False) and (
+                    grade.error or grade.verifier_artifact_error):
+                return attempts
 
-        if round_attempts:
-            winner = max(round_attempts, key=lambda a: a.score)
-            print("\n   round %d best: %s (score %d)"
-                  % (round_no, winner.name, winner.score))
+        winner = max(round_attempts, key=lambda a: a.score)
+        print("\n   round %d best: %s (score %d)" % (round_no, winner.name, winner.score))
 
     print("\n== %s: %s ==" % (instance["instance_id"],
                                "RESOLVED" if any(a.grade.resolved for a in attempts)

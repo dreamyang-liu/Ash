@@ -1,8 +1,12 @@
 """What the analyst actually gets to see."""
 import json
+from pathlib import Path
+from string import Formatter
+from types import SimpleNamespace
 
 import pytest
 
+from swebench import fork_eval
 from swebench.fork_eval import RESULT_CHARS, _clip, render_transcript
 
 
@@ -12,6 +16,89 @@ def _journal(tmp_path, records):
         for i, r in enumerate(records, 1):
             fh.write(json.dumps(dict(r, seq=i, run_id="r", agent_id="a")) + "\n")
     return path
+
+
+def test_grading_uses_saved_code_before_a_native_task_update(tmp_path, monkeypatch):
+    path = _journal(tmp_path, [
+        {"type": "checkpoint.policy", "pairing": "call-id-v1"},
+        {"type": "tool.started", "step": 1, "call_id": "commit", "name": "mcp__ash__shell"},
+        {"type": "checkpoint.captured", "step": 1, "snapshot_id": "saved-code",
+         "reason": "captured", "captured": True},
+        {"type": "tool.started", "step": 2, "call_id": "todo", "name": "TaskUpdate"},
+        {"type": "checkpoint.captured", "step": 2, "call_id": "todo", "snapshot_id": None,
+         "reason": "not_executed", "captured": False},
+    ])
+    graded = []
+
+    def grade(snapshot_id, instance, backend):
+        graded.append(snapshot_id)
+        return fork_eval.Grade(resolved=False, detail="official test failure")
+
+    monkeypatch.setattr(fork_eval, "backend_for", lambda *args: None)
+    result = fork_eval.grade_attempt(SimpleNamespace(journal_path=path), {}, None,
+                                     SimpleNamespace(grade=grade))
+    assert graded == ["saved-code"]
+    assert not result.resolved and result.detail == "official test failure"
+    assert result.grading_snapshot["policy"] == "last_successful_snapshot"
+    assert result.grading_snapshot["capture_step"] == 1
+    assert result.grading_snapshot["later_tool_calls"] == [
+        {"step": 2, "call_id": "todo", "name": "TaskUpdate"}]
+    assert result.grading_snapshot["later_checkpoint_issues"][0]["reason"] == "not_executed"
+
+
+def test_grading_ignores_old_backfills_and_failed_snapshot_references(tmp_path, monkeypatch):
+    path = _journal(tmp_path, [
+        {"type": "checkpoint.captured", "step": 1, "snapshot_id": "old"},
+        {"type": "checkpoint.captured", "step": 2, "snapshot_id": "new", "reason": None},
+        {"type": "checkpoint.captured", "step": 1, "snapshot_id": "old", "reason": "session_ref_backfill"},
+        {"type": "checkpoint.captured", "step": 3, "snapshot_id": "unproven", "reason": "failed", "captured": False},
+    ])
+    graded = []
+
+    def grade(snapshot_id, instance, backend):
+        graded.append(snapshot_id)
+        return fork_eval.Grade()
+
+    monkeypatch.setattr(fork_eval, "backend_for", lambda *args: None)
+    result = fork_eval.grade_attempt(SimpleNamespace(journal_path=path), {}, None,
+                                     SimpleNamespace(grade=grade))
+    assert graded == ["new"]
+    assert result.grading_snapshot["capture_step"] == 2
+    assert result.grading_snapshot["later_checkpoint_issues"] == [
+        {"step": 3, "call_id": None, "reason": "failed"}]
+
+
+@pytest.mark.parametrize("records", [[], [
+    {"type": "checkpoint.captured", "step": 1, "snapshot_id": "unproven", "reason": "failed", "captured": False},
+]])
+def test_grading_without_a_successful_snapshot_still_fails(tmp_path, records):
+    path = _journal(tmp_path, records)
+    result = fork_eval.grade_attempt(SimpleNamespace(journal_path=path), {}, None)
+    assert result.error == "no successful snapshot recorded -- nothing to grade"
+    assert result.grading_snapshot is None
+
+
+def test_regrade_persists_the_same_last_successful_snapshot_policy(tmp_path, monkeypatch):
+    directory = tmp_path / "task-a"
+    directory.mkdir()
+    _journal(directory, [
+        {"type": "checkpoint.captured", "step": 1, "snapshot_id": "saved"},
+        {"type": "checkpoint.captured", "step": 2, "snapshot_id": "not-saved", "reason": "failed"},
+    ])
+    graded = []
+
+    def grade(snapshot_id, instance, backend):
+        graded.append(snapshot_id)
+        return fork_eval.Grade(resolved=True)
+
+    bench = SimpleNamespace(catalogue=lambda args: {"task-a": "raw"},
+                            instance=lambda raw: {}, grade=grade)
+    monkeypatch.setattr(fork_eval, "backend_for", lambda *args: None)
+    assert fork_eval.regrade(SimpleNamespace(slot="test", model="test"), tmp_path, bench) == 0
+    assert graded == ["saved"]
+    recorded = json.loads((tmp_path / "regrade.json").read_text())["instances"][0]["attempts"][0]
+    assert recorded["grading_snapshot"]["snapshot_id"] == "saved"
+    assert recorded["grading_snapshot"]["later_checkpoint_issues"][0]["reason"] == "failed"
 
 
 def test_a_long_tool_result_keeps_its_tail():
@@ -198,3 +285,238 @@ def test_verdict_text_names_broken_tests_and_survives_empty_grade():
     text = attempt.verdict_text()
     assert "mod.test_a" in text and "BROKE" in text
     assert Attempt("p", None, Grade()).verdict_text()  # empty grade renders too
+
+
+@pytest.mark.parametrize("template,input_fields,output_fields", [
+    (fork_eval._CASE_PROMPT,
+     {"problem", "verdict", "transcript", "lo", "hi", "checkpoint_steps", "candidate_limit"},
+     {"failure_reason", "lesson", "salvage", "branch_candidates"}),
+    (fork_eval._REVIEW_PROMPT,
+     {"problem", "reports", "count_rule"},
+     {"synthesis", "branches"}),
+])
+def test_analysis_prompts_preserve_fields_and_separate_private_evidence(
+        template, input_fields, output_fields):
+    fields = {entry[1] for entry in Formatter().parse(template) if entry[1]}
+    assert fields == input_fields
+    values = {field: "INPUT_%s" % field.upper() for field in input_fields}
+    rendered = template.format(**values)
+    assert all(value in rendered for value in values.values())
+    schema = json.loads(rendered.rsplit("Return ONLY a JSON object, no prose:", 1)[1]
+                        .replace("<int>", "1"))
+    assert set(schema) == output_fields
+    compact = " ".join(rendered.split())
+    assert "private diagnostic evidence" in compact
+    assert "natural and effective continuation" in compact
+
+
+def test_analyst_translates_private_evidence_to_accessible_repair_directions():
+    """Instruction coverage, not a claim that a model always follows it."""
+    prompt = " ".join(fork_eval._CASE_PROMPT.split())
+    assert "## Translate evidence into repair directions" in prompt
+    assert "A path in verifier output is not evidence that the actor can open it" in prompt
+    assert "In every returned field" in prompt
+    assert "omit verifier-only filenames, test names/IDs and grader paths" in prompt
+    assert "task or retained prefix establishes it is available" in prompt
+    assert "Do not ask the actor to read, locate or recreate a hidden test" in prompt
+    assert "compliance_test.go" not in fork_eval._CASE_PROMPT
+
+
+def test_analyst_uncertainty_still_produces_a_testable_direction():
+    prompt = " ".join(fork_eval._CASE_PROMPT.split())
+    assert "strongest supported hypothesis" in prompt
+    assert "what would support or rule it out" in prompt
+    assert "Do not merely add 'possibly' to an invented explanation" in prompt
+    assert "do not guess how an unseen test constructs its fixtures" in prompt
+    assert "If the cause is established, state the correction directly" in prompt
+    assert "caller-owned or handler-owned prefix" in prompt
+
+
+def test_analysis_prompts_anchor_guidance_to_the_retained_prefix():
+    analyst = " ".join(fork_eval._CASE_PROMPT.split())
+    reviewer = " ".join(fork_eval._REVIEW_PROMPT.split())
+    assert "Separate observed facts from inferences" in analyst
+    assert "failure_reason and lesson are controller-only reports" in analyst
+    assert "state after each candidate step" in analyst
+    assert "LATER IS BETTER" in analyst
+    assert "For EACH branch, choose its own base attempt and branch_step" in reviewer
+    assert "Positions do NOT need to be distinct" in reviewer
+    assert "state AFTER branch_step" in reviewer
+    assert "already present or already verified" in reviewer
+    assert "Prefer 2-5 concise sentences" in reviewer
+    assert "through its own tools" in reviewer
+    assert "not just the wording" in reviewer
+
+
+def test_reviewer_prompt_includes_continuity_usefulness_and_no_source_narration():
+    reviewer = " ".join(fork_eval._REVIEW_PROMPT.split())
+    assert "delivered VERBATIM" in reviewer
+    assert "mentally remove the hint" in reviewer
+    assert "Do not make a precise diagnosis vague" in reviewer
+    assert "Do not fabricate the agent's reasoning" in reviewer
+    assert "do not include test names or IDs" in reviewer
+    assert "pass/fail counts, scores, raw verifier output" in reviewer
+    assert "Do not label the text as a reminder" in reviewer
+    assert "useful diagnosis and behavioral constraints are still intact" in reviewer
+
+
+@pytest.mark.parametrize("hint", [
+    "Inspect subclass dispatch. Reproduce the operand case before editing.",
+    "  The caller owns /environments/:id/compliance.\n"
+    "RegisterRoutes registers only /baselines beneath that group.  ",
+])
+def test_branch_loop_consumes_both_analysis_prompts_and_preserves_the_hint(
+        tmp_path, monkeypatch, hint):
+    from swebench.tests.test_parent_from import write_journal
+
+    write_journal(tmp_path / "base" / "shard-0" / "task-a" / "parent.jsonl")
+    analysis = {
+        "failure_reason": "Subclass overrides may bypass the shared method.",
+        "lesson": "Trace dispatch and reproduce the affected operand case.",
+        "salvage": "At step 2 the shared comparison implementation is visible.",
+        "branch_candidates": [{"step": 2, "why": "Inspect subclass dispatch."}],
+    }
+    plan = {
+        "synthesis": "An override may require a different comparison path.",
+        "branches": [{"name": "dispatch", "base": "parent", "branch_step": 2,
+                      "why": "Keep the inspected code as the starting point.", "hint": hint}],
+    }
+    replies = iter([analysis, plan])
+    prompts = []
+    branch_calls = []
+
+    def ask_analyst(model, prompt):
+        prompts.append(prompt)
+        return json.dumps(next(replies))
+
+    def run_attempt(orch, args, instance, **kwargs):
+        branch_calls.append(kwargs)
+        journal = write_journal(kwargs["out_dir"] / (kwargs["name"] + ".jsonl"))
+        return SimpleNamespace(status="completed", error=None, checkpoints=3,
+                               journal_path=journal)
+
+    class Benchmark(fork_eval.Benchmark):
+        name = "prompt-test"
+
+        def instance(self, raw):
+            return {"instance_id": raw, "repo": "repo", "image": "image",
+                    "problem": "Fix comparison dispatch.", "f2p": [], "p2p": []}
+
+        def grade(self, snapshot_id, instance, backend):
+            return fork_eval.Grade(
+                patch="diff", detail="tests/hidden.py::test_dispatch failed")
+
+        def branch_prompt(self, instance, verdict, hint, **context):
+            assert verdict == ""
+            assert "analysis" not in context and "grade" not in context
+            return hint
+
+    monkeypatch.setattr(fork_eval, "ask_analyst", ask_analyst)
+    monkeypatch.setattr(fork_eval, "run_attempt", run_attempt)
+    monkeypatch.setattr(fork_eval, "conversation_cut", lambda *args: "result-2")
+    args = SimpleNamespace(
+        rounds=1, slot="claude-code", model="model", analyst_model="model",
+        analyst_tokens=1000, timeout=10.0, runtime_bin="runtime/ash-runtime",
+        parent_from=str(tmp_path / "base"), fork_full_conversation=False)
+    attempts = fork_eval.run_one(
+        None, args, "task-a", [1], tmp_path / "out" / "task-a", Benchmark())
+
+    assert len(prompts) == 2
+    assert "## Evidence and output rules" in prompts[0]
+    assert "tests/hidden.py::test_dispatch failed" in prompts[0]
+    assert "## Hint and output rules" in prompts[1]
+    assert analysis["lesson"] in prompts[1]
+    assert len(branch_calls) == 1
+    assert branch_calls[0]["image"] == "snap-2"
+    assert branch_calls[0]["resume_at"] == "result-2"
+    assert branch_calls[0]["prompt"] == hint
+    assert branch_calls[0]["origin"]["actor_hint"] == hint
+    assert attempts[1].hint == hint
+    assert branch_calls[0]["origin"]["hint_delivery"] == "reviewer-direct"
+    assert not list((tmp_path / "out/task-a").glob("hint-*.json"))
+    recorded = json.loads((tmp_path / "out/task-a/plan-round1.json").read_text())
+    assert recorded["review"] == plan
+    assert recorded["review"]["branches"][0]["hint"] == hint
+
+
+def test_failed_branch_hint_is_withheld_from_analyst_but_kept_for_reviewer(
+        tmp_path, monkeypatch):
+    from swebench.tests.test_parent_from import write_journal
+
+    write_journal(tmp_path / "source/task-a/parent.jsonl")
+    supplied_hint = "PRIOR_DIRECTION_ONLY_FOR_ACTOR_AND_REVIEWER"
+    analyst_inputs, reviewer_inputs = [], []
+
+    def ask(model, prompt):
+        if "## Every attempt so far" in prompt:
+            reviewer_inputs.append(prompt)
+            return json.dumps({
+                "synthesis": "Boundary case.",
+                "branches": [{"name": "boundary", "base": "parent", "branch_step": 2,
+                              "why": "Inspect a remaining boundary.", "hint": supplied_hint}],
+            })
+        analyst_inputs.append(prompt)
+        return json.dumps({
+            "failure_reason": "Observed behavior still differs from the task.",
+            "lesson": "Check the public boundary.", "salvage": "Existing code.",
+            "branch_candidates": [{"step": 2, "why": "Relevant code is present."}],
+        })
+
+    def run_attempt(orch, args, instance, **kwargs):
+        journal = write_journal(kwargs["out_dir"] / (kwargs["name"] + ".jsonl"))
+        records = [json.loads(line) for line in journal.read_text().splitlines()]
+        records[0]["task_prompt"] = kwargs["prompt"]
+        records.insert(0, {"type": "fork.origin", "actor_hint": supplied_hint})
+        journal.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+        return SimpleNamespace(status="completed", error=None, checkpoints=3,
+                               journal_path=journal)
+
+    class Benchmark(fork_eval.Benchmark):
+        name = "analyst-input-test"
+
+        def instance(self, raw):
+            return {"instance_id": raw, "repo": "repo", "image": "image",
+                    "problem": "PUBLIC_TASK", "f2p": [], "p2p": []}
+
+        def grade(self, snapshot_id, instance, backend):
+            return fork_eval.Grade(patch="PUBLIC_PATCH", detail="OBSERVED_VERIFICATION")
+
+        def branch_prompt(self, instance, verdict, hint, **context):
+            return hint
+
+    monkeypatch.setattr(fork_eval, "ask_analyst", ask)
+    monkeypatch.setattr(fork_eval, "run_attempt", run_attempt)
+    monkeypatch.setattr(fork_eval, "conversation_cut", lambda *args: "cut-2")
+    args = SimpleNamespace(
+        rounds=2, slot="claude-code", model="model", analyst_model="model",
+        analyst_tokens=1000, timeout=10.0, runtime_bin="runtime/ash-runtime",
+        parent_from=str(tmp_path / "source"), fork_full_conversation=False)
+    attempts = fork_eval.run_one(None, args, "task-a", [1, 1], tmp_path / "out",
+                                 Benchmark())
+
+    assert len(analyst_inputs) == len(reviewer_inputs) == 2
+    assert all(supplied_hint not in prompt for prompt in analyst_inputs)
+    assert all("PUBLIC_TASK" in prompt and "PUBLIC_PATCH" in prompt
+               and "OBSERVED_VERIFICATION" in prompt for prompt in analyst_inputs)
+    assert all("## Translate evidence into repair directions" in prompt
+               and "strongest supported hypothesis" in prompt for prompt in analyst_inputs)
+    assert supplied_hint not in reviewer_inputs[0]
+    assert supplied_hint in reviewer_inputs[1]
+    assert all(attempt.hint == supplied_hint for attempt in attempts[1:])
+
+
+def test_analyst_transcript_omits_injected_note_without_rewriting_agent_speech(tmp_path):
+    path = tmp_path / "branch.jsonl"
+    records = [
+        {"type": "fork.origin", "actor_hint": "INJECTED_NOTE"},
+        {"type": "run.started", "task_prompt": "INJECTED_NOTE"},
+        {"type": "agent.message", "text": "ACTUAL_RECORDED_SPEECH about a reminder"},
+        {"type": "tool.started", "name": "shell", "args": {"command": "ls"}},
+        {"type": "tool.finished", "output": "OBSERVED_FILES"},
+    ]
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    text, lo, hi = fork_eval.render_transcript(path)
+    assert "INJECTED_NOTE" not in text
+    assert "ACTUAL_RECORDED_SPEECH about a reminder" in text
+    assert "OBSERVED_FILES" in text
+    assert (lo, hi) == (1, 1)
