@@ -174,6 +174,10 @@ def is_proven_workspace_read_shell(
     roots = tuple(str(root).rstrip("/") or "/" for root in workspace_roots)
     if not command or not roots:
         return False
+
+    # Allow safe fault-tolerance idioms (|| true, || :) at the end of the command
+    command = re.sub(r"\s*\|\|\s*(true|:|exit 0)\s*$", "", command)
+
     if "\n" in command or "`" in command or "$(" in command or "$" in command:
         return False
     command = _strip_safe_devnull_redirections(command)
