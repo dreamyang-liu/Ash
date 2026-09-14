@@ -79,6 +79,28 @@ def test_resolver_reuses_existing_runtime_snapshot(tmp_path):
     assert len(calls) == 1
 
 
+def test_resolver_releases_prepared_snapshot_by_deterministic_alias(tmp_path):
+    calls = []
+    snapshots = []
+
+    def run(args, _timeout):
+        calls.append(args)
+        if args[1:4] == ["snapshot", "list", "--output"]:
+            return _completed(args, json.dumps(snapshots))
+        if args[1:3] == ["template", "delete"]:
+            snapshots.clear()
+            return _completed(args)
+        raise AssertionError(args)
+
+    resolver = AgentEnvOCIResolver(_config(tmp_path), command_runner=run)
+    snapshot_name = resolver._snapshot_name(_ref())
+    snapshots.append({"snapshotID": "snap-1", "names": [snapshot_name]})
+
+    assert resolver.release(_ref()) is True
+    assert ["aenv", "template", "delete", snapshot_name] in calls
+    assert resolver.release(_ref()) is False
+
+
 def test_resolver_prepares_runtime_snapshot_and_cleans_builder(tmp_path):
     calls = []
     snapshots = []
@@ -109,6 +131,70 @@ def test_resolver_prepares_runtime_snapshot_and_cleans_builder(tmp_path):
     assert any(args[1:3] == ["snapshot", "create"] for args in calls)
     assert any(args[1:3] == ["delete", "sandbox-1"] for args in calls)
     assert any(args[1:3] == ["template", "delete"] for args in calls)
+
+
+def test_runtime_upload_retries_until_guest_can_see_file(tmp_path):
+    calls = []
+    snapshots = []
+    failed_verify = False
+
+    def run(args, _timeout):
+        nonlocal failed_verify
+        calls.append(args)
+        if args[1:4] == ["snapshot", "list", "--output"]:
+            return _completed(args, json.dumps(snapshots))
+        if args[1] == "start":
+            return _completed(args, "sandbox-1\n")
+        if args[1:5] == ["exec", "sandbox-1", "test", "-s"] and not failed_verify:
+            failed_verify = True
+            return _completed(args, stderr="not visible yet", returncode=1)
+        if args[1:3] == ["snapshot", "create"]:
+            name = args[args.index("--name") + 1]
+            snapshots.append({"snapshotID": "snapshot-1", "names": [name]})
+        return _completed(args)
+
+    resolver = AgentEnvOCIResolver(
+        _config(tmp_path, runtime_upload_retry_seconds=0),
+        command_runner=run,
+        sleep=lambda _: None,
+    )
+
+    resolver.resolve(_ref())
+
+    uploads = [args for args in calls if args[1:3] == ["upload", "sandbox-1"]]
+    verifies = [args for args in calls if args[1:5] == ["exec", "sandbox-1", "test", "-s"]]
+    assert len(uploads) == 2
+    assert len(verifies) == 2
+
+
+def test_runtime_upload_fails_after_bounded_visibility_retries(tmp_path):
+    calls = []
+
+    def run(args, _timeout):
+        calls.append(args)
+        if args[1:4] == ["snapshot", "list", "--output"]:
+            return _completed(args, "[]")
+        if args[1] == "start":
+            return _completed(args, "sandbox-1\n")
+        if args[1:5] == ["exec", "sandbox-1", "test", "-s"]:
+            return _completed(args, stderr="missing", returncode=1)
+        return _completed(args)
+
+    resolver = AgentEnvOCIResolver(
+        _config(
+            tmp_path,
+            runtime_upload_attempts=2,
+            runtime_upload_retry_seconds=0,
+        ),
+        command_runner=run,
+        sleep=lambda _: None,
+    )
+
+    with pytest.raises(RuntimeError, match="after 2 attempts"):
+        resolver.resolve(_ref())
+
+    assert len([args for args in calls if args[1:3] == ["upload", "sandbox-1"]]) == 2
+    assert ["aenv", "delete", "sandbox-1"] in calls
 
 
 def test_resolver_rejects_invalid_agentenv_catalog_json(tmp_path):

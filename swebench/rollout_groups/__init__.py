@@ -35,10 +35,13 @@ from .session_runtime import (
     MilesSessionClient,
     SessionAgentStrategySupport,
     branch_input_length,
+    response_input_length,
     trajectory_from_session,
 )
 from .strategies import (
     CheckpointAgentLoopRolloutStrategy,
+    ClaudeAgentLoopRolloutStrategy,
+    ClaudeCheckpointAgentLoopRolloutStrategy,
     MilesSessionAgentRolloutStrategy,
     SequentialRolloutStrategy,
 )
@@ -58,6 +61,8 @@ __all__ = [
     "ModelClient",
     "MilesSessionClient",
     "CheckpointAgentLoopRolloutStrategy",
+    "ClaudeAgentLoopRolloutStrategy",
+    "ClaudeCheckpointAgentLoopRolloutStrategy",
     "MilesSessionAgentRolloutStrategy",
     "RolloutBudget",
     "RolloutContext",
@@ -73,6 +78,7 @@ __all__ = [
     "SequentialRolloutStrategy",
     "Trajectory",
     "branch_input_length",
+    "response_input_length",
     "serve",
     "trajectory_from_session",
 ]

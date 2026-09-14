@@ -44,6 +44,7 @@ class FakeAenv(BaseHTTPRequestHandler):
     #: When set, the fork endpoint reports this error for every child after
     #: the first, mimicking AgentENV's per-fork failure reporting.
     fork_error: dict | None = None
+    tool_error: dict | None = None
 
     def do_POST(self):
         body = self._record("POST")
@@ -69,6 +70,8 @@ class FakeAenv(BaseHTTPRequestHandler):
             return self._reply(results)
         if self.path.rstrip("/") == "":
             # A tool call proxied into a sandbox.
+            if FakeAenv.tool_error is not None:
+                return self._reply({"error": FakeAenv.tool_error})
             return self._reply({"result": {"content": [{"type": "text", "text": "ok"}],
                                            "isError": False, "notifications": []}})
         return self._reply({})  # pause / resume
@@ -88,6 +91,7 @@ def aenv():
     FakeAenv.next_snapshot_id = 0
     FakeAenv.delete_status = 200
     FakeAenv.fork_error = None
+    FakeAenv.tool_error = None
     server = HTTPServer(("127.0.0.1", 0), FakeAenv)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_port}"
@@ -134,14 +138,16 @@ def test_spawn_requests_a_template_and_tracks_the_sandbox(aenv):
     assert body["templateID"] == "swe-base"
 
 def test_calls_route_through_the_proxy_headers(aenv):
-    pool = MicroVMPool(aenv, runtime_port=3000)
+    pool = MicroVMPool(aenv, runtime_port=3000, request_timeout=1234)
 
     async def scenario():
         sb = await pool.spawn()
         await sb.call("shell", command="true")
+        backend = sb.backend
         await pool.close()
+        return backend
 
-    asyncio.run(scenario())
+    backend = asyncio.run(scenario())
     # The tool call must carry AgentENV's routing headers: which sandbox, and
     # which port the runtime listens on inside it.
     tool_calls = [h for m, p, _, h in FakeAenv.requests
@@ -150,6 +156,24 @@ def test_calls_route_through_the_proxy_headers(aenv):
     headers = tool_calls[-1]
     assert headers["x-agentenv-sandbox-id"] == "vm-1"
     assert headers["x-agentenv-target-port"] == "3000"
+    # Lifecycle calls and proxied runtime calls use the same deployment-level
+    # timeout instead of the gateway silently reverting to 360 seconds.
+    assert backend._client.timeout.read == 1234
+
+
+def test_gateway_preserves_json_rpc_error_message(aenv):
+    pool = MicroVMPool(aenv)
+    FakeAenv.tool_error = {"code": -32000, "message": "sandbox auto-paused"}
+
+    async def scenario():
+        sb = await pool.spawn()
+        result = await sb.call("shell", command="true")
+        await pool.close()
+        return result
+
+    result = asyncio.run(scenario())
+    assert result.is_error is True
+    assert result.output == "sandbox auto-paused"
 
 def test_fork_returns_independent_children(aenv):
     pool = MicroVMPool(aenv)

@@ -26,6 +26,15 @@ class Conversation:
         """Append the assistant turn and update the no-tool counter."""
         msg = {"role": "assistant", "content": message.content or ""}
         trajectory_extra = {}
+        # Reasoning-aware OpenAI endpoints return this field separately from
+        # ``content``.  It is part of the model-visible assistant message and
+        # therefore must be replayed verbatim on the next turn.  Dropping it
+        # makes a token/session server treat every later request as a new root
+        # instead of an extension of the current trajectory.
+        reasoning_content = getattr(message, "reasoning_content", None)
+        if reasoning_content is not None:
+            msg["reasoning_content"] = reasoning_content
+            trajectory_extra["reasoning_content"] = reasoning_content
         if message.tool_calls:
             # Provider SDKs commonly return Pydantic/namespace objects.  A
             # durable trajectory key must be JSON-compatible, while retaining

@@ -85,6 +85,11 @@ class AshAgent:
         self.before_query_hooks = list(hooks.DEFAULT_BEFORE_QUERY)
         self.before_finish_hooks = list(hooks.DEFAULT_BEFORE_FINISH)
         self.result_processors = list(hooks.DEFAULT_RESULT_PROCESSORS)
+        # Kept out of the model-visible conversation but exposed to rollout
+        # orchestrators so an inference failure is not mistaken for a valid,
+        # partially completed trajectory.
+        self.last_model_error: Optional[str] = None
+        self.last_model_finish_reason: Optional[str] = None
 
     def use_panel(self, panel) -> None:
         """Offer this panel, and route through its views.
@@ -262,15 +267,25 @@ class AshAgent:
 
     def _query(self, llm: LLMClient, conv: Conversation, step_n: int):
         """Return the model message, or None on an error that should end the run."""
+        self.last_model_finish_reason = None
         try:
-            return llm.query_with_recovery(conv.messages).choices[0].message
+            response = llm.query_with_recovery(conv.messages)
+            choices = getattr(response, "choices", None)
+            if not choices:
+                raise RuntimeError("model response contained no choices")
+            choice = choices[0]
+            self.last_model_finish_reason = getattr(choice, "finish_reason", None)
+            return choice.message
         except ThinkingLoopError:
             err = "repeated thinking loop"
+            error_type = "ThinkingLoopError"
         except Exception as e:
             err = str(e)
+            error_type = type(e).__name__
             if self.on_step:
                 self.on_step(step_n, "error", err)
         self._trace(f"\n[ERROR] {err}\n")
+        self.last_model_error = f"{error_type}: {err}"
         conv.add_error(err)
         return None
 
@@ -304,6 +319,8 @@ class AshAgent:
         self.cost = CostTracker()
         self._warned = False
         self.hook_state = {}
+        self.last_model_error = None
+        self.last_model_finish_reason = None
         active_run_id = self.run_id or new_run_id()
         if self.trace_dir:
             self.trace_dir.mkdir(parents=True, exist_ok=True)
@@ -349,6 +366,15 @@ class AshAgent:
                 if message is None:
                     return "error"
                 conv.add_assistant(message)
+
+                # A length-truncated completion closes the corresponding Miles
+                # SessionTree path. Keep the partial assistant response for
+                # profiling, but do not execute a possibly partial tool call or
+                # issue another request against that closed node.
+                if self.last_model_finish_reason == "length":
+                    if self.on_turn_end:
+                        self.on_turn_end(self.cost.api_calls, list(conv.messages))
+                    return "length_limit"
 
                 if message.tool_calls:
                     turn_id = f"turn-{self.cost.api_calls}"

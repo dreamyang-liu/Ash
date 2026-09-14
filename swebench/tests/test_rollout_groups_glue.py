@@ -149,6 +149,26 @@ def test_protocol_rejects_boolean_budget_fields(field):
         RolloutGroupRequest.from_dict(payload)
 
 
+def test_protocol_accepts_unbounded_call_budgets():
+    payload = request_payload()
+    payload["budgets"]["max_model_calls"] = None
+    payload["budgets"]["max_tool_calls"] = None
+
+    request = RolloutGroupRequest.from_dict(payload)
+
+    assert request.budgets.max_model_calls is None
+    assert request.budgets.max_tool_calls is None
+
+
+@pytest.mark.parametrize("field", ["max_model_calls", "max_tool_calls"])
+def test_protocol_requires_explicit_call_budget_fields(field):
+    payload = request_payload()
+    del payload["budgets"][field]
+
+    with pytest.raises(ValueError, match="missing required fields"):
+        RolloutGroupRequest.from_dict(payload)
+
+
 def test_protocol_rejects_non_numeric_consumed_budget():
     with pytest.raises(ValueError, match="finite non-negative number"):
         RolloutGroupResult(
@@ -267,6 +287,117 @@ def test_delete_cancels_active_job_and_releases_record():
     assert deleted.status == "cancelled"
     with pytest.raises(KeyError):
         service.get(request.rollout_job_id)
+    deadline = time.time() + 2
+    while time.time() < deadline and service.activity()["active_workers"]:
+        time.sleep(0.01)
+    assert service.activity()["active_workers"] == 0
+
+
+def test_running_job_exposes_live_progress():
+    started = threading.Event()
+    release = threading.Event()
+
+    def report_progress(request, context):
+        context.update_progress(
+            "tool_execution",
+            model_calls=4,
+            tool_calls=3,
+            active_sample_slot_id="slot-0",
+        )
+        started.set()
+        assert release.wait(timeout=2)
+        return complete_result(request, context)
+
+    service = GroupRolloutService(
+        lambda request, context: _ResultStrategy(report_progress)
+    )
+    request = RolloutGroupRequest.from_dict(request_payload("progress-job"))
+    service.submit(request)
+    assert started.wait(timeout=2)
+
+    first = service.get(request.rollout_job_id).to_dict()
+    time.sleep(0.01)
+    second = service.get(request.rollout_job_id).to_dict()
+
+    assert first["status"] == "running"
+    assert first["progress"]["phase"] == "tool_execution"
+    assert first["progress"]["model_calls"] == 4
+    assert first["progress"]["tool_calls"] == 3
+    assert first["progress"]["completed_samples"] == 0
+    assert first["progress"]["active_sample_slot_id"] == "slot-0"
+    assert second["progress"]["elapsed_seconds"] > first["progress"]["elapsed_seconds"]
+    assert second["progress"]["remaining_wall_time_seconds"] < first["progress"]["remaining_wall_time_seconds"]
+
+    release.set()
+    deadline = time.time() + 2
+    while time.time() < deadline and service.get(request.rollout_job_id).status == "running":
+        time.sleep(0.01)
+    terminal = service.get(request.rollout_job_id).to_dict()
+    assert terminal["status"] == "completed"
+    assert "progress" not in terminal
+
+
+def test_cancelled_job_preserves_progress_as_consumed_budget():
+    started = threading.Event()
+
+    def wait_for_deadline(request, context):
+        context.update_progress(
+            "model_generation",
+            model_calls=7,
+            tool_calls=6,
+            active_sample_slot_id="slot-0",
+        )
+        started.set()
+        while not context.cancel_event.wait(0.01):
+            pass
+        context.check_cancelled()
+
+    payload = request_payload("deadline-progress-job")
+    payload["budgets"]["max_wall_time_seconds"] = 0.05
+    service = GroupRolloutService(
+        lambda request, context: _ResultStrategy(wait_for_deadline)
+    )
+    request = RolloutGroupRequest.from_dict(payload)
+    service.submit(request)
+    assert started.wait(timeout=2)
+
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        result = service.get(request.rollout_job_id)
+        if result.status == "cancelled":
+            break
+        time.sleep(0.01)
+
+    assert result.status == "cancelled"
+    assert result.stop_reason == "rollout wall-time budget exhausted"
+    assert result.consumed_budget["model_calls"] == 7
+    assert result.consumed_budget["tool_calls"] == 6
+    assert result.consumed_budget["elapsed_seconds"] >= 0.05
+
+
+def test_progress_counters_do_not_move_backwards():
+    started = threading.Event()
+    release = threading.Event()
+
+    def report_progress(request, context):
+        context.update_progress("model_generation", model_calls=3, tool_calls=2)
+        context.update_progress("cleanup", model_calls=0, tool_calls=0)
+        started.set()
+        assert release.wait(timeout=2)
+        return complete_result(request, context)
+
+    service = GroupRolloutService(
+        lambda request, context: _ResultStrategy(report_progress)
+    )
+    request = RolloutGroupRequest.from_dict(request_payload("monotonic-progress-job"))
+    service.submit(request)
+    assert started.wait(timeout=2)
+
+    progress = service.get(request.rollout_job_id).to_dict()["progress"]
+    assert progress["model_calls"] == 3
+    assert progress["tool_calls"] == 2
+
+    release.set()
 
 
 def test_terminal_job_expires_if_consumer_does_not_delete_it():
@@ -294,6 +425,11 @@ def test_http_endpoints():
     thread.start()
     base = f"http://127.0.0.1:{server.server_port}"
     try:
+        with urllib.request.urlopen(base + "/health") as response:
+            health = json.load(response)
+        assert health["status"] == "ready"
+        assert health["active_workers"] == 0
+        assert health["retained_jobs"] == 0
         body = json.dumps(request_payload("http-job")).encode()
         req = urllib.request.Request(base + "/rollout-groups", data=body,
                                      headers={"Content-Type": "application/json"})
@@ -379,6 +515,76 @@ def test_http_lists_static_environment_refs_without_spawn_handles():
         }
         assert "spawn_ref" not in json.dumps(payload)
     finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_http_releases_idle_dynamic_environment_and_rejects_active_reference():
+    class ReleasableEnvironment:
+        def __init__(self):
+            self.released = []
+
+        def validate_request(self, _request):
+            return None
+
+        def release_environment(self, ref):
+            self.released.append(ref)
+            return True
+
+    environment = ReleasableEnvironment()
+    gate = threading.Event()
+
+    class BlockingStrategy:
+        def run(self, request, context):
+            gate.wait(timeout=2)
+            return complete_result(request, context)
+
+    service = GroupRolloutService(
+        lambda request, context: BlockingStrategy(),
+        environment_provider=environment,
+    )
+    server = RolloutGroupsHTTPServer(("127.0.0.1", 0), service)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    payload = request_payload("active-environment-job")
+    release_body = json.dumps(
+        {"environment_ref": payload["environment_ref"]}
+    ).encode()
+    try:
+        submit = urllib.request.Request(
+            base + "/rollout-groups",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(submit):
+            pass
+        release = urllib.request.Request(
+            base + "/rollout-environments/cache",
+            data=release_body,
+            method="DELETE",
+            headers={"Content-Type": "application/json"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as conflict:
+            urllib.request.urlopen(release)
+        assert conflict.value.code == 409
+
+        gate.set()
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            if service.get("active-environment-job").status == "completed":
+                break
+            time.sleep(0.01)
+        service.delete("active-environment-job")
+
+        with urllib.request.urlopen(release) as response:
+            result = json.load(response)
+        assert result["status"] == "released"
+        assert len(environment.released) == 1
+        assert environment.released[0].to_dict() == payload["environment_ref"]
+    finally:
+        gate.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)

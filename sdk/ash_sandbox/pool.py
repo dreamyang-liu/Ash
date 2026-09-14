@@ -305,6 +305,7 @@ class MicroVMPool(Pool):
         self.server_url = server_url.rstrip("/")
         self.default_template = default_template
         self.runtime_port = runtime_port
+        self.request_timeout = request_timeout
         self.sandbox_ttl = sandbox_ttl
         self.auto_resume = auto_resume
         headers = {"X-API-KEY": api_key} if api_key else {}
@@ -476,6 +477,7 @@ class MicroVMPool(Pool):
             sandbox_id_header=self.SANDBOX_ID_HEADER,
             target_port=self.runtime_port,
             target_port_header=self.TARGET_PORT_HEADER,
+            request_timeout=self.request_timeout,
         ), agent_id=agent_id)
         sb._container_id = sandbox_id
         self._sandboxes[sandbox_id] = sb

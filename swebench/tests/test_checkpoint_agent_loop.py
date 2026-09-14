@@ -185,11 +185,11 @@ def test_checkpoint_agent_loop_restores_child_and_releases_resources(monkeypatch
             kwargs["on_turn_end"](1, checkpoint_messages)
             return "completed", 3, 1, checkpoint_messages + [
                 {"role": "assistant", "content": "parent-final"}
-            ]
+            ], 0.25
         assert kwargs["initial_messages"] == checkpoint_messages
         return "completed", 2, 0, checkpoint_messages + [
             {"role": "assistant", "content": "child-final"}
-        ]
+        ], 0.10
 
     monkeypatch.setattr(strategy, "_run_agent", run_agent)
     result = strategy.run(
@@ -296,7 +296,7 @@ def test_checkpoint_agent_loop_reports_release_failure_after_other_cleanup(monke
             kwargs["on_turn_end"](1, checkpoint_messages)
         return "completed", 1, 0, checkpoint_messages + [
             {"role": "assistant", "content": "done"}
-        ]
+        ], 0.05
 
     monkeypatch.setattr(strategy, "_run_agent", run_agent)
     with pytest.raises(RuntimeError, match="checkpoint rollout cleanup failed"):

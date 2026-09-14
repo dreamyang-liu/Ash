@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 from typing import Any
 
@@ -27,6 +28,7 @@ class AshSessionEnvironmentProvider:
         backend: dict[str, Any] | None = None,
         runtime_bin: str | None = None,
         timeout: float = 300.0,
+        cleanup_reserve_seconds: int = 300,
         quiet: bool = True,
     ) -> None:
         if catalog is not None and not isinstance(catalog, EnvironmentCatalog):
@@ -38,6 +40,9 @@ class AshSessionEnvironmentProvider:
         self.backend = dict(backend or {})
         self.runtime_bin = runtime_bin
         self.timeout = timeout
+        if cleanup_reserve_seconds < 0:
+            raise ValueError("cleanup_reserve_seconds must be non-negative")
+        self.cleanup_reserve_seconds = cleanup_reserve_seconds
         self.quiet = quiet
         self._checkpoint_lock = threading.RLock()
         self._checkpoint_owners: dict[
@@ -51,7 +56,7 @@ class AshSessionEnvironmentProvider:
             runtime_bin=self.runtime_bin,
             timeout=self.timeout,
             quiet=self.quiet,
-            backend=self.backend,
+            backend=self._backend_for_request(request),
         )
         if not session.create(resolved.spawn_ref):
             session.destroy()
@@ -89,6 +94,20 @@ class AshSessionEnvironmentProvider:
         if self.catalog is None:
             return []
         return [ref.to_dict() for ref in self.catalog.list_refs()]
+
+    def release_environment(self, ref) -> bool:
+        """Release a dynamically prepared OCI environment snapshot.
+
+        Static catalog entries are deployment-owned and deliberately excluded:
+        a rollout consumer must not delete a shared administrator-provisioned
+        template or snapshot.
+        """
+        if self.catalog is not None and self.catalog.find(ref) is not None:
+            raise ValueError("static catalog environments cannot be released")
+        backend = str(self.backend.get("backend") or "docker").strip().lower()
+        if backend != "microvm" or ref.kind != "image" or self.oci_resolver is None:
+            raise ValueError("environment is not managed by the dynamic OCI resolver")
+        return self.oci_resolver.release(ref)
 
     def _resolve(self, ref) -> EnvironmentCatalogEntry:
         if self.catalog is not None:
@@ -158,12 +177,15 @@ class AshSessionEnvironmentProvider:
     ):
         if checkpoint.backend != "agentenv-microvm" or checkpoint.state_scope != "full-runtime":
             raise ValueError("checkpoint is incompatible with the AgentENV microVM provider")
-        self._owned_checkpoint(checkpoint)
+        owner = self._owned_checkpoint(checkpoint)
         session = AshSession(
             runtime_bin=self.runtime_bin,
             timeout=self.timeout,
             quiet=self.quiet,
-            backend=self.backend,
+            # A restored child must retain the parent rollout's TTL policy.
+            # The provider-level default may be shorter than this job's wall
+            # budget and would otherwise pause the child during a long turn.
+            backend=owner.backend,
         )
         try:
             session.restore_checkpoint(checkpoint.checkpoint_id, agent_id=agent_id)
@@ -171,6 +193,27 @@ class AshSessionEnvironmentProvider:
             session.destroy()
             raise
         return session
+
+    def _backend_for_request(self, request) -> dict[str, Any]:
+        backend = dict(self.backend)
+        if str(backend.get("backend") or "docker").strip().lower() != "microvm":
+            return backend
+        microvm = dict(backend.get("microvm") or {})
+        minimum_ttl = math.ceil(
+            request.budgets.max_wall_time_seconds + self.cleanup_reserve_seconds
+        )
+        microvm["sandbox_ttl"] = max(
+            int(microvm.get("sandbox_ttl", 0)), minimum_ttl
+        )
+        # AgentENV's gateway request must outlive any command admitted by the
+        # rollout deadline.  The command itself is still bounded precisely by
+        # RolloutContext; this larger transport timeout prevents an unrelated
+        # client default from severing a healthy long-running tool call first.
+        microvm["request_timeout"] = max(
+            float(microvm.get("request_timeout", 0)), float(minimum_ttl)
+        )
+        backend["microvm"] = microvm
+        return backend
 
     def release_checkpoint(self, checkpoint: EnvironmentCheckpoint) -> bool:
         with self._checkpoint_lock:

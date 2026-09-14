@@ -107,6 +107,10 @@ class LLMClient:
             kwargs["api_base"] = c.api_base
         if c.api_key:
             kwargs["api_key"] = c.api_key
+        if c.request_timeout is not None:
+            kwargs["timeout"] = c.request_timeout
+        if c.request_max_retries is not None:
+            kwargs["max_retries"] = c.request_max_retries
         if c.extra_body:
             # LiteLLM's OpenAI-compatible adapter forwards provider-specific
             # fields correctly when they are top-level kwargs.  Passing the
@@ -121,20 +125,20 @@ class LLMClient:
         completion, stream_chunk_builder = _get_litellm()
         kwargs = self._build_kwargs(messages)
 
-        max_retries = 8
+        max_attempts = max(1, self.config.retry_attempts)
         raw = None
-        for attempt in range(max_retries):
+        for attempt in range(max_attempts):
             try:
                 raw = completion(**kwargs)
                 break
             except Exception as e:
                 if not self._retryable(e):
                     raise
-                wait = min(2 ** attempt, 120)
-                self._trace(f"\n[RETRY] {type(e).__name__} attempt {attempt+1}/{max_retries}, waiting {wait}s\n")
-                time.sleep(wait)
-                if attempt == max_retries - 1:
+                if attempt == max_attempts - 1:
                     raise
+                wait = min(2 ** attempt, 120)
+                self._trace(f"\n[RETRY] {type(e).__name__} attempt {attempt+1}/{max_attempts}, waiting {wait}s\n")
+                time.sleep(wait)
 
         if not self.stream:
             self.cost.update(raw)

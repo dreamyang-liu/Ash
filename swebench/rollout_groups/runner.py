@@ -7,11 +7,12 @@ checkpoint cadence and model prompting are injected through protocols.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import urllib.request
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
 from .protocol import (
@@ -19,10 +20,14 @@ from .protocol import (
     GeneratedSpan,
     RolloutGroupRequest,
     RolloutGroupResult,
+    RolloutProgress,
     RolloutDeletion,
     RolloutSubmission,
     Trajectory,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class ModelClient(Protocol):
@@ -75,6 +80,34 @@ class EnvironmentProvider(Protocol):
     def destroy(self, sandbox: Any) -> None: ...
 
 
+@dataclass(frozen=True)
+class TaskEvaluation:
+    """Benchmark result produced while the final sandbox is still alive."""
+
+    reward: float | dict[str, Any]
+    metadata: dict[str, Any]
+
+
+class TaskAdapter(Protocol):
+    """Server-side task setup and grading kept outside the public request."""
+
+    def validate_request(self, request: RolloutGroupRequest) -> None: ...
+    def prepare(
+        self,
+        request: RolloutGroupRequest,
+        sandbox: Any,
+        context: "RolloutContext | None" = None,
+    ) -> Any: ...
+    def evaluate(
+        self,
+        request: RolloutGroupRequest,
+        sandbox: Any,
+        trajectory: Trajectory,
+        prepared: Any,
+        context: "RolloutContext | None" = None,
+    ) -> TaskEvaluation: ...
+
+
 class RolloutStrategy(Protocol):
     """Algorithm plug-in; no HTTP or job-state responsibilities."""
 
@@ -88,10 +121,32 @@ class RolloutContext:
     environment_provider: EnvironmentProvider | None
     job_id: str
     deadline: float | None = None
+    task_adapter: TaskAdapter | None = None
+    progress_callback: Any | None = None
+
+    def update_progress(
+        self,
+        phase: str,
+        *,
+        model_calls: int | None = None,
+        tool_calls: int | None = None,
+        completed_samples: int | None = None,
+        active_sample_slot_id: str | None = None,
+    ) -> None:
+        """Publish bounded operational state without exposing trajectory text."""
+        if self.progress_callback is not None:
+            self.progress_callback(
+                phase=phase,
+                model_calls=model_calls,
+                tool_calls=tool_calls,
+                completed_samples=completed_samples,
+                active_sample_slot_id=active_sample_slot_id,
+            )
 
     def check_cancelled(self) -> None:
         if self.deadline is not None and time.monotonic() >= self.deadline:
             self.cancel_event.set()
+            raise RolloutCancelled("rollout wall-time budget exhausted")
         if self.cancel_event.is_set():
             raise RolloutCancelled("rollout job was cancelled")
 
@@ -101,8 +156,40 @@ class RolloutContext:
             return None
         return max(0.0, self.deadline - time.monotonic())
 
+    def prepare_task(self, request: RolloutGroupRequest, sandbox: Any) -> Any:
+        if self.task_adapter is None:
+            return None
+        self.check_cancelled()
+        self.update_progress("preparing_task")
+        return self.task_adapter.prepare(request, sandbox, self)
+
+    def evaluate_trajectory(
+        self,
+        request: RolloutGroupRequest,
+        sandbox: Any,
+        trajectory: Trajectory,
+        prepared: Any,
+    ) -> Trajectory:
+        if self.task_adapter is None:
+            return trajectory
+        self.check_cancelled()
+        self.update_progress("evaluating")
+        evaluation = self.task_adapter.evaluate(
+            request, sandbox, trajectory, prepared, self
+        )
+        self.check_cancelled()
+        return replace(
+            trajectory,
+            reward=evaluation.reward,
+            metadata={**trajectory.metadata, **evaluation.metadata},
+        )
+
 
 class RolloutCancelled(Exception):
+    pass
+
+
+class EnvironmentInUse(Exception):
     pass
 
 
@@ -145,6 +232,8 @@ class GroupRolloutService:
         *,
         model_client: ModelClient | None = None,
         environment_provider: EnvironmentProvider | None = None,
+        task_adapter: TaskAdapter | None = None,
+        profile_writer: Any | None = None,
         result_ttl_seconds: float = 300.0,
     ):
         if result_ttl_seconds <= 0:
@@ -152,9 +241,15 @@ class GroupRolloutService:
         self.strategy_factory = strategy_factory
         self.model_client = model_client
         self.environment_provider = environment_provider
+        self.task_adapter = task_adapter
+        self.profile_writer = profile_writer
         self.result_ttl_seconds = result_ttl_seconds
         self._lock = threading.RLock()
         self._jobs: dict[str, dict[str, Any]] = {}
+        # Workers remain tracked after DELETE removes their public job record.
+        # A storage supervisor can therefore wait for cancellation cleanup to
+        # finish before replacing an AgentENV node.
+        self._workers: set[threading.Thread] = set()
 
     def submit(self, request: RolloutGroupRequest) -> RolloutSubmission:
         # Environment selection is optional for providers such as the
@@ -165,6 +260,8 @@ class GroupRolloutService:
         )
         if callable(validate_environment):
             validate_environment(request)
+        if self.task_adapter is not None:
+            self.task_adapter.validate_request(request)
         canonical = json.dumps(request.to_dict(), sort_keys=True, separators=(",", ":"))
         with self._lock:
             self._prune_terminal_jobs_locked()
@@ -186,13 +283,39 @@ class GroupRolloutService:
                 "cancel_event": threading.Event(),
                 "thread": None,
                 "terminal_at": None,
+                "started_at": None,
+                "progress": {
+                    "phase": "queued",
+                    "model_calls": 0,
+                    "tool_calls": 0,
+                    "completed_samples": 0,
+                    "active_sample_slot_id": None,
+                    "updated_at_unix_seconds": time.time(),
+                },
             }
             self._jobs[request.rollout_job_id] = record
             worker = threading.Thread(target=self._run, args=(request.rollout_job_id,),
                                       name=f"ash-rollout-{request.rollout_job_id}", daemon=True)
             record["thread"] = worker
+            self._workers.add(worker)
             worker.start()
             return RolloutSubmission(request.rollout_job_id, "queued")
+
+    def activity(self) -> dict[str, Any]:
+        """Return aggregate lifecycle state without exposing task contents."""
+        with self._lock:
+            self._workers = {worker for worker in self._workers if worker.is_alive()}
+            counts: dict[str, int] = {}
+            for record in self._jobs.values():
+                status = record["result"].status
+                counts[status] = counts.get(status, 0) + 1
+            return {
+                "protocol_version": PROTOCOL_VERSION,
+                "status": "ready",
+                "active_workers": len(self._workers),
+                "retained_jobs": len(self._jobs),
+                "jobs_by_status": counts,
+            }
 
     def list_environments(self) -> dict[str, Any]:
         """Describe the static environment refs accepted by this deployment.
@@ -210,13 +333,56 @@ class GroupRolloutService:
             "environments": environments,
         }
 
+    def release_environment(self, environment_ref) -> dict[str, Any]:
+        """Release one idle, dynamically prepared rollout environment.
+
+        The lock makes the active-reference check and backend release atomic
+        with respect to job submission. Terminal jobs remain references until
+        the consumer deletes them, proving that their results were collected.
+        """
+        release = getattr(self.environment_provider, "release_environment", None)
+        if not callable(release):
+            raise ValueError("environment provider does not support cache release")
+        with self._lock:
+            blockers = [
+                job_id
+                for job_id, record in self._jobs.items()
+                if record["request"].environment_ref == environment_ref
+            ]
+            if blockers:
+                raise EnvironmentInUse(
+                    "environment is still referenced by rollout jobs: "
+                    + ", ".join(sorted(blockers))
+                )
+            released = release(environment_ref)
+        return {
+            "protocol_version": PROTOCOL_VERSION,
+            "environment_ref": environment_ref.to_dict(),
+            "status": "released" if released else "not_cached",
+        }
+
     def get(self, job_id: str) -> RolloutGroupResult:
         with self._lock:
             self._prune_terminal_jobs_locked()
             record = self._jobs.get(job_id)
             if record is None:
                 raise KeyError(job_id)
-            return record["result"]
+            result = record["result"]
+            if result.status not in {"queued", "running"}:
+                return result
+            progress = dict(record["progress"])
+            started_at = record["started_at"]
+            elapsed = 0.0 if started_at is None else max(0.0, time.monotonic() - started_at)
+            request: RolloutGroupRequest = record["request"]
+            remaining = max(0.0, request.budgets.max_wall_time_seconds - elapsed)
+            return replace(
+                result,
+                progress=RolloutProgress(
+                    **progress,
+                    elapsed_seconds=round(elapsed, 3),
+                    remaining_wall_time_seconds=round(remaining, 3),
+                ),
+            )
 
     def delete(self, job_id: str) -> RolloutDeletion:
         """Cancel unfinished work and release the in-memory job record.
@@ -252,6 +418,20 @@ class GroupRolloutService:
             if result.status in {"completed", "early_stopped", "failed", "cancelled"}:
                 self._jobs[job_id]["terminal_at"] = time.monotonic()
 
+    def _update_progress(self, job_id: str, **changes: Any) -> None:
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if record is None or record["result"].status not in {"queued", "running"}:
+                return
+            progress = record["progress"]
+            for name, value in changes.items():
+                if value is not None:
+                    if name in {"model_calls", "tool_calls", "completed_samples"}:
+                        progress[name] = max(int(progress.get(name, 0)), int(value))
+                    else:
+                        progress[name] = value
+            progress["updated_at_unix_seconds"] = time.time()
+
     def _prune_terminal_jobs_locked(self) -> None:
         cutoff = time.monotonic() - self.result_ttl_seconds
         expired = [
@@ -262,6 +442,19 @@ class GroupRolloutService:
         for job_id in expired:
             del self._jobs[job_id]
 
+    def _consumed_budget_snapshot(
+        self, job_id: str, *, started: float
+    ) -> dict[str, int | float]:
+        """Keep measured work when a rollout terminates outside a strategy."""
+        with self._lock:
+            record = self._jobs.get(job_id)
+            progress = {} if record is None else record["progress"]
+            return {
+                "model_calls": int(progress.get("model_calls", 0)),
+                "tool_calls": int(progress.get("tool_calls", 0)),
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+            }
+
     def _run(self, job_id: str) -> None:
         with self._lock:
             record = self._jobs.get(job_id)
@@ -271,6 +464,12 @@ class GroupRolloutService:
             cancel_event: threading.Event = record["cancel_event"]
             if record["result"].status == "cancelled":
                 return
+            started = time.monotonic()
+            record["started_at"] = started
+            record["progress"].update(
+                phase="starting",
+                updated_at_unix_seconds=time.time(),
+            )
             self._jobs[job_id]["result"] = RolloutGroupResult(
                 rollout_job_id=job_id,
                 prompt_group_id=request.prompt_group_id,
@@ -283,6 +482,8 @@ class GroupRolloutService:
             self.environment_provider,
             job_id,
             deadline=time.monotonic() + request.budgets.max_wall_time_seconds,
+            task_adapter=self.task_adapter,
+            progress_callback=lambda **changes: self._update_progress(job_id, **changes),
         )
         timeout_timer = threading.Timer(
             request.budgets.max_wall_time_seconds,
@@ -290,9 +491,9 @@ class GroupRolloutService:
         )
         timeout_timer.daemon = True
         timeout_timer.start()
-        started = time.monotonic()
         try:
             strategy = self.strategy_factory(request, context)
+            context.update_progress("running_strategy")
             result = strategy.run(request, context)
             if not isinstance(result, RolloutGroupResult):
                 raise TypeError("rollout strategy must return RolloutGroupResult")
@@ -312,19 +513,30 @@ class GroupRolloutService:
             if not returned_slots <= requested_slots:
                 raise ValueError("strategy returned a sample_slot_id not allocated by Miles")
             context.check_cancelled()
+            elapsed_seconds = round(time.monotonic() - started, 3)
+            if self.profile_writer is not None:
+                self.profile_writer.write(
+                    request, result, elapsed_seconds=elapsed_seconds
+                )
             self._set_result(job_id, result)
         except RolloutCancelled as exc:
             self._set_result(job_id, RolloutGroupResult(
                 rollout_job_id=job_id, prompt_group_id=request.prompt_group_id,
                 status="cancelled", max_samples=request.max_samples,
                 stop_reason=str(exc),
+                consumed_budget=self._consumed_budget_snapshot(
+                    job_id, started=started
+                ),
             ))
         except Exception as exc:  # noqa: BLE001 - failure is part of the wire contract
+            logger.exception("rollout job %s failed", job_id)
             self._set_result(job_id, RolloutGroupResult(
                 rollout_job_id=job_id, prompt_group_id=request.prompt_group_id,
                 status="failed", max_samples=request.max_samples,
                 stop_reason=f"{type(exc).__name__}: {exc}",
-                consumed_budget={"elapsed_seconds": round(time.monotonic() - started, 3)},
+                consumed_budget=self._consumed_budget_snapshot(
+                    job_id, started=started
+                ),
             ))
         finally:
             timeout_timer.cancel()
@@ -334,3 +546,5 @@ class GroupRolloutService:
                     close()
                 except Exception:
                     pass
+            with self._lock:
+                self._workers.discard(threading.current_thread())

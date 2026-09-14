@@ -10,6 +10,17 @@ import httpx
 from .result import ToolResult
 
 
+def _rpc_error_text(data: dict) -> str:
+    """Preserve a JSON-RPC error instead of returning an empty tool result."""
+    error = data.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if message:
+            return str(message)
+        return json.dumps(error, ensure_ascii=False, sort_keys=True)
+    return str(error or "runtime returned an unspecified JSON-RPC error")
+
+
 def call_params(tool_name: str, args: dict, agent_id: str = "") -> dict:
     """Build the JSON-RPC params for a tools/call request.
 
@@ -58,7 +69,9 @@ class HTTPBackend(Backend):
         resp.raise_for_status()
         data = resp.json()
         if data.get("error"):
-            return ToolResult(output="", is_error=True, notifications=[])
+            return ToolResult(
+                output=_rpc_error_text(data), is_error=True, notifications=[]
+            )
         return ToolResult.from_response(data["result"])
 
     async def list_tools(self) -> list[dict]:
@@ -105,7 +118,9 @@ class MCPBackend(Backend):
         resp.raise_for_status()
         data = resp.json()
         if data.get("error"):
-            return ToolResult(output="", is_error=True, notifications=[])
+            return ToolResult(
+                output=_rpc_error_text(data), is_error=True, notifications=[]
+            )
         return ToolResult.from_response(data["result"])
 
     async def list_tools(self) -> list[dict]:
@@ -220,13 +235,14 @@ class GatewayBackend(Backend):
     def __init__(self, gateway_url: str, sandbox_id: str,
                  sandbox_id_header: str = "X-Sandbox-ID",
                  target_port: int | None = None,
-                 target_port_header: str = "X-Target-Port"):
+                 target_port_header: str = "X-Target-Port",
+                 request_timeout: float | None = 360):
         self.gateway_url = gateway_url.rstrip("/")
         self.sandbox_id = sandbox_id
         self.sandbox_id_header = sandbox_id_header
         self.target_port = target_port
         self.target_port_header = target_port_header
-        self._client = httpx.AsyncClient(timeout=360)
+        self._client = httpx.AsyncClient(timeout=request_timeout)
 
     def _routing_headers(self) -> dict[str, str]:
         headers = {self.sandbox_id_header: self.sandbox_id}
@@ -248,7 +264,9 @@ class GatewayBackend(Backend):
         resp.raise_for_status()
         data = resp.json()
         if data.get("error"):
-            return ToolResult(output="", is_error=True, notifications=[])
+            return ToolResult(
+                output=_rpc_error_text(data), is_error=True, notifications=[]
+            )
         return ToolResult.from_response(data["result"])
 
     async def list_tools(self) -> list[dict]:

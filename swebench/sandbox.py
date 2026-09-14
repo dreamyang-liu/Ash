@@ -222,8 +222,17 @@ class AshSession:
         # expansion it also memoises, so a repeat call skips the download
         # round-trip. This session's registry is passed explicitly: the Sandbox has one
         # of its own, but the panel compiled for this run loaded into ours.
-        sdk_result: SdkToolResult = await self._sandbox.call_agent_tool(
-            tool_name, call_args, registry=self.tools, agent_id=agent_id)
+        try:
+            sdk_result: SdkToolResult = await asyncio.wait_for(
+                self._sandbox.call_agent_tool(
+                    tool_name, call_args, registry=self.tools, agent_id=agent_id
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"tool request exceeded transport timeout of {timeout:.3f}s"
+            ) from exc
         return ToolResult.from_sdk(sdk_result)
 
     def get_patch(self) -> str:

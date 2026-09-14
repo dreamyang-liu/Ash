@@ -43,6 +43,23 @@ def test_conversation_persists_assistant_tool_calls_in_both_views():
     assert trajectory.messages[0]["tool_calls"][0]["function"]["name"] == "shell"
 
 
+def test_conversation_replays_reasoning_content_in_model_history():
+    trajectory = Trajectory()
+    conversation = Conversation(trajectory)
+    message = SimpleNamespace(
+        content="",
+        reasoning_content="inspect the repository first",
+        tool_calls=[_tool_call("call-1", "shell", {"command": "ls"})],
+        thinking_blocks=None,
+    )
+
+    conversation.add_assistant(message)
+
+    expected = "inspect the repository first"
+    assert conversation.messages[0]["reasoning_content"] == expected
+    assert trajectory.messages[0]["reasoning_content"] == expected
+
+
 def test_tool_trace_records_turn_sequence_routing_and_background_process(tmp_path):
     path = tmp_path / "trace.events.jsonl"
     calls = []

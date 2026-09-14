@@ -2,11 +2,11 @@
 
 This branch adds a strategy-neutral Ash rollout interface for Miles. It starts
 from the Ash `main` branch and keeps the rollout protocol independent from any
-branching algorithm. The first executable strategy is the branch-free
-`SequentialRolloutStrategy`; no checkpoint index or branch-selection policy is
-part of the interface layer. `CheckpointAgentLoopRolloutStrategy` is a
-functional reference that exercises the AgentENV checkpoint contract; its
-fixed first-checkpoint rule is not part of that contract.
+branching algorithm. The recommended baseline is Claude Agent SDK with Ash MCP
+tools (`claude-agent-loop`); `claude-checkpoint-agent-loop-v1` is a functional
+reference that exercises the AgentENV checkpoint plus Claude-session fork
+contract. Its fixed first-tool rule is not part of that contract. The older
+AshAgent strategies remain compatibility paths.
 
 ## Boundary
 
@@ -35,10 +35,26 @@ never calls it directly.
 
 | Endpoint | Purpose |
 | --- | --- |
+| `GET /health` | Report aggregate job and worker activity. A storage controller must wait for `active_workers=0` before replacing an AgentENV node; deleting a job record alone does not prove cleanup has finished. |
 | `GET /rollout-environments` | List deployment-approved static environment references. The response omits backend `spawn_ref` values and credentials. |
 | `POST /rollout-groups` | Validate a group and enqueue an asynchronous job. Repeating the same job ID with the same request is idempotent and returns the job's current status, including a terminal status if it already finished; reusing it for another request is rejected. |
 | `GET /rollout-groups/{job_id}` | Read progress or the terminal result. A terminal result contains complete trajectories, not just final text. |
 | `DELETE /rollout-groups/{job_id}` | Cancel unfinished work and release the in-memory job record. Miles calls it after consuming a terminal result as well as on failure; the response is a lightweight job ID/status acknowledgement, not a second copy of the trajectories. |
+
+Cancellation propagates through the serving stack instead of stopping only at
+the Ash job record. For a running SessionTree-backed model call, Ash sets the
+job cancellation event and deletes the active Miles session. Miles cancels the
+session's in-flight upstream HTTP request; the resulting client disconnect lets
+SGLang abort that request in its scheduler. Ash remains independent of the
+concrete inference backend and never calls an SGLang-specific abort endpoint.
+
+Legacy AshAgent services make three attempts by default for retryable model
+transport failures (`InternalServerError`, timeout, rate limit, or service
+unavailable); configure this with `--model-request-retry-attempts`. The retry
+occurs while waiting for one model response and before any tool call from that
+response can execute. It can add an abandoned sibling generation to the Miles
+SessionTree if the first HTTP response was committed upstream but lost in
+transit, but it cannot repeat an environment side effect.
 
 Terminal results that are not deleted, for example after a Miles process
 failure, become eligible for removal after `--result-ttl-seconds` (300 seconds
@@ -50,6 +66,14 @@ The wire version is `ash-rollout-v2`, matching the Miles adapter. Each
 returned leaf must retain its `sample_slot_id`; Ash branch/checkpoint IDs are
 lineage metadata. A trajectory includes exact token IDs, generated spans,
 weight version, ordered messages, reward and branch lineage.
+
+`prompt_token_alignment` records how the first model-visible prefix relates to
+the request's `prompt_token_ids`. The default, `request_exact`, preserves the
+strict equality check used by direct model and AshAgent rollouts. External
+harnesses such as Claude Code add their own system prompt and runtime context;
+they return `harness_rendered`, making the exact first request captured by the
+Miles Session Server authoritative while retaining the original request prompt
+tokens as provenance.
 
 ### Request and response bodies
 
@@ -87,23 +111,37 @@ may perform.
   "return_rollout_logprobs": false,
   "sampling_params": {"temperature": 0.6, "max_new_tokens": 2048},
   "budgets": {
-    "max_model_calls": 6,
-    "max_tool_calls": 2,
-    "max_wall_time_seconds": 1800
+    "max_model_calls": null,
+    "max_tool_calls": null,
+    "max_wall_time_seconds": 10800
   }
 }
 ```
 
-In the current agent-loop strategies, `task_id` becomes the AshAgent
-`instance_id` used for task/trace identity. It does not by itself install a
-repository, select a working directory, configure tools, or bind a reward.
-Those task-specific effects must already be represented by the selected
-environment and prompt, or be added by a future task-initialization contract.
-Only `environment_ref` selects the sandbox creation artifact.
+`max_model_calls` and `max_tool_calls` may be `null`. A null value disables
+that call-count limit for the episode; wall time, cancellation, model context,
+per-turn generation limits and sandbox lifecycle policy still bound the job.
+Finite positive model-call limits and finite non-negative tool-call limits are
+also accepted.
 
-The protocol accepts an extensible `sampling_params` object. The shared
+For the AgentENV microVM backend, Ash derives the sandbox lifecycle from the
+request: both the sandbox TTL and the proxied runtime request timeout are at
+least `max_wall_time_seconds + 300`. Restored children inherit the same backend
+settings. Shell commands are capped to the remaining rollout time (with a
+short response reserve), while model requests and Miles Session Server
+requests are also bounded by the same remaining deadline. This prevents an
+independent backend timeout from pausing a healthy sandbox before rollout or
+hidden-test evaluation reaches its declared wall-time boundary.
+
+`task_id` supplies task/trace identity and can be consumed by an Ash task
+adapter. It does not by itself install a repository, select a working
+directory, configure tools, or bind a reward. Those task-specific effects must
+already be represented by the selected environment and prompt, or by a task
+adapter. Only `environment_ref` selects the sandbox creation artifact.
+
+The protocol accepts an extensible `sampling_params` object. The legacy
 AshAgent adapter maps `model`, `max_tokens`/`max_new_tokens`, `temperature`,
-`top_p`, `top_k`, `stop`, `stop_token_ids`, `skip_special_tokens`,
+`seed`, `top_p`, `top_k`, `stop`, `stop_token_ids`, `skip_special_tokens`,
 `no_stop_trim`, `spaces_between_special_tokens`, and `chat_template_kwargs` into the
 OpenAI-compatible model request. An explicit `extra_body` object may carry
 additional provider fields; future sampling controls still require an adapter
@@ -127,6 +165,39 @@ not contain trajectories; Miles obtains those through GET.
 Miles polls `GET /rollout-groups/{rollout_job_id}`. A terminal response has
 the following shape (the full `messages`, token IDs and spans are not shortened
 in the actual response):
+
+While the job is queued or running, the same endpoint includes a lightweight
+`progress` snapshot:
+
+```json
+{
+  "status": "running",
+  "progress": {
+    "phase": "model_generation",
+    "model_calls": 12,
+    "tool_calls": 10,
+    "completed_samples": 0,
+    "active_sample_slot_id": "...:slot:0",
+    "elapsed_seconds": 418.2,
+    "remaining_wall_time_seconds": 3181.8,
+    "updated_at_unix_seconds": 1789320000.0
+  }
+}
+```
+
+`phase` identifies the current coarse operation (`starting`,
+`creating_environment`, `preparing_task`, `model_generation`,
+`tool_execution`, `evaluating`, or `cleaning_up`). Counts are cumulative for
+the rollout group. `updated_at_unix_seconds` is the last phase/count update;
+`elapsed_seconds` and `remaining_wall_time_seconds` are recalculated on every
+GET, so a stale activity timestamp can be distinguished from a stopped clock.
+Progress is operational telemetry and is not training data.
+When a job is cancelled or fails, the terminal `consumed_budget` retains the
+latest published `model_calls`, `tool_calls`, and measured `elapsed_seconds`,
+so a right-censored run remains distinguishable from an immediate failure.
+A deadline-triggered cancellation uses the explicit stop reason
+`rollout wall-time budget exhausted`; an external delete remains
+`rollout job was cancelled`.
 
 ```json
 {
@@ -178,6 +249,7 @@ in the actual response):
       "response_text": "Parent completed.",
       "reward": null,
       "status": "completed",
+      "prompt_token_alignment": "request_exact",
       "metadata": {"environment_checkpoint_id": "opaque-to-Miles"}
     },
     {
@@ -218,6 +290,7 @@ in the actual response):
       "response_text": "Child completed.",
       "reward": null,
       "status": "completed",
+      "prompt_token_alignment": "request_exact",
       "metadata": {"environment_checkpoint_id": "opaque-to-Miles"}
     }
   ]
@@ -349,7 +422,7 @@ take the warm path. Enable this behavior with a deployment-owned policy file:
 
 ```bash
 PYTHONPATH=sdk:. python -m swebench.rollout_groups.server \
-  --strategy agent-loop \
+  --strategy claude-agent-loop \
   --agentenv-oci-resolver-config configs/agentenv_oci_resolver.example.json \
   --backend-json '{"backend":"microvm","microvm":{"server_url":"http://agentenv:8000","runtime_port":3000,"api_key_file":"/run/secrets/agentenv-api-key"}}' \
   --miles-session-endpoint "http://miles-session:30000" \
@@ -382,12 +455,13 @@ Docker can bind-mount `ash-runtime` at container creation time, whereas an
 AgentENV microVM must receive it during preparation and preserve the running
 process in the cached full-runtime snapshot.
 
-The following command selects the real AgentENV-backed environment provider,
-the catalog and the Miles v2 Session Server:
+The following command selects the recommended Claude Agent SDK harness, the
+real AgentENV-backed environment provider, the catalog and the Miles v2
+Session Server:
 
 ```bash
 PYTHONPATH=sdk:. python -m swebench.rollout_groups.server \
-  --strategy agent-loop \
+  --strategy claude-agent-loop \
   --environment-catalog /etc/ash/environments.json \
   --backend-json '{"backend":"microvm","microvm":{"server_url":"http://agentenv:8000","runtime_port":3000,"api_key_file":"/run/secrets/agentenv-api-key"}}' \
   --miles-session-endpoint "http://miles-session:30000" \
@@ -397,15 +471,34 @@ PYTHONPATH=sdk:. python -m swebench.rollout_groups.server \
 `server_url`, credentials and runtime port remain deployment settings and never
 cross the rollout request. The process exposes `POST/GET/DELETE
 /rollout-groups` on port `11001` by default. A later branch policy can replace
-`MilesSessionAgentRolloutStrategy` without changing this transport or
-environment wiring.
+the Claude rollout strategy without changing this transport or environment
+wiring.
 
 The checkpoint reference strategy uses the same service with
-`--strategy checkpoint-agent-loop-v1`. It records the first tool-complete
-boundary, restores the remaining allocated slots from that checkpoint and
-releases the persistent AgentENV snapshot after the group finishes.
+`--strategy claude-checkpoint-agent-loop-v1`. It records the first
+tool-complete boundary, restores the remaining allocated slots from that
+checkpoint, forks the Claude transcript at the matching tool-result message,
+and releases the persistent AgentENV snapshot after the group finishes.
 
-The older `swebench/rollout_server.py` exposes a separate `/run` endpoint for
+Claude Code is the recommended baseline through
+`--strategy claude-agent-loop` and as a checkpoint/fork reference through
+`--strategy claude-checkpoint-agent-loop-v1`. Both use the official Python
+Agent SDK and expose only Ash MCP tools; they do not import or modify
+`AshAgent`. Install the tested optional dependency with
+`pip install claude-agent-sdk==0.2.152`.
+
+The checkpoint strategy pairs two independently restorable positions after a
+tool completes: an AgentENV checkpoint and the Claude transcript's
+`tool_result` UUID. It restores the child with `resume=<parent session>`,
+`resume_session_at=<tool_result UUID>`, and `fork_session=True`. Claude inserts
+an empty synthetic user message before the child continuation; the Miles
+SessionTree records it as external context, so it never receives policy loss.
+The bundled strategy always chooses the first completed tool only to verify the
+mechanism; production checkpoint selection remains a separate strategy.
+
+The AshAgent strategies `agent-loop` and `checkpoint-agent-loop-v1` remain
+available for compatibility and regression testing, but they are not the
+recommended baseline. The older `swebench/rollout_server.py` exposes a separate `/run` endpoint for
 one episode. It is retained for compatibility with that caller and is not an
 alias for `ash-rollout-v2`: Miles tree rollout uses `rollout_groups/server.py`
 and the three `/rollout-groups` endpoints documented here.
@@ -423,21 +516,15 @@ not attach an environment provider. The tests also cover checkpoint
 capabilities, AgentENV create/restore/release HTTP paths, ownership, release
 failure and the parent/child SessionTree reference strategy.
 
-Two real-backend environment paths completed the same AgentENV/Firecracker +
-Miles GRPO smoke test on 2026-09-11:
+The current real-backend result (2026-09-14) uses Claude Agent SDK, Ash MCP,
+AgentENV/Firecracker and Qwen3.8-27B. One group produced two SessionTree leaves
+from one environment checkpoint and one Claude transcript fork: 2 samples,
+1 branch, 3 model calls and 1 tool call. Miles imported both trajectories,
+recomputed old-policy log-probabilities, obtained rewards `[0, 1]` and GRPO
+advantages `[-1, +1]`, completed an optimizer step
+(`grad_norm=14.268937110900879`), and updated SGLang `weight_version` 1 -> 2.
 
-- The prebuilt-template path performed one checkpoint restore, one tool
-  execution, five model calls, produced two SessionTree leaves, completed an
-  optimizer step (`grad_norm=32.4090`), and updated SGLang `weight_version`
-  1 -> 2.
-- The dynamic OCI path first pulled a digest-pinned public Ubuntu 24.04 image,
-  injected `ash-runtime`, and created or reused a runtime-ready AgentENV
-  snapshot. It then completed the same branch and training chain with
-  `grad_norm=32.4122` and SGLang `weight_version` 1 -> 2. A separate resolver
-  probe measured 18.46 seconds for cold preparation and 0.001 seconds for an
-  identical cached resolution; those preparation timings are not end-to-end
-  GRPO latency measurements.
-
-These are functional integration checks, not claims about rollout performance,
-training quality, dynamic checkpoint selection, or cross-job checkpoint
-retention.
+The public-OCI resolver is separately covered for digest validation, runtime
+injection, snapshot creation/cache reuse and Firecracker tool execution. These
+are functional integration checks, not claims about rollout performance,
+training quality, dynamic checkpoint selection, or cross-job retention.

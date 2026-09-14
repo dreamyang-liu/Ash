@@ -14,7 +14,8 @@ from swebench.rollout_groups.protocol import EnvironmentRef
 class _Session:
     instances = []
 
-    def __init__(self, **_kwargs):
+    def __init__(self, **kwargs):
+        self.backend = kwargs.get("backend") or {}
         self.sandbox_id = "restored-child"
         self.created = None
         self.restored = None
@@ -34,6 +35,7 @@ class _Session:
 
 class _Parent:
     sandbox_id = "parent-sandbox"
+    backend = {"backend": "microvm", "microvm": {"sandbox_ttl": 3900}}
     checkpoint_capabilities = SimpleNamespace(
         state_scope="full-runtime",
         multiple_restore=True,
@@ -83,7 +85,10 @@ def _request(**overrides):
         "resource_profile": "standard",
     }
     values.update(overrides)
-    return SimpleNamespace(environment_ref=EnvironmentRef(**values))
+    return SimpleNamespace(
+        environment_ref=EnvironmentRef(**values),
+        budgets=SimpleNamespace(max_wall_time_seconds=3600),
+    )
 
 
 def test_provider_resolves_request_environment_at_spawn(monkeypatch):
@@ -92,6 +97,22 @@ def test_provider_resolves_request_environment_at_spawn(monkeypatch):
     session = provider.spawn(_request())
 
     assert session.created == "template-1"
+    assert _Session.instances[-1].backend["microvm"]["sandbox_ttl"] == 3900
+    assert _Session.instances[-1].backend["microvm"]["request_timeout"] == 3900
+
+
+def test_provider_expands_microvm_lifecycle_to_the_rollout_budget(monkeypatch):
+    provider = _provider(monkeypatch)
+    provider.backend["microvm"] = {
+        "sandbox_ttl": 600,
+        "request_timeout": 120,
+    }
+
+    provider.spawn(_request())
+
+    microvm = _Session.instances[-1].backend["microvm"]
+    assert microvm["sandbox_ttl"] == 3900
+    assert microvm["request_timeout"] == 3900
 
 
 def test_provider_rejects_unlisted_or_backend_incompatible_environment(monkeypatch):

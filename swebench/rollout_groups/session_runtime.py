@@ -11,6 +11,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import inspect
+import sys
+import threading
+import time
 import urllib.request
 from collections.abc import Callable
 from dataclasses import replace
@@ -35,6 +39,25 @@ class MilesSessionClient:
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("Miles session server returned no session_id")
         return session_id
+
+    def require_capabilities(self, *required: str) -> dict[str, Any]:
+        """Fail before rollout when an endpoint lacks required semantics."""
+        payload = self._request("GET", "/health", None)
+        capabilities = payload.get("capabilities")
+        if not isinstance(capabilities, list) or any(
+            not isinstance(item, str) for item in capabilities
+        ):
+            raise RuntimeError(
+                "Miles session server does not report capabilities; deploy a "
+                "compatible version to every configured endpoint"
+            )
+        missing = sorted(set(required) - set(capabilities))
+        if missing:
+            raise RuntimeError(
+                "Miles session server is missing required capabilities: "
+                + ", ".join(missing)
+            )
+        return payload
 
     def get(self, session_id: str) -> dict[str, Any]:
         return self._request("GET", f"/sessions/{session_id}", None)
@@ -114,16 +137,25 @@ class SessionAgentStrategySupport:
         sandbox,
         initial_messages: list[dict[str, Any]],
         agent_id: str,
-        max_model_calls: int,
-        max_tool_calls: int,
+        max_model_calls: int | None,
+        max_tool_calls: int | None,
+        model_calls_offset: int = 0,
+        tool_calls_offset: int = 0,
         on_turn_end=None,
-    ) -> tuple[str, int, int, list[dict[str, Any]]]:
-        config = self._agent_config(request, client, session_id, max_model_calls)
-        executor, executed_tool_calls = self._tool_executor(
+    ) -> tuple[str, int, int, list[dict[str, Any]], float]:
+        config = self._agent_config(
+            request,
+            client,
+            session_id,
+            max_model_calls,
+            remaining_wall_time_seconds=context.remaining_wall_time_seconds,
+        )
+        executor, executed_tool_calls, tool_seconds = self._tool_executor(
             sandbox,
             agent_id=agent_id,
             context=context,
             max_tool_calls=max_tool_calls,
+            tool_calls_offset=tool_calls_offset,
         )
         agent = AshAgent(
             config,
@@ -131,20 +163,90 @@ class SessionAgentStrategySupport:
             agent_id=agent_id,
             sandbox_id=str(getattr(sandbox, "sandbox_id", "unknown")),
         )
+        agent.on_step = lambda step, kind, _summary: context.update_progress(
+            "tool_execution" if kind != "error" else "agent_error",
+            model_calls=model_calls_offset + step,
+            tool_calls=tool_calls_offset + executed_tool_calls(),
+            active_sample_slot_id=slot.sample_slot_id,
+        )
         agent.stream = False
         latest_messages: list[dict[str, Any]] = []
 
+        def report_model_generation(_agent, _conversation) -> None:
+            context.update_progress(
+                "model_generation",
+                # The hook runs immediately before issuing the request, while
+                # CostTracker increments only after a response is received.
+                # Count this admitted in-flight call so cancellation does not
+                # make a long first generation look like zero model work.
+                model_calls=model_calls_offset + agent.cost.api_calls + 1,
+                tool_calls=tool_calls_offset + executed_tool_calls(),
+                active_sample_slot_id=slot.sample_slot_id,
+            )
+
+        before_query_hooks = getattr(agent, "before_query_hooks", None)
+        if isinstance(before_query_hooks, list):
+            before_query_hooks.insert(0, report_model_generation)
+
+        # AshAgent's model call is synchronous, so checking cancel_event only
+        # between tool calls is insufficient.  A small watcher translates job
+        # cancellation into deletion of the active Miles session.  Miles then
+        # cancels its upstream HTTP request, which SGLang treats as a client
+        # disconnect and aborts at the scheduler.
+        cancel_watch_done = threading.Event()
+
+        def propagate_cancellation() -> None:
+            wait = getattr(context.cancel_event, "wait", None)
+            if not callable(wait):
+                return
+            while not cancel_watch_done.is_set():
+                if wait(timeout=0.1):
+                    try:
+                        client.delete(session_id)
+                    except Exception:
+                        # Cleanup is best-effort here.  The strategy's normal
+                        # finally block remains the authoritative cleanup path.
+                        pass
+                    return
+
+        cancel_watcher = threading.Thread(
+            target=propagate_cancellation,
+            name=f"ash-cancel-{session_id}",
+            daemon=True,
+        )
+        cancel_watcher.start()
+
         def capture_messages(step: int, messages: list[dict[str, Any]]) -> None:
             latest_messages[:] = copy.deepcopy(messages)
+            context.update_progress(
+                "model_generation",
+                model_calls=model_calls_offset + step,
+                tool_calls=tool_calls_offset + executed_tool_calls(),
+                active_sample_slot_id=slot.sample_slot_id,
+            )
             if on_turn_end is not None:
                 on_turn_end(step, messages)
 
         agent.on_turn_end = capture_messages
-        status = agent.run(
-            task="",
-            instance_id=request.task_id,
-            initial_messages=initial_messages,
-        )
+        try:
+            context.update_progress(
+                "model_generation",
+                model_calls=model_calls_offset,
+                tool_calls=tool_calls_offset,
+                active_sample_slot_id=slot.sample_slot_id,
+            )
+            status = agent.run(
+                task="",
+                instance_id=request.task_id,
+                initial_messages=initial_messages,
+            )
+        finally:
+            cancel_watch_done.set()
+            cancel_watcher.join(timeout=0.2)
+        context.check_cancelled()
+        if status == "error":
+            detail = agent.last_model_error or "unknown model request failure"
+            raise RuntimeError(f"AshAgent model request failed: {detail}")
         if not latest_messages:
             errors = [
                 str(message.get("content") or "")
@@ -158,14 +260,21 @@ class SessionAgentStrategySupport:
             )
         if _tool_call_count(latest_messages) < _tool_call_count(initial_messages):
             raise RuntimeError("agent history lost tool results from its checkpoint prefix")
-        return status, agent.cost.api_calls, executed_tool_calls(), latest_messages
+        return (
+            status,
+            agent.cost.api_calls,
+            executed_tool_calls(),
+            latest_messages,
+            tool_seconds(),
+        )
 
     def _agent_config(
         self,
         request: RolloutGroupRequest,
         client: MilesSessionClient,
         session_id: str,
-        max_model_calls: int,
+        max_model_calls: int | None,
+        remaining_wall_time_seconds: float | None = None,
     ) -> AgentConfig:
         sampling = dict(request.sampling_params)
         model = request.model or sampling.pop("model", None) or self.agent_config.model
@@ -178,6 +287,7 @@ class SessionAgentStrategySupport:
             raise ValueError("sampling_params.extra_body must be an object")
         extra_body = dict(raw_extra_body or {})
         for name in (
+            "seed",
             "top_p",
             "top_k",
             "stop",
@@ -189,6 +299,12 @@ class SessionAgentStrategySupport:
         ):
             if name in sampling and name not in extra_body:
                 extra_body[name] = sampling[name]
+        request_timeout = self.agent_config.request_timeout
+        if remaining_wall_time_seconds is not None:
+            request_timeout = min(
+                request_timeout or remaining_wall_time_seconds,
+                remaining_wall_time_seconds,
+            )
         return replace(
             self.agent_config,
             model=str(model),
@@ -198,7 +314,20 @@ class SessionAgentStrategySupport:
             temperature=None if temperature is None else float(temperature),
             prompt_cache=False,
             extra_body=extra_body or None,
-            step_limit=min(self.agent_config.step_limit, max_model_calls),
+            request_timeout=request_timeout,
+            # AshAgent's standalone default is finite.  A null rollout budget
+            # delegates termination to wall time, cancellation and the model
+            # context limit instead of accidentally retaining that default.
+            step_limit=(
+                sys.maxsize
+                if max_model_calls is None
+                else min(self.agent_config.step_limit, max_model_calls)
+            ),
+            cost_limit=(
+                sys.float_info.max
+                if max_model_calls is None
+                else self.agent_config.cost_limit
+            ),
         )
 
     @staticmethod
@@ -207,8 +336,13 @@ class SessionAgentStrategySupport:
         *,
         agent_id: str,
         context: RolloutContext,
-        max_tool_calls: int,
-    ) -> tuple[Callable[[str, dict[str, Any]], ToolResult], Callable[[], int]]:
+        max_tool_calls: int | None,
+        tool_calls_offset: int = 0,
+    ) -> tuple[
+        Callable[[str, dict[str, Any]], ToolResult],
+        Callable[[], int],
+        Callable[[], float],
+    ]:
         call = getattr(sandbox, "call_agent_tool", None) or getattr(sandbox, "call", None)
         if call is None:
             session_executor = getattr(sandbox, "executor_for", None)
@@ -217,19 +351,72 @@ class SessionAgentStrategySupport:
         if call is None:
             raise TypeError("environment sandbox must expose call_agent_tool or call")
         calls = 0
+        elapsed_seconds = 0.0
 
         def execute(name: str, args: dict[str, Any]) -> ToolResult:
-            nonlocal calls
+            nonlocal calls, elapsed_seconds
             context.check_cancelled()
-            if calls >= max_tool_calls:
+            if max_tool_calls is not None and calls >= max_tool_calls:
                 raise RolloutCancelled("rollout tool-call budget exhausted")
             calls += 1
-            result = _run_async(call(name, args))
+            context.update_progress(
+                "tool_execution",
+                tool_calls=tool_calls_offset + calls,
+            )
+            call_args = dict(args)
+            remaining = context.remaining_wall_time_seconds
+            if remaining is not None:
+                if remaining <= 0:
+                    context.check_cancelled()
+                if name == "shell":
+                    requested = call_args.get("timeout")
+                    # Give the runtime a short interval to serialize the
+                    # command's timeout outcome before the outer transport is
+                    # cancelled at the rollout deadline.
+                    remaining_timeout = max(1, int(max(1.0, remaining - 5.0)))
+                    call_args["timeout"] = (
+                        remaining_timeout
+                        if requested is None
+                        else min(int(requested), remaining_timeout)
+                    )
+            started = time.monotonic()
+            try:
+                try:
+                    parameters = inspect.signature(call).parameters.values()
+                except (TypeError, ValueError):
+                    accepts_transport_timeout = False
+                else:
+                    accepts_transport_timeout = any(
+                        parameter.name == "timeout"
+                        or parameter.kind
+                        in {parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD}
+                        for parameter in parameters
+                    )
+                result = _run_async(
+                    call(name, call_args, remaining)
+                    if remaining is not None and accepts_transport_timeout
+                    else call(name, call_args)
+                )
+            finally:
+                elapsed_seconds += time.monotonic() - started
             if isinstance(result, ToolResult):
                 return result
             return ToolResult.from_sdk(result)
 
-        return execute, lambda: calls
+        return execute, lambda: calls, lambda: elapsed_seconds
+
+
+def session_model_seconds(state: dict[str, Any]) -> float:
+    """Sum request-to-commit latency for model calls on one session path."""
+    elapsed = 0.0
+    for record in state.get("records") or []:
+        timestamp = record.get("timestamp")
+        request_timestamp = record.get("request_timestamp")
+        if isinstance(timestamp, (int, float)) and isinstance(
+            request_timestamp, (int, float)
+        ):
+            elapsed += max(0.0, float(timestamp) - float(request_timestamp))
+    return elapsed
 
 
 def branch_input_length(state: dict[str, Any], checkpoint_messages: list[dict[str, Any]]) -> int:
@@ -243,6 +430,19 @@ def branch_input_length(state: dict[str, Any], checkpoint_messages: list[dict[st
     raise ValueError("Miles session did not expose the child request at the checkpoint message boundary")
 
 
+def response_input_length(state: dict[str, Any], response_id: str) -> int:
+    """Return the model-visible input length for a recorded generation."""
+    tree = (state.get("metadata") or {}).get("tree") or {}
+    for node in tree.get("nodes") or []:
+        if node.get("response_id") == response_id:
+            span = node.get("completion_span") or []
+            if len(span) == 2:
+                return int(span[0])
+    raise ValueError(
+        f"Miles SessionTree has no node for response_id {response_id!r}"
+    )
+
+
 def trajectory_from_session(
     request: RolloutGroupRequest,
     sample_slot_id: str,
@@ -251,6 +451,7 @@ def trajectory_from_session(
     *,
     branch_id: str,
     messages: list[dict[str, Any]] | None = None,
+    prompt_token_alignment: str = "request_exact",
     parent_branch_id: str | None = None,
     branch_point_token_count: int | None = None,
     metadata: dict[str, Any] | None = None,
@@ -266,7 +467,10 @@ def trajectory_from_session(
     for record in records:
         req = record.get("request") or {}
         response_envelope = record.get("response") or {}
-        response = response_envelope.get("choices", [{}])[0]
+        choices = response_envelope.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("Miles session record contains no response choices")
+        response = choices[0]
         info = response.get("meta_info") or {}
         pairs = info.get("output_token_logprobs") or []
         output_ids = [int(pair[1]) for pair in pairs]
@@ -309,6 +513,7 @@ def trajectory_from_session(
         generated_spans=spans,
         response_text=response_text,
         status=trajectory_status(status),
+        prompt_token_alignment=prompt_token_alignment,
         metadata=dict(metadata or {}),
     )
 
@@ -316,7 +521,7 @@ def trajectory_from_session(
 def trajectory_status(agent_status: str) -> str:
     if agent_status == "completed":
         return "completed"
-    if agent_status in {"step_limit", "cost_limit"}:
+    if agent_status in {"step_limit", "cost_limit", "length_limit"}:
         return "truncated"
     return "failed"
 

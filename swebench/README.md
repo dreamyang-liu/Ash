@@ -8,6 +8,7 @@ Firecracker microVMs, or Kubernetes pods, chosen by config rather than by code.
 ```bash
 pip install litellm pyyaml datasets
 pip install ./sdk                      # the ash-sandbox client
+pip install claude-agent-sdk==0.2.152  # optional: Claude Code harness/rollout strategies
 export ANTHROPIC_API_KEY=sk-...        # or AWS creds for Bedrock, etc.
 
 # One instance
@@ -23,7 +24,10 @@ python -m swebench -c swebench/configs/bedrock-sonnet46.yaml --backend microvm
 python -m swebench -c swebench/configs/claude-opus.yaml --harness claude-code
 ```
 
-`python -m swebench` is the only entry point. Configs are YAML and compose via
+`python -m swebench` is the evaluation CLI entry point. The separate
+`python -m swebench.rollout_groups.server` entry point serves Miles group
+rollouts; its recommended strategies use Claude Agent SDK with Ash MCP rather
+than the built-in `AshAgent`. Configs are YAML and compose via
 `extends:`; CLI flags override file values, which override defaults. See
 `__main__.py` for the flag-to-section mapping, and `configs/` for examples.
 
@@ -72,6 +76,11 @@ swebench/
 ├── rollout_server.py # Legacy single-run rollout endpoint
 └── rollout_groups/   # Versioned group rollout service and strategies
 ```
+
+For Miles integration, use `claude-agent-loop` as the independent-sample
+baseline and `claude-checkpoint-agent-loop-v1` to exercise an AgentENV
+checkpoint paired with a Claude transcript fork. See
+[`../docs/ASH_ROLLOUT_INTERFACE.md`](../docs/ASH_ROLLOUT_INTERFACE.md).
 
 ## How a run works
 

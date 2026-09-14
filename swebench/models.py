@@ -110,6 +110,12 @@ class AgentConfig:
     workdir: str = "/testbed"
     system_template: Optional[str] = None  # Jinja2 template for system prompt (overrides AGENT.md)
     instance_template: Optional[str] = None  # Jinja2 template for instance/task message
+    # HTTP controls for one model request.  ``None`` preserves the provider
+    # client's defaults; rollout services set these explicitly because long
+    # local generations can exceed the OpenAI SDK's 600-second read timeout.
+    request_timeout: Optional[float] = None
+    request_max_retries: Optional[int] = None
+    retry_attempts: int = 8
 
 
 @dataclass

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import sys
+import time
 import uuid
 from typing import Any
 
@@ -21,6 +22,7 @@ from ..session_runtime import (
     MilesSessionClient,
     SessionAgentStrategySupport,
     branch_input_length,
+    session_model_seconds,
     trajectory_from_session,
 )
 from ...models import AgentConfig
@@ -51,29 +53,47 @@ class CheckpointAgentLoopRolloutStrategy(SessionAgentStrategySupport):
         if context.environment_provider is None:
             raise RuntimeError("checkpoint-agent-loop requires an environment provider")
         endpoint = self.session_endpoint(request)
-
         slots = list(request.sample_slots[: request.max_samples])
         if len(slots) < 2:
             raise ValueError("checkpoint-agent-loop requires at least two allocated sample slots")
-        if request.budgets.max_model_calls < len(slots):
+        if (
+            request.budgets.max_model_calls is not None
+            and request.budgets.max_model_calls < len(slots)
+        ):
             raise ValueError(
                 "checkpoint-agent-loop requires at least one model call per allocated sample slot"
             )
 
-        model_calls_per_agent, parent_model_remainder = divmod(
-            request.budgets.max_model_calls, len(slots)
-        )
-        tool_calls_per_agent, parent_tool_remainder = divmod(
-            request.budgets.max_tool_calls, len(slots)
-        )
+        if request.budgets.max_model_calls is None:
+            model_calls_per_agent = parent_model_remainder = None
+        else:
+            model_calls_per_agent, parent_model_remainder = divmod(
+                request.budgets.max_model_calls, len(slots)
+            )
+        if request.budgets.max_tool_calls is None:
+            tool_calls_per_agent = parent_tool_remainder = None
+        else:
+            tool_calls_per_agent, parent_tool_remainder = divmod(
+                request.budgets.max_tool_calls, len(slots)
+            )
 
         client = MilesSessionClient(endpoint, timeout_seconds=context.remaining_wall_time_seconds or 120.0)
+        require_capabilities = getattr(client, "require_capabilities", None)
+        if callable(require_capabilities):
+            require_capabilities("session-tree-v2", "context-aware-completion-cap")
         session_id = client.create()
         parent = None
         children: list[Any] = []
         parent_checkpoint: dict[str, Any] = {}
         try:
+            context.update_progress(
+                "creating_environment",
+                active_sample_slot_id=slots[0].sample_slot_id,
+            )
+            setup_started = time.monotonic()
             parent = context.environment_provider.spawn(request)
+            parent_setup_seconds = time.monotonic() - setup_started
+            prepared = context.prepare_task(request, parent)
             parent_slot = slots[0]
 
             def capture_first_checkpoint(step_id: int, messages: list[dict[str, Any]]) -> None:
@@ -105,7 +125,13 @@ class CheckpointAgentLoopRolloutStrategy(SessionAgentStrategySupport):
 
             # Divide the group budget without exceeding it. Remainders go to
             # the parent because it must first reach a tool-complete boundary.
-            parent_status, parent_calls, parent_tools, parent_messages = self._run_agent(
+            (
+                parent_status,
+                parent_calls,
+                parent_tools,
+                parent_messages,
+                parent_tool_seconds,
+            ) = self._run_agent(
                 request=request,
                 context=context,
                 client=client,
@@ -114,8 +140,16 @@ class CheckpointAgentLoopRolloutStrategy(SessionAgentStrategySupport):
                 sandbox=parent,
                 initial_messages=self.initial_messages(request),
                 agent_id=f"{request.rollout_job_id}:{parent_slot.sample_slot_id}",
-                max_model_calls=model_calls_per_agent + parent_model_remainder,
-                max_tool_calls=tool_calls_per_agent + parent_tool_remainder,
+                max_model_calls=(
+                    None
+                    if model_calls_per_agent is None
+                    else model_calls_per_agent + parent_model_remainder
+                ),
+                max_tool_calls=(
+                    None
+                    if tool_calls_per_agent is None
+                    else tool_calls_per_agent + parent_tool_remainder
+                ),
                 on_turn_end=capture_first_checkpoint,
             )
             if not parent_checkpoint:
@@ -124,34 +158,51 @@ class CheckpointAgentLoopRolloutStrategy(SessionAgentStrategySupport):
             checkpoint = parent_checkpoint["checkpoint"]
 
             parent_state = client.get(session_id)
-            trajectories = [
-                trajectory_from_session(
-                    request,
-                    parent_slot.sample_slot_id,
-                    parent_state,
-                    parent_status,
-                    branch_id=f"{request.rollout_job_id}:root:{parent_slot.sample_index}",
-                    messages=parent_messages,
-                    metadata={
-                        "strategy": "checkpoint-agent-loop-v1",
-                        "session_id": session_id,
-                        "sandbox_id": getattr(parent, "sandbox_id", "unknown"),
-                        "environment_checkpoint_id": checkpoint.checkpoint_id,
-                        "session_tree": (parent_state.get("metadata") or {}).get("tree", {}),
-                    },
-                )
-            ]
+            parent_trajectory = trajectory_from_session(
+                request,
+                parent_slot.sample_slot_id,
+                parent_state,
+                parent_status,
+                branch_id=f"{request.rollout_job_id}:root:{parent_slot.sample_index}",
+                messages=parent_messages,
+                metadata={
+                    "strategy": "checkpoint-agent-loop-v1",
+                    "session_id": session_id,
+                    "sandbox_id": getattr(parent, "sandbox_id", "unknown"),
+                    "environment_checkpoint_id": checkpoint.checkpoint_id,
+                    "session_tree": (parent_state.get("metadata") or {}).get("tree", {}),
+                    "sandbox_setup_seconds": parent_setup_seconds,
+                    "model_time_seconds": session_model_seconds(parent_state),
+                    "tool_time_seconds": parent_tool_seconds,
+                },
+            )
+            pending_trajectories = [(parent, parent_trajectory, prepared)]
             consumed_model_calls = parent_calls
             consumed_tool_calls = parent_tools
 
             for slot in slots[1:]:
                 context.check_cancelled()
+                context.update_progress(
+                    "restoring_checkpoint",
+                    model_calls=consumed_model_calls,
+                    tool_calls=consumed_tool_calls,
+                    completed_samples=len(pending_trajectories),
+                    active_sample_slot_id=slot.sample_slot_id,
+                )
+                setup_started = time.monotonic()
                 child = context.environment_provider.restore_checkpoint(
                     checkpoint,
                     agent_id=f"{request.rollout_job_id}:{slot.sample_slot_id}",
                 )
+                child_setup_seconds = time.monotonic() - setup_started
                 children.append(child)
-                child_status, child_calls, child_tools, child_messages = self._run_agent(
+                (
+                    child_status,
+                    child_calls,
+                    child_tools,
+                    child_messages,
+                    child_tool_seconds,
+                ) = self._run_agent(
                     request=request,
                     context=context,
                     client=client,
@@ -162,32 +213,42 @@ class CheckpointAgentLoopRolloutStrategy(SessionAgentStrategySupport):
                     agent_id=f"{request.rollout_job_id}:{slot.sample_slot_id}",
                     max_model_calls=model_calls_per_agent,
                     max_tool_calls=tool_calls_per_agent,
+                    model_calls_offset=consumed_model_calls,
+                    tool_calls_offset=consumed_tool_calls,
                 )
                 consumed_model_calls += child_calls
                 consumed_tool_calls += child_tools
                 child_state = client.get(session_id)
-                trajectories.append(
-                    trajectory_from_session(
-                        request,
-                        slot.sample_slot_id,
-                        child_state,
-                        child_status,
-                        branch_id=f"{request.rollout_job_id}:child:{slot.sample_index}",
-                        parent_branch_id=f"{request.rollout_job_id}:root:{parent_slot.sample_index}",
-                        branch_point_token_count=branch_input_length(
-                            child_state, parent_checkpoint["messages"]
+                child_trajectory = trajectory_from_session(
+                    request,
+                    slot.sample_slot_id,
+                    child_state,
+                    child_status,
+                    branch_id=f"{request.rollout_job_id}:child:{slot.sample_index}",
+                    parent_branch_id=(
+                        f"{request.rollout_job_id}:root:{parent_slot.sample_index}"
+                    ),
+                    branch_point_token_count=branch_input_length(
+                        child_state, parent_checkpoint["messages"]
+                    ),
+                    messages=child_messages,
+                    metadata={
+                        "strategy": "checkpoint-agent-loop-v1",
+                        "session_id": session_id,
+                        "sandbox_id": getattr(child, "sandbox_id", "unknown"),
+                        "environment_checkpoint_id": checkpoint.checkpoint_id,
+                        "parent_checkpoint_messages": len(
+                            parent_checkpoint["messages"]
                         ),
-                        messages=child_messages,
-                        metadata={
-                            "strategy": "checkpoint-agent-loop-v1",
-                            "session_id": session_id,
-                            "sandbox_id": getattr(child, "sandbox_id", "unknown"),
-                            "environment_checkpoint_id": checkpoint.checkpoint_id,
-                            "parent_checkpoint_messages": len(parent_checkpoint["messages"]),
-                            "session_tree": (child_state.get("metadata") or {}).get("tree", {}),
-                        },
-                    )
+                        "session_tree": (child_state.get("metadata") or {}).get(
+                            "tree", {}
+                        ),
+                        "sandbox_setup_seconds": child_setup_seconds,
+                        "model_time_seconds": session_model_seconds(child_state),
+                        "tool_time_seconds": child_tool_seconds,
+                    },
                 )
+                pending_trajectories.append((child, child_trajectory, prepared))
 
             # This is intentionally a real request, not a local leaf count:
             # Miles assembles and validates every SessionTree leaf here.
@@ -195,10 +256,19 @@ class CheckpointAgentLoopRolloutStrategy(SessionAgentStrategySupport):
             final_state = client.get(session_id)
             tree = (final_state.get("metadata") or {}).get("tree") or {}
             leaf_count = len(tree.get("leaves") or [])
-            if leaf_count < len(trajectories):
+            if leaf_count < len(pending_trajectories):
                 raise RuntimeError(
-                    f"Miles SessionTree returned {leaf_count} leaves for {len(trajectories)} trajectories"
+                    f"Miles SessionTree returned {leaf_count} leaves for "
+                    f"{len(pending_trajectories)} trajectories"
                 )
+
+            # Grading mutates the repository by restoring hidden test files and
+            # applying test_patch.  Defer parent grading until every child has
+            # been restored from the pristine checkpoint.
+            trajectories = [
+                context.evaluate_trajectory(request, sandbox, trajectory, state)
+                for sandbox, trajectory, state in pending_trajectories
+            ]
 
             return RolloutGroupResult(
                 rollout_job_id=request.rollout_job_id,
@@ -217,6 +287,7 @@ class CheckpointAgentLoopRolloutStrategy(SessionAgentStrategySupport):
                 },
             )
         finally:
+            context.update_progress("cleaning_up")
             active_error = sys.exc_info()[1]
             cleanup_errors: list[Exception] = []
             for child in children:

@@ -95,7 +95,23 @@ def test_agent_exit_status_maps_to_trajectory_status():
     assert _trajectory_status("completed") == "completed"
     assert _trajectory_status("step_limit") == "truncated"
     assert _trajectory_status("cost_limit") == "truncated"
+    assert _trajectory_status("length_limit") == "truncated"
     assert _trajectory_status("error") == "failed"
+
+
+def test_empty_session_choices_report_contract_error():
+    state = {
+        "records": [
+            {
+                "request": {"input_ids": [10, 11], "messages": _request().prompt},
+                "response": {"choices": []},
+            }
+        ],
+        "metadata": {"accumulated_token_ids": [10, 11, 12]},
+    }
+
+    with pytest.raises(ValueError, match="contains no response choices"):
+        _trajectory_from_session(_request(), "slot", state, "completed")
 
 
 class _SessionClient:
@@ -166,10 +182,16 @@ def test_agent_loop_distributes_group_budgets_across_slots(monkeypatch):
 
     def run_agent(**kwargs):
         allocations.append((kwargs["max_model_calls"], kwargs["max_tool_calls"]))
-        return "completed", kwargs["max_model_calls"], kwargs["max_tool_calls"], [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "done"},
-        ]
+        return (
+            "completed",
+            kwargs["max_model_calls"],
+            kwargs["max_tool_calls"],
+            [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "done"},
+            ],
+            0.25,
+        )
 
     monkeypatch.setattr(strategy, "_run_agent", run_agent)
     result = strategy.run(
@@ -188,6 +210,54 @@ def test_agent_loop_distributes_group_budgets_across_slots(monkeypatch):
     assert all(client.deleted for client in _SessionClient.instances)
 
 
+def test_agent_loop_passes_unbounded_call_budgets_to_each_slot(monkeypatch):
+    _SessionClient.instances.clear()
+    monkeypatch.setattr(agent_loop_module, "MilesSessionClient", _SessionClient)
+    request = _request(
+        sample_slots=[
+            {"sample_slot_id": "slot-0", "sample_index": 0},
+            {"sample_slot_id": "slot-1", "sample_index": 1},
+        ],
+        max_samples=2,
+        minimum_returned_samples=2,
+        budgets={
+            "max_model_calls": None,
+            "max_tool_calls": None,
+            "max_wall_time_seconds": 10,
+        },
+    )
+    environment = _Environment()
+    strategy = MilesSessionAgentRolloutStrategy()
+    allocations = []
+
+    def run_agent(**kwargs):
+        allocations.append((kwargs["max_model_calls"], kwargs["max_tool_calls"]))
+        return (
+            "completed",
+            1,
+            1,
+            [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "done"},
+            ],
+            0.25,
+        )
+
+    monkeypatch.setattr(strategy, "_run_agent", run_agent)
+    result = strategy.run(
+        request,
+        RolloutContext(
+            cancel_event=SimpleNamespace(is_set=lambda: False),
+            model_client=None,
+            environment_provider=environment,
+            job_id="job",
+        ),
+    )
+
+    assert allocations == [(None, None), (None, None)]
+    assert result.consumed_budget == {"model_calls": 2, "tool_calls": 2}
+
+
 def test_agent_loop_destroys_sandbox_when_session_cleanup_fails(monkeypatch):
     class FailingDeleteClient(_SessionClient):
         def delete(self, _session_id):
@@ -204,6 +274,7 @@ def test_agent_loop_destroys_sandbox_when_session_cleanup_fails(monkeypatch):
             1,
             0,
             [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "done"}],
+            0.0,
         ),
     )
 

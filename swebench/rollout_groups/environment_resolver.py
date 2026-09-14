@@ -76,6 +76,8 @@ class AgentEnvOCIResolverConfig:
     cache_prefix: str = "ash-rollout"
     build_timeout_seconds: int = 900
     sandbox_timeout_seconds: int = 900
+    runtime_upload_attempts: int = 3
+    runtime_upload_retry_seconds: float = 1.0
     aenv_bin: str = "aenv"
 
     @classmethod
@@ -91,6 +93,8 @@ class AgentEnvOCIResolverConfig:
             "cache_prefix",
             "build_timeout_seconds",
             "sandbox_timeout_seconds",
+            "runtime_upload_attempts",
+            "runtime_upload_retry_seconds",
             "aenv_bin",
         }
         unknown = set(value) - allowed
@@ -133,6 +137,14 @@ class AgentEnvOCIResolverConfig:
                 value.get("sandbox_timeout_seconds", 900),
                 "sandbox_timeout_seconds",
             ),
+            runtime_upload_attempts=_positive_int(
+                value.get("runtime_upload_attempts", 3),
+                "runtime_upload_attempts",
+            ),
+            runtime_upload_retry_seconds=_nonnegative_number(
+                value.get("runtime_upload_retry_seconds", 1.0),
+                "runtime_upload_retry_seconds",
+            ),
             aenv_bin=_required_string(value.get("aenv_bin", "aenv"), "aenv_bin"),
         )
         if not config.runtime_artifact.is_file():
@@ -153,6 +165,16 @@ def _positive_int(value: Any, name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{name} must be > 0")
     return value
+
+
+def _nonnegative_number(value: Any, name: str) -> float:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or value < 0
+    ):
+        raise ValueError(f"{name} must be >= 0")
+    return float(value)
 
 
 def _safe_cache_prefix(value: Any) -> str:
@@ -241,6 +263,29 @@ class AgentEnvOCIResolver:
                     f"AgentENV did not publish prepared snapshot {snapshot_name!r}"
                 )
         return EnvironmentCatalogEntry(ref=ref, spawn_ref=snapshot_name)
+
+    def release(self, ref: EnvironmentRef) -> bool:
+        """Delete this resolver's prepared snapshot for ``ref``.
+
+        The caller must first prove that no rollout still uses the environment.
+        AgentENV snapshots are durable objects, so they are deleted explicitly;
+        source-image commits remain under AgentENV's lease-aware image-cache GC
+        instead of being removed from disk directly.
+        """
+        self.validate(ref)
+        snapshot_name = self._snapshot_name(ref)
+        with self._lock:
+            if not self._snapshot_exists(snapshot_name):
+                return False
+            self._run(
+                [self.config.aenv_bin, "template", "delete", snapshot_name],
+                timeout=self.config.sandbox_timeout_seconds,
+            )
+            if self._snapshot_exists(snapshot_name):
+                raise RuntimeError(
+                    f"AgentENV retained released snapshot {snapshot_name!r}"
+                )
+        return True
 
     def _snapshot_name(self, ref: EnvironmentRef) -> str:
         profile = self.config.resource_profiles[ref.resource_profile]
@@ -333,15 +378,7 @@ class AgentEnvOCIResolver:
                     str(Path(install_path).parent),
                 ]
             )
-            self._run(
-                [
-                    self.config.aenv_bin,
-                    "upload",
-                    sandbox_id,
-                    str(self.config.runtime_artifact),
-                    install_path,
-                ]
-            )
+            self._upload_runtime(sandbox_id, install_path)
             self._run([self.config.aenv_bin, "exec", sandbox_id, "chmod", "0755", install_path])
             quoted_path = shlex.quote(install_path)
             start_command = (
@@ -375,6 +412,46 @@ class AgentEnvOCIResolver:
                 self._run_best_effort(
                     [self.config.aenv_bin, "template", "delete", base_name]
                 )
+
+    def _upload_runtime(self, sandbox_id: str, install_path: str) -> None:
+        """Upload the runtime and wait until the guest can actually see it.
+
+        AgentENV upload completion and guest filesystem visibility are not
+        always atomic.  Treat a successful CLI exit as an acknowledgement,
+        then verify the file from inside the microVM before using it.  A retry
+        repeats the idempotent upload so a dropped/early acknowledgement does
+        not poison the prepared-snapshot cache.
+        """
+        upload = [
+            self.config.aenv_bin,
+            "upload",
+            sandbox_id,
+            str(self.config.runtime_artifact),
+            install_path,
+        ]
+        verify = [
+            self.config.aenv_bin,
+            "exec",
+            sandbox_id,
+            "test",
+            "-s",
+            install_path,
+        ]
+        last_error: RuntimeError | None = None
+        for attempt in range(self.config.runtime_upload_attempts):
+            try:
+                self._run(upload)
+                self._run(verify, timeout=30)
+                return
+            except RuntimeError as exc:
+                last_error = exc
+                if attempt + 1 < self.config.runtime_upload_attempts:
+                    self._sleep(self.config.runtime_upload_retry_seconds)
+        raise RuntimeError(
+            "ash-runtime upload was acknowledged but the artifact did not "
+            f"become visible at {install_path!r} after "
+            f"{self.config.runtime_upload_attempts} attempts"
+        ) from last_error
 
     def _wait_runtime(self, sandbox_id: str) -> None:
         deadline = time.monotonic() + min(60, self.config.sandbox_timeout_seconds)
