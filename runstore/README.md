@@ -63,9 +63,15 @@ most N active attempt supervisors, filling a free slot when one finishes. Each
 attempt still runs in its own child process; no new broker or in-memory task queue
 replaces PostgreSQL. You do not need to launch N worker CLI processes. Additional
 managers on the same host remain fenced by the existing DB locks and leases.
-`--once` still claims at most one new job, even with concurrency greater than 1. The
-backend's existing cold-image/template preparation limits still apply: prebuild
-images/templates before large parallel launches, especially duplicate-image jobs.
+`--once` still claims at most one new job, even with concurrency greater than 1.
+Concurrent cold starts of the same content-addressed image may both stage the
+runtime, but only one template build wins the alias; the other waits for that
+build to become ready. Its unused staging snapshot remains until repository GC
+because AgentENV does not expose snapshot deletion. Prebuilding images/templates
+still avoids duplicate staging work. If the winning build reports failure,
+waiters fail explicitly; if it never settles, they fail at the configured build
+timeout. Avoiding duplicate staging and automatic takeover require an
+AgentENV-native create-or-join operation and are not implemented here.
 The controller can use Python 3.12 while `profile.python` selects Python 3.11 for the
 Codex SDK child. Install `openai-codex` in the Codex interpreter and
 `claude-agent-sdk` in the Claude interpreter, plus each interpreter's normal Ash
@@ -136,6 +142,7 @@ REST endpoints (all require `Authorization: Bearer ...`):
 
 | Endpoint | Result |
 |---|---|
+| `GET /health` | Authenticated API and fresh PostgreSQL-transaction readiness |
 | `POST /v1/jobs` + `Idempotency-Key` | Accepted job, immediately |
 | `GET /v1/jobs?state=running` | Job states/phases |
 | `GET /v1/jobs/{id}` | Frozen request, lease, state, result/error |
@@ -145,7 +152,7 @@ REST endpoints (all require `Authorization: Bearer ...`):
 | `GET /v1/jobs/{id}/recovery-points` | Message boundaries and snapshot/native pairs |
 | `GET /v1/jobs/{id}/result` | Repeatably readable completion/result |
 | `POST /v1/jobs/{id}/branch` | New queued branch from `point_id` |
-| `POST /v1/jobs/{id}/cancel` | Cancel a queued job only |
+| `POST /v1/jobs/{id}/cancel` | Cancel queued jobs immediately or persist cancellation intent for running jobs |
 | `POST /v1/prefix/query` | Historical prefix matches and ancestor fallback |
 
 Events/tools/recovery queries accept `attempt_id`; otherwise they select the
@@ -213,13 +220,49 @@ and reconciliation reloads it from PostgreSQL, not current profile defaults or
 files are left untouched and are never consulted by the new handoff path. Large
 native logs, resource receipts and outcomes still use the shared artifact directory.
 
-On upgrade, drain old workers first and add the nullable payload columns:
+### Large journal events
+
+Session-state events can contain a complete trajectory tree under
+`rollout.session_state.state.metadata.tree_records`. For long agent runs, a single
+canonical JSON event can be hundreds of MiB. Writing that object directly as
+PostgreSQL `jsonb` can exceed PostgreSQL's roughly 256 MiB JSONB object-element
+limit or the Run Store's normal five-second statement timeout.
+
+Run Store therefore encodes canonical JSON events larger than 1 MiB with zlib and
+Base64 before storing them in `rs_events.event`. The database wrapper is identified
+by `encoding: "ash.runstore.zlib-json-v1"`; event reads transparently restore the
+original object. Idempotency/conflict checks also compare restored events, so this
+is a storage representation change rather than an API or journal-schema change.
+Older uncompressed rows remain readable, and an application event is decoded only
+when it has exactly the complete wrapper shape. Artifact files such as
+`trajectory.jsonl` remain uncompressed and retain their original full content.
+Compression reduces typical repeated SessionTree payloads but is not a hard
+upper bound: an incompressible event can still approach PostgreSQL's JSONB limit.
+Such an event fails explicitly; moving large opaque state to content-addressed
+artifact storage would require a later schema change.
+
+Encoding is completed before the transaction takes the job row lock, so CPU time
+spent serializing a large tree does not block cancellation or heartbeat updates.
+Two representative single-event measurements were 204.7 MB to 45.7 MB and
+143.7 MB to 29.7 MB (approximately 78% and 79% smaller). These figures compare the
+same PostgreSQL event before and after encoding; they are not complete trajectory
+artifact sizes. Because compressed tree events may still be tens of MiB,
+`append_events()` uses a 60-second local statement timeout. Cancellation uses a
+20-second local timeout so it may wait behind a bounded in-flight write while
+remaining below the client's 30-second deadline. Other Store operations retain
+the five-second default, so these exceptional paths do not weaken general
+control-plane failure detection.
+
+On upgrade, stop new admission and drain old workers first, then add the nullable
+payload columns:
 
 ```bash
 python3.12 -m runstore init --config /path/to/worker-config.json
 ```
 
-Then start the updated workers. Existing jobs/results are preserved. Legacy attempts without a
+Restart both the Run Store API and workers so both processes load the same Python
+revision; replacing source files does not hot-reload an existing process. Then
+resume admission. Existing jobs/results are preserved. Legacy attempts without a
 DB payload remain queryable but are not automatically reconciled by the new worker;
 they stay quarantined if interrupted and need a separately scoped migration.
 New queued attempts acquire their DB payload normally. A corrupt DB payload also

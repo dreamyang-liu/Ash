@@ -332,7 +332,13 @@ class TemplateBuilder:
                     logging.getLogger(__name__).warning(
                         "template %s was unusable; using %s", base, name)
                 return name
-            if not self._name_taken(client, name):
+            if self._name_taken(client, name):
+                # The alias may have appeared between the readiness and name
+                # lookups. Recheck it so an in-progress winner is joined rather
+                # than mistaken for a permanently poisoned build.
+                if self._template_exists(client, name):
+                    return name
+            else:
                 staged = self._stage_runtime(client, image, name, resources)
                 self._build_from(client, name, image, staged, resources)
                 return name
@@ -373,31 +379,29 @@ class TemplateBuilder:
         if not template_id:
             # The alias resolves but does not say to what. Not evidence of a
             # failed build, so not grounds for condemning it -- the same
-            # polarity as _build_succeeded below.
+            # polarity as the status handling below.
             return True
-        return self._build_succeeded(client, template_id)
+        status = self._build_status(client, template_id)
+        if status in ("error", "failed", "failure", "cancelled", "canceled"):
+            return False
+        if status in ("waiting", "building", "pending", "queued", "running"):
+            # A caller may arrive after the peer has claimed the alias but
+            # before its build commits. Alias existence alone is not spawn
+            # readiness; join that build instead of handing a pending template
+            # to POST /sandboxes or creating a needless suffixed variant.
+            self._await_existing_template(client, name)
+        return True
 
-    def _build_succeeded(self, client: httpx.Client, template_id: str) -> bool:
-        """Whether the template's build is *not known to have failed*.
-
-        Polarity matters here. Requiring a recognised success value would make
-        every unexpected answer -- an older template with no status, a renamed
-        state, a backend that does not implement the endpoint -- look like a
-        failed build, which is the same mistake as reading a missing signal as
-        a bad one. Only an explicit failure disqualifies a template; anything
-        else is used, and a template that is genuinely unusable fails loudly at
-        spawn instead of silently multiplying template names.
-        """
+    def _build_status(self, client: httpx.Client,
+                      template_id: str) -> "Optional[str]":
         try:
             resp = client.get(
                 f"/templates/{template_id}/builds/{template_id}/status")
         except Exception:
-            return True
+            return None
         if resp.status_code != 200:
-            return True
-        status = str((resp.json() or {}).get("status") or "").lower()
-        return status not in ("error", "failed", "failure", "cancelled",
-                             "canceled")
+            return None
+        return str((resp.json() or {}).get("status") or "").lower()
 
     def _lookup(self, client: httpx.Client, path: str, name: str) -> bool:
         resp = client.get(path)
@@ -494,8 +498,14 @@ class TemplateBuilder:
         created = client.post("/v3/templates", json=payload)
         if created.status_code == 409 or (
                 created.status_code == 400 and "already points" in created.text):
-            # Another worker (or an earlier attempt) got there first; its
-            # build is the one to use.
+            # Another worker claimed this content-addressed name after our
+            # lookup. AgentENV publishes the alias while that build is still
+            # pending, so wait for ready before handing it to spawn().
+            # Staging happens before the claim on purpose: a failed upload must
+            # not poison the permanent name. AgentENV needs a native
+            # create-or-join build API to also eliminate this losing worker's
+            # otherwise harmless staging snapshot.
+            self._await_existing_template(client, name)
             return
         if created.status_code != 202:
             raise TemplateError(
@@ -523,6 +533,60 @@ class TemplateBuilder:
                 f"HTTP {started.status_code} {started.text[:200]}")
 
         self._await_build(client, template_id, build_id, name, image)
+
+    def _await_existing_template(self, client: httpx.Client, name: str) -> None:
+        """Wait for the builder that atomically claimed *name*.
+
+        Current AgentENV publishes the alias with the pending build record;
+        another process can still briefly see 404 before that claim. Once the
+        alias is visible, inspect its build status and wait for ready rather
+        than treating mere alias existence as spawn readiness. Older compatible
+        servers without build status retain their historical alias semantics.
+        """
+        deadline = time.monotonic() + self.build_timeout
+        last = "alias not visible"
+        while time.monotonic() < deadline:
+            resp = client.get(f"/templates/aliases/{name}")
+            if resp.status_code == 404:
+                last = "alias not visible"
+            elif resp.status_code != 200:
+                raise TemplateError(
+                    f"could not join concurrent build for {name}: "
+                    f"HTTP {resp.status_code} {resp.text[:200]}")
+            else:
+                template_id = (resp.json() or {}).get("templateID")
+                if not template_id:
+                    # Older servers expose no build identity.  Alias
+                    # visibility is their strongest available signal.
+                    return
+                status_resp = client.get(
+                    f"/templates/{template_id}/builds/{template_id}/status")
+                if status_resp.status_code in (404, 405):
+                    return
+                if status_resp.status_code != 200:
+                    raise TemplateError(
+                        f"could not read concurrent build status for {name}: "
+                        f"HTTP {status_resp.status_code} "
+                        f"{status_resp.text[:200]}")
+                status = str((status_resp.json() or {}).get("status") or "").lower()
+                last = status or "unknown"
+                if status == "ready":
+                    return
+                if status in ("error", "failed", "failure", "cancelled", "canceled"):
+                    raise TemplateError(
+                        f"concurrent template build failed for {name}: "
+                        f"{status_resp.text[:400]}")
+                if status not in ("waiting", "building", "pending", "queued",
+                                  "running", ""):
+                    # Preserve compatibility with servers that use a newer
+                    # success state unknown to this client.  Only recognised
+                    # in-progress states are waited on and explicit failures
+                    # are rejected.
+                    return
+            time.sleep(BUILD_POLL_SECONDS)
+        raise TemplateError(
+            f"concurrent template build for {name} did not finish in "
+            f"{self.build_timeout:.0f}s (last status: {last})")
 
     def _await_build(self, client: httpx.Client, template_id: str,
                      build_id: str, name: str, image: str) -> None:

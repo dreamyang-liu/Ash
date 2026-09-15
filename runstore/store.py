@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager
+import json
 from pathlib import Path
 from typing import Iterator
 from uuid import uuid4
+import zlib
 
 from runstore.payload import checked_payload, encode_payload
 from runstore.specs import JobSpec, canonical, digest
@@ -19,9 +22,51 @@ class Fenced(Conflict):
     pass
 
 
+_COMPRESSED_EVENT = "ash.runstore.zlib-json-v1"
+_COMPRESS_EVENT_AFTER_BYTES = 1024 * 1024
+
+
+def _stored_event(event: dict) -> dict:
+    """Keep PostgreSQL rows bounded while preserving the exact event value."""
+    encoded = canonical(event).encode("utf-8")
+    if len(encoded) <= _COMPRESS_EVENT_AFTER_BYTES:
+        return event
+    return {
+        "encoding": _COMPRESSED_EVENT,
+        "uncompressed_bytes": len(encoded),
+        "data": base64.b64encode(zlib.compress(encoded)).decode("ascii"),
+    }
+
+
+def _loaded_event(event: dict) -> dict:
+    if (
+        not isinstance(event, dict)
+        or event.get("encoding") != _COMPRESSED_EVENT
+        or set(event) != {"encoding", "uncompressed_bytes", "data"}
+        or type(event.get("uncompressed_bytes")) is not int
+        or not isinstance(event.get("data"), str)
+    ):
+        return event
+    encoded = zlib.decompress(base64.b64decode(event["data"], validate=True))
+    if len(encoded) != event.get("uncompressed_bytes"):
+        raise ValueError("Compressed Run Store event length does not match")
+    value = json.loads(encoded)
+    if not isinstance(value, dict):
+        raise ValueError("Compressed Run Store event is not an object")
+    return value
+
+
 class Store:
     def __init__(self, dsn: str) -> None:
         self.dsn = dsn
+
+    def health(self) -> dict:
+        """Prove that a new database transaction can complete."""
+        with self.transaction() as cursor:
+            cursor.execute("SELECT 1 AS ready")
+            if cursor.fetchone()["ready"] != 1:
+                raise RuntimeError("Run Store database readiness query failed")
+        return {"status": "ok", "database": "ready"}
 
     @contextmanager
     def transaction(self) -> Iterator:
@@ -170,26 +215,36 @@ class Store:
             return [dict(row) for row in cursor.fetchall()]
 
     def append_events(self, job_id: str, token: str, events: list[dict]) -> None:
+        prepared = []
+        for event in events:
+            seq = event.get("seq")
+            if type(seq) is not int or seq < 1:
+                raise ValueError("Journal sequence must be positive")
+            # Canonicalizing and compressing a large session-state event can be
+            # CPU-heavy. Do it before _fence() takes the job row lock so a
+            # concurrent cancellation is not blocked by local serialization.
+            prepared.append((seq, _stored_event(event), event))
         with self.transaction() as cursor:
+            # Compressed session-tree events can still span tens of MiB. Keep
+            # the short default for control-plane queries, but give this
+            # bounded bulk write enough time on slower PostgreSQL storage.
+            cursor.execute("SET LOCAL statement_timeout = '60s'")
             job = self._fence(cursor, job_id, token)
-            for event in events:
-                seq = event.get("seq")
-                if type(seq) is not int or seq < 1:
-                    raise ValueError("Journal sequence must be positive")
+            for seq, stored, event in prepared:
                 cursor.execute("""INSERT INTO rs_events(attempt_id,seq,event) VALUES(%s,%s,%s::jsonb)
                     ON CONFLICT(attempt_id,seq) DO NOTHING""",
-                               (job["active_attempt"], seq, canonical(event)))
+                               (job["active_attempt"], seq, canonical(stored)))
                 if cursor.rowcount == 0:
                     cursor.execute("SELECT event FROM rs_events WHERE attempt_id=%s AND seq=%s",
                                    (job["active_attempt"], seq))
-                    if cursor.fetchone()["event"] != event:
+                    if _loaded_event(cursor.fetchone()["event"]) != event:
                         raise Conflict("Journal sequence was rewritten")
 
     def events(self, attempt_id: str, after: int = 0, limit: int = 1000) -> list[dict]:
         with self.transaction() as cursor:
             cursor.execute("""SELECT event FROM rs_events WHERE attempt_id=%s AND seq>%s
                 ORDER BY seq LIMIT %s""", (attempt_id, after, min(10000, max(1, limit))))
-            return [row["event"] for row in cursor.fetchall()]
+            return [_loaded_event(row["event"]) for row in cursor.fetchall()]
 
     def finish(self, job_id: str, token: str, result: dict, *, state: str = "succeeded",
                retry: bool = False, recovery: dict | None = None) -> None:
@@ -215,6 +270,11 @@ class Store:
 
     def request_cancel(self, job_id: str) -> None:
         with self.transaction() as cursor:
+            # The HTTP client waits 30 seconds. Permit cancellation to wait for
+            # a short in-flight worker transaction without exceeding that
+            # boundary; event compression happens before the competing row
+            # lock is acquired, so this is a bounded exceptional path.
+            cursor.execute("SET LOCAL statement_timeout = '20s'")
             cursor.execute("SELECT state FROM rs_jobs WHERE id=%s FOR UPDATE", (job_id,))
             row = cursor.fetchone()
             if row is None:

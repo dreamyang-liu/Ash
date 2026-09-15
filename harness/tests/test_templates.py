@@ -266,11 +266,54 @@ def test_failed_build_is_reported(monkeypatch, runtime_bin):
 
 
 def test_conflicting_create_defers_to_the_other_builder(monkeypatch, runtime_bin):
-    # Two workers racing on the same image: the loser reuses the winner's.
-    client = FakeClient(exists=False, create_status=409)
+    # Two workers racing on the same image: the loser must wait until the
+    # winner's build is ready, not merely until its alias has been claimed.
+    class ConcurrentBuild(FakeClient):
+        def __init__(self):
+            super().__init__(exists=False, create_status=409,
+                             statuses=("building", "building", "ready"))
+            self.alias_lookups = 0
+
+        def get(self, path, **kwargs):
+            if path.startswith("/templates/aliases/"):
+                self.calls.append(("GET", path))
+                self.alias_lookups += 1
+                # _usable_template checks usability and then alias ownership
+                # before attempting create; neither lookup sees the competing
+                # creator yet.  The alias becomes visible after create returns
+                # 409.
+                if self.alias_lookups <= 2:
+                    return FakeResponse(404)
+                return FakeResponse(200, {"templateID": "tid"})
+            return super().get(path, **kwargs)
+
+    client = ConcurrentBuild()
     b = builder(monkeypatch, client, runtime_bin)
     assert b.template_for(IMAGE) == template_name(IMAGE, b._fingerprint, 3000)
     assert client.build_payload is None
+    assert sum(1 for method, path in client.calls
+               if method == "GET" and path.endswith("/status")) == 3
+
+
+def test_conflicting_create_reports_the_winners_failed_build(
+        monkeypatch, runtime_bin):
+    class FailedConcurrentBuild(FakeClient):
+        def __init__(self):
+            super().__init__(exists=False, create_status=409, statuses=("error",))
+            self.alias_lookups = 0
+
+        def get(self, path, **kwargs):
+            if path.startswith("/templates/aliases/"):
+                self.calls.append(("GET", path))
+                self.alias_lookups += 1
+                if self.alias_lookups <= 2:
+                    return FakeResponse(404)
+                return FakeResponse(200, {"templateID": "tid"})
+            return super().get(path, **kwargs)
+
+    client = FailedConcurrentBuild()
+    with pytest.raises(TemplateError, match="concurrent template build failed"):
+        builder(monkeypatch, client, runtime_bin).template_for(IMAGE)
 
 
 def test_build_timeout_fails_rather_than_hangs(monkeypatch, runtime_bin):
@@ -337,6 +380,19 @@ def test_a_built_template_is_found_even_though_snapshots_says_404(
 def test_create_collision_reported_as_400_already_points_is_reuse(
         monkeypatch, runtime_bin):
     class Collides(FakeClient):
+        def __init__(self):
+            super().__init__(exists=False, statuses=("building", "ready"))
+            self.alias_lookups = 0
+
+        def get(self, path, **kwargs):
+            if path.startswith("/templates/aliases/"):
+                self.calls.append(("GET", path))
+                self.alias_lookups += 1
+                if self.alias_lookups <= 2:
+                    return FakeResponse(404)
+                return FakeResponse(200, {"templateID": "tid"})
+            return super().get(path, **kwargs)
+
         def post(self, path, json=None, files=None, **kwargs):
             if path == "/v3/templates":
                 self.calls.append(("POST", path))
@@ -344,7 +400,7 @@ def test_create_collision_reported_as_400_already_points_is_reuse(
                     400, text="alias 'x' already points to 'y', cannot rebind")
             return super().post(path, json=json, files=files, **kwargs)
 
-    client = Collides(exists=False)
+    client = Collides()
     b = builder(monkeypatch, client, runtime_bin)
     assert b.template_for(IMAGE) == template_name(IMAGE, b._fingerprint, 3000)
     assert client.build_payload is None
@@ -463,6 +519,62 @@ def test_an_existing_good_template_is_reused_without_building():
         AssertionError("must not rebuild a usable template"))
     client = _FakeClient({"base": "id-good"}, {"id-good": "ready"})
     assert b._usable_template(client, "base", "img", None) == "base"
+
+
+def test_an_existing_in_progress_template_is_joined_before_reuse(monkeypatch):
+    import harness.execution.templates as templates
+
+    monkeypatch.setattr(templates.time, "sleep", lambda _seconds: None)
+    b = bare_builder()
+    b.build_timeout = 1
+    b._stage_runtime = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("must not rebuild an in-progress template"))
+    client = _FakeClient({"base": "id-building"},
+                         {"id-building": "building"})
+    statuses = iter(("waiting", "building", "ready"))
+    client.statuses["id-building"] = None
+
+    original_get = client.get
+
+    def get(path, **kwargs):
+        if path.endswith("/status"):
+            client.gets.append(path)
+            return _Resp(200, {"status": next(statuses)})
+        return original_get(path, **kwargs)
+
+    client.get = get
+    assert b._usable_template(client, "base", "img", None) == "base"
+    assert sum(path.endswith("/status") for path in client.gets) == 3
+
+
+def test_alias_claimed_between_lookup_steps_is_joined(monkeypatch):
+    import harness.execution.templates as templates
+
+    monkeypatch.setattr(templates.time, "sleep", lambda _seconds: None)
+    b = bare_builder()
+    b.build_timeout = 1
+    b._stage_runtime = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("must join the build that claimed the alias"))
+    alias_lookups = 0
+    statuses = iter(("building", "ready"))
+
+    class AppearingAlias(_FakeClient):
+        def get(self, path, **kwargs):
+            nonlocal alias_lookups
+            if path.startswith("/templates/aliases/"):
+                self.gets.append(path)
+                alias_lookups += 1
+                if alias_lookups == 1:
+                    return _Resp(404)
+                return _Resp(200, {"templateID": "id-building"})
+            if path.endswith("/status"):
+                self.gets.append(path)
+                return _Resp(200, {"status": next(statuses)})
+            raise AssertionError(path)
+
+    client = AppearingAlias({}, {})
+    assert b._usable_template(client, "base", "img", None) == "base"
+    assert alias_lookups >= 3
 
 
 def test_the_search_for_a_name_is_bounded():

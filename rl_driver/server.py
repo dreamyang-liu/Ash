@@ -80,8 +80,14 @@ def create_app(driver: Driver, token: str | None, *, poll_interval_s: float = 1,
 
     @app.get("/health")
     def health():
+        nonterminal_groups = len(driver.ledger.active())
         return {"protocol_version": PROTOCOL_VERSION, "role": "driver", "miles_configured": miles is not None,
-                "training_token_source": "recorded Miles session; native protocol support required"}
+                "training_token_source": "recorded Miles session; native protocol support required",
+                "nonterminal_groups": nonterminal_groups,
+                # Compatibility for storage supervisors deployed before the
+                # metric was named accurately. This counts groups, not worker
+                # processes; zero remains the safe drain condition.
+                "active_workers": nonterminal_groups}
 
     @app.post("/rollout-groups", status_code=202)
     def submit_miles(body: dict):

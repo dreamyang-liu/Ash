@@ -62,6 +62,10 @@ def create_app(store: Store, token: str, *, index: Index | None = None, profiles
                 raise ValueError("v1 continuation must use the source execution profile")
         return store.submit(spec, key)
 
+    @app.get("/health")
+    def health():
+        return store.health()
+
     @app.post("/v1/jobs", status_code=202)
     def submit_job(body: dict, idempotency_key: str = Header(default="")):
         return submit(body, idempotency_key)

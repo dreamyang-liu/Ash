@@ -47,11 +47,19 @@ trajectory。协议已能通过 `minimum_returned_samples < max_samples` 表达
 `actual_samples < max_samples`。因此现阶段 `skip` 用于让无法分支的 group
 可终止而不是继续训练；支持 `K < N` 训练是 Miles 侧的后续实现项。
 
-v3 原生采样支持 temperature、top_p、top_k、文本 stop 和输出长度；
+v3 原生采样支持 temperature、top_p、top_k、seed、文本 stop 和输出长度；
 其他字段明确拒绝。Responses 使用 max_output_tokens，Messages 使用
 max_tokens/stop_sequences。v2 的 raw-token detokenization 开关不属于
 消息版协议。模型端必须支持 native
 agent 使用的 Responses 或 Messages，但无需返回训练 token records。
+
+fresh v3 rollout 的 prompt 可以是纯文本、单条 user message，或若干条
+system/developer preamble 后接一条 user message。Claude slot 会把前置消息
+追加到 Claude SDK 的内建 system preset，而不是把 system 内容降格拼入 user
+文本；assistant/tool 历史必须通过已验证的 native prefix 恢复，不能直接作为
+fresh prompt 注入。由于 Claude SDK 仍会渲染自身稳定 harness prompt，这类轨迹
+在执行上下文中标记为 `prompt_token_alignment: "harness_rendered"`；它不宣称
+请求文本与模型最终 token 前缀逐 token 相等。
 
 v3 的次数限制统一为请求顶层的 `max_turns`（正整数），按每条轨迹生效：
 
@@ -165,7 +173,7 @@ finally:
 | sample_slots / max_samples | 从分配名额中选择前 max_samples 个，各自提交独立 RunSpec |
 | task_id | 写入任务上下文；可查部署侧 tasks 映射中的评分模板 |
 | environment_ref | 通过可信目录解析为 sandbox_image，并设置对应 CPU/内存 |
-| prompt | 文本或单条 user message → RunSpec.prompt |
+| prompt | 文本、单条 user message，或 system/developer preamble + 最终 user；Claude preamble 通过 SDK system preset 保留 |
 | prompt_token_ids | 原样保存；训练导出使用推理端记录的真实完整输入，而不重新 tokenize 文本 |
 | model / model_endpoint | 设置 RunSpec.model，并由执行侧 gateway 实际路由 |
 | session_server_endpoint | worker 创建 Miles session，模型请求路由至其 session 路径，结束时保存 records 后释放 session |
@@ -234,6 +242,13 @@ JobSpec 模板并省略 snapshot_id。driver 按已有规则从 actor 最终可�
 Session Server 对象。DELETE 保留持久幂等记录和执行数据，不删除 snapshot。
 原自定义调用方迁移到 `ExecutionClient` 和 `/execution-groups`；详见
 [EXECUTION.md](EXECUTION.md)。`Client` 默认已指向 Miles v2。
+
+RL Driver 的 `GET /health` 无需探测 Run Store 数据库，它报告 driver 协议、
+Miles adapter 配置和 `nonterminal_groups`。该计数包含 queued、running 和正在
+取消的 rollout group，用于部署侧在 GC、轮换或升级前确认已经排空；历史字段
+`active_workers` 暂时返回同一数值以兼容旧监督器，但它并不是 OS 进程或
+Run Store worker 数量。Run Store 自己的、需要 Bearer 鉴权的 `GET /health`
+会开启新事务执行 `SELECT 1`，用于判断 API 与 PostgreSQL 是否同时 ready。
 
 ## Profiling 导出
 

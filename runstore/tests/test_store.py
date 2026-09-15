@@ -1,6 +1,7 @@
 """Real PostgreSQL concurrency and fencing, not a SQLite approximation."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import os
 import time
 from uuid import uuid4
@@ -8,7 +9,14 @@ from uuid import uuid4
 import pytest
 
 from runstore.specs import JobSpec
-from runstore.store import Conflict, Fenced, Store
+from runstore.store import (
+    Conflict,
+    Fenced,
+    Store,
+    _COMPRESSED_EVENT,
+    _loaded_event,
+    _stored_event,
+)
 
 
 @pytest.fixture
@@ -82,6 +90,83 @@ def test_cancel_intent_is_durable_for_queued_and_running_jobs(store):
     assert store.get(running["id"])["state"] == "cancelled"
 
 
+def test_cancel_uses_timeout_within_http_client_deadline():
+    class Cursor:
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, query, parameters=None):
+            self.queries.append((query, parameters))
+
+        def fetchone(self):
+            return {"state": "running"}
+
+    cursor = Cursor()
+
+    @contextmanager
+    def transaction():
+        yield cursor
+
+    instance = Store("unused")
+    instance.transaction = transaction
+    instance.request_cancel("job")
+    assert cursor.queries[0] == ("SET LOCAL statement_timeout = '20s'", None)
+    assert "FOR UPDATE" in cursor.queries[1][0]
+
+
+def test_cancel_waits_past_the_default_statement_timeout_for_a_row_lock(store):
+    """Cancellation has its own timeout rather than inheriting the 5s default."""
+    job = store.submit(request(), "cancel-lock-wait")
+    claim = store.claim("worker")
+    assert claim["id"] == job["id"]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with store.transaction() as cursor:
+            cursor.execute("SELECT id FROM rs_jobs WHERE id=%s FOR UPDATE", (job["id"],))
+            cancellation = pool.submit(store.request_cancel, job["id"])
+            time.sleep(5.5)
+            assert not cancellation.done()
+        cancellation.result(timeout=1)
+    assert store.get(job["id"])["phase"] == "cancelling"
+
+
+def test_large_event_encoding_happens_before_the_job_row_is_locked(monkeypatch):
+    import runstore.store as store_module
+
+    class Cursor:
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, query, parameters=None):
+            self.queries.append((query, parameters))
+            self.rowcount = 1
+
+    cursor = Cursor()
+
+    @contextmanager
+    def transaction():
+        yield cursor
+
+    instance = Store("unused")
+    instance.transaction = transaction
+    observed = []
+
+    def fence(_cursor, _job_id, _token):
+        observed.append("locked")
+        return {"active_attempt": "attempt"}
+
+    event = {"seq": 1, "type": "rollout.session_state", "state": {"text": "x" * 1_100_000}}
+    instance._fence = fence
+    original = store_module._stored_event
+
+    def encoded(value):
+        observed.append("encoded")
+        return original(value)
+
+    monkeypatch.setattr(store_module, "_stored_event", encoded)
+    instance.append_events("job", "lease", [event])
+    assert observed == ["encoded", "locked"]
+
+
 def test_result_is_durable_and_old_attempt_cannot_overwrite(store):
     job = store.submit(request(), "fixture")
     claim = store.claim("worker")
@@ -99,6 +184,38 @@ def test_journal_append_is_idempotent_but_not_rewritable(store):
     assert store.events(claim["active_attempt"]) == [event]
     with pytest.raises(Conflict):
         store.append_events(job["id"], claim["lease_token"], [{**event, "call_id": "changed"}])
+
+
+def test_large_events_are_compressed_losslessly():
+    event = {"seq": 1, "type": "rollout.session_state", "state": {"text": "x" * 1_100_000}}
+    stored = _stored_event(event)
+    assert stored["encoding"] == "ash.runstore.zlib-json-v1"
+    assert len(stored["data"]) < len(event["state"]["text"])
+    assert _loaded_event(stored) == event
+
+
+def test_large_event_round_trips_through_postgresql(store):
+    job = store.submit(request(), "large-event")
+    claim = store.claim("worker")
+    assert claim["id"] == job["id"]
+    event = {
+        "seq": 1,
+        "type": "rollout.session_state",
+        "state": {"text": "repeated session state " * 100_000},
+    }
+    store.append_events(job["id"], claim["lease_token"], [event])
+    assert store.events(claim["active_attempt"]) == [event]
+    with store.transaction() as cursor:
+        cursor.execute(
+            "SELECT event FROM rs_events WHERE attempt_id=%s AND seq=1",
+            (claim["active_attempt"],),
+        )
+        assert cursor.fetchone()["event"]["encoding"] == _COMPRESSED_EVENT
+
+
+def test_compressed_event_marker_is_not_interpreted_without_all_fields():
+    event = {"encoding": "ash.runstore.zlib-json-v1", "application": "payload"}
+    assert _loaded_event(event) == event
 
 
 def test_actor_retry_needs_verified_pair_and_preserves_cap(store):

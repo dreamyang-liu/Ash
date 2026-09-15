@@ -7,7 +7,7 @@ from runstore.message_sampling import validate as validate_sampling
 from rl_driver.environment_catalog import EnvironmentCatalog, EnvironmentResolver
 from rl_driver.ledger import Conflict, canonical
 from rl_driver.message_protocol import MESSAGE_VERSION, MessageRequest
-from rl_driver.miles import internal_id, rollout_progress, validate_endpoint
+from rl_driver.miles import internal_id, native_prompt, rollout_progress, validate_endpoint
 from rl_driver.profiling import build_profile_records
 from rl_driver.tasks import resolve_task
 from runstore.message_export import clean_messages
@@ -89,16 +89,12 @@ class MessageAdapter:
             if request.session_server_endpoint
             else None
         )
-        prompt = request.prompt
-        if isinstance(prompt, list):
-            if (len(prompt) != 1 or prompt[0].get("role") != "user"
-                    or set(prompt[0]) != {"role", "content"} or not isinstance(prompt[0]["content"], str)):
-                raise ValueError("Native task input must be text or one user message")
-            prompt = prompt[0]["content"]
+        slot_name = defaults.get("slot", "codex")
+        prompt, system_prompt = native_prompt(request.prompt, slot_name)
         samples = []
         for slot in request.sample_slots[:request.max_samples]:
             spec = deepcopy(defaults)
-            spec.update(prompt=prompt, model=model, slot=spec.get("slot", "codex"),
+            spec.update(prompt=prompt, model=model, slot=slot_name,
                         sandbox_image=entry.spawn_ref, sandbox_resources=resources, use_gateway=True, transport="http",
                         timeout_s=min(spec.get("timeout_s", float("inf")), request.budgets.max_wall_time_seconds))
             contract = {
@@ -114,6 +110,8 @@ class MessageAdapter:
                     retain_session=True,
                 )
             spec["extra"] = {**spec.get("extra", {}), "rollout_contract": contract}
+            if system_prompt is not None:
+                spec["extra"]["system_prompt"] = system_prompt
             if task.get("repository") is not None:
                 spec["extra"]["repository_preflight"] = deepcopy(task["repository"])
             sample = {
@@ -121,6 +119,11 @@ class MessageAdapter:
                 "run": {"kind": "rollout", "profile": self.config.get("profile", "codex"),
                         "spec": spec, "max_infra_retries": 0,
                         "context": {"task_id": request.task_id,
+                                    "prompt_token_alignment": (
+                                        "harness_rendered"
+                                        if slot_name == "claude-code"
+                                        else "request_exact"
+                                    ),
                                     "environment_ref": request.environment_ref.to_dict(),
                                     "sample_slot_id": slot.sample_slot_id,
                                     **({"miles_session_id": shared_session_id}

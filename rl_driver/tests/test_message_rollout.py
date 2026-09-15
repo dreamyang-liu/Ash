@@ -115,6 +115,21 @@ def test_real_miles_request_to_queue_grade_and_message_response(tmp_path, peer, 
     assert grade["spec"]["repository_base_commit"] == "1" * 40
 
 
+def test_health_reports_nonterminal_groups_for_storage_drain(tmp_path, peer):
+    _queue, client = peer
+    body = request()
+    driver = Driver(client, Ledger(tmp_path / "ledger"))
+    adapter = MilesAdapter(driver, config(body))
+    with TestClient(create_app(driver, None, miles=adapter, background=False)) as http:
+        health = http.get("/health").json()
+        assert health["nonterminal_groups"] == 0
+        assert health["active_workers"] == 0
+        assert http.post("/rollout-groups", json=body).status_code == 202
+        health = http.get("/health").json()
+        assert health["nonterminal_groups"] == 1
+        assert health["active_workers"] == 1
+
+
 def test_v3_without_deployment_grader_defers_reward_to_miles(tmp_path, peer):
     queue, client = peer
     body = request()
@@ -135,6 +150,50 @@ def test_v3_without_deployment_grader_defers_reward_to_miles(tmp_path, peer):
     assert result["status"] == "completed", result
     assert result["trajectories"][0]["reward"] is None
     assert all(job["kind"] == "rollout" for job in queue.jobs.values())
+
+
+def test_v3_claude_preserves_system_preamble_as_sdk_system_prompt(tmp_path, peer):
+    queue, client = peer
+    body = request()
+    body["prompt"] = [
+        {"role": "system", "content": "benchmark policy"},
+        {"role": "user", "content": "fix task"},
+    ]
+    cfg = config(body)
+    cfg["run_defaults"]["slot"] = "claude-code"
+    adapter = MilesAdapter(Driver(client, Ledger(tmp_path / "ledger")), cfg)
+    adapter.submit(body)
+    adapter.driver.tick()
+    actor = next(
+        body
+        for method, path, body, _params in queue.requests
+        if method == "POST" and path == "/v1/jobs"
+    )
+    assert actor["spec"]["prompt"] == "fix task"
+    assert actor["spec"]["extra"]["system_prompt"] == {
+        "type": "preset",
+        "preset": "claude_code",
+        "append": "benchmark policy",
+    }
+    assert actor["context"]["prompt_token_alignment"] == "harness_rendered"
+
+
+def test_v3_claude_plain_prompt_still_records_harness_rendering(tmp_path, peer):
+    queue, client = peer
+    body = request()
+    cfg = config(body)
+    cfg["run_defaults"]["slot"] = "claude-code"
+    adapter = MilesAdapter(Driver(client, Ledger(tmp_path / "ledger")), cfg)
+    adapter.submit(body)
+    adapter.driver.tick()
+    actor = next(
+        request_body
+        for method, path, request_body, _params in queue.requests
+        if method == "POST" and path == "/v1/jobs"
+    )
+    assert actor["spec"]["prompt"] == "fix task"
+    assert "system_prompt" not in actor["spec"]["extra"]
+    assert actor["context"]["prompt_token_alignment"] == "harness_rendered"
 
 
 def test_v3_claude_branch_policy_consumes_deferred_slot_and_exports_lineage(
@@ -445,6 +504,11 @@ def test_sampling_values_survive_native_mapping(shape, length_field, stop_field)
     for key in ("temperature", "top_p", "top_k"):
         assert mapped[key] == controls[key]
     assert controls == request()["sampling_params"]
+
+
+@pytest.mark.parametrize("shape", ["responses", "messages"])
+def test_sampling_seed_survives_native_mapping(shape):
+    assert parameters({"seed": 20260915}, shape)["seed"] == 20260915
 
 
 def test_unsupported_controls_and_wire_fields_are_not_silently_accepted():

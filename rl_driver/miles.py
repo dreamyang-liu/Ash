@@ -240,7 +240,7 @@ class MilesAdapter:
             raise ValueError("Provide model or configure run_defaults.model")
         validate_sampling(sampling)
         slot_name = self.defaults.get("slot", "codex")
-        prompt, system_prompt = _native_prompt(request.prompt, slot_name)
+        prompt, system_prompt = native_prompt(request.prompt, slot_name)
         resources = self.config.get("resources", {}).get(request.environment_ref.resource_profile)
         if (not isinstance(resources, dict) or set(resources) != {"cpu", "memory_mb"}
                 or any(type(n) is not int or n <= 0 for n in resources.values())):
@@ -585,7 +585,7 @@ def rollout_progress(
     )
 
 
-def _native_prompt(prompt: str | list[dict], slot: str) -> tuple[str, object | None]:
+def native_prompt(prompt: str | list[dict], slot: str) -> tuple[str, object | None]:
     """Map a fresh structured task onto a native SDK without flattening roles.
 
     Run Store branches use native prefix restoration and are handled elsewhere.

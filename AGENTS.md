@@ -626,10 +626,16 @@ handed an agent this repo's own `.claude/` skills mid-task.
   FRESH handle (`MicroVMPool.handle`): one probed on the session's loop fails
   its first call on the server's loop ("Event ... bound to a different event
   loop").
-- **Two processes building the same template race.** The second spawns before
-  the first's build commits → AgentENV 500 "resolve committed snapshot into
-  runnable runtime paths". Never run two jobs on the same image concurrently
-  from separate processes (the gate runs one job per task for this reason).
+- **Two processes building the same template must join the winning build.**
+  AgentENV makes the alias visible while its build record is still pending. Ash
+  therefore detects both an in-progress alias and an alias-create collision,
+  then waits for the winning build before spawning; it never hands a pending
+  template to `POST /sandboxes`. A failed winner makes waiters fail explicitly;
+  a build that never settles reaches the configured timeout. The losing process's
+  private staging snapshot remains until repository GC because AgentENV does not
+  expose snapshot deletion. Eliminating that duplicate staging work and allowing
+  takeover after a failed winner require an AgentENV-native create-or-join build
+  operation; correctness no longer requires callers to serialize jobs.
 - **The guest agent rebuilds PATH.** Image ENV reaches the runtime except
   PATH: `/opt/venv/bin`, `/root/go/bin`, `/app/node_modules/.bin` were
   missing in every DeepSWE image. `microvm.image_env=true` launches the
