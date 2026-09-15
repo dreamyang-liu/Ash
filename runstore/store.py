@@ -142,7 +142,8 @@ class Store:
         return dict(job)
 
     def heartbeat(self, job_id: str, token: str, *, lease_s: float = 60,
-                  phase: str | None = None, execution: dict | None = None) -> None:
+                  phase: str | None = None, execution: dict | None = None) -> bool:
+        """Renew a lease and return whether durable cancellation was requested."""
         with self.transaction() as cursor:
             job = self._fence(cursor, job_id, token)
             cursor.execute("""UPDATE rs_jobs SET lease_until=clock_timestamp()+%s*interval '1 second',
@@ -150,6 +151,7 @@ class Store:
             if execution is not None:
                 cursor.execute("UPDATE rs_attempts SET execution=execution || %s::jsonb WHERE id=%s",
                                (canonical(execution), job["active_attempt"]))
+            return bool(job.get("cancel_requested"))
 
     def expire(self) -> list[str]:
         with self.transaction() as cursor:
@@ -191,7 +193,7 @@ class Store:
 
     def finish(self, job_id: str, token: str, result: dict, *, state: str = "succeeded",
                retry: bool = False, recovery: dict | None = None) -> None:
-        if state not in {"succeeded", "failed", "quarantined"}:
+        if state not in {"succeeded", "failed", "quarantined", "cancelled"}:
             raise ValueError("Invalid terminal outcome")
         if retry and (state != "failed" or result.get("failure_kind") != "infrastructure"):
             raise ValueError("Only reconciled infrastructure failures may retry")
@@ -211,12 +213,22 @@ class Store:
                             canonical(result), result.get("error"),
                             30 * job["attempt_count"] if retry else 0, job_id))
 
-    def cancel_queued(self, job_id: str) -> None:
+    def request_cancel(self, job_id: str) -> None:
         with self.transaction() as cursor:
-            cursor.execute("""UPDATE rs_jobs SET state='cancelled',phase='cancelled',
-                updated_at=clock_timestamp() WHERE id=%s AND state='queued'""", (job_id,))
-            if cursor.rowcount != 1:
-                raise Conflict("Only queued jobs can be cancelled without execution reconciliation")
+            cursor.execute("SELECT state FROM rs_jobs WHERE id=%s FOR UPDATE", (job_id,))
+            row = cursor.fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row["state"] == "queued":
+                cursor.execute("""UPDATE rs_jobs SET state='cancelled',phase='cancelled',
+                    cancel_requested=true,updated_at=clock_timestamp() WHERE id=%s""", (job_id,))
+            elif row["state"] == "running":
+                cursor.execute("""UPDATE rs_jobs SET phase='cancelling',cancel_requested=true,
+                    updated_at=clock_timestamp() WHERE id=%s""", (job_id,))
+
+    def cancel_queued(self, job_id: str) -> None:
+        """Compatibility name; cancellation now also reaches running jobs."""
+        self.request_cancel(job_id)
 
     def adopt_quarantined(self, job_id: str, worker_id: str, lease_s: float = 120) -> dict | None:
         with self.transaction() as cursor:

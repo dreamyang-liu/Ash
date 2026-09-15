@@ -170,7 +170,7 @@ def test_miles_request_through_queue_orchestrator_and_recorded_session(store, tm
     from harness.execution.pipeline import CallContext, ToolPipeline
     from harness.orchestrator.run import Orchestrator, RunSpec
     from rl_driver.client import Client as MilesClient
-    from rl_driver.miles import MilesAdapter
+    from rl_driver.miles import MilesAdapter, internal_id
     from rl_driver.tests.test_miles import miles_request, config, recorded_state
     import httpx
 
@@ -179,10 +179,17 @@ def test_miles_request_through_queue_orchestrator_and_recorded_session(store, tm
     states, released, executions, owned_servers = {}, [], [], []
     session_app = FastAPI()
 
+    @session_app.get("/health")
+    def session_health():
+        return {
+            "capabilities": ["session-tree-v2", "session-position-v1"],
+            "session_server_instance_id": "fixture-session-server",
+        }
+
     @session_app.post("/sessions")
-    def new_session():
-        sid = f"session-{len(states)}"
-        states[sid] = {}
+    def new_session(payload: dict | None = None):
+        sid = (payload or {}).get("session_id") or f"session-{len(states)}"
+        states.setdefault(sid, {})
         return {"session_id": sid}
 
     @session_app.post("/sessions/{sid}/v1/responses")
@@ -243,9 +250,16 @@ def test_miles_request_through_queue_orchestrator_and_recorded_session(store, tm
                     assert result["status"] == "completed", result
                     assert result["actual_samples"] == 2
                     assert result["consumed_budget"] == {"model_calls": 2, "tool_calls": 2}
-                    assert len(executions) == 2 and len(released) == 2
+                    # Shared SessionTree state is retained until Miles
+                    # acknowledges consumption with DELETE.
+                    assert len(executions) == 2 and released == []
                     assert [t["sample_slot_id"] for t in result["trajectories"]] == [s["sample_slot_id"] for s in body["sample_slots"]]
                     assert result["trajectories"][0]["token_ids"] == [*body["prompt_token_ids"], 90]
+                    client.release(group)
+                    # The background reconciler and explicit DELETE may race;
+                    # remote session deletion is deliberately idempotent.
+                    assert released
+                    assert set(released) == {internal_id(body["rollout_job_id"])}
                 finally:
                     client.close()
         finally:

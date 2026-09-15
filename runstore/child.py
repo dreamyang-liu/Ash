@@ -7,13 +7,14 @@ import os
 from pathlib import Path
 import signal
 import sys
+import threading
 import time
 
 from harness.execution.session import SandboxSession
 from harness.orchestrator.resources import ResourceLedger
 from harness.orchestrator.run import Orchestrator, RunSpec
 from runstore.config import referenced_env, resolve
-from runstore.files import write_json
+from runstore.files import read_json, write_json
 from runstore.native import materialize
 from runstore.payload import receive_payload
 
@@ -62,6 +63,23 @@ def execute(request: dict, directory: Path) -> dict:
     slot = spec.get("slot", "claude-code")
     os.environ["CODEX_HOME" if slot == "codex" else "CLAUDE_CONFIG_DIR"] = str(native_home)
     extra = dict(spec.get("extra", {}))
+    contract_overrides = (
+        request.get("context", {}).get("rl_driver", {}).get(
+            "rollout_contract_overrides", {}
+        )
+    )
+    if contract_overrides:
+        if not isinstance(contract_overrides, dict) or set(contract_overrides) - {
+            "max_model_calls", "max_tool_calls"
+        }:
+            raise ValueError("Invalid RL-driver rollout contract overrides")
+        contract = extra.get("rollout_contract")
+        if not isinstance(contract, dict):
+            raise ValueError("Rollout contract overrides require a rollout contract")
+        for name, value in contract_overrides.items():
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"{name} override must be a nonnegative integer or null")
+        extra["rollout_contract"] = {**contract, **contract_overrides}
     message_export = extra.get("rollout_contract", {}).get("message_export", False)
     completion = {}
     if request.get("recovery"):
@@ -77,13 +95,34 @@ def execute(request: dict, directory: Path) -> dict:
             from runstore.message_export import mark_hint
 
             spec["prompt"] = mark_hint(spec["prompt"])
+        rollout_contract = extra.get("rollout_contract")
+        if rollout_contract and rollout_contract.get("session_id"):
+            model_position = recovered.get("model_position")
+            if not isinstance(model_position, dict):
+                raise ValueError(
+                    "Miles-backed continuation requires a verified model position"
+                )
+            if model_position.get("session_id") != rollout_contract["session_id"]:
+                raise ValueError(
+                    "Recovery model position belongs to a different Miles session"
+                )
+            extra["rollout_contract"] = {
+                **rollout_contract,
+                "model_parent_position": model_position,
+            }
     extra["exact_capture"] = True
     spec.update(cwd=str(cwd), run_id=request["attempt_id"], agent_id=request["attempt_id"],
                 journal_path=directory / "trajectory.jsonl", transport="http", extra=extra)
     ledger._append("allocation_started", run_id=request["attempt_id"], image=spec.get("sandbox_image"))
 
+    progress_lock = threading.Lock()
+
     def progress(kind: str, payload: dict) -> None:
-        write_json(directory / "progress.json", {"phase": kind, **payload})
+        with progress_lock:
+            current = read_json(directory / "progress.json") or {}
+            current.update({"phase": kind, **payload})
+            current["updated_at_unix_seconds"] = time.time()
+            write_json(directory / "progress.json", current)
 
     class TrackedOrchestrator(Orchestrator):
         def _teardown(self, run_spec, gateway, provisioned, claim):

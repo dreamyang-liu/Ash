@@ -4,7 +4,12 @@
   "rollout_id": 1,
   "prompt_group_id": "3",
   "task_id": "task-1",
-  "image": "prime/primeintellect/task:base",
+  "environment_ref": {
+    "kind": "image",
+    "id": "docker.io/swerebenchv2/task",
+    "revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "resource_profile": "standard"
+  },
   "prompt": [
     {
       "role": "user",
@@ -12,6 +17,7 @@
     }
   ],
   "model_endpoint": "http://model:30000",
+  "session_server_endpoint": "http://session-server:30000",
   "model": "policy",
   "sample_slots": [
     {

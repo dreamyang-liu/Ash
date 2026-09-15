@@ -151,6 +151,109 @@ def test_the_bound_wiring_reaches_the_slot(tmp_path, monkeypatch):
     assert outcome.sandbox_id == "sb-1"
 
 
+def test_repository_preflight_runs_before_the_agent(tmp_path, monkeypatch):
+    order = []
+
+    class Session:
+        def execute(self, tool, args, timeout):
+            order.append((tool, args["command"], timeout))
+            output = "image-cache.txt\n" if "ls-files --others" in args["command"] else ""
+            return type("Result", (), {"success": True, "output": output, "error": ""})()
+
+    provisioned = FakeProvisioned()
+    provisioned.session = Session()
+    orchestrator = Orchestrator(out_dir=tmp_path)
+    monkeypatch.setattr(
+        orchestrator, "_wire_sandbox", lambda run_spec, claim: (provisioned, "MCP")
+    )
+
+    outcome = orchestrator.run(spec(
+        tmp_path,
+        extra={"repository_preflight": {
+            "workdir": "/workspace/repo",
+            "base_commit": "1" * 40,
+        }},
+    ))
+
+    assert outcome.ok
+    assert len(order) == 2
+    command = order[0][1]
+    assert "git -C /workspace/repo rev-parse HEAD" in command
+    assert "ln -s -- /workspace/repo /testbed" in command
+    assert RecordingSlot.calls, "agent did not run after a successful preflight"
+    prepared = [
+        event for event in read_journal(tmp_path / "j.jsonl")
+        if event["type"] == "environment.prepared"
+    ]
+    assert prepared[0]["base_commit"] == "1" * 40
+    assert prepared[0]["baseline_untracked"] == ["image-cache.txt"]
+
+
+def test_repository_preflight_inherits_root_baseline_without_rescanning_child(
+    tmp_path, monkeypatch
+):
+    commands = []
+
+    class Session:
+        def execute(self, tool, args, timeout):
+            commands.append(args["command"])
+            return type("Result", (), {"success": True, "output": "", "error": ""})()
+
+    provisioned = FakeProvisioned()
+    provisioned.session = Session()
+    orchestrator = Orchestrator(out_dir=tmp_path)
+    monkeypatch.setattr(
+        orchestrator, "_wire_sandbox", lambda run_spec, claim: (provisioned, "MCP")
+    )
+    outcome = orchestrator.run(spec(
+        tmp_path,
+        extra={
+            "repository_preflight": {
+                "workdir": "/workspace/repo",
+                "base_commit": "1" * 40,
+            },
+            "repository_baseline_untracked": ["image-cache.txt"],
+        },
+    ))
+
+    assert outcome.ok
+    assert all("ls-files --others" not in command for command in commands)
+    prepared = [
+        event for event in read_journal(tmp_path / "j.jsonl")
+        if event["type"] == "environment.prepared"
+    ]
+    assert prepared[0]["baseline_untracked"] == ["image-cache.txt"]
+
+
+def test_repository_preflight_failure_prevents_agent_start(tmp_path, monkeypatch):
+    class Session:
+        def execute(self, tool, args, timeout):
+            return type(
+                "Result", (),
+                {"success": False, "output": "", "error": "unexpected HEAD"},
+            )()
+
+    provisioned = FakeProvisioned()
+    provisioned.session = Session()
+    orchestrator = Orchestrator(out_dir=tmp_path)
+    monkeypatch.setattr(
+        orchestrator, "_wire_sandbox", lambda run_spec, claim: (provisioned, "MCP")
+    )
+
+    outcome = orchestrator.run(spec(
+        tmp_path,
+        extra={"repository_preflight": {
+            "workdir": "/testbed",
+            "base_commit": "1" * 40,
+        }},
+    ))
+
+    assert not outcome.ok
+    assert "repository preflight failed" in outcome.error
+    assert not RecordingSlot.calls
+    assert provisioned.destroyed
+
+
 def test_checkpoints_are_paired_when_a_session_is_given(tmp_path):
     """The bridge must be subscribed before the slot's first event, or the run's
     early checkpoints are silently lost."""

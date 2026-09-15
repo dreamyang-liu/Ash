@@ -36,3 +36,40 @@ def test_worker_credentials_are_hidden_and_gateway_wins_over_agent_env(tmp_path,
     assert captured["ASH_GATEWAY_TOKEN"].startswith("ash-slot-")
     assert "backend-fixture-secret" not in captured.values()
     assert "provider-fixture-secret" not in captured.values()
+
+
+def test_child_applies_only_call_budget_overrides_from_branch_context(
+    tmp_path, monkeypatch
+):
+    captured = {}
+
+    def run(_orchestrator, spec):
+        captured.update(spec.extra["rollout_contract"])
+        return RunOutcome(spec.run_id, spec.journal_path, "completed")
+
+    monkeypatch.setattr(Orchestrator, "run", run)
+    execute({
+        "kind": "rollout",
+        "attempt_id": "fixture",
+        "effective_spec": {
+            "prompt": "fixture",
+            "slot": "codex",
+            "extra": {"rollout_contract": {
+                "model_endpoint": "http://model",
+                "session_id": "shared",
+                "max_model_calls": 8,
+                "max_tool_calls": 9,
+            }},
+        },
+        "profile_config": {},
+        "context": {"rl_driver": {"rollout_contract_overrides": {
+            "max_model_calls": 3,
+            "max_tool_calls": None,
+        }}},
+    }, tmp_path)
+    assert captured == {
+        "model_endpoint": "http://model",
+        "session_id": "shared",
+        "max_model_calls": 3,
+        "max_tool_calls": None,
+    }

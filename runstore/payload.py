@@ -27,6 +27,8 @@ def encode_payload(payload: dict, job_id: str, attempt_id: str) -> bytes:
         raise ValueError("Invalid attempt payload kind")
     if not all(isinstance(payload.get(key), dict) for key in ("effective_spec", "profile_config")):
         raise ValueError("Attempt payload requires effective spec and profile")
+    if not isinstance(payload.get("context", {}), dict):
+        raise ValueError("Attempt payload context must be an object")
     if payload.get("recovery") is not None and not isinstance(payload["recovery"], dict):
         raise ValueError("Invalid attempt recovery metadata")
     no_credentials(payload)

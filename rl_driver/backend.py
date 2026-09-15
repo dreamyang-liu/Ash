@@ -22,13 +22,12 @@ class RunStoreClient(Client):
             result.extend(page)
             after = cursor
 
-    def cancel_queued(self, job_id: str) -> bool:
+    def request_cancel(self, job_id: str) -> bool:
         response = self.http.post(f"/v1/jobs/{segment(job_id)}/cancel")
-        if response.status_code == 409:
-            # This API cannot interrupt a running execution. Keep tracking it.
-            return False
         response.raise_for_status()
         return True
+
+    cancel_queued = request_cancel
 
     def tools(self, job_id: str, *, attempt_id: str, after: int = 0) -> list[dict]:
         response = self.http.get(f"/v1/jobs/{segment(job_id)}/tools", params={

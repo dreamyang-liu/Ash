@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field, fields
 import hashlib
 import json
 import math
+import re
 from typing import Any
 
 from harness.orchestrator.run import RunSpec
@@ -58,6 +59,9 @@ class GradeSpec:
     verifier_network: str = "deny"
     harness_repo: str | None = None
     parser_path: str | None = None
+    baseline_untracked: list[str] | None = None
+    repository_workdir: str | None = None
+    repository_base_commit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -100,7 +104,8 @@ class JobSpec:
             if not isinstance(self.spec.get("extra", {}), dict):
                 raise ValueError("RunSpec extra must be a JSON object")
             if any(key in self.spec.get("extra", {}) for key in (
-                    "native_prefix", "resume_session_id", "fork", "checkpoint_identity")):
+                    "native_prefix", "resume_session_id", "fork", "checkpoint_identity",
+                    "repository_baseline_untracked")):
                 raise ValueError("Native restoration fields are worker-owned")
         elif self.kind == "grade":
             grade = GradeSpec(**self.spec)
@@ -113,6 +118,37 @@ class JobSpec:
                 raise ValueError("Grading requires frozen task, snapshot and grader references")
             if grade.benchmark == "swe-rebench-v2" and not grade.parser_path:
                 raise ValueError("SWE-rebench grading requires a deployment parser_path")
+            if grade.benchmark == "swe-rebench-v2" and grade.baseline_untracked is None:
+                raise ValueError(
+                    "SWE-rebench grading requires the actor's frozen baseline_untracked"
+                )
+            if grade.benchmark == "swe-rebench-v2" and (
+                not isinstance(grade.repository_workdir, str)
+                or not grade.repository_workdir.startswith("/")
+                or grade.repository_workdir == "/"
+                or not isinstance(grade.repository_base_commit, str)
+                or not re.fullmatch(
+                    r"[0-9a-fA-F]{40,64}", grade.repository_base_commit
+                )
+            ):
+                raise ValueError(
+                    "SWE-rebench grading requires the actor's frozen repository workdir/base commit"
+                )
+            if grade.baseline_untracked is not None and (
+                not isinstance(grade.baseline_untracked, list)
+                or any(
+                    not isinstance(path, str)
+                    or not path
+                    or path.startswith("/")
+                    or path in {".", ".."}
+                    or ".." in path.split("/")
+                    for path in grade.baseline_untracked
+                )
+                or grade.baseline_untracked != sorted(set(grade.baseline_untracked))
+            ):
+                raise ValueError(
+                    "baseline_untracked must be sorted unique repository-relative paths"
+                )
             if grade.benchmark == "deepswe" and not grade.harness_repo:
                 raise ValueError("DeepSWE grading requires a deployment harness_repo")
         else:

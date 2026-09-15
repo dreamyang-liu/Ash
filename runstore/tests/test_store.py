@@ -62,6 +62,26 @@ def test_expiry_quarantines_instead_of_replaying_uncertain_execution(store):
         store.finish(job["id"], claim["lease_token"], {"ok": True})
 
 
+def test_cancel_intent_is_durable_for_queued_and_running_jobs(store):
+    queued = store.submit(request(), "queued-cancel")
+    store.request_cancel(queued["id"])
+    assert store.get(queued["id"])["state"] == "cancelled"
+    assert store.get(queued["id"])["cancel_requested"] is True
+
+    running = store.submit(request(), "running-cancel")
+    claim = store.claim("worker")
+    assert claim["id"] == running["id"]
+    store.request_cancel(running["id"])
+    assert store.get(running["id"])["phase"] == "cancelling"
+    assert store.heartbeat(running["id"], claim["lease_token"]) is True
+    store.finish(
+        running["id"], claim["lease_token"],
+        {"status": "cancelled", "stop_reason": "cancelled"},
+        state="cancelled",
+    )
+    assert store.get(running["id"])["state"] == "cancelled"
+
+
 def test_result_is_durable_and_old_attempt_cannot_overwrite(store):
     job = store.submit(request(), "fixture")
     claim = store.claim("worker")

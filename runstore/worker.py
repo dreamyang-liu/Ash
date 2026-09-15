@@ -23,6 +23,35 @@ from runstore.store import Store
 from runstore.watchdog import Watchdog
 
 
+def recovery_repository_baseline(store, recovery: dict | None) -> list[str] | None:
+    """Return the root repository baseline inherited by a retry or branch.
+
+    Re-scanning a restored child would classify files created by its parent as
+    image baggage. The source attempt's durable event is therefore the only
+    valid source for a continuation baseline.
+    """
+    if recovery is None:
+        return None
+    prepared = [
+        event
+        for event in store.events(recovery["attempt_id"], limit=10000)
+        if event.get("type") == "environment.prepared"
+    ]
+    if not prepared:
+        return None
+    baselines = [event.get("baseline_untracked") for event in prepared]
+    if any(
+        not isinstance(value, list)
+        or any(not isinstance(path, str) or not path for path in value)
+        or value != sorted(set(value))
+        for value in baselines
+    ):
+        raise ValueError("Source attempt has an invalid repository baseline")
+    if any(value != baselines[0] for value in baselines[1:]):
+        raise ValueError("Source attempt changed its repository baseline")
+    return list(baselines[0])
+
+
 def process_identity(pid: int) -> dict | None:
     try:
         fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
@@ -173,6 +202,11 @@ class Worker:
             result = {**result, "error": "Owned allocation or cleanup needs reconciliation", "failure_kind": "infrastructure"}
             self.store.finish(job["id"], job["lease_token"], result, state="quarantined")
             return
+        if result.get("status") == "cancelled":
+            self.store.finish(
+                job["id"], job["lease_token"], result, state="cancelled"
+            )
+            return
         if result.get("status") == "completed" or truncated:
             self.store.finish(job["id"], job["lease_token"], result)
             return
@@ -244,6 +278,13 @@ class Worker:
                 validate_continuation(self.store.get(recovery["job_id"])["request"], request)
             if recovery and not self.index.valid(recovery):
                 raise ValueError("Native prefix or snapshot invalid before dispatch")
+            if recovery:
+                baseline = recovery_repository_baseline(self.store, recovery)
+                if baseline is not None:
+                    effective["extra"] = {
+                        **effective.get("extra", {}),
+                        "repository_baseline_untracked": baseline,
+                    }
             rollout_contract = effective.get("extra", {}).get("rollout_contract")
             if job["kind"] == "rollout" and rollout_contract is not None:
                 from harness.rollout import remaining_timeout
@@ -260,7 +301,8 @@ class Worker:
                     }}
             envelope = {"version": 1, "job_id": job["id"],
                         "attempt_id": job["active_attempt"], "kind": job["kind"],
-                        "effective_spec": effective, "profile_config": profile, "recovery": recovery}
+                        "effective_spec": effective, "profile_config": profile,
+                        "context": request.get("context", {}), "recovery": recovery}
             envelope = self.store.freeze_payload(job["id"], job["lease_token"], envelope)
             effective = envelope["effective_spec"]
             profile = envelope["profile_config"]
@@ -289,20 +331,40 @@ class Worker:
                     raise RuntimeError("Attempt child exited before process registration")
                 watchdog.arm(identity, started + timeout, running=lambda: process.poll() is None)
                 heartbeat_started = time.monotonic()
-                self.store.heartbeat(job["id"], job["lease_token"], lease_s=self.lease_s, phase="starting",
-                                     execution={"directory": str(directory), "process": identity,
-                                                "request_hash": digest(envelope), "scope": self._scope(request, envelope)})
+                cancel_requested = self.store.heartbeat(
+                    job["id"], job["lease_token"], lease_s=self.lease_s,
+                    phase="starting",
+                    execution={"directory": str(directory), "process": identity,
+                               "request_hash": digest(envelope), "scope": self._scope(request, envelope)},
+                )
                 watchdog.renew(heartbeat_started)
-                send_payload(process.stdin, payload, timeout_s=min(30, self.lease_s / 4,
-                                                                  timeout - (time.monotonic() - started)))
+                if cancel_requested:
+                    watchdog.request_stop("cancelled")
+                else:
+                    send_payload(
+                        process.stdin,
+                        payload,
+                        timeout_s=min(
+                            30,
+                            self.lease_s / 4,
+                            timeout - (time.monotonic() - started),
+                        ),
+                    )
                 while process.poll() is None:
                     events = self._ingest(job, directory, envelope)
                     progress = read_json(directory / "progress.json") or {}
                     heartbeat_started = time.monotonic()
-                    self.store.heartbeat(job["id"], job["lease_token"], lease_s=self.lease_s,
-                                         phase=progress.get("phase", "grading" if job["kind"] == "grade" else "rollout"),
-                                         execution={"last_seq": events[-1]["seq"] if events else 0,
-                                                    "tool_step": sum(event.get("type") == "tool.started" for event in events)})
+                    cancel_requested = self.store.heartbeat(
+                        job["id"], job["lease_token"], lease_s=self.lease_s,
+                        phase=progress.get(
+                            "phase", "grading" if job["kind"] == "grade" else "rollout"
+                        ),
+                        execution={"last_seq": events[-1]["seq"] if events else 0,
+                                   "tool_step": sum(event.get("type") == "tool.started" for event in events),
+                                   "progress": progress},
+                    )
+                    if cancel_requested:
+                        watchdog.request_stop("cancelled")
                     if watchdog.reason is not None:
                         break
                     watchdog.renew(heartbeat_started)
@@ -312,8 +374,12 @@ class Worker:
                 "status": "error", "failure_kind": "infrastructure", "error": "Attempt process exited without outcome",
                 "elapsed_s": time.monotonic() - started}
             if watchdog.reason is not None:
-                result = {**result, "status": "timeout" if watchdog.reason == "timeout" else "error",
-                          "failure_kind": "infrastructure", "error": f"Attempt stopped: {watchdog.reason}",
+                result = {**result, "status": ("timeout" if watchdog.reason == "timeout"
+                                               else "cancelled" if watchdog.reason == "cancelled"
+                                               else "error"),
+                          "failure_kind": ("actor" if watchdog.reason == "cancelled"
+                                           else "infrastructure"),
+                          "error": f"Attempt stopped: {watchdog.reason}",
                           "stop_reason": watchdog.reason}
             self._publish(job, directory, result, envelope)
         except BaseException as error:

@@ -13,6 +13,7 @@ from rl_driver.backend import RunStoreClient
 from rl_driver.driver import Driver
 from rl_driver.ledger import Ledger
 from rl_driver.miles import MilesAdapter
+from rl_driver.policy import load_branch_policy
 from rl_driver.server import DEFAULT_PORT, create_app
 
 
@@ -50,7 +51,16 @@ def main():
     client.http.timeout = httpx.Timeout(10)
     try:
         driver = Driver(client, ledger)
-        miles = MilesAdapter(driver, config["miles"]) if config.get("miles") is not None else None
+        miles_config = config.get("miles")
+        miles = (
+            MilesAdapter(
+                driver,
+                miles_config,
+                branch_policy=load_branch_policy(miles_config.get("branch_policy")),
+            )
+            if miles_config is not None
+            else None
+        )
         uvicorn.run(create_app(driver, driver_token, poll_interval_s=interval, miles=miles),
                     host=args.host, port=args.port)
     finally:

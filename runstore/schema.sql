@@ -13,12 +13,14 @@ CREATE TABLE IF NOT EXISTS rs_jobs (
     lease_token text,
     lease_until timestamptz,
     worker_id text,
+    cancel_requested boolean NOT NULL DEFAULT false,
     ready_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     result jsonb,
     error text,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+ALTER TABLE rs_jobs ADD COLUMN IF NOT EXISTS cancel_requested boolean NOT NULL DEFAULT false;
 CREATE INDEX IF NOT EXISTS rs_jobs_ready ON rs_jobs (ready_at, created_at) WHERE state = 'queued';
 CREATE TABLE IF NOT EXISTS rs_attempts (
     id text PRIMARY KEY,
@@ -69,8 +71,10 @@ CREATE TABLE IF NOT EXISTS rs_recoveries (
     prefix_node text NOT NULL REFERENCES rs_prefix_nodes(node),
     snapshot_id text NOT NULL,
     native jsonb NOT NULL,
+    model_position jsonb,
     valid boolean NOT NULL DEFAULT true,
     invalid_reason text,
     UNIQUE(attempt_id, message_step)
 );
+ALTER TABLE rs_recoveries ADD COLUMN IF NOT EXISTS model_position jsonb;
 CREATE INDEX IF NOT EXISTS rs_recoveries_depth ON rs_recoveries(attempt_id, tool_depth);

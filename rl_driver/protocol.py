@@ -18,6 +18,7 @@ from typing import Any
 PROTOCOL_VERSION = "ash-rollout-v2"
 JOB_STATUSES = {"queued", "running", "completed", "early_stopped", "failed", "cancelled"}
 TRAJECTORY_STATUSES = {"completed", "truncated", "failed", "aborted"}
+PROMPT_TOKEN_ALIGNMENTS = {"request_exact", "harness_rendered"}
 ENVIRONMENT_KINDS = {"image", "template", "snapshot"}
 OCI_DIGEST = re.compile(r"sha256:[0-9a-fA-F]{64}\Z")
 
@@ -36,8 +37,8 @@ def _required_string(value: Any, name: str) -> str:
 
 @dataclass(frozen=True)
 class RolloutBudget:
-    max_model_calls: int
-    max_tool_calls: int
+    max_model_calls: int | None
+    max_tool_calls: int | None
     max_wall_time_seconds: float
 
     @classmethod
@@ -49,21 +50,28 @@ class RolloutBudget:
             {"max_model_calls", "max_tool_calls", "max_wall_time_seconds"},
             "budgets",
         )
+        missing = {
+            "max_model_calls",
+            "max_tool_calls",
+            "max_wall_time_seconds",
+        } - set(value)
+        if missing:
+            raise ValueError(f"budgets is missing required fields: {sorted(missing)}")
         model_calls = value.get("max_model_calls")
         tool_calls = value.get("max_tool_calls")
         wall_time = value.get("max_wall_time_seconds")
-        if (
+        if model_calls is not None and (
             not isinstance(model_calls, int)
             or isinstance(model_calls, bool)
             or model_calls <= 0
         ):
-            raise ValueError("budgets.max_model_calls must be > 0")
-        if (
+            raise ValueError("budgets.max_model_calls must be null or > 0")
+        if tool_calls is not None and (
             not isinstance(tool_calls, int)
             or isinstance(tool_calls, bool)
             or tool_calls < 0
         ):
-            raise ValueError("budgets.max_tool_calls must be >= 0")
+            raise ValueError("budgets.max_tool_calls must be null or >= 0")
         if (
             not isinstance(wall_time, (int, float))
             or isinstance(wall_time, bool)
@@ -358,6 +366,7 @@ class Trajectory:
     generated_spans: list[GeneratedSpan]
     response_text: str
     status: str = "completed"
+    prompt_token_alignment: str = "request_exact"
     parent_branch_id: str | None = None
     branch_point_token_count: int | None = None
     reward: float | dict[str, Any] | None = None
@@ -381,6 +390,7 @@ class Trajectory:
                 "response_text",
                 "reward",
                 "status",
+                "prompt_token_alignment",
                 "metadata",
             },
             "trajectory",
@@ -388,6 +398,13 @@ class Trajectory:
         status = value.get("status", "completed")
         if status not in TRAJECTORY_STATUSES:
             raise ValueError(f"unknown trajectory status: {status!r}")
+        prompt_token_alignment = value.get(
+            "prompt_token_alignment", "request_exact"
+        )
+        if prompt_token_alignment not in PROMPT_TOKEN_ALIGNMENTS:
+            raise ValueError(
+                "prompt_token_alignment must be request_exact or harness_rendered"
+            )
         tokens = value.get("token_ids")
         if not isinstance(tokens, list) or not tokens:
             raise ValueError("trajectory token_ids must be a non-empty list")
@@ -456,6 +473,7 @@ class Trajectory:
             response_text=response_text,
             reward=reward,
             status=status,
+            prompt_token_alignment=prompt_token_alignment,
             metadata=dict(metadata),
         )
 
@@ -463,6 +481,68 @@ class Trajectory:
         data = asdict(self)
         data["generated_spans"] = [span.to_dict() for span in self.generated_spans]
         return data
+
+
+@dataclass(frozen=True)
+class RolloutProgress:
+    """Bounded operational state for polling an in-flight rollout group.
+
+    Token counters describe the most recently updated active sample.  Group
+    call/sample counters are cumulative across all actors.  This keeps the
+    response constant-size even when a group contains many long trajectories.
+    """
+
+    phase: str
+    model_calls: int = 0
+    tool_calls: int = 0
+    completed_samples: int = 0
+    active_sample_slot_id: str | None = None
+    trajectory_tokens: int = 0
+    assistant_generated_tokens: int = 0
+    current_context_tokens: int = 0
+    peak_context_tokens: int = 0
+    last_model_output_tokens: int = 0
+    elapsed_seconds: float = 0.0
+    remaining_wall_time_seconds: float | None = None
+    updated_at_unix_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        _required_string(self.phase, "progress.phase")
+        for name in (
+            "model_calls",
+            "tool_calls",
+            "completed_samples",
+            "trajectory_tokens",
+            "assistant_generated_tokens",
+            "current_context_tokens",
+            "peak_context_tokens",
+            "last_model_output_tokens",
+        ):
+            _nonnegative_int(getattr(self, name), f"progress.{name}")
+        if self.active_sample_slot_id is not None:
+            _required_string(
+                self.active_sample_slot_id, "progress.active_sample_slot_id"
+            )
+        for name in (
+            "elapsed_seconds",
+            "remaining_wall_time_seconds",
+            "updated_at_unix_seconds",
+        ):
+            value = getattr(self, name)
+            if value is None and name == "remaining_wall_time_seconds":
+                continue
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(
+                    f"progress.{name} must be a finite non-negative number"
+                )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -475,6 +555,7 @@ class RolloutGroupResult:
     stop_reason: str | None = None
     search_branches: int = 0
     consumed_budget: dict[str, int | float] = field(default_factory=dict)
+    progress: RolloutProgress | None = None
     protocol_version: str = PROTOCOL_VERSION
 
     def __post_init__(self) -> None:
@@ -521,7 +602,7 @@ class RolloutGroupResult:
         return len(self.trajectories)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "protocol_version": self.protocol_version,
             "rollout_job_id": self.rollout_job_id,
             "prompt_group_id": self.prompt_group_id,
@@ -533,6 +614,9 @@ class RolloutGroupResult:
             "consumed_budget": self.consumed_budget,
             "trajectories": [item.to_dict() for item in self.trajectories],
         }
+        if self.progress is not None:
+            result["progress"] = self.progress.to_dict()
+        return result
 
 
 @dataclass(frozen=True)

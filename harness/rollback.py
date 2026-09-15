@@ -46,6 +46,7 @@ class Checkpoint:
     call_id: Optional[str] = None
     pairing: Optional[str] = None
     prefix_complete: Optional[bool] = None
+    model_position: Optional[dict] = None
 
     def is_complete(self) -> bool:
         """Both halves present -> a full rollback point."""
@@ -86,6 +87,7 @@ class RollbackLedger:
             call_id=extra.get("call_id"),
             pairing=extra.get("pairing"),
             prefix_complete=extra.get("prefix_complete"),
+            model_position=extra.get("model_position"),
         )
         self.checkpoints.append(checkpoint)
         return checkpoint
@@ -120,6 +122,7 @@ def load_checkpoints(journal_path, *, events=None) -> List[Checkpoint]:
                 call_id=record.get("call_id"),
                 pairing=record.get("pairing"),
                 prefix_complete=record.get("prefix_complete"),
+                model_position=record.get("model_position"),
             )
         )
     return out
@@ -136,11 +139,14 @@ def branch_checkpoints(journal_path, *, events=None) -> Dict[int, Checkpoint]:
     for checkpoint in load_checkpoints(journal_path, events=events):
         if type(checkpoint.step) is not int or checkpoint.step < 1:
             continue
-        if checkpoint.reason == "session_ref_backfill":
+        if checkpoint.reason in {"session_ref_backfill", "model_position_backfill"}:
             previous = latest.get(checkpoint.step)
             if previous and previous.snapshot_id == checkpoint.snapshot_id:
                 latest[checkpoint.step] = replace(
-                    previous, session_ckpt=checkpoint.session_ckpt or previous.session_ckpt)
+                    previous,
+                    session_ckpt=checkpoint.session_ckpt or previous.session_ckpt,
+                    model_position=checkpoint.model_position or previous.model_position,
+                )
         else:
             latest[checkpoint.step] = checkpoint
 

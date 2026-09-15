@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
 import math
 
-from rl_driver.protocol import SampleSlot, _nonnegative_int, _required_string
+from rl_driver.protocol import EnvironmentRef, SampleSlot, _nonnegative_int, _required_string
 
 MESSAGE_VERSION = "ash-rollout-v3"
 
@@ -29,16 +29,17 @@ class MessageRequest:
     rollout_id: int
     prompt_group_id: str
     task_id: str
-    image: str
+    environment_ref: EnvironmentRef
     prompt: str | list
     model_endpoint: str
     sample_slots: tuple
     max_samples: int
     minimum_returned_samples: int
-    max_turns: int
+    max_turns: int | None
     sampling_params: dict
     budgets: MessageBudget
     model: str | None = None
+    session_server_endpoint: str | None = None
     finalization_timeout_seconds: float = 1800.0
     protocol_version: str = MESSAGE_VERSION
 
@@ -49,8 +50,11 @@ class MessageRequest:
         if body.get("protocol_version") != MESSAGE_VERSION:
             raise ValueError("Expected ash-rollout-v3")
         value = deepcopy(body)
-        for key in ("rollout_job_id", "prompt_group_id", "task_id", "image", "model_endpoint"):
+        for key in ("rollout_job_id", "prompt_group_id", "task_id", "model_endpoint"):
             _required_string(value.get(key), key)
+        if value.get("session_server_endpoint") is not None:
+            _required_string(value["session_server_endpoint"], "session_server_endpoint")
+        value["environment_ref"] = EnvironmentRef.from_dict(value.get("environment_ref"))
         _nonnegative_int(value.get("rollout_id"), "rollout_id")
         if value.get("model") is not None:
             _required_string(value["model"], "model")
@@ -64,9 +68,15 @@ class MessageRequest:
         if any(len({getattr(s, key) for s in value["sample_slots"]}) != len(slots)
                for key in ("sample_slot_id", "sample_index")):
             raise ValueError("Sample slots must have unique ids and indices")
-        for key in ("max_samples", "minimum_returned_samples", "max_turns"):
+        for key in ("max_samples", "minimum_returned_samples"):
             if _nonnegative_int(value.get(key), key) < 1:
                 raise ValueError(f"{key} must be positive")
+        if "max_turns" not in value:
+            raise ValueError("max_turns must be explicit; use null for no turn limit")
+        if value["max_turns"] is not None and (
+            type(value["max_turns"]) is not int or value["max_turns"] <= 0
+        ):
+            raise ValueError("max_turns must be null or a positive integer")
         if not value["minimum_returned_samples"] <= value["max_samples"] <= len(slots):
             raise ValueError("Invalid sample count bounds")
         value.setdefault("sampling_params", {})
@@ -82,4 +92,5 @@ class MessageRequest:
     def to_dict(self):
         value = asdict(self)
         value["sample_slots"] = list(value["sample_slots"])
+        value["environment_ref"] = self.environment_ref.to_dict()
         return value

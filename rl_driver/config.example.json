@@ -5,8 +5,9 @@
   "ledger": "../runs/rl-driver/groups.sqlite3",
   "poll_interval_s": 1,
   "miles": {
-    "profile": "codex",
-    "run_defaults": {"slot": "codex", "tools": "shell_only"},
+    "profile": "claude",
+    "branch_policy": "rl_driver.policy:first_available_recovery",
+    "run_defaults": {"slot": "claude-code", "tools": "shell_only"},
     "resources": {"standard": {"cpu": 2, "memory_mb": 12288}},
     "environment_catalog": {
       "environments": [{

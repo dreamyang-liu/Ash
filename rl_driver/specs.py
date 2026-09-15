@@ -54,23 +54,48 @@ def validate_request(body: dict) -> dict:
             sample["run"] = job.validate()
         else:
             branch = sample["branch"]
-            object_fields(branch, {"job_id", "point_id", "overrides"}, "branch")
+            object_fields(branch, {"job_id", "point_id", "overrides", "context"}, "branch")
             identifier(branch.get("job_id"), "branch.job_id")
             identifier(branch.get("point_id"), "branch.point_id")
             branch.setdefault("overrides", {})
             object_fields(branch["overrides"], {"prompt", "model", "timeout_s", "budget_usd"}, "branch overrides")
+            branch.setdefault("context", {})
+            if not isinstance(branch["context"], dict):
+                raise ValueError("branch.context must be an object")
         if "grade" in sample:
             grade = sample["grade"]
             if not isinstance(grade, dict) or not isinstance(grade.get("spec"), dict):
                 raise ValueError("grade must be a GradeSpec job template")
             if "snapshot_id" in grade["spec"]:
                 raise ValueError("grade snapshot_id is selected from the actor's exact final boundary")
-            job = JobSpec.from_dict({**grade, "kind": "grade",
-                                     "spec": {**grade["spec"], "snapshot_id": "driver-pending-snapshot"}})
+            worker_owned_grade_fields = {
+                "baseline_untracked",
+                "repository_workdir",
+                "repository_base_commit",
+            }
+            if worker_owned_grade_fields & set(grade["spec"]):
+                raise ValueError(
+                    "grade repository baseline is captured by the worker, not supplied by the caller"
+                )
+            validation_spec = {
+                **grade["spec"],
+                "snapshot_id": "driver-pending-snapshot",
+            }
+            if validation_spec.get("benchmark") == "swe-rebench-v2":
+                validation_spec["baseline_untracked"] = []
+                validation_spec["repository_workdir"] = "/driver-pending-repository"
+                validation_spec["repository_base_commit"] = "0" * 40
+            job = JobSpec.from_dict({
+                **grade,
+                "kind": "grade",
+                "spec": validation_spec,
+            })
             if grade.get("kind", "grade") != "grade" or job.parent_point:
                 raise ValueError("grade must be an independent grading job")
             sample["grade"] = job.validate()
             del sample["grade"]["spec"]["snapshot_id"]
+            for field in worker_owned_grade_fields:
+                sample["grade"]["spec"].pop(field, None)
     no_credentials(result)
     canonical(result)
     return result

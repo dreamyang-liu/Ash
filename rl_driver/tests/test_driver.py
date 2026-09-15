@@ -60,9 +60,10 @@ class QueueHTTP:
         if req.method == "GET" and path == f"/v1/jobs/{job_id}":
             return httpx.Response(200, json=job)
         if path.endswith("/cancel"):
-            if job["state"] != "queued":
-                return httpx.Response(409, json={"detail": "Only queued jobs can be cancelled"})
-            job["state"] = "cancelled"
+            if job["state"] == "queued":
+                job.update(state="cancelled", phase="cancelled")
+            elif job["state"] == "running":
+                job.update(phase="cancelling", cancel_requested=True)
             return httpx.Response(200, json=job)
         if path.endswith("/tools"):
             after = int(req.url.params.get("after", 0))
@@ -80,7 +81,21 @@ class QueueHTTP:
         self.jobs[job_id].update(state="succeeded", active_attempt=f"attempt-{job_id}",
                                  result={"status": "completed", "resolved": resolved})
 
+    def cancel(self, job_id):
+        self.jobs[job_id].update(
+            state="cancelled", phase="cancelled", active_attempt=f"attempt-{job_id}",
+            result={"status": "cancelled", "stop_reason": "cancelled"},
+        )
+
     def final_point(self, job_id):
+        self.events.setdefault(job_id, []).append({
+            "seq": len(self.events.get(job_id, [])) + 1,
+            "type": "environment.prepared",
+            "workdir": "/task-repository",
+            "base_commit": "1" * 40,
+            "agent_workdir": "/testbed",
+            "baseline_untracked": ["image-cache.txt"],
+        })
         self.tools[job_id] = [{"depth": n, "response": {"output": "ok"}} for n in range(1, 4)]
         self.points[job_id] = [
             {"id": "old", "tool_depth": 2, "message_step": 1, "snapshot_id": "AB", "available": True},
@@ -158,7 +173,7 @@ def test_lost_submit_reply_restarts_with_same_idempotency_key(tmp_path, peer, br
     assert restored.get("group")["samples"][0]["actor"]["job_id"] == "job-0"
 
 
-def test_cancel_does_not_claim_running_job_stopped_or_launch_grading(tmp_path, peer):
+def test_cancel_reaches_running_job_and_does_not_launch_grading(tmp_path, peer):
     queue, client = peer
     driver = Driver(client, Ledger(tmp_path / "ledger.sqlite3"))
     body = request(grade=True)
@@ -169,9 +184,11 @@ def test_cancel_does_not_claim_running_job_stopped_or_launch_grading(tmp_path, p
     assert driver.release("group")["status"] == "cancelling"
     driver.tick()
     assert queue.jobs["job-0"]["state"] == "running"
+    assert queue.jobs["job-0"]["phase"] == "cancelling"
+    assert queue.jobs["job-0"]["cancel_requested"] is True
     assert queue.jobs["job-1"]["state"] == "cancelled"
     assert not driver.get("group")["ready"]
-    queue.finish("job-0")
+    queue.cancel("job-0")
     driver.tick()
     assert driver.get("group")["status"] == "cancelled"
     assert driver.get("group")["ready"]
@@ -186,6 +203,139 @@ def test_cancel_before_dispatch_never_submits(tmp_path, peer):
     driver.tick()
     assert driver.get("group")["status"] == "cancelled"
     assert queue.requests == []
+
+
+def test_internal_deferred_slots_reuse_runstore_branch(tmp_path, peer):
+    queue, client = peer
+    driver = Driver(client, Ledger(tmp_path / "ledger.sqlite3"))
+    body = request()
+    template = body["samples"][0].pop("run")
+    template["spec"]["extra"] = {"rollout_contract": {
+        "session_id": "shared-session", "max_model_calls": 4,
+        "max_tool_calls": 4,
+    }}
+    body["samples"] = [
+        {"sample_slot_id": "parent", "run": deepcopy(template)},
+        {"sample_slot_id": "child", "run": deepcopy(template)},
+    ]
+    driver.submit(body, deferred_sample_ids={"child"})
+    driver.tick()
+    assert len(queue.jobs) == 1
+    assert driver.get("group")["status"] == "running"
+    parent_job = next(iter(queue.jobs))
+    queue.finish(parent_job)
+    queue.points[parent_job] = [{
+        "id": "joint-point", "available": True, "tool_depth": 1,
+        "message_step": 1, "snapshot_id": "snapshot", "model_position": {
+            "session_id": "shared-session", "response_id": "parent-response",
+        },
+    }]
+    driver.tick()
+
+    decision = {
+        "kind": "branch", "source_sample_slot_id": "parent",
+        "point_id": "joint-point", "overrides": {"prompt": "try another path"},
+    }
+    driver.decide_deferred("group", "child", decision)
+    assert driver.decide_deferred("group", "child", decision)["samples"][1]["actor"][
+        "policy_decision"
+    ] == decision
+    with pytest.raises(Conflict, match="different policy decision"):
+        driver.decide_deferred("group", "child", {"kind": "skip"})
+    driver.tick()
+    child_job = next(job for job in queue.jobs if job != parent_job)
+    branch_request = next(
+        body for method, path, body, _ in queue.requests
+        if method == "POST" and path.endswith("/branch")
+    )
+    assert branch_request["point_id"] == "joint-point"
+    assert branch_request["context"]["rl_driver"]["sample_slot_id"] == "child"
+    assert "rollout_contract" not in branch_request
+    queue.finish(child_job)
+    driver.tick()
+    result = driver.get("group")
+    assert result["ready"] and result["status"] == "completed"
+    assert result["samples"][1]["actor"]["origin"] == {
+        "job_id": parent_job, "point_id": "joint-point"
+    }
+
+
+def test_deferred_slot_rejects_foreign_or_unavailable_branch_point(tmp_path, peer):
+    queue, client = peer
+    driver = Driver(client, Ledger(tmp_path / "ledger.sqlite3"))
+    body = request()
+    template = body["samples"][0].pop("run")
+    body["samples"] = [
+        {"sample_slot_id": "parent", "run": deepcopy(template)},
+        {"sample_slot_id": "child", "run": deepcopy(template)},
+    ]
+    driver.submit(body, deferred_sample_ids={"child"})
+    driver.tick()
+    parent_job = next(iter(queue.jobs))
+    queue.finish(parent_job)
+    queue.points[parent_job] = [{"id": "bad", "available": False}]
+    driver.tick()
+    with pytest.raises(ValueError, match="absent or unavailable"):
+        driver.decide_deferred("group", "child", {
+            "kind": "branch", "source_sample_slot_id": "parent",
+            "point_id": "bad", "overrides": {},
+        })
+    assert len(queue.jobs) == 1
+
+
+def test_deferred_decision_survives_driver_restart_without_duplicate_branch(
+    tmp_path, peer
+):
+    queue, client = peer
+    path = tmp_path / "ledger.sqlite3"
+    body = request()
+    template = body["samples"][0]["run"]
+    body["samples"] = [
+        {"sample_slot_id": "parent", "run": deepcopy(template)},
+        {"sample_slot_id": "child", "run": deepcopy(template)},
+    ]
+    driver = Driver(client, Ledger(path))
+    driver.submit(body, deferred_sample_ids={"child"})
+    driver.tick()
+    queue.finish("job-0")
+    queue.points["job-0"] = [{
+        "id": "point", "available": True, "snapshot_id": "snapshot",
+        "tool_depth": 1, "message_step": 1,
+    }]
+    driver.tick()
+    decision = {
+        "kind": "branch", "source_sample_slot_id": "parent",
+        "point_id": "point", "overrides": {},
+    }
+    driver.decide_deferred("group", "child", decision)
+
+    restored = Driver(client, Ledger(path))
+    assert restored.decide_deferred("group", "child", decision)["samples"][1][
+        "actor"
+    ]["policy_decision"] == decision
+    restored.tick()
+    restored.tick()
+    assert len(queue.jobs) == 2
+    assert len([
+        request for request in queue.requests
+        if request[0] == "POST" and request[1].endswith("/branch")
+    ]) == 1
+
+
+def test_cancellation_terminates_deferred_slots_without_launching_them(tmp_path, peer):
+    queue, client = peer
+    body = request()
+    second = deepcopy(body["samples"][0])
+    second["sample_slot_id"] = "child"
+    body["samples"].append(second)
+    driver = Driver(client, Ledger(tmp_path / "ledger.sqlite3"))
+    driver.submit(body, deferred_sample_ids={"child"})
+    driver.tick()
+    assert len(queue.jobs) == 1
+    driver.release("group")
+    driver.tick()
+    assert len(queue.jobs) == 1
+    assert driver.get("group")["samples"][1]["actor"]["state"] == "cancelled"
 
 
 def test_cancel_lost_ack_does_not_repost_possibly_new_work(tmp_path, peer):
@@ -281,18 +431,20 @@ def test_grade_lost_ack_keeps_original_snapshot_on_restart(tmp_path, peer):
     assert driver.get("group")["samples"][0]["grade"]["job_id"] == "job-1"
 
 
-def test_quarantine_is_visible_and_reconciliation_does_not_rerun_from_driver(tmp_path, peer):
+def test_quarantine_terminates_group_without_rerunning_from_driver(tmp_path, peer):
     queue, client = peer
     driver = Driver(client, Ledger(tmp_path / "ledger.sqlite3"))
     driver.submit(request())
     driver.tick()
     queue.jobs["job-0"]["state"] = "quarantined"
     driver.tick()
-    assert driver.get("group")["status"] == "quarantined"
-    assert not driver.get("group")["ready"]
+    assert driver.get("group")["status"] == "failed"
+    assert driver.get("group")["ready"]
     queue.finish("job-0")
     driver.tick()
-    assert driver.get("group")["status"] == "completed"
+    # Run Store may retain/reconcile the quarantined job independently, but
+    # this fixed RL group is already terminal and is never silently rewritten.
+    assert driver.get("group")["status"] == "failed"
     assert len(queue.jobs) == 1
 
 

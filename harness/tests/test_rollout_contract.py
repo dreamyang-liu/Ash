@@ -82,7 +82,7 @@ def test_orchestrator_mounts_real_endpoint_sampling_and_admission_caps(tmp_path,
     assert usage["model_calls"] == 2 and usage["tool_calls"] == expected_tools
 
 
-@pytest.mark.parametrize("max_turns", [None, 0, -1, True, 1.5])
+@pytest.mark.parametrize("max_turns", [0, -1, True, 1.5])
 def test_message_controls_reject_invalid_turn_limit(tmp_path, max_turns):
     controls = contract("http://model")
     controls.pop("max_model_calls")
@@ -91,6 +91,42 @@ def test_message_controls_reject_invalid_turn_limit(tmp_path, max_turns):
     with JournalWriter(tmp_path / "journal", run_id="run") as journal:
         with pytest.raises(ValueError, match="max_turns"):
             RolloutControls(controls, journal, RunControl())
+
+
+def test_message_controls_accept_unbounded_turn_limit(tmp_path):
+    controls = contract("http://model")
+    controls.pop("max_model_calls")
+    controls.pop("max_tool_calls")
+    controls.update(message_export=True, max_turns=None)
+    with JournalWriter(tmp_path / "journal", run_id="run") as journal:
+        policy = RolloutControls(controls, journal, RunControl())
+
+    assert policy._call_limits == {"model": None, "tool": None}
+
+
+def test_model_completion_publishes_constant_size_progress(tmp_path):
+    updates = []
+    with JournalWriter(tmp_path / "journal", run_id="run") as journal:
+        policy = RolloutControls(
+            contract("http://model"), journal, RunControl(),
+            on_progress=updates.append,
+        )
+        policy.model_calls = 2
+        policy.tool_calls = 1
+        policy.model_response_completed(
+            SimpleNamespace(input_tokens=12, output_tokens=7)
+        )
+
+    assert updates == [{
+        "phase": "model_response",
+        "model_calls": 2,
+        "tool_calls": 1,
+        "trajectory_tokens": 19,
+        "assistant_generated_tokens": 7,
+        "current_context_tokens": 12,
+        "peak_context_tokens": 12,
+        "last_model_output_tokens": 7,
+    }]
 
 
 def test_message_controls_reject_legacy_count_caps(tmp_path):

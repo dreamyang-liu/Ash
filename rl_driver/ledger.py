@@ -95,6 +95,16 @@ class Ledger:
         with self.connection() as db:
             return [row[0] for row in db.execute("SELECT id FROM driver_groups WHERE terminal=0 ORDER BY created_at,id")]
 
+    def rows(self) -> list[dict]:
+        """Return one ordered snapshot for offline, replayable exports."""
+        with self.connection() as db:
+            return [
+                self._row(row)
+                for row in db.execute(
+                    "SELECT * FROM driver_groups ORDER BY created_at,id"
+                )
+            ]
+
     def save(self, group_id: str, document: dict, *, terminal: bool = False) -> None:
         # Separate columns prevent polling from overwriting a concurrent DELETE.
         with self.connection() as db:

@@ -27,6 +27,7 @@ return value only: a run that dies still leaves a record.
 from __future__ import annotations
 
 import threading
+import shlex
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -339,9 +340,13 @@ class Orchestrator:
 
                     if spec.transport != "http" or spec.mcp_url:
                         raise ValueError("Rollout controls require an owned HTTP execution server")
-                    rollout_controls = RolloutControls(extra["rollout_contract"], journal, control)
+                    rollout_controls = RolloutControls(
+                        extra["rollout_contract"], journal, control,
+                        on_progress=lambda payload: self.on_event("rollout", payload),
+                    )
                     rollout_controls.start()
                 provisioned, mcp = self._wire_sandbox(spec, claim)
+                self._prepare_repository(spec, provisioned, journal)
                 if rollout_controls is not None:
                     from harness.execution.pipeline import ToolPipeline
 
@@ -424,6 +429,98 @@ class Orchestrator:
             error=error or (result.error if result else None),
             stop_reason=(getattr(control, "stop_reason", None)
                          or ("timeout" if result and result.status == "timeout" else None)),
+        )
+
+    def _prepare_repository(self, spec: RunSpec, provisioned, journal) -> None:
+        """Validate a deployment-owned task baseline before the agent starts.
+
+        This accepts data only through the fixed ``workdir/base_commit`` schema;
+        it is not a general setup-command hook.  The agent-facing conventional
+        path is created only after the immutable Git baseline is confirmed.
+        """
+        value = spec.extra.get("repository_preflight")
+        if value is None:
+            return
+        if not isinstance(value, dict) or set(value) != {"workdir", "base_commit"}:
+            raise ValueError(
+                "repository_preflight requires workdir and base_commit"
+            )
+        workdir = value.get("workdir")
+        commit = value.get("base_commit")
+        if (
+            not isinstance(workdir, str)
+            or not workdir.startswith("/")
+            or workdir == "/"
+            or not isinstance(commit, str)
+            or not commit
+        ):
+            raise ValueError("invalid repository_preflight")
+        session = getattr(provisioned, "session", None)
+        if session is None:
+            raise ValueError(
+                "repository preflight requires an orchestrator-owned sandbox"
+            )
+        quoted_workdir = shlex.quote(workdir)
+        quoted_commit = shlex.quote(commit)
+        commands = [
+            "set -eu",
+            f"test -d {quoted_workdir}",
+            f'test "$(git -C {quoted_workdir} rev-parse HEAD)" = {quoted_commit}',
+        ]
+        if workdir != "/testbed":
+            commands.append(
+                "if [ -e /testbed ] || [ -L /testbed ]; then "
+                f'test "$(readlink -f /testbed)" = "$(readlink -f {quoted_workdir})"; '
+                f"else ln -s -- {quoted_workdir} /testbed; fi"
+            )
+        result = session.execute(
+            "shell",
+            {"command": "; ".join(commands)},
+            timeout=min(120.0, spec.timeout_s),
+        )
+        if not getattr(result, "success", False):
+            detail = getattr(result, "error", None) or getattr(
+                result, "output", "repository preflight failed"
+            )
+            raise RuntimeError(f"repository preflight failed: {detail}")
+        inherited = spec.extra.get("repository_baseline_untracked")
+        if inherited is None:
+            baseline_result = session.execute(
+                "shell",
+                {
+                    "command": (
+                        f"git -C {quoted_workdir} ls-files --others "
+                        "--exclude-standard"
+                    )
+                },
+                timeout=min(120.0, spec.timeout_s),
+            )
+            if not getattr(baseline_result, "success", False):
+                detail = getattr(baseline_result, "error", None) or getattr(
+                    baseline_result,
+                    "output",
+                    "repository baseline scan failed",
+                )
+                raise RuntimeError(f"repository baseline scan failed: {detail}")
+            baseline_untracked = sorted(
+                line.strip()
+                for line in (getattr(baseline_result, "output", "") or "").splitlines()
+                if line.strip()
+            )
+        else:
+            if (
+                not isinstance(inherited, list)
+                or any(not isinstance(path, str) or not path for path in inherited)
+                or inherited != sorted(set(inherited))
+            ):
+                raise ValueError("invalid inherited repository baseline")
+            baseline_untracked = list(inherited)
+        journal.emit(
+            "environment.prepared",
+            workdir=workdir,
+            base_commit=commit,
+            agent_workdir="/testbed",
+            baseline_untracked=baseline_untracked,
         )
 
     # --- steps -------------------------------------------------------------

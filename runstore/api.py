@@ -72,7 +72,24 @@ def create_app(store: Store, token: str, *, index: Index | None = None, profiles
 
     @app.get("/v1/jobs/{job_id}")
     def get_job(job_id: str):
-        return store.get(job_id)
+        job = store.get(job_id)
+        if job.get("active_attempt"):
+            attempt = next(
+                (
+                    row
+                    for row in reversed(store.attempts(job_id))
+                    if row["id"] == job["active_attempt"]
+                ),
+                None,
+            )
+            progress = (
+                (attempt.get("execution") or {}).get("progress")
+                if attempt is not None
+                else None
+            )
+            if isinstance(progress, dict):
+                job["progress"] = progress
+        return job
 
     @app.get("/v1/jobs/{job_id}/result")
     def get_result(job_id: str):
@@ -107,6 +124,8 @@ def create_app(store: Store, token: str, *, index: Index | None = None, profiles
 
     @app.post("/v1/jobs/{job_id}/branch", status_code=202)
     def branch(job_id: str, body: dict, idempotency_key: str = Header(default="")):
+        if not isinstance(body, dict) or set(body) - {"point_id", "overrides", "context"}:
+            raise ValueError("Branch accepts point_id, overrides and optional context")
         parent = JobSpec.from_dict(store.get(job_id)["request"])
         point = index.get_point(body["point_id"])
         if point["job_id"] != job_id or parent.kind != "rollout":
@@ -114,12 +133,16 @@ def create_app(store: Store, token: str, *, index: Index | None = None, profiles
         overrides = body.get("overrides", {})
         if set(overrides) - {"prompt", "model", "timeout_s", "budget_usd"}:
             raise ValueError("v1 branches can change prompt, model and budgets only")
-        request = replace(parent, spec={**parent.spec, **overrides}, parent_point=point["id"])
+        context = body.get("context", parent.context)
+        if not isinstance(context, dict):
+            raise ValueError("Branch context must be an object")
+        request = replace(parent, spec={**parent.spec, **overrides},
+                          context=context, parent_point=point["id"])
         return submit(request.validate(), idempotency_key)
 
     @app.post("/v1/jobs/{job_id}/cancel")
     def cancel(job_id: str):
-        store.cancel_queued(job_id)
+        store.request_cancel(job_id)
         return store.get(job_id)
 
     @app.post("/v1/prefix/query")

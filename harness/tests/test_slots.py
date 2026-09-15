@@ -384,6 +384,20 @@ def test_claude_code_buffer_default_and_override():
     assert slot._build_options(sdk.ClaudeAgentOptions, task, {}, []).max_buffer_size == 4 * 1024 * 1024
 
 
+def test_miles_rollout_disables_anthropic_extended_thinking():
+    class Options:
+        def __init__(self, thinking=None, **kwargs):
+            self.thinking = thinking
+
+    task = TaskSpec(
+        prompt="p",
+        cwd="/tmp",
+        extra={"rollout_contract": {"model_endpoint": "http://model"}},
+    )
+    options = ClaudeCodeSlot()._build_options(Options, task, {}, [])
+    assert options.thinking == {"type": "disabled"}
+
+
 @pytest.mark.parametrize("size", [0, -1, None, True, "large"])
 def test_claude_code_rejects_invalid_buffer_sizes(size):
     with pytest.raises(ValueError, match="max_buffer_size"):

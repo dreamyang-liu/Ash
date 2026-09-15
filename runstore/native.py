@@ -17,6 +17,7 @@ class NativePoint:
     tool_depth: int
     snapshot_id: str
     native: dict
+    model_position: dict | None = None
 
 
 def read_prefix(reference: dict) -> bytes:
@@ -157,7 +158,15 @@ def index_native(journal: Path, transcript: Path, slot: str, session_id: str,
                     from harness.slots.claude_history import _referenced_outputs
 
                     reference["referenced_outputs"] = _referenced_outputs(native_entries, transcript, allowed_outputs)
-                points.append(NativePoint(message_step, depth, checkpoints[depth].snapshot_id, reference))
+                points.append(
+                    NativePoint(
+                        message_step,
+                        depth,
+                        checkpoints[depth].snapshot_id,
+                        reference,
+                        checkpoints[depth].model_position,
+                    )
+                )
         group = []
     return points
 

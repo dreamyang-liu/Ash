@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from runstore.message_export import export_messages, mark_hint
+from runstore.specs import JobSpec
 from runstore.swerebench import grade_snapshot
 
 
@@ -28,6 +29,7 @@ def test_grader_runs_hidden_tests_after_actor_and_distinguishes_fix(tmp_path, mo
     )
     # A solver-created fake test must be removed before installing hidden tests.
     (repo / "test_answer.py").write_text("def test_answer(): assert True\n")
+    (repo / "image-cache.txt").write_text("pre-existing image baggage\n")
     if fix:
         (repo / "answer.py").write_text("VALUE = 1\n")
     parser = tmp_path / "parser.py"
@@ -59,6 +61,8 @@ def test_grader_runs_hidden_tests_after_actor_and_distinguishes_fix(tmp_path, mo
     spec = SimpleNamespace(
         parser_path=str(parser), grader_revision="sha256:" + hashlib.sha256(parser.read_bytes()).hexdigest(),
         snapshot_id="actor-final-snapshot", resources={"cpu": 2, "memory_mb": 4096}, timeout_s=60,
+        baseline_untracked=["image-cache.txt"],
+        repository_workdir="/repo", repository_base_commit=base,
     )
     row = {
         "repo": "owner/repo", "base_commit": base, "test_patch": patch,
@@ -69,6 +73,33 @@ def test_grader_runs_hidden_tests_after_actor_and_distinguishes_fix(tmp_path, mo
     assert result["resolved"] is expected, result
     assert lifecycle == [("create", "actor-final-snapshot"), ("destroy",)]
     assert (repo / "answer.py").read_text() == ("VALUE = 1\n" if fix else "VALUE = 0\n")
+    submission = (tmp_path / "submission.patch").read_text()
+    assert "image-cache.txt" not in submission
+    assert "test_answer.py" in submission
+    assert result["patch_sha256"] == hashlib.sha256(submission.encode()).hexdigest()
+    assert result["patch_chars"] == len(submission)
+    assert result["patch_files_changed"] == (2 if fix else 1)
+    assert result["patch_added_paths"] == ["test_answer.py"]
+
+
+def test_swerebench_grade_job_requires_worker_captured_repository_baseline():
+    spec = {
+        "benchmark": "swe-rebench-v2",
+        "instance_id": "task",
+        "snapshot_id": "snapshot",
+        "dataset_path": "/tasks.jsonl",
+        "dataset_sha256": "digest",
+        "grader_revision": "sha256:parser",
+        "parser_path": "/parser.py",
+        "repository_workdir": "/repo",
+        "repository_base_commit": "1" * 40,
+    }
+    with pytest.raises(ValueError, match="baseline_untracked"):
+        JobSpec(kind="grade", spec=spec).validate()
+
+    assert JobSpec(
+        kind="grade", spec={**spec, "baseline_untracked": []}
+    ).validate()["spec"]["baseline_untracked"] == []
 
 
 def test_export_native_prefix_and_marked_branch_hint(tmp_path):

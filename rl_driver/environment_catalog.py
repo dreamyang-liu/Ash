@@ -10,6 +10,7 @@ credentials never cross the rollout wire contract.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -98,3 +99,77 @@ class EnvironmentCatalog:
             self._entries,
             key=lambda ref: (ref.kind, ref.id, ref.revision, ref.resource_profile),
         )
+
+
+def _oci_registry(repository: str) -> str:
+    first = repository.split("/", 1)[0].lower()
+    if "." in first or ":" in first or first == "localhost":
+        return first
+    return "docker.io"
+
+
+class EnvironmentResolver:
+    """Resolve trusted logical environments without exposing backend handles.
+
+    Static template/snapshot entries must match the deployment catalog exactly.
+    Digest-pinned OCI images may instead be admitted by registry policy.  The
+    worker receives the immutable ``repository@digest`` source and the existing
+    :class:`harness.execution.templates.TemplateBuilder` turns it into a
+    runtime-ready, content-addressed AgentENV template before sandbox creation.
+    """
+
+    def __init__(
+        self,
+        catalog: EnvironmentCatalog | None,
+        *,
+        allowed_oci_registries: list[str] | tuple[str, ...] = (),
+    ) -> None:
+        if not isinstance(allowed_oci_registries, (list, tuple)):
+            raise ValueError("allowed_oci_registries must be a list")
+        if any(not isinstance(item, str) or not item.strip() for item in allowed_oci_registries):
+            raise ValueError("allowed_oci_registries entries must be nonempty strings")
+        self.catalog = catalog
+        self.allowed_oci_registries = frozenset(
+            item.strip().lower() for item in allowed_oci_registries
+        )
+
+    def resolve(self, ref: EnvironmentRef) -> EnvironmentCatalogEntry:
+        static = self.catalog.find(ref) if self.catalog else None
+        if static is not None:
+            return static
+        if ref.kind != "image":
+            raise ValueError(
+                "environment_ref is not allowlisted: "
+                f"{ref.kind}/{ref.id}@{ref.revision} ({ref.resource_profile})"
+            )
+        self._validate_oci(ref)
+        return EnvironmentCatalogEntry(
+            ref=ref,
+            spawn_ref=f"{ref.id}@{ref.revision.lower()}",
+        )
+
+    def _validate_oci(self, ref: EnvironmentRef) -> None:
+        if not self.allowed_oci_registries:
+            raise ValueError("dynamic OCI environments are disabled")
+        if "://" in ref.id or "@" in ref.id:
+            raise ValueError(
+                "environment_ref.id must be an OCI repository without a URL scheme or digest"
+            )
+        if (
+            ref.id.startswith(("-", "/"))
+            or any(character.isspace() for character in ref.id)
+            or ".." in ref.id.split("/")
+        ):
+            raise ValueError("environment_ref.id is not a valid OCI repository")
+        if ":" in ref.id.rsplit("/", 1)[-1]:
+            raise ValueError(
+                "environment_ref.id must not contain a mutable tag; use revision for the digest"
+            )
+        if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", ref.revision):
+            raise ValueError("dynamic OCI environment revision must be a sha256 digest")
+        registry = _oci_registry(ref.id)
+        if registry not in self.allowed_oci_registries:
+            raise ValueError(f"OCI registry {registry!r} is not allowlisted")
+
+    def list_refs(self) -> list[EnvironmentRef]:
+        return self.catalog.list_refs() if self.catalog else []

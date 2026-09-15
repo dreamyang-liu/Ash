@@ -52,6 +52,15 @@ class Watchdog:
         self.finished.set()
         self.thread.join(timeout=16)
 
+    def request_stop(self, reason: str) -> None:
+        """Stop the attempt for one durable external reason."""
+        with self.lock:
+            if self.reason is not None:
+                return
+            self.reason = reason
+            identity = self.identity
+        self.stop_process(identity)
+
     def _run(self) -> None:
         while not self.finished.wait(0.05):
             now = time.monotonic()
@@ -64,6 +73,8 @@ class Watchdog:
                 elif now >= self.lease_deadline:
                     reason = "lease_expired"
                 else:
+                    continue
+                if self.reason is not None:
                     continue
                 self.reason = reason
                 identity = self.identity

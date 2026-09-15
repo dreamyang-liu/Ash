@@ -3,17 +3,21 @@
 ## 去 hint 的消息训练（v3）
 
 `POST /rollout-groups` 现在也接收 `protocol_version: "ash-rollout-v3"`；
-v2 的请求和客户端保持兼容。Miles 使用
-`miles.rollout.ash.message_rollout.AshMessageRolloutFn`，发送 `task_id`、
-原始 `image`、prompt、sample slots 和采样参数；不再发送环境目录条目、
-prompt token IDs 或 Session Server 地址。
+v2 的请求和客户端保持兼容。Miles 使用同一个
+`miles.rollout.ash.rollout_fn.AshRolloutFn`，通过
+`--ash-rollout-protocol-version ash-rollout-v3` 发送 `task_id`、可信
+`environment_ref`、prompt、sample slots、采样参数以及可选的 Miles Session
+Server 地址。v3 不发送 prompt token IDs；Ash 返回去 hint 的结构化消息，
+Miles 使用当前训练模型的 tokenizer/chat template 重建 token 和 loss mask。
 
 Ash 按 `image_resources` 选择资源，将镜像交给已有 worker 的环境/runtime
 准备流程。Prime 数据集的 `prime/primeintellect/...` 名称在 Ash 解析到其
 上游 `docker.io/swerebenchv2/...` 镜像。需要配置现有 worker profile 的
 microVM、runtime 和推理访问方式，无需由 Miles 准备目录。
 
-`tasks[task_id].grade` 必须存在，评分结果随消息轨迹的 `reward` 返回。
+`tasks[task_id]` 必须存在并绑定可信环境；其中 `grade` 可选。配置 grader 时，
+评分结果随消息轨迹的 `reward` 返回；未配置时返回 `reward: null`，由 Miles
+沿用现有 reward hook 评分。
 新增 `swe-rebench-v2` grader：`dataset_path`/`dataset_sha256` 固定任务行；
 `parser_path` 指向 Prime/SWE-rebench 的日志解析文件，`grader_revision`
 为该文件的 `sha256:<digest>`。评分在独立恢复的 snapshot 中进行，只在
@@ -21,11 +25,27 @@ microVM、runtime 和推理访问方式，无需由 Miles 准备目录。
 通过才返回 resolved=true；基础设施错误不会伪装成零分。
 
 worker 从实际 native history 导出消息，保留工具调用/结果和分支来源。
+工具调用沿用 OpenAI wire format：`function.arguments` 是 JSON 字符串；Miles
+导入时仅在 chat-template 渲染副本中解码成对象，持久化的原始消息不改写。
 v3 分支 continuation prompt 在执行前包上保留标记
 `<ash_training_hint>...</ash_training_hint>`；导出只从 user/system/developer
 消息删除这些注入内容，assistant/tool 原文不做全局替换。旧的未标记 hint
 不能自动可靠删除；不完整工具记录、压缩历史和不支持的内容会明确失败。
-当前 driver 默认仍是独立样本策略，没有新增 branching 策略或样本加权。
+未配置 `miles.branch_policy` 时默认仍执行独立样本。配置可信的
+`module:callable` 后，第一个 slot 作为 root，其余已由 Miles 分配的 slots
+延迟消费；policy 可返回 root/branch/skip，branch 复用 Run Store recovery
+point，同时恢复 Claude 原生 prefix、AgentENV snapshot 和经 Miles 验证的
+SessionTree 模型位置。`rl_driver.policy.first_available_recovery` 只用于机制
+验收，不是正式选点算法或训练策略。
+
+Policy 对每个 deferred slot 只能做三种决定：`root` 将其作为新的
+独立 rollout；`branch` 必须指定同组的 `source_sample_slot_id`、可用
+`point_id` 和受限的 `overrides`；`skip` 则释放该 slot，不产生
+trajectory。协议已能通过 `minimum_returned_samples < max_samples` 表达
+部分返回，Ash 在达到下限时可返回 `early_stopped`。当前 Miles GRPO
+训练适配器仍要求固定组大小：它把下限设为 `max_samples`，并拒绝
+`actual_samples < max_samples`。因此现阶段 `skip` 用于让无法分支的 group
+可终止而不是继续训练；支持 `K < N` 训练是 Miles 侧的后续实现项。
 
 v3 原生采样支持 temperature、top_p、top_k、文本 stop 和输出长度；
 其他字段明确拒绝。Responses 使用 max_output_tokens，Messages 使用
@@ -66,7 +86,8 @@ Miles 对去 hint 消息重新 tokenize 并计算 logprobs；这不等于恢复�
 采样时的行为概率。不要给这条训练路径启用 use-rollout-logprobs、跳过
 actor forward、TIS 或旧 rollout token replay。完整数据准备示例位于
 Miles 的 `examples/swe-rebench-ash/`。Ash `rl_driver.client.Client`
-仍是 v2 客户端；v3 由 Miles 的 AshMessageClient 或直接 HTTP 调用。
+仍是 v2 客户端；Miles 的统一 `AshRolloutClient` 根据请求的
+`protocol_version` 校验 v2/v3 响应。
 
 ## 原 v2 接口
 
@@ -213,6 +234,26 @@ JobSpec 模板并省略 snapshot_id。driver 按已有规则从 actor 最终可�
 Session Server 对象。DELETE 保留持久幂等记录和执行数据，不删除 snapshot。
 原自定义调用方迁移到 `ExecutionClient` 和 `/execution-groups`；详见
 [EXECUTION.md](EXECUTION.md)。`Client` 默认已指向 Miles v2。
+
+## Profiling 导出
+
+终态 trajectory 的 profiling 记录与 v2/v3 result 一起保存在 driver
+ledger 中，而不是在任务完成时直接向 JSONL 追加。这保证 driver 在任意位置
+崩溃后都可以从持久化结果重新导出，不会出现“result 已保存但统计丢失”或
+重复追加同一 trajectory 的情况。
+
+```bash
+PYTHONPATH=.:sdk python3.12 -m rl_driver.profiling \
+  --ledger runs/rl-driver/groups.sqlite3 \
+  --output runs/profile.jsonl
+```
+
+exporter 按 `(rollout_job_id, sample_slot_id, branch_id)` 稳定排序、去重，并以
+原子替换方式重写目标文件，因此同一个 ledger 可以安全重复导出。v2 记录直接
+使用 Miles SessionTree 返回的精确 token IDs 和 generated spans。v3 只返回
+去 hint 的消息，没有权威 token 对齐信息，因此 token 统计字段明确为 `null`，
+不会通过文本长度或重新 tokenize 猜测；model/tool calls、耗时、reward、状态
+和身份等有权威来源的字段仍会保留。
 
 ## 验证
 

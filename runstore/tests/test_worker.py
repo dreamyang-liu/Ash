@@ -12,7 +12,12 @@ from runstore.specs import JobSpec, digest
 from runstore.tests.test_payload import envelope
 from runstore.tests.test_store import request, store
 from runstore.store import Fenced, Store
-from runstore.worker import Worker, process_identity, stop_process
+from runstore.worker import (
+    Worker,
+    process_identity,
+    recovery_repository_baseline,
+    stop_process,
+)
 
 
 @pytest.mark.parametrize("result,expected", [
@@ -56,6 +61,44 @@ def test_wrong_process_start_identity_never_kills_another_process():
     finally:
         stop_process(identity)
         process.wait()
+
+
+def test_branch_inherits_root_repository_baseline_from_durable_event():
+    class StoreFixture:
+        def events(self, attempt_id, limit):
+            assert attempt_id == "parent-attempt"
+            assert limit == 10000
+            return [{
+                "type": "environment.prepared",
+                "baseline_untracked": ["image-cache.txt", "vendor/generated.py"],
+            }]
+
+    assert recovery_repository_baseline(StoreFixture(), {
+        "attempt_id": "parent-attempt",
+    }) == ["image-cache.txt", "vendor/generated.py"]
+
+
+def test_branch_refuses_malformed_or_changed_repository_baseline():
+    class StoreFixture:
+        def __init__(self, events):
+            self._events = events
+
+        def events(self, attempt_id, limit):
+            return self._events
+
+    malformed = StoreFixture([{
+        "type": "environment.prepared",
+        "baseline_untracked": ["z", "a"],
+    }])
+    with pytest.raises(ValueError, match="invalid repository baseline"):
+        recovery_repository_baseline(malformed, {"attempt_id": "parent"})
+
+    changed = StoreFixture([
+        {"type": "environment.prepared", "baseline_untracked": ["a"]},
+        {"type": "environment.prepared", "baseline_untracked": ["b"]},
+    ])
+    with pytest.raises(ValueError, match="changed its repository baseline"):
+        recovery_repository_baseline(changed, {"attempt_id": "parent"})
 
 
 def test_bad_job_does_not_prevent_worker_claiming_next_job(store, tmp_path):

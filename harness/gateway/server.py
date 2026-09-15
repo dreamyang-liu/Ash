@@ -285,6 +285,12 @@ def _make_handler(gateway: GatewayServer):
                     headers["x-api-key"] = key
             if shape == "messages":
                 headers.setdefault("anthropic-version", "2023-06-01")
+            if gateway.request_policy is not None:
+                policy_headers = getattr(
+                    gateway.request_policy, "upstream_headers", None
+                )
+                if callable(policy_headers):
+                    headers.update(policy_headers())
             headers["Content-Type"] = "application/json"
             return headers
 
@@ -303,8 +309,17 @@ def _make_handler(gateway: GatewayServer):
                         content = json.dumps(adapter.restore(upstream.json())).encode()
                     self._relay_head(upstream.status_code, upstream.headers, len(content))
                     self.wfile.write(content)
-                    usage, model = _usage_from_response(upstream)
-                    self._tap(token, requested_model, model, route, upstream.status_code, usage, False)
+                    usage, model, response_id = _usage_from_response(upstream)
+                    self._tap(
+                        token,
+                        requested_model,
+                        model,
+                        response_id,
+                        route,
+                        upstream.status_code,
+                        usage,
+                        False,
+                    )
                     return
 
                 with client.stream("POST", url, content=body, headers=headers) as upstream:
@@ -328,7 +343,16 @@ def _make_handler(gateway: GatewayServer):
                             self.wfile.write(b"%X\r\n%s\r\n" % (len(remaining), remaining))
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
-                    self._tap(token, requested_model, model, route, upstream.status_code, usage, True)
+                    self._tap(
+                        token,
+                        requested_model,
+                        model,
+                        scanner.response_id,
+                        route,
+                        upstream.status_code,
+                        usage,
+                        True,
+                    )
 
         def _relay_head(self, status: int, headers, content_length: Optional[int]) -> None:
             self.send_response(status)
@@ -342,7 +366,17 @@ def _make_handler(gateway: GatewayServer):
                 self.send_header("Content-Length", str(content_length))
             self.end_headers()
 
-        def _tap(self, token, requested_model, upstream_model, route, status, usage, streaming):
+        def _tap(
+            self,
+            token,
+            requested_model,
+            upstream_model,
+            response_id,
+            route,
+            status,
+            usage,
+            streaming,
+        ):
             cost = usage.cost_usd or route.price(usage)
             if token is not None:
                 gateway.table.charge(
@@ -373,27 +407,43 @@ def _make_handler(gateway: GatewayServer):
                 status="ok" if status < 400 else "upstream_%d" % status,
                 requested_model=requested_model,
                 upstream_model=upstream_model or route.upstream_model or requested_model,
+                response_id=response_id,
                 base_url=route.base_url,
                 streaming=streaming,
                 usage=dict(usage.as_dict(), cost_usd=round(cost, 6)),
                 spent_usd=round(token.spent_usd, 6) if token else None,
             )
+            if status < 400 and gateway.request_policy is not None:
+                completed = getattr(
+                    gateway.request_policy, "model_response_completed", None
+                )
+                if callable(completed):
+                    try:
+                        completed(usage, response_id=response_id)
+                    except Exception:
+                        # Telemetry cannot change an already relayed model
+                        # response into a failed rollout.
+                        pass
 
     return Handler
 
 
 # --- usage extraction ------------------------------------------------------
-def _usage_from_response(response) -> Tuple[Usage, Optional[str]]:
+def _usage_from_response(
+    response,
+) -> Tuple[Usage, Optional[str], Optional[str]]:
     usage = Usage()
     model = None
+    response_id = None
     try:
         payload = response.json()
     except Exception:  # noqa: BLE001 - non-JSON error body
-        return usage, model
+        return usage, model, response_id
     if isinstance(payload, dict):
         model = payload.get("model")
+        response_id = payload.get("id")
         _absorb_usage(payload.get("usage"), usage)
-    return usage, model
+    return usage, model, response_id
 
 
 def _absorb_usage(native, usage: Usage) -> None:
@@ -435,6 +485,7 @@ class _SseScanner:
 
     def __init__(self) -> None:
         self._tail = b""
+        self.response_id: Optional[str] = None
 
     def feed(self, chunk: bytes, usage: Usage) -> Optional[str]:
         data = self._tail + chunk
@@ -442,16 +493,21 @@ class _SseScanner:
         self._tail = lines.pop()          # partial last line, or b""
         if len(self._tail) > self.MAX_TAIL:
             self._tail = b""
-        return _scan_sse_lines(lines, usage)
+        model, response_id = _scan_sse_lines(lines, usage)
+        self.response_id = response_id or self.response_id
+        return model
 
 
 def _scan_sse(chunk: bytes, usage: Usage) -> Optional[str]:
     """One-shot scan of complete lines (tests and non-split callers)."""
-    return _scan_sse_lines(chunk.split(b"\n"), usage)
+    return _scan_sse_lines(chunk.split(b"\n"), usage)[0]
 
 
-def _scan_sse_lines(lines, usage: Usage) -> Optional[str]:
+def _scan_sse_lines(
+    lines, usage: Usage
+) -> Tuple[Optional[str], Optional[str]]:
     model = None
+    response_id = None
     for line in lines:
         line = line.strip()
         if not line.startswith(b"data:"):
@@ -469,12 +525,14 @@ def _scan_sse_lines(lines, usage: Usage) -> Optional[str]:
         if etype == "message_start":
             message = event.get("message") or {}
             model = message.get("model") or model
+            response_id = message.get("id") or response_id
             _absorb_usage(message.get("usage"), usage)
         elif etype == "response.completed":
             # OpenAI Responses stream: the terminal event carries the whole
             # request's usage and the model that actually served it.
             response = event.get("response") or {}
             model = response.get("model") or model
+            response_id = response.get("id") or response_id
             _absorb_usage(response.get("usage"), usage)
         elif etype == "message_delta":
             native = event.get("usage") or {}
@@ -482,7 +540,7 @@ def _scan_sse_lines(lines, usage: Usage) -> Optional[str]:
             output = int(native.get("output_tokens") or 0)
             if output:
                 usage.output_tokens = max(usage.output_tokens, output)
-    return model
+    return model, response_id
 
 
 def serve(

@@ -55,6 +55,7 @@ class SnapshotBridge:
     #: Snapshot every step rather than only mutating ones.
     always: bool = False
     session_ref: Optional[str] = None
+    model_position: Optional[dict] = None
     step: int = 0
     #: Depth of unfinished tool calls; a checkpoint is only safe at zero.
     _inflight: int = 0
@@ -129,6 +130,20 @@ class SnapshotBridge:
                     # id; complete the pair now rather than leaving a half.
                     self._pending = False
                     self._backfill_session_ref(ref)
+            return
+
+        if etype == "rollout.model_response":
+            position = record.get("model_position")
+            if isinstance(position, dict):
+                self.model_position = dict(position)
+                self._backfill_model_position(self.model_position)
+            return
+
+        if etype == "rollout.model_position_unavailable":
+            # Never let a checkpoint after response N silently inherit the
+            # model position from response N-1.  Such a snapshot remains useful
+            # for environment cleanup/debugging but is not a joint branch point.
+            self.model_position = None
             return
 
         if etype == TOOL_STARTED:
@@ -257,6 +272,7 @@ class SnapshotBridge:
             if self._closed:
                 return None
             checkpoint = self.ledger.record(step, snapshot_id, session_ckpt=self.session_ref,
+                                            model_position=self.model_position,
                                             reason=reason, captured=captured, **extra)
             self.records.append(checkpoint)
             if snapshot_id and not self.session_ref:
@@ -296,6 +312,31 @@ class SnapshotBridge:
                     call_id=checkpoint.call_id,
                     pairing=checkpoint.pairing,
                     prefix_complete=checkpoint.prefix_complete,
+                    model_position=checkpoint.model_position,
+                )
+
+    def _backfill_model_position(self, position: dict) -> None:
+        """Attach a committed Miles response to captures made by its tools.
+
+        Claude can begin executing a streamed tool call before the gateway has
+        received the response's final frame. The environment snapshot is
+        therefore captured first; Miles publishes the authoritative response
+        position moments later. Append a correction for the still-unpositioned
+        suffix instead of mutating the checkpoint journal in place.
+        """
+        for checkpoint in list(self.ledger.checkpoints):
+            if checkpoint.snapshot_id and checkpoint.model_position is None:
+                checkpoint.model_position = dict(position)
+                self.ledger.record(
+                    checkpoint.step,
+                    checkpoint.snapshot_id,
+                    session_ckpt=checkpoint.session_ckpt,
+                    reason="model_position_backfill",
+                    delta_empty=checkpoint.delta_empty,
+                    call_id=checkpoint.call_id,
+                    pairing=checkpoint.pairing,
+                    prefix_complete=checkpoint.prefix_complete,
+                    model_position=checkpoint.model_position,
                 )
 
 

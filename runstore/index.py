@@ -53,15 +53,19 @@ class Index:
                 if point.tool_depth not in nodes:
                     raise ValueError("Recovery point extends beyond recorded tools")
                 cursor.execute("""INSERT INTO rs_recoveries
-                    (id,attempt_id,message_step,tool_depth,prefix_node,snapshot_id,native)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)
+                    (id,attempt_id,message_step,tool_depth,prefix_node,snapshot_id,native,model_position)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)
                     ON CONFLICT(attempt_id,message_step) DO UPDATE SET valid=true,invalid_reason=NULL
                     WHERE rs_recoveries.native=EXCLUDED.native
                     AND rs_recoveries.snapshot_id=EXCLUDED.snapshot_id
-                    AND rs_recoveries.prefix_node=EXCLUDED.prefix_node""",
+                    AND rs_recoveries.prefix_node=EXCLUDED.prefix_node
+                    AND rs_recoveries.model_position IS NOT DISTINCT FROM EXCLUDED.model_position""",
                                (uuid4().hex, job["active_attempt"], point.message_step,
                                 point.tool_depth, nodes[point.tool_depth], point.snapshot_id,
-                                canonical(point.native)))
+                                canonical(point.native),
+                                canonical(point.model_position)
+                                if point.model_position is not None
+                                else None))
                 if cursor.rowcount != 1:
                     raise Conflict("Recovery point changed after publication")
             cursor.execute("""UPDATE rs_recoveries SET valid=false,invalid_reason='boundary_no_longer_proven'

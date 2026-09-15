@@ -46,9 +46,13 @@ class Client:
         response.raise_for_status()
         return response.json()
 
-    def branch(self, job_id: str, point_id: str, *, idempotency_key: str, **overrides) -> str:
+    def branch(self, job_id: str, point_id: str, *, idempotency_key: str,
+               context: dict | None = None, **overrides) -> str:
+        body = {"point_id": point_id, "overrides": overrides}
+        if context is not None:
+            body["context"] = context
         response = self.http.post(f"/v1/jobs/{job_id}/branch",
-                                  json={"point_id": point_id, "overrides": overrides},
+                                  json=body,
                                   headers={"Idempotency-Key": idempotency_key})
         response.raise_for_status()
         return response.json()["id"]

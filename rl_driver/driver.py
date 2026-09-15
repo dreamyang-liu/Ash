@@ -7,10 +7,15 @@ import time
 import httpx
 
 from runstore.specs import JobSpec
-from rl_driver.ledger import Ledger
+from rl_driver.ledger import Conflict, Ledger, canonical
 from rl_driver.specs import initial_document, submission_key, validate_request
 
-DONE = {"succeeded", "failed", "cancelled", "skipped"}
+# Run Store quarantine is terminal from the RL caller's perspective.  It needs
+# operator reconciliation before the execution can make progress, so keeping a
+# rollout group active would make clients poll until their unrelated wall-time
+# deadline expires.  Export it as a failed sample while preserving the Run
+# Store job and its reconciliation evidence.
+DONE = {"succeeded", "failed", "quarantined", "cancelled", "skipped"}
 
 
 class Driver:
@@ -21,9 +26,38 @@ class Driver:
         self.wakeup = threading.Event()
         self.stopping = threading.Event()
 
-    def submit(self, body: dict, *, source_request: dict | None = None, extra_document: dict | None = None) -> dict:
+    def submit(
+        self,
+        body: dict,
+        *,
+        source_request: dict | None = None,
+        extra_document: dict | None = None,
+        deferred_sample_ids: set[str] | None = None,
+    ) -> dict:
+        """Persist a group, optionally deferring already-validated sample slots.
+
+        Deferral is an RL-driver implementation detail.  It deliberately is
+        not part of the public execution-group schema: every entry in ``body``
+        remains an ordinary validated root run, while a policy may later turn
+        a deferred slot into a root, a Run Store branch, or a skipped slot.
+        """
         request = validate_request(body)
         document = {**initial_document(request), **(extra_document or {})}
+        deferred = deferred_sample_ids or set()
+        known = {sample["sample_slot_id"] for sample in document["samples"]}
+        if deferred - known:
+            raise ValueError("Deferred sample IDs must belong to this execution group")
+        for sample in document["samples"]:
+            actor = sample["actor"]
+            if sample["sample_slot_id"] not in deferred:
+                continue
+            if actor["operation"] != "run":
+                raise ValueError("Only fresh root templates can be deferred")
+            actor.update(
+                state="deferred",
+                operation="deferred",
+                template=actor.pop("submission"),
+            )
         row = self.ledger.create(request["rollout_job_id"], source_request or request, document)
         self.wakeup.set()
         return self._view(row)
@@ -74,7 +108,9 @@ class Driver:
             if stage["operation"] == "branch":
                 branch = stage["submission"]
                 job_id = self.client.branch(branch["job_id"], branch["point_id"],
-                                            idempotency_key=key, **branch["overrides"])
+                                            idempotency_key=key,
+                                            context=branch.get("context"),
+                                            **branch["overrides"])
             else:
                 job_id = self.client.submit(JobSpec.from_dict(stage["submission"]), key)
         except httpx.HTTPStatusError as error:
@@ -94,11 +130,13 @@ class Driver:
 
     def _poll(self, document: dict, stage: dict) -> None:
         job = self.client.get(stage["job_id"])
-        if job["state"] == "queued" and self._cancelled(document):
-            self.client.cancel_queued(stage["job_id"])
+        if job["state"] in {"queued", "running"} and self._cancelled(document):
+            self.client.request_cancel(stage["job_id"])
             job = self.client.get(stage["job_id"])
         stage.update(state=job["state"], attempt_id=job.get("active_attempt"),
                      phase=job.get("phase"), error=job.get("error"))
+        if isinstance(job.get("progress"), dict):
+            stage["progress"] = deepcopy(job["progress"])
         if job["state"] in DONE:
             stage["result"] = job.get("result")
         stage.pop("last_error", None)
@@ -131,6 +169,29 @@ class Driver:
             point = max(candidates, key=lambda item: item["message_step"])
         submission = deepcopy(grade["template"])
         submission["spec"]["snapshot_id"] = point["snapshot_id"]
+        if submission["spec"].get("benchmark") == "swe-rebench-v2":
+            events = self.client.all_events(actor["job_id"], attempt_id=attempt)
+            prepared = [
+                event
+                for event in events
+                if event.get("type") == "environment.prepared"
+            ]
+            if len(prepared) != 1:
+                raise ValueError(
+                    "SWE-rebench grading requires exactly one durable repository baseline"
+                )
+            baseline = prepared[0].get("baseline_untracked")
+            if (
+                not isinstance(baseline, list)
+                or any(not isinstance(path, str) or not path for path in baseline)
+                or baseline != sorted(set(baseline))
+            ):
+                raise ValueError("SWE-rebench repository baseline is invalid")
+            submission["spec"]["baseline_untracked"] = baseline
+            submission["spec"]["repository_workdir"] = prepared[0].get("workdir")
+            submission["spec"]["repository_base_commit"] = prepared[0].get(
+                "base_commit"
+            )
         submission["context"]["rl_driver"] = {
             "rollout_job_id": document["rollout_job_id"], "sample_slot_id": sample["sample_slot_id"],
             "actor_job_id": actor["job_id"], "actor_attempt_id": attempt, "point_id": point["id"],
@@ -142,6 +203,11 @@ class Driver:
     def _advance(self, document: dict, sample: dict, phase: str) -> None:
         stage = sample[phase]
         if stage is None or stage["state"] in DONE:
+            return
+        if stage["state"] == "deferred":
+            if self._cancelled(document):
+                stage["state"] = "cancelled"
+                self._save(document)
             return
         if not stage["job_id"]:
             if self._cancelled(document):
@@ -198,6 +264,7 @@ class Driver:
                           for phase in ("actor", "grade") if sample[phase] is not None]
                 document["ready"] = all(stage["state"] in DONE for stage in stages)
                 if document["ready"]:
+                    document.setdefault("completed_at", time.time())
                     document["status"] = ("cancelled" if self._cancelled(document) else
                                           "failed" if any(stage["state"] != "succeeded" for stage in stages)
                                           else "completed")
@@ -216,6 +283,123 @@ class Driver:
                     raise ValueError("Sample has not received a Run Store job ID")
                 return sample["actor"]
         raise KeyError(sample_id)
+
+    def decide_deferred(self, group_id: str, sample_id: str, decision: dict) -> dict:
+        """Atomically consume one driver-internal deferred training slot.
+
+        The policy chooses a recovery point; the driver enforces group quota,
+        source ownership and durable idempotency.  It never chooses a point on
+        the policy's behalf.
+        """
+        expected = (
+            {"kind", "source_sample_slot_id", "point_id", "overrides"}
+            if isinstance(decision, dict) and decision.get("kind") == "branch"
+            else {"kind"}
+        )
+        if not isinstance(decision, dict) or set(decision) != expected:
+            raise ValueError(
+                "Policy decision must be root/skip or a branch with source_sample_slot_id, point_id and overrides"
+            )
+        kind = decision.get("kind")
+        if kind not in {"root", "branch", "skip"}:
+            raise ValueError("Policy decision kind must be root, branch or skip")
+        normalized = deepcopy(decision)
+        if kind == "branch":
+            source_id = normalized.get("source_sample_slot_id")
+            point_id = normalized.get("point_id")
+            if not isinstance(source_id, str) or not source_id or not isinstance(point_id, str) or not point_id:
+                raise ValueError("Branch admission requires source sample and recovery point IDs")
+            overrides = normalized.get("overrides")
+            if not isinstance(overrides, dict) or set(overrides) - {
+                "prompt", "model", "timeout_s", "budget_usd"
+            }:
+                raise ValueError("Invalid branch admission overrides")
+        with self._tick_lock:
+            row = self.ledger.get(group_id)
+            document = row["document"]
+            if row["cancel_requested"] or row["terminal"]:
+                raise Conflict("Cannot admit a sample into a cancelled or terminal group")
+            sample = next((item for item in document["samples"]
+                           if item["sample_slot_id"] == sample_id), None)
+            if sample is None:
+                raise KeyError(sample_id)
+            actor = sample["actor"]
+            if actor.get("policy_decision") is not None:
+                if canonical(actor["policy_decision"]) != canonical(normalized):
+                    raise Conflict("Sample slot already has a different policy decision")
+                return self._view(self.ledger.get(group_id))
+            if actor["state"] != "deferred" or actor.get("template") is None:
+                raise Conflict("Sample slot is not deferred for policy scheduling")
+            template = actor["template"]
+            if kind == "skip":
+                actor.update(
+                    state="skipped",
+                    operation="skip",
+                    policy_decision=normalized,
+                    error="Training policy released this sample slot",
+                )
+            elif kind == "root":
+                actor.update(state="planned", operation="run",
+                             submission=template, policy_decision=normalized)
+            else:
+                source = next((item for item in document["samples"]
+                               if item["sample_slot_id"] == normalized["source_sample_slot_id"]), None)
+                if source is None or source is sample:
+                    raise ValueError("Branch source must be another sample in this group")
+                parent = source["actor"]
+                if not parent.get("job_id") or not parent.get("attempt_id"):
+                    raise ValueError("Branch source has no durable execution attempt")
+                points = self.client.points(parent["job_id"], attempt_id=parent["attempt_id"])
+                point = next((item for item in points if item.get("id") == normalized["point_id"]), None)
+                if point is None or point.get("available") is not True:
+                    raise ValueError("Branch recovery point is absent or unavailable")
+                contract = deepcopy(
+                    template["spec"].get("extra", {}).get("rollout_contract") or {}
+                )
+                if contract.get("session_id"):
+                    model_position = point.get("model_position")
+                    if (
+                        not isinstance(model_position, dict)
+                        or model_position.get("session_id") != contract["session_id"]
+                        or not isinstance(model_position.get("response_id"), str)
+                        or not model_position["response_id"]
+                    ):
+                        raise ValueError(
+                            "Miles-backed branch point has no matching model position"
+                        )
+                parent_submission = parent.get("submission") or {}
+                inherited = deepcopy(
+                    parent_submission.get("spec", {}).get("extra", {}).get(
+                        "rollout_contract"
+                    )
+                    or contract
+                )
+                contract_overrides = {
+                    name: contract.get(name)
+                    for name in ("max_model_calls", "max_tool_calls")
+                    if contract.get(name) != inherited.get(name)
+                }
+                context = deepcopy(template["context"])
+                if contract_overrides:
+                    context.setdefault("rl_driver", {})[
+                        "rollout_contract_overrides"
+                    ] = contract_overrides
+                actor.update(
+                    state="planned",
+                    operation="branch",
+                    submission={
+                        "job_id": parent["job_id"],
+                        "point_id": point["id"],
+                        "overrides": normalized["overrides"],
+                        "context": context,
+                    },
+                    origin={"job_id": parent["job_id"], "point_id": point["id"]},
+                    policy_decision=normalized,
+                )
+            actor.pop("template", None)
+            self._save(document)
+        self.wakeup.set()
+        return self.get(group_id)
 
     def reconcile_submission(self, group_id: str, sample_id: str, phase: str, job_id: str) -> dict:
         """Attach a known accepted job after cancellation plus a lost HTTP reply.

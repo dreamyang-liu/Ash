@@ -28,6 +28,7 @@ scratch to be cleaned up, so the two reinforce rather than substitute.
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 from typing import Callable, Iterable
 
 #: Where SWE-bench images check out the repository under test.
@@ -35,7 +36,8 @@ WORKDIR = "/testbed"
 
 Shell = Callable[[str], object]     # command -> ToolResult-like (.success, .output)
 
-__all__ = ["WORKDIR", "extract_patch", "baseline_untracked", "added_paths",
+__all__ = ["WORKDIR", "extract_patch", "extract_patch_isolated",
+           "baseline_untracked", "added_paths",
            "select_added", "stage_commands", "diff_command", "format_patch",
            "UNTRACKED_LIST"]
 
@@ -113,7 +115,7 @@ def stage_commands(added: Iterable[str] = ()) -> list[str]:
 
 
 def diff_command(base_commit: str = "") -> str:
-    return f"git diff --cached {base_commit or 'HEAD'}"
+    return f"git diff --cached --binary {base_commit or 'HEAD'}"
 
 
 def format_patch(diff_output: str) -> str:
@@ -134,6 +136,46 @@ def extract_patch(shell: Shell, base_commit: str = "",
     for command in stage_commands(added):
         shell(command)
     return format_patch(_output(shell(diff_command(base_commit)))), added
+
+
+def extract_patch_isolated(
+    shell: Shell,
+    base_commit: str,
+    baseline: Iterable[str] = (),
+    *,
+    index_path: str,
+) -> tuple[str, list[str]]:
+    """Extract a binary patch without changing the repository's real index.
+
+    Grading still needs the restored worktree after extraction so it can remove
+    solver-supplied versions of hidden tests and install the official ones. A
+    normal ``git add`` mutates that worktree's index and makes the later
+    three-way apply observe staged conflicts. Use a private index initialized
+    from the immutable base commit instead.
+    """
+    if not base_commit or not index_path.startswith("/"):
+        raise ValueError("isolated patch extraction needs a base commit and absolute index path")
+    added = added_paths(shell, baseline)
+    index = shlex.quote(index_path)
+
+    def checked(command: str):
+        result = shell(command)
+        if not getattr(result, "success", False):
+            detail = getattr(result, "error", None) or getattr(result, "output", "")
+            raise RuntimeError(f"patch extraction failed: {detail}")
+        return result
+
+    checked(f"rm -f -- {index}")
+    prefix = f"GIT_INDEX_FILE={index} "
+    try:
+        checked(prefix + f"git read-tree {shlex.quote(base_commit)}")
+        checked(prefix + "git add -u")
+        if added:
+            checked(prefix + "git add -- " + " ".join(shlex.quote(path) for path in added))
+        diff = checked(prefix + diff_command(base_commit))
+        return format_patch(_output(diff)), added
+    finally:
+        shell(f"rm -f -- {index}")
 
 
 # ---------------------------------------------------------------------------

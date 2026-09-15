@@ -327,6 +327,12 @@ class ClaudeCodeSlot(AgentSlot):
                 kwargs["resume_session_at"] = extra["resume_session_at"]
         if extra.get("max_turns"):
             kwargs["max_turns"] = extra["max_turns"]
+        if extra.get("rollout_contract") is not None:
+            # Miles currently records visible generated tokens and replays
+            # them through an OpenAI-compatible SGLang endpoint. Ask the SDK
+            # not to request Anthropic extended-thinking semantics, whose
+            # hidden/signature-bearing blocks cannot be represented there.
+            kwargs["thinking"] = {"type": "disabled"}
         # The inner command timeout does not configure the CLI's outer MCP wait.
         # Populate this even when the caller has no other task-specific env.
         env = dict(task.env)

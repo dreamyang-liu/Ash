@@ -29,6 +29,9 @@ def create_app(driver: Driver, token: str | None, *, poll_interval_s: float = 1,
             driver.wakeup.clear()
             try:
                 driver.tick()
+                if miles is not None:
+                    miles.reconcile_policy()
+                    miles.reconcile_sessions()
             except Exception:
                 LOG.exception("Driver polling failed; saved submission intents are retained")
             driver.wakeup.wait(poll_interval_s)

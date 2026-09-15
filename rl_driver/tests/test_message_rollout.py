@@ -9,7 +9,7 @@ from runstore.message_sampling import parameters
 from rl_driver.driver import Driver
 from rl_driver.ledger import Ledger
 from rl_driver.message_protocol import MessageRequest
-from rl_driver.miles import MilesAdapter
+from rl_driver.miles import MilesAdapter, internal_id
 from rl_driver.server import create_app
 from rl_driver.tests.test_driver import peer as peer
 from runstore.message_export import clean_messages, codex_messages, export_tools, mark_hint
@@ -23,12 +23,20 @@ def request():
 def config(body):
     return {
         "profile": "codex", "run_defaults": {"slot": "codex", "tools": "shell_only"},
-        "image_resources": {"cpu": 2, "memory_mb": 12288},
-        "tasks": {body["task_id"]: {"grade": {"profile": "grade", "spec": {
-            "benchmark": "swe-rebench-v2", "instance_id": body["task_id"],
-            "dataset_path": "/ash/tasks.jsonl", "dataset_sha256": "fixture",
-            "grader_revision": "sha256:fixture", "parser_path": "/ash/log_parsers.py",
-        }}}},
+        "resources": {"standard": {"cpu": 2, "memory_mb": 12288}},
+        "allowed_oci_registries": ["docker.io"],
+        "tasks": {body["task_id"]: {
+            "environment_ref": deepcopy(body["environment_ref"]),
+            "repository": {
+                "workdir": "/task-repository",
+                "base_commit": "1" * 40,
+            },
+            "grade": {"profile": "grade", "spec": {
+                "benchmark": "swe-rebench-v2", "instance_id": body["task_id"],
+                "dataset_path": "/ash/tasks.jsonl", "dataset_sha256": "fixture",
+                "grader_revision": "sha256:fixture", "parser_path": "/ash/log_parsers.py",
+            }},
+        }},
     }
 
 
@@ -44,9 +52,16 @@ def messages():
     ]
 
 
-def test_real_miles_request_to_queue_grade_and_message_response(tmp_path, peer):
+def test_real_miles_request_to_queue_grade_and_message_response(tmp_path, peer, monkeypatch):
     queue, client = peer
     body = request()
+    class Released:
+        status_code = 204
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("rl_driver.miles.httpx.delete", lambda *args, **kwargs: Released())
     driver = Driver(client, Ledger(tmp_path / "ledger"))
     adapter = MilesAdapter(driver, config(body))
     with TestClient(create_app(driver, None, miles=adapter, background=False)) as http:
@@ -72,16 +87,141 @@ def test_real_miles_request_to_queue_grade_and_message_response(tmp_path, peer):
         assert "check the parser" not in json.dumps(trajectory["messages"])
         assert "/workspace" in json.dumps(trajectory["messages"])
         assert "token_ids" not in trajectory
+        persisted = driver.ledger.get(internal_id(body["rollout_job_id"]))["document"]
+        assert persisted["message_result"] == result
+        assert len(persisted["profiling_records"]) == result["actual_samples"]
+        assert all(record["protocol_version"] == "ash-rollout-v3"
+                   and record["final_transcript_tokens"] is None
+                   for record in persisted["profiling_records"])
         assert http.post("/rollout-groups", json=body).json()["status"] == "completed"
         deleted = http.delete("/rollout-groups/" + body["rollout_job_id"])
         assert deleted.json()["protocol_version"] == "ash-rollout-v3"
         assert len(queue.jobs) == len(actors) * 2
     submissions = [row[2] for row in queue.requests if row[0] == "POST" and row[1] == "/v1/jobs"]
     actor = next(row for row in submissions if row["kind"] == "rollout")
-    assert actor["spec"]["sandbox_image"] == "docker.io/swerebenchv2/task:base"
+    grade = next(row for row in submissions if row["kind"] == "grade")
+    assert actor["spec"]["sandbox_image"] == (
+        "docker.io/swerebenchv2/task@sha256:" + "a" * 64
+    )
     assert actor["spec"]["extra"]["rollout_contract"]["sampling_params"]["top_k"] == 20
     assert actor["spec"]["extra"]["rollout_contract"]["message_export"] is True
     assert actor["spec"]["extra"]["rollout_contract"]["max_turns"] == body["max_turns"]
+    assert actor["spec"]["extra"]["repository_preflight"] == {
+        "workdir": "/task-repository",
+        "base_commit": "1" * 40,
+    }
+    assert grade["spec"]["baseline_untracked"] == ["image-cache.txt"]
+    assert grade["spec"]["repository_workdir"] == "/task-repository"
+    assert grade["spec"]["repository_base_commit"] == "1" * 40
+
+
+def test_v3_without_deployment_grader_defers_reward_to_miles(tmp_path, peer):
+    queue, client = peer
+    body = request()
+    cfg = config(body)
+    cfg["tasks"][body["task_id"]].pop("grade")
+    driver = Driver(client, Ledger(tmp_path / "ledger"))
+    adapter = MilesAdapter(driver, cfg)
+
+    adapter.submit(body)
+    driver.tick()
+    (actor_id,) = queue.jobs
+    queue.finish(actor_id)
+    queue.jobs[actor_id]["result"]["training_messages"] = messages()
+    queue.final_point(actor_id)
+    driver.tick()
+
+    result = adapter.get(body["rollout_job_id"])
+    assert result["status"] == "completed", result
+    assert result["trajectories"][0]["reward"] is None
+    assert all(job["kind"] == "rollout" for job in queue.jobs.values())
+
+
+def test_v3_claude_branch_policy_consumes_deferred_slot_and_exports_lineage(
+    tmp_path, peer
+):
+    queue, client = peer
+    body = request()
+    body.update(max_samples=2, minimum_returned_samples=2)
+    body["sample_slots"].append({"sample_slot_id": "child-slot", "sample_index": 12})
+    child_slot_id = body["sample_slots"][1]["sample_slot_id"]
+
+    def policy(state):
+        parent = state["samples"][0]
+        if not parent["recovery_points"]:
+            return None
+        return [{
+            "sample_slot_id": child_slot_id,
+            "decision": {
+                "kind": "branch",
+                "source_sample_slot_id": parent["sample_slot_id"],
+                "point_id": parent["recovery_points"][0]["id"],
+                "overrides": {},
+            },
+        }]
+
+    cfg = config(body)
+    cfg["profile"] = "claude-code"
+    cfg["run_defaults"]["slot"] = "claude-code"
+    cfg["branch_policy"] = "fixture:policy"
+    driver = Driver(client, Ledger(tmp_path / "ledger"))
+    adapter = MilesAdapter(driver, cfg, branch_policy=policy)
+    adapter.submit(body)
+    driver.tick()
+    assert len(queue.jobs) == 1
+    parent_job = next(iter(queue.jobs))
+
+    queue.finish(parent_job)
+    queue.jobs[parent_job]["result"]["training_messages"] = messages()
+    queue.final_point(parent_job)
+    queue.points[parent_job][0]["model_position"] = {
+        "session_id": internal_id(body["rollout_job_id"]),
+        "response_id": "parent-response",
+    }
+    driver.tick()
+    adapter.reconcile_policy()
+    driver.tick()
+
+    branch_requests = [
+        row[2] for row in queue.requests
+        if row[0] == "POST" and row[1].endswith("/branch")
+    ]
+    assert len(branch_requests) == 1
+    assert branch_requests[0]["point_id"] == "old"
+    assert branch_requests[0]["context"]["sample_slot_id"] == child_slot_id
+    assert branch_requests[0]["context"]["environment_ref"] == body["environment_ref"]
+    child_job = next(
+        job for job, value in queue.jobs.items()
+        if job != parent_job and value["kind"] == "rollout"
+    )
+
+    queue.finish(child_job)
+    queue.jobs[child_job]["result"]["training_messages"] = [
+        *messages()[:3],
+        {"role": "user", "content": mark_hint("try the branch")},
+        {"role": "assistant", "content": "branched fix"},
+    ]
+    queue.final_point(child_job)
+    driver.tick()
+    driver.tick()
+    grades = [job_id for job_id, job in queue.jobs.items() if job["kind"] == "grade"]
+    assert len(grades) == 2
+    for job_id in grades:
+        queue.finish(job_id, resolved=True)
+    driver.tick()
+
+    result = adapter.get(body["rollout_job_id"])
+    assert result["status"] == "completed", result
+    assert result["actual_samples"] == 2
+    assert result["search_branches"] == 1
+    parent, child = result["trajectories"]
+    assert parent["sample_slot_id"] == body["sample_slots"][0]["sample_slot_id"]
+    assert parent["parent_branch_id"] is None
+    assert child["sample_slot_id"] == child_slot_id
+    assert child["parent_branch_id"] == parent_job
+    assert child["metadata"]["origin"]["point_id"] == "old"
+    assert "try the branch" not in json.dumps(child["messages"])
+    assert child["messages"][-1]["content"] == "branched fix"
 
 
 @pytest.mark.parametrize("group_size", [1, 2, 8])
@@ -122,6 +262,14 @@ def test_limit_cutoff_is_graded_after_deadline_and_returned_as_truncated(tmp_pat
         status="truncated", stop_reason=reason, final_snapshot_id="actual-final-state",
         training_messages=messages(),
     )
+    queue.events[actor_id] = [{
+        "seq": 1,
+        "type": "environment.prepared",
+        "workdir": "/task-repository",
+        "base_commit": "1" * 40,
+        "agent_workdir": "/testbed",
+        "baseline_untracked": ["image-cache.txt"],
+    }]
     row = driver.ledger.get(internal_id(body["rollout_job_id"]))
     document = row["document"]
     # Reaching the execution deadline must not cancel grading.
@@ -160,12 +308,44 @@ def test_infrastructure_failure_is_not_graded_as_a_timeout(tmp_path, peer):
     assert all(job["kind"] != "grade" for job in queue.jobs.values())
     assert adapter.get(body["rollout_job_id"])["status"] == "failed"
 
-@pytest.mark.parametrize("limit", [None, 0, -1, True, 1.5])
+
+def test_message_cancellation_waits_for_worker_cleanup(tmp_path, peer):
+    queue, client = peer
+    body = request()
+    driver = Driver(client, Ledger(tmp_path / "ledger"))
+    adapter = MilesAdapter(driver, config(body))
+    adapter.submit(body)
+    driver.tick()
+    (actor_id,) = queue.jobs
+    queue.jobs[actor_id].update(
+        state="running",
+        active_attempt="attempt-actor",
+        progress={"phase": "model_generation", "model_calls": 1},
+    )
+
+    assert adapter.release(body["rollout_job_id"])["status"] == "cancelled"
+    driver.tick()
+    pending = adapter.get(body["rollout_job_id"])
+    assert pending["status"] == "running"
+    assert pending["progress"]["phase"] == "cancelling"
+
+    queue.cancel(actor_id)
+    driver.tick()
+    assert adapter.get(body["rollout_job_id"])["status"] == "cancelled"
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
 def test_message_request_rejects_invalid_turn_limit(limit):
     body = request()
     body["max_turns"] = limit
     with pytest.raises(ValueError, match="max_turns"):
         MessageRequest.from_dict(body)
+
+
+def test_message_request_accepts_explicit_unbounded_turn_limit():
+    body = request()
+    body["max_turns"] = None
+
+    assert MessageRequest.from_dict(body).max_turns is None
 
 
 @pytest.mark.parametrize("key", ["max_model_calls", "max_tool_calls"])
@@ -176,13 +356,47 @@ def test_message_request_rejects_legacy_count_budgets(key):
         MessageRequest.from_dict(body)
 
 
-def test_missing_grader_rejected_before_queueing(tmp_path, peer):
+def test_missing_task_binding_rejected_before_queueing(tmp_path, peer):
     queue, client = peer
     body = request()
     cfg = config(body)
     cfg["tasks"] = {}
     adapter = MilesAdapter(Driver(client, Ledger(tmp_path / "ledger")), cfg)
-    with pytest.raises(ValueError, match="grade"):
+    with pytest.raises(ValueError, match="environment_ref"):
+        adapter.submit(body)
+    assert queue.jobs == {}
+
+
+def test_task_environment_mismatch_is_rejected_before_queueing(tmp_path, peer):
+    queue, client = peer
+    body = request()
+    cfg = config(body)
+    cfg["tasks"][body["task_id"]]["environment_ref"]["revision"] = (
+        "sha256:" + "b" * 64
+    )
+    adapter = MilesAdapter(Driver(client, Ledger(tmp_path / "ledger")), cfg)
+
+    with pytest.raises(ValueError, match="environment_ref does not match"):
+        adapter.submit(body)
+    assert queue.jobs == {}
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        {"workdir": "relative", "base_commit": "1" * 40},
+        {"workdir": "/repo", "base_commit": "short"},
+        {"workdir": "/repo", "base_commit": "1" * 40, "command": "unsafe"},
+    ],
+)
+def test_task_repository_preflight_schema_is_closed(tmp_path, peer, repository):
+    queue, client = peer
+    body = request()
+    cfg = config(body)
+    cfg["tasks"][body["task_id"]]["repository"] = repository
+    adapter = MilesAdapter(Driver(client, Ledger(tmp_path / "ledger")), cfg)
+
+    with pytest.raises(ValueError, match="repository|base_commit|workdir"):
         adapter.submit(body)
     assert queue.jobs == {}
 

@@ -127,6 +127,31 @@ def test_late_session_ref_is_backfilled(tmp_path):
     journal.close()
 
 
+def test_model_position_after_streamed_tool_backfills_checkpoint(tmp_path):
+    journal, bridge, _ = make(tmp_path)
+    journal.emit(E.SESSION_REF, native_session_id="ses_1")
+    bridge.on_tool_boundary(1)
+    assert bridge.ledger.checkpoints[0].model_position is None
+
+    position = {
+        "session_id": "session-tree-1",
+        "session_server_instance_id": "server-1",
+        "response_id": "response-1",
+        "token_sha256": "abc",
+    }
+    journal.emit("rollout.model_response", response_id="response-1", model_position=position)
+
+    assert bridge.ledger.checkpoints[0].model_position == position
+    records = read_journal(tmp_path / "j.jsonl")
+    corrections = [
+        record for record in records
+        if record.get("reason") == "model_position_backfill"
+    ]
+    assert len(corrections) == 1
+    assert corrections[0]["model_position"] == position
+    journal.close()
+
+
 def test_the_journal_pairs_a_clean_step_with_the_previous_snapshot(tmp_path):
     """Read-only steps map to the last capture, so the step map stays complete.
 

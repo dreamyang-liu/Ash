@@ -52,3 +52,20 @@ def test_finished_child_is_not_misreported_as_timeout_during_collection():
         assert watchdog.reason is None and killed == []
     finally:
         watchdog.close()
+
+
+def test_external_cancellation_stops_the_owned_process_group():
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+    )
+    watchdog = Watchdog(stop_process, Event(), 10)
+    try:
+        watchdog.arm(process_identity(process.pid), time.monotonic() + 60)
+        watchdog.request_stop("cancelled")
+        eventually(lambda: process.poll() is not None, timeout=3)
+        assert watchdog.reason == "cancelled"
+    finally:
+        watchdog.close()
+        stop_process(process_identity(process.pid))
+        process.wait(timeout=5)
