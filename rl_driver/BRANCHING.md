@@ -64,6 +64,22 @@ not require Bedrock credentials. `reviewer_api_key_env` is optional;
 before a timed-out group becomes ready, so a colocated trainer does not offload
 inference while its review call is still active.
 
+To bound local reviewer reasoning independently of its final JSON, configure:
+
+```json
+{
+  "reviewer_max_tokens": 32768,
+  "reviewer_thinking_budget": 16384,
+  "reviewer_timeout_s": 2400
+}
+```
+
+The total output budget includes reasoning and final content. A thinking budget
+requires SGLang `enable_strict_thinking`; the client verifies this before making
+the model request and sends `custom_params.thinking_budget`. It also requests a
+JSON schema for the final plan. A backend without enforcement is rejected.
+The serving context limit is separate and must fit the review input plus output.
+
 ## Sequence limits and discounted rewards
 
 V3 requests can set `max_sequence_tokens` and `truncated_reward_scale`.

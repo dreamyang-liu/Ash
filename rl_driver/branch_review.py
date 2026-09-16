@@ -25,6 +25,7 @@ class BranchingConfig:
     reviewer_endpoint: str | None = None
     reviewer_api_key_env: str | None = None
     reviewer_max_tokens: int = 16384
+    reviewer_thinking_budget: int | None = None
     return_mode: str = "pair"
 
     @classmethod
@@ -56,6 +57,12 @@ class BranchingConfig:
             raise ValueError("branching.reviewer_region must be nonempty")
         if type(value.reviewer_max_tokens) is not int or value.reviewer_max_tokens <= 0:
             raise ValueError("branching.reviewer_max_tokens must be positive")
+        if value.reviewer_thinking_budget is not None:
+            if (type(value.reviewer_thinking_budget) is not int
+                    or not 0 <= value.reviewer_thinking_budget < value.reviewer_max_tokens):
+                raise ValueError("reviewer_thinking_budget must be nonnegative and below reviewer_max_tokens")
+            if value.reviewer_endpoint is None:
+                raise ValueError("reviewer_thinking_budget requires a local reviewer_endpoint")
         if value.reviewer_endpoint is not None:
             parsed = urlsplit(value.reviewer_endpoint)
             if (parsed.scheme not in {"http", "https"} or not parsed.hostname
@@ -146,17 +153,50 @@ def ask_reviewer(config, evidence):
         if config.reviewer_api_key_env:
             headers["Authorization"] = "Bearer " + os.environ[config.reviewer_api_key_env]
         with httpx.Client(timeout=config.reviewer_timeout_s, trust_env=False) as client:
-            response = client.post(base + "/v1/chat/completions", headers=headers, json={
+            body = {
                 "model": config.reviewer_model,
                 "messages": [{"role": "user", "content": review_prompt(evidence)}],
                 "temperature": 0.6, "top_p": 0.95, "top_k": 20,
                 "max_tokens": config.reviewer_max_tokens,
-            })
+            }
+            if config.reviewer_thinking_budget is not None:
+                info = client.get(base + "/get_server_info", headers=headers)
+                info.raise_for_status()
+                settings = info.json().get("server_args", info.json())
+                if settings.get("enable_strict_thinking") is not True:
+                    raise ValueError("Reviewer thinking budget requires enable_strict_thinking on the server")
+                body.update(
+                    custom_params={"thinking_budget": config.reviewer_thinking_budget},
+                    chat_template_kwargs={"enable_thinking": True},
+                    response_format={"type": "json_schema", "json_schema": {
+                        "name": "branch_plan", "strict": True, "schema": {
+                            "type": "object", "additionalProperties": False,
+                            "required": ["synthesis", "branches"],
+                            "properties": {
+                                "synthesis": {"type": "string"},
+                                "branches": {"type": "array", "maxItems": evidence["branch_limit"], "items": {
+                                    "type": "object", "additionalProperties": False,
+                                    "required": ["job_id", "point_id", "reason", "hint"],
+                                    "properties": {key: {"type": "string"} for key in (
+                                        "job_id", "point_id", "reason", "hint",
+                                    )},
+                                }},
+                            },
+                        },
+                    }},
+                )
+            response = client.post(base + "/v1/chat/completions", headers=headers, json=body)
             response.raise_for_status()
             payload = response.json()
         text = payload["choices"][0]["message"].get("content")
         if not isinstance(text, str) or not text.strip():
-            raise ValueError("Reviewer did not return final JSON content")
+            usage = payload.get("usage", {})
+            raise ValueError(
+                "Reviewer did not return final JSON content"
+                f"; finish_reason={payload['choices'][0].get('finish_reason')}"
+                f"; completion_tokens={usage.get('completion_tokens')}"
+                f"; reasoning_tokens={usage.get('reasoning_tokens')}"
+            )
         return {"raw_text": text, "plan": extract_json(text), "usage": payload.get("usage", {})}
     try:
         text = ask_analyst(
