@@ -29,11 +29,18 @@ def pair_request(group="branch-test"):
     return body
 
 
-def plan(evidence, hint=HINT):
+def plan(evidence, hint=HINT, count=1):
     attempt = next(a for a in evidence["attempts"] if a["available_points"])
     return {
-        "job_id": attempt["job_id"], "point_id": attempt["available_points"][-1]["id"],
-        "reason": "Follow the retained code path", "hint": hint,
+        "synthesis": "Choose useful directions within this round's allowance",
+        "branches": [
+            {
+                "job_id": attempt["job_id"], "point_id": attempt["available_points"][-1]["id"],
+                "reason": "Follow the retained code path",
+                "hint": hint if count == 1 else f"{hint} Route {index + 1}.",
+            }
+            for index in range(count)
+        ],
     }
 
 
@@ -80,13 +87,19 @@ class Scenario:
             rollout_usage={"model_calls": 3, "tool_calls": 1},
         )
         if actor_id != self.actors()[0]:
-            output["training_messages"].insert(-1, {"role": "user", "content": mark_hint(HINT)})
-            output["training_origin"] = {"job_id": self.actors()[0], "hint": HINT, "prompt": HINT}
+            submission = next(json.loads(body) for job, body in self.queue.keys.values() if job == actor_id)
+            hint = submission["overrides"]["prompt"]
+            output["training_messages"].insert(-1, {"role": "user", "content": mark_hint(hint)})
+            output["training_origin"] = {"job_id": self.actors()[0], "hint": hint, "prompt": hint}
         if points:
             self.queue.final_point(actor_id)
         self.driver.tick()
-        grade = next(key for key, job in self.queue.jobs.items()
-                     if job["kind"] == "grade" and job["state"] == "queued")
+        grade = next(
+            job for job, body in self.queue.keys.values()
+            if json.loads(body).get("kind") == "grade"
+            and json.loads(body)["context"]["rl_driver"]["actor_job_id"] == actor_id
+        )
+        assert self.queue.jobs[grade]["state"] == "queued"
         self.queue.finish(grade, resolved=resolved)
         self.driver.tick()
 
@@ -100,7 +113,7 @@ class Scenario:
 
 
 @pytest.mark.parametrize("root_reward", [False, True])
-def test_root_grade_controls_review_direction_and_first_opposite_stops(tmp_path, peer, root_reward):
+def test_root_grade_controls_review_direction_and_single_child_round(tmp_path, peer, root_reward):
     scenario = Scenario(tmp_path, peer)
     try:
         scenario.start()
@@ -116,7 +129,7 @@ def test_root_grade_controls_review_direction_and_first_opposite_stops(tmp_path,
         assert result["actual_samples"] == 2 and result["search_branches"] == 1
         assert len(scenario.reviews) == 1 and len(scenario.actors()) == 2
         assert result["trajectories"][1]["parent_branch_id"] == scenario.actors()[0]
-        assert result["trajectories"][1]["metadata"]["branching"]["stop_reason"] == "target_found"
+        assert result["trajectories"][1]["metadata"]["branching"]["stop_reason"] == "mixed_rewards"
         assert HINT not in json.dumps(result)
         assert "<ash_training_hint>" not in json.dumps(result)
         branch = next(row for row in scenario.queue.requests if row[1].endswith("/branch"))
@@ -145,29 +158,36 @@ def test_two_round_bound_and_pair_selection_keep_intermediate_attempts(tmp_path,
         assert result["consumed_budget"] == {"model_calls": 9, "tool_calls": 3}
         state = scenario.driver.ledger.get(internal_id(scenario.body["rollout_job_id"]))["document"]
         assert len(state["samples"]) == 3
-        assert state["branching"]["stop_reason"] == ("target_found" if last_reward else "round_limit")
+        assert state["branching"]["stop_reason"] == ("mixed_rewards" if last_reward else "round_limit")
     finally:
         scenario.driver.close()
 
 
-def test_success_can_be_configured_to_run_both_rounds(tmp_path, peer):
-    scenario = Scenario(tmp_path, peer, settings={"stop_on_negative": False})
+@pytest.mark.parametrize("rewards", [(False, True), (False, False), (True, True)])
+def test_successful_root_gets_at_most_two_children_and_finishes_the_round(tmp_path, peer, rewards):
+    scenario = Scenario(tmp_path, peer, reviewer=lambda _config, e: plan(e, count=e["branch_limit"]))
     try:
         scenario.start()
         scenario.finish(scenario.actors()[0], True)
-        first_child = scenario.wait_branch(2)
-        scenario.finish(first_child, False)
-        second_child = scenario.wait_branch(3)
-        scenario.finish(second_child, False)
-        assert scenario.result()["search_branches"] == 2
+        scenario.wait_branch(3)
+        assert scenario.reviews[0]["branch_limit"] == 2
+        children = scenario.actors()[1:]
+        scenario.finish(children[0], rewards[0])
+        assert not scenario.driver.get(internal_id(scenario.body["rollout_job_id"]))["ready"]
+        scenario.finish(children[1], rewards[1])
+        result = scenario.result()
+        assert result["search_branches"] == 2 and len(scenario.reviews) == 1
+        assert len(scenario.actors()) == 3
+        stop = "mixed_rewards" if False in rewards else "round_limit"
+        assert result["trajectories"][1]["metadata"]["branching"]["stop_reason"] == stop
     finally:
         scenario.driver.close()
 
 
 def test_all_mode_returns_only_real_trajectories_with_no_padding(tmp_path, peer):
     body = pair_request()
-    body.update(max_samples=3, minimum_returned_samples=1)
-    body["sample_slots"].append({"sample_slot_id": "third", "sample_index": 2})
+    body.update(max_samples=8, minimum_returned_samples=1)
+    body["sample_slots"] = [{"sample_slot_id": f"slot-{i}", "sample_index": i} for i in range(8)]
     scenario = Scenario(tmp_path, peer, body=body, settings={"return_mode": "all"})
     try:
         scenario.start()
@@ -175,7 +195,7 @@ def test_all_mode_returns_only_real_trajectories_with_no_padding(tmp_path, peer)
         scenario.finish(scenario.wait_branch(2), True)
         result = scenario.result()
         assert result["status"] == "completed"
-        assert result["actual_samples"] == 2 and result["max_samples"] == 3
+        assert result["actual_samples"] == 2 and result["max_samples"] == 8
     finally:
         scenario.driver.close()
 
@@ -200,7 +220,12 @@ def test_no_point_returns_explicit_failure_without_blind_retry(tmp_path, peer):
     {"hint": ""},
 ])
 def test_invalid_review_never_launches_a_branch(tmp_path, peer, change):
-    scenario = Scenario(tmp_path, peer, reviewer=lambda _config, e: {**plan(e), **change})
+    def reviewer(_config, evidence):
+        output = plan(evidence)
+        output["branches"][0].update(change)
+        return output
+
+    scenario = Scenario(tmp_path, peer, reviewer=reviewer)
     try:
         scenario.start()
         scenario.finish(scenario.actors()[0], False)
@@ -239,8 +264,9 @@ def test_slow_review_does_not_block_other_roots_and_cancel_discards_it(tmp_path,
         scenario.driver.close()
 
 
-def test_accepted_review_and_lost_branch_reply_survive_restart(tmp_path, peer, monkeypatch):
-    scenario = Scenario(tmp_path, peer)
+@pytest.mark.parametrize("count", [1, 4])
+def test_accepted_review_and_lost_branch_reply_survive_restart(tmp_path, peer, monkeypatch, count):
+    scenario = Scenario(tmp_path, peer, reviewer=lambda _config, e: plan(e, count=count))
     restored = None
     try:
         scenario.start()
@@ -249,7 +275,7 @@ def test_accepted_review_and_lost_branch_reply_survive_restart(tmp_path, peer, m
         def disconnected(*_args):
             raise httpx.ReadError("temporarily disconnected")
 
-        monkeypatch.setattr(scenario.driver.branching, "_append_branch", disconnected)
+        monkeypatch.setattr(scenario.driver.branching, "_append_branches", disconnected)
         group = internal_id(scenario.body["rollout_job_id"])
         spin(scenario.driver, lambda: scenario.driver.ledger.get(group)["document"]["branching"]["reviews"][-1]["state"] == "accepted")
         scenario.driver.close()
@@ -261,12 +287,12 @@ def test_accepted_review_and_lost_branch_reply_survive_restart(tmp_path, peer, m
         restored.tick()
         scenario.queue.lose_ack = True
         restored.tick()
-        assert len(scenario.actors()) == 2
+        assert len(scenario.actors()) == count + 1
         restored.close()
         restored = Driver(scenario.client, Ledger(scenario.path), branch_reviewer=unexpected_review)
         restored.tick()
-        assert len(scenario.actors()) == 2
-        assert restored.get(group)["samples"][-1]["actor"]["job_id"] == scenario.actors()[-1]
+        assert len(scenario.actors()) == count + 1
+        assert restored.get(group)["samples"][1]["actor"]["job_id"] == scenario.actors()[1]
     finally:
         scenario.driver.close()
         if restored:
@@ -361,15 +387,142 @@ def test_point_revoked_while_reviewing_is_not_replaced(tmp_path, peer):
 
 
 def test_success_and_failure_review_prompts_have_distinct_goals():
-    evidence = {"target_resolved": True, "attempts": []}
+    evidence = {"target_resolved": True, "attempts": [], "branch_limit": 4}
     assert "concrete repair direction" in review_prompt(evidence)
+    assert "AT MOST 4" in review_prompt(evidence)
     evidence["target_resolved"] = False
+    evidence["branch_limit"] = 2
     prompt = review_prompt(evidence)
     assert "plausible mistaken reasoning" in prompt and "not arbitrary\nsabotage" in prompt
+    assert "AT MOST 2" in prompt and "points do not have to be distinct" in prompt
+
+
+@pytest.mark.parametrize("return_mode", ["pair", "all"])
+def test_full_four_then_three_schedule_and_round_end_barrier(tmp_path, peer, return_mode):
+    body = pair_request()
+    if return_mode == "all":
+        body.update(max_samples=8, minimum_returned_samples=1)
+        body["sample_slots"] = [{"sample_slot_id": f"slot-{i}", "sample_index": i} for i in range(8)]
+    scenario = Scenario(
+        tmp_path, peer, body=body, settings={"return_mode": return_mode},
+        reviewer=lambda _config, e: plan(e, count=e["branch_limit"]),
+    )
+    try:
+        scenario.start()
+        scenario.finish(scenario.actors()[0], False)
+        scenario.wait_branch(5)
+        first_round = scenario.actors()[1:5]
+        assert scenario.reviews[0]["branch_limit"] == 4
+        for child in first_round[:-1]:
+            scenario.finish(child, False)
+            assert len(scenario.reviews) == 1
+        scenario.finish(first_round[-1], False)
+        scenario.wait_branch(8)
+        second_round = scenario.actors()[5:8]
+        assert scenario.reviews[1]["branch_limit"] == 3
+        # The positive arrives before its siblings finish. It must not end the round.
+        scenario.finish(second_round[1], True)
+        assert not scenario.driver.get(internal_id(body["rollout_job_id"]))["ready"]
+        scenario.finish(second_round[0], False)
+        assert not scenario.driver.get(internal_id(body["rollout_job_id"]))["ready"]
+        scenario.finish(second_round[2], False)
+        result = scenario.result()
+        assert result["status"] == "completed" and result["search_branches"] == 7
+        assert result["actual_samples"] == (2 if return_mode == "pair" else 8)
+        assert {t["reward"] for t in result["trajectories"]} == {0.0, 1.0}
+        assert result["consumed_budget"] == {"model_calls": 24, "tool_calls": 8}
+        state = scenario.driver.get(internal_id(body["rollout_job_id"]))
+        assert [r["branch_count"] for r in state["branching"]["reviews"]] == [4, 3]
+        assert [r["point_count"] for r in state["branching"]["reviews"]] == [1, 1]
+        assert len(scenario.reviews) == 2 and len(scenario.actors()) == 8
+        assert HINT not in json.dumps(result)
+    finally:
+        scenario.driver.close()
+
+
+def test_mixed_first_round_finishes_all_four_then_skips_second_round(tmp_path, peer):
+    scenario = Scenario(tmp_path, peer, reviewer=lambda _config, e: plan(e, count=4))
+    try:
+        scenario.start()
+        scenario.finish(scenario.actors()[0], False)
+        scenario.wait_branch(5)
+        children = scenario.actors()[1:]
+        scenario.finish(children[0], True)
+        assert not scenario.driver.get(internal_id(scenario.body["rollout_job_id"]))["ready"]
+        for child in children[1:]:
+            scenario.finish(child, False)
+        result = scenario.result()
+        assert result["search_branches"] == 4 and len(scenario.reviews) == 1
+        assert len(scenario.actors()) == 5 and result["actual_samples"] == 2
+        assert result["trajectories"][1]["metadata"]["branching"]["stop_reason"] == "mixed_rewards"
+    finally:
+        scenario.driver.close()
+
+
+def test_reviewer_selects_smaller_counts_and_its_own_points(tmp_path, peer):
+    def reviewer(_config, evidence):
+        result = plan(evidence, count=2 if evidence["round"] == 1 else 1)
+        if evidence["round"] == 1:
+            result["branches"][1]["point_id"] = evidence["attempts"][0]["available_points"][0]["id"]
+        return result
+
+    scenario = Scenario(tmp_path, peer, reviewer=reviewer)
+    try:
+        scenario.start()
+        scenario.finish(scenario.actors()[0], False)
+        scenario.wait_branch(3)
+        for child in scenario.actors()[1:3]:
+            scenario.finish(child, False)
+        last = scenario.wait_branch(4)
+        scenario.finish(last, True)
+        result = scenario.result()
+        state = scenario.driver.get(internal_id(scenario.body["rollout_job_id"]))
+        assert [r["branch_limit"] for r in state["branching"]["reviews"]] == [4, 3]
+        assert [r["branch_count"] for r in state["branching"]["reviews"]] == [2, 1]
+        assert [r["point_count"] for r in state["branching"]["reviews"]] == [2, 1]
+        assert result["search_branches"] == 3
+    finally:
+        scenario.driver.close()
+
+
+@pytest.mark.parametrize("root_reward,invalid_round", [(False, 1), (False, 2), (True, 1)])
+def test_over_limit_review_is_rejected_whole_without_trimming(tmp_path, peer, root_reward, invalid_round):
+    def reviewer(_config, evidence):
+        count = evidence["branch_limit"] + 1 if evidence["round"] == invalid_round else 1
+        return plan(evidence, count=count)
+
+    scenario = Scenario(tmp_path, peer, reviewer=reviewer)
+    try:
+        scenario.start()
+        scenario.finish(scenario.actors()[0], root_reward)
+        if invalid_round == 2:
+            scenario.finish(scenario.wait_branch(2), root_reward)
+        result = scenario.result()
+        assert "review_failed" in result["stop_reason"]
+        assert len(scenario.actors()) == invalid_round
+        state = scenario.driver.get(internal_id(scenario.body["rollout_job_id"]))
+        assert "branch limit" in state["branching"]["error"]
+    finally:
+        scenario.driver.close()
+
+
+def test_reviewer_can_select_no_branches_without_forced_padding(tmp_path, peer):
+    scenario = Scenario(tmp_path, peer, reviewer=lambda _config, e: plan(e, count=0))
+    try:
+        scenario.start()
+        scenario.finish(scenario.actors()[0], False)
+        result = scenario.result()
+        assert result["actual_samples"] == 1 and result["search_branches"] == 0
+        assert "reviewer_no_branches" in result["stop_reason"]
+        assert len(scenario.actors()) == 1 and len(scenario.reviews) == 1
+    finally:
+        scenario.driver.close()
 
 
 @pytest.mark.parametrize("body", [
-    {"enabled": "yes"}, {"max_rounds": True}, {"max_rounds": 0},
+    {"enabled": "yes"}, {"branch_limits": [True, 3]}, {"branch_limits": [0, 3]},
+    {"branch_limits": [5, 3]}, {"branch_limits": [4, 4]}, {"branch_limits": [4]},
+    {"branch_limits": "4,3"}, {"successful_root_limit": 3}, {"successful_root_limit": True},
     {"reviewer_timeout_s": float("inf")}, {"reviewer_workers": 0},
     {"return_mode": "duplicate"}, {"unknown": 1},
 ])

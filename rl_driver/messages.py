@@ -52,8 +52,8 @@ class MessageAdapter:
                     request.max_samples != 2 or request.minimum_returned_samples != 2):
                 raise ValueError("Pair branching requires exactly two allocated sample slots")
             if self.branching.return_mode == "all" and (
-                    request.max_samples < 1 + self.branching.max_rounds or request.minimum_returned_samples != 1):
-                raise ValueError("All-trajectory branching requires max_rounds+1 slots and minimum_returned_samples=1")
+                    request.max_samples < self.branching.max_trajectories or request.minimum_returned_samples != 1):
+                raise ValueError("All-trajectory branching requires slots for the schedule and minimum_returned_samples=1")
             self.driver.branching.validate_config(self.branching)
         defaults = self.config.get("run_defaults", {})
         model = request.model or defaults.get("model")
@@ -170,6 +170,7 @@ class MessageAdapter:
                     state = document["branching"]
                     result["trajectories"][-1]["metadata"]["branching"] = {
                         "round": sample.get("branch_round", 0),
+                        "index": sample.get("branch_index", 0),
                         "target_resolved": state["target_resolved"],
                         "stop_reason": state["stop_reason"],
                     }

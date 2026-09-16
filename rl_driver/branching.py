@@ -111,8 +111,9 @@ class BranchController:
             future.cancel()
         self._save(document)
 
-    def _evidence(self, document):
+    def _evidence(self, document, config):
         attempts = []
+        per_attempt_limit = max(4000, 40000 // len(document["samples"]))
         for sample in document["samples"]:
             actor = sample["actor"]
             grade = verdict(sample)
@@ -125,27 +126,32 @@ class BranchController:
             tools = self.client.all_tools(actor["job_id"], attempt_id=actor["attempt_id"])
             attempts.append({
                 "job_id": actor["job_id"], "resolved": grade,
-                "messages": _bounded_messages(output.get("training_messages") or []),
-                "tool_steps": _bounded_steps(tools),
+                "messages": _bounded_messages(output.get("training_messages") or [], limit=per_attempt_limit),
+                "tool_steps": _bounded_steps(tools, limit=per_attempt_limit),
                 "grader": deepcopy(sample["grade"].get("result")),
                 "available_points": available,
                 "prior_hint": actor.get("submission", {}).get("overrides", {}).get("prompt"),
             })
+        round_index = len(document["branching"]["reviews"])
+        root_resolved = verdict(document["samples"][0])
         return {
             "task": document["message_request"]["prompt"],
             "target_resolved": document["branching"]["target_resolved"],
-            "round": len(document["branching"]["reviews"]) + 1,
+            "root_resolved": root_resolved,
+            "round": round_index + 1,
+            "branch_limit": config.limits_for(root_resolved)[round_index],
             "attempts": attempts,
         }
 
     def _start_review(self, document, config):
-        evidence = self._evidence(document)
+        evidence = self._evidence(document, config)
         if not any(attempt["available_points"] for attempt in evidence["attempts"]):
             self._finish(document, "no_available_recovery_point")
             return
         state = document["branching"]
         state["reviews"].append({
-            "round": evidence["round"], "state": "pending", "evidence": evidence,
+            "round": evidence["round"], "branch_limit": evidence["branch_limit"],
+            "state": "pending", "evidence": evidence,
             "started_at": time.time(),
         })
         state["phase"] = "reviewing"
@@ -162,33 +168,45 @@ class BranchController:
             self.reviewer, config, deepcopy(review["evidence"]),
         )
 
-    def _append_branch(self, document, review):
-        plan = review["plan"]
-        # Revalidate availability after review; never substitute another point.
-        parent = next(s["actor"] for s in document["samples"] if s["actor"]["job_id"] == plan["job_id"])
-        points = self.client.points(plan["job_id"], attempt_id=parent["attempt_id"])
-        if not any(p["id"] == plan["point_id"] and p.get("available") is True for p in points):
-            raise ValueError("Selected recovery point became unavailable after review")
-        sample_id = f'{document["rollout_job_id"]}:branch:{review["round"]}'
-        if not any(sample["sample_slot_id"] == sample_id for sample in document["samples"]):
-            template = deepcopy(document["samples"][0]["grade"]["template"])
-            body = validate_request({
-                "rollout_job_id": document["rollout_job_id"],
-                "prompt_group_id": document["prompt_group_id"],
-                "samples": [{
-                    "sample_slot_id": sample_id,
-                    "branch": {
-                        "job_id": plan["job_id"], "point_id": plan["point_id"],
-                        # Worker marks the entire continuation once it restores
-                        # the validated native prefix.
-                        "overrides": {"prompt": plan["hint"]},
-                    },
-                    "grade": template,
-                }],
-            })
-            child = initial_document(body)["samples"][0]
-            child["branch_round"] = review["round"]
-            document["samples"].append(child)
+    def _append_branches(self, document, review):
+        branches = review["plan"]["branches"]
+        if not branches:
+            review["state"] = "declined"
+            self._finish(document, "reviewer_no_branches")
+            return
+        # Validate the whole round before appending any child. Several children
+        # may share a point; each still has its own durable submission identity.
+        available = {}
+        for branch in branches:
+            parent_id = branch["job_id"]
+            if parent_id not in available:
+                parent = next(s["actor"] for s in document["samples"] if s["actor"]["job_id"] == parent_id)
+                points = self.client.points(parent_id, attempt_id=parent["attempt_id"])
+                available[parent_id] = {p["id"] for p in points if p.get("available") is True}
+            if branch["point_id"] not in available[parent_id]:
+                raise ValueError("Selected recovery point became unavailable after review")
+        specs = [
+            {
+                "sample_slot_id": f'{document["rollout_job_id"]}:branch:{review["round"]}:{index}',
+                "branch": {
+                    "job_id": branch["job_id"], "point_id": branch["point_id"],
+                    "overrides": {"prompt": branch["hint"]},
+                },
+                "grade": deepcopy(document["samples"][0]["grade"]["template"]),
+            }
+            for index, branch in enumerate(branches, 1)
+        ]
+        body = validate_request({
+            "rollout_job_id": document["rollout_job_id"],
+            "prompt_group_id": document["prompt_group_id"], "samples": specs,
+        })
+        existing = {sample["sample_slot_id"] for sample in document["samples"]}
+        for index, child in enumerate(initial_document(body)["samples"], 1):
+            if child["sample_slot_id"] not in existing:
+                child.update(branch_round=review["round"], branch_index=index)
+                document["samples"].append(child)
+        review["branch_count"] = len(branches)
+        review["point_count"] = len({(b["job_id"], b["point_id"]) for b in branches})
         review["state"] = "submitted"
         document["branching"]["phase"] = "branching"
         self._save(document)
@@ -196,7 +214,7 @@ class BranchController:
     def _poll_review(self, document, config):
         review = document["branching"]["reviews"][-1]
         if review["state"] == "accepted":
-            self._append_branch(document, review)
+            self._append_branches(document, review)
             return
         group = document["rollout_job_id"]
         future = self._futures.get(group)
@@ -218,7 +236,7 @@ class BranchController:
             return
         review["state"] = "accepted"
         self._save(document)
-        self._append_branch(document, review)
+        self._append_branches(document, review)
 
     def advance(self, document, *, cancelled=False):
         state = document["branching"]
@@ -245,10 +263,11 @@ class BranchController:
             self._finish(document, "execution_or_grading_failed", str(error))
             return
         state["target_resolved"] = not values[0]
-        found = state["target_resolved"] in values[1:]
-        if found and (state["target_resolved"] or config.stop_on_negative):
-            self._finish(document, "target_found")
-        elif len(state["reviews"]) >= config.max_rounds:
+        # All selected actors AND graders above are terminal before evaluating
+        # the signal mix. A positive arriving early never cancels its siblings.
+        if len(set(values)) == 2:
+            self._finish(document, "mixed_rewards")
+        elif len(state["reviews"]) >= len(config.limits_for(values[0])):
             self._finish(document, "round_limit")
         else:
             self._start_review(document, config)

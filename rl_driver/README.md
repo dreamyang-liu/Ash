@@ -27,7 +27,9 @@ v3 分支 continuation prompt 在执行前包上保留标记
 不能自动可靠删除；不完整工具记录、压缩历史和不支持的内容会明确失败。
 默认仍是独立样本策略。可通过 `--branching`、`miles.branching.enabled` 或
 v3 请求的 `branching: true` 开启 review 指导的分支策略：每题先跑一条，
-失败找正例、成功找负例，默认最多两轮，返回去 hint 的首条与选中分支。
+失败时两轮分别最多 4／3 条；根轨迹已成功时追加最多 2 条寻找负例。
+每轮数量和分叉点由 review 决定，整轮评分完成且累计有正有负后停止。
+返回去 hint 的首条与选中分支。
 配置、停止条件及返回数量见 [BRANCHING.md](BRANCHING.md)。
 
 v3 原生采样支持 temperature、top_p、top_k、文本 stop 和输出长度；
