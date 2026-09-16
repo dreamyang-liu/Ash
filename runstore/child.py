@@ -127,7 +127,9 @@ def execute(request: dict, directory: Path) -> dict:
         from runstore.message_completion import complete_message_result
 
         result.update(completion)
-        result = complete_message_result(result, directory, slot, request.get("recovery"))
+        result = complete_message_result(
+            result, directory, slot, request.get("recovery"), contract=extra.get("rollout_contract"),
+        )
     return result
 
 

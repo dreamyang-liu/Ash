@@ -98,17 +98,20 @@ class BranchController:
     def validate_config(self, config):
         config.require_reviewer()
         if self.reviewer is ask_reviewer:
-            validate_reviewer_environment()
+            validate_reviewer_environment(config)
 
     def _save(self, document):
         self.ledger.save(document["rollout_job_id"], document, terminal=False)
 
     def _finish(self, document, reason, error=None):
         state = document["branching"]
-        state.update(phase="finished", stop_reason=reason, error=error)
-        future = self._futures.pop(document["rollout_job_id"], None)
-        if future is not None:
-            future.cancel()
+        future = self._futures.get(document["rollout_job_id"])
+        draining = future is not None and not future.done() and not future.cancel()
+        state.update(phase="draining_review" if draining else "finished", stop_reason=reason, error=error)
+        if future is not None and future.cancelled() and state["reviews"]:
+            state["reviews"][-1]["state"] = "cancelled"
+        if not draining:
+            self._futures.pop(document["rollout_job_id"], None)
         self._save(document)
 
     def _evidence(self, document, config):
@@ -118,11 +121,23 @@ class BranchController:
             actor = sample["actor"]
             grade = verdict(sample)
             points = self.client.points(actor["job_id"], attempt_id=actor["attempt_id"])
-            available = [
-                {key: point[key] for key in ("id", "message_step", "tool_depth", "snapshot_id") if key in point}
-                for point in points if point.get("available") is True
-            ]
             output = actor.get("result") or {}
+            cap = output.get("max_sequence_tokens")
+            lengths = output.get("training_point_tokens") or {}
+            cut_depth = (output.get("sequence_truncation") or {}).get("tool_depth")
+            available = [
+                {
+                    **{key: point[key] for key in ("id", "message_step", "tool_depth", "snapshot_id") if key in point},
+                    **({"sequence_tokens": lengths[str(point["tool_depth"])]}
+                       if str(point["tool_depth"]) in lengths else {}),
+                    **({"remaining_sequence_tokens": cap - lengths[str(point["tool_depth"])] - 1024}
+                       if cap is not None and str(point["tool_depth"]) in lengths else {}),
+                }
+                for point in points
+                if point.get("available") is True
+                and (cut_depth is None or point["tool_depth"] <= cut_depth)
+                and (cap is None or lengths.get(str(point["tool_depth"]), cap) < cap - 1024)
+            ]
             tools = self.client.all_tools(actor["job_id"], attempt_id=actor["attempt_id"])
             attempts.append({
                 "job_id": actor["job_id"], "resolved": grade,
@@ -140,6 +155,7 @@ class BranchController:
             "root_resolved": root_resolved,
             "round": round_index + 1,
             "branch_limit": config.limits_for(root_resolved)[round_index],
+            "max_sequence_tokens": document["message_request"].get("max_sequence_tokens"),
             "attempts": attempts,
         }
 
@@ -241,6 +257,20 @@ class BranchController:
     def advance(self, document, *, cancelled=False):
         state = document["branching"]
         if state["phase"] == "finished":
+            return
+        if state["phase"] == "draining_review":
+            future = self._futures.get(document["rollout_job_id"])
+            if future is None or future.done():
+                review = state["reviews"][-1]
+                review["state"] = "discarded"
+                if future is not None and not future.cancelled():
+                    try:
+                        review["discarded_output"] = future.result()
+                    except Exception as error:
+                        review["discarded_error"] = str(error)
+                self._futures.pop(document["rollout_job_id"], None)
+                state["phase"] = "finished"
+                self._save(document)
             return
         if cancelled:
             self._finish(document, "cancelled")

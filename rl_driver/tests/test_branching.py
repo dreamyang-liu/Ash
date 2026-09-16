@@ -519,6 +519,35 @@ def test_reviewer_can_select_no_branches_without_forced_padding(tmp_path, peer):
         scenario.driver.close()
 
 
+def test_deadline_drains_local_review_before_returning_a_pair(tmp_path, peer, monkeypatch):
+    release = Event()
+
+    def reviewer(_config, evidence):
+        if evidence["round"] == 2:
+            assert release.wait(3)
+        return plan(evidence)
+
+    scenario = Scenario(tmp_path, peer, reviewer=reviewer)
+    try:
+        scenario.start()
+        scenario.finish(scenario.actors()[0], False)
+        scenario.finish(scenario.wait_branch(2), False)
+        spin(scenario.driver, lambda: len(scenario.reviews) == 2)
+        group = internal_id(scenario.body["rollout_job_id"])
+        deadline = scenario.driver.ledger.get(group)["document"]["execution_deadline_at"]
+        monkeypatch.setattr("rl_driver.branching.time.time", lambda: deadline + 1)
+        scenario.driver.tick()
+        state = scenario.driver.get(group)
+        assert state["branching"]["phase"] == "draining_review" and not state["ready"]
+        release.set()
+        result = scenario.result()
+        assert result["actual_samples"] == 2 and len(scenario.actors()) == 2
+        assert scenario.driver.get(group)["branching"]["reviews"][-1]["state"] == "discarded"
+    finally:
+        release.set()
+        scenario.driver.close()
+
+
 @pytest.mark.parametrize("body", [
     {"enabled": "yes"}, {"branch_limits": [True, 3]}, {"branch_limits": [0, 3]},
     {"branch_limits": [5, 3]}, {"branch_limits": [4, 4]}, {"branch_limits": [4]},

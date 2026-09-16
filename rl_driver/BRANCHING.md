@@ -57,6 +57,31 @@ The matching Miles caller uses:
 --n-samples-per-prompt 2
 ```
 
+For an owned local reviewer, set `reviewer_endpoint` to its serving base URL
+and `reviewer_model` to its base model name. This uses Chat Completions and does
+not require Bedrock credentials. `reviewer_api_key_env` is optional;
+`reviewer_max_tokens` defaults to16384. In-flight review calls are drained
+before a timed-out group becomes ready, so a colocated trainer does not offload
+inference while its review call is still active.
+
+## Sequence limits and discounted rewards
+
+V3 requests can set `max_sequence_tokens` and `truncated_reward_scale`.
+Configure `miles.sequence_tokenizers` as an exact model-name→local tokenizer
+directory mapping (include the LoRA-qualified name when serving an adapter).
+The worker bounds native output by the remaining sequence budget. At final
+export it counts the cleaned history with that tokenizer. If tool output or
+history still exceeds the limit, it chooses a complete native checkpoint prefix
+that fits and grades that prefix's paired snapshot. The later full-run snapshot
+is retained separately, never used to score the shortened training sequence.
+No eligible prefix is an explicit unusable episode, not arbitrary token slicing.
+
+Correct truncated episodes receive `resolved × truncated_reward_scale`;
+natural successes remain1, failures0. Search decisions continue to use the real
+grader boolean. Branch review receives retained-prefix token counts and excludes
+discarded or over-budget points. Defaults preserve the previous uncapped,
+undiscounted wire contract.
+
 ## Samples and stopping
 
 `pair` requires two allocated slots and `minimum_returned_samples=2`. At the end

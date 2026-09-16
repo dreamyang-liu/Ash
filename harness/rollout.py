@@ -83,6 +83,13 @@ class RolloutControls(ToolInterceptor):
                 raise ValueError("Invalid max_turns")
             self._call_limits = {"model": max_turns, "tool": None}
             validate(contract.get("sampling_params", {}))
+            if contract.get("max_sequence_tokens") is not None:
+                if type(contract["max_sequence_tokens"]) is not int or contract["max_sequence_tokens"] <= 1024:
+                    raise ValueError("max_sequence_tokens must be an integer above 1024")
+                if not isinstance(contract.get("sequence_tokenizer_path"), str):
+                    raise ValueError("Sequence limits require a configured tokenizer")
+                if contract.get("native_slot") not in {"claude-code", "codex"}:
+                    raise ValueError("Sequence limits require the native slot")
         else:
             for key, minimum in (("max_model_calls", 1), ("max_tool_calls", 0)):
                 if type(contract[key]) is not int or contract[key] < minimum:
@@ -142,6 +149,18 @@ class RolloutControls(ToolInterceptor):
         payload = {**payload, **sampling}
         if self.contract.get("model"):
             payload["model"] = self.contract["model"]
+        if self.contract.get("max_sequence_tokens") is not None:
+            from runstore.sequence_limits import remaining_output_budget, SEQUENCE_STOP_REASON
+
+            remaining = remaining_output_budget(payload, shape, self.contract, self.journal)
+            if remaining < 1024:
+                self.control.request_stop("rollout sequence token budget exhausted", stop_reason=SEQUENCE_STOP_REASON)
+                raise ValueError("rollout sequence token budget exhausted")
+            field = "max_tokens" if shape == "messages" else "max_output_tokens"
+            payload[field] = min(payload.get(field, remaining), remaining)
+            thinking = payload.get("thinking")
+            if isinstance(thinking, dict) and isinstance(thinking.get("budget_tokens"), int):
+                payload["thinking"] = {**thinking, "budget_tokens": min(thinking["budget_tokens"], payload[field] - 1)}
         return payload
 
     def before(self, ctx):

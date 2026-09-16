@@ -42,6 +42,8 @@ class MessageRequest:
     finalization_timeout_seconds: float = 1800.0
     protocol_version: str = MESSAGE_VERSION
     branching: bool = False
+    max_sequence_tokens: int | None = None
+    truncated_reward_scale: float = 1.0
 
     @classmethod
     def from_dict(cls, body):
@@ -52,6 +54,13 @@ class MessageRequest:
         value = deepcopy(body)
         if type(value.get("branching", False)) is not bool:
             raise ValueError("branching must be boolean")
+        limit = value.get("max_sequence_tokens")
+        if limit is not None and (type(limit) is not int or limit <= 1024):
+            raise ValueError("max_sequence_tokens must be an integer above 1024")
+        scale = value.get("truncated_reward_scale", 1.0)
+        if type(scale) not in (int, float) or not math.isfinite(scale) or not 0 <= scale <= 1:
+            raise ValueError("truncated_reward_scale must be in [0, 1]")
+        value["truncated_reward_scale"] = float(scale)
         for key in ("rollout_job_id", "prompt_group_id", "task_id", "image", "model_endpoint"):
             _required_string(value.get(key), key)
         _nonnegative_int(value.get("rollout_id"), "rollout_id")
@@ -87,4 +96,8 @@ class MessageRequest:
         value["sample_slots"] = list(value["sample_slots"])
         if not value["branching"]:
             del value["branching"]
+        if value["max_sequence_tokens"] is None:
+            del value["max_sequence_tokens"]
+        if value["truncated_reward_scale"] == 1.0:
+            del value["truncated_reward_scale"]
         return value

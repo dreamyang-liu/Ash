@@ -89,6 +89,14 @@ class MessageAdapter:
                 "max_turns": request.max_turns,
                 "api_key_env": self.config.get("api_key_env"),
             }}
+            if request.max_sequence_tokens is not None:
+                tokenizer = self.config.get("sequence_tokenizers", {}).get(model)
+                if not isinstance(tokenizer, str) or not tokenizer:
+                    raise ValueError(f"Configure sequence_tokenizers for {model!r} before enabling a length cap")
+                spec["extra"]["rollout_contract"].update(
+                    max_sequence_tokens=request.max_sequence_tokens,
+                    sequence_tokenizer_path=tokenizer, native_slot=spec["slot"],
+                )
             samples.append({
                 "sample_slot_id": internal_id(slot.sample_slot_id),
                 "run": {"kind": "rollout", "profile": self.config.get("profile", "codex"),
@@ -157,14 +165,19 @@ class MessageAdapter:
                 result["trajectories"].append({
                     "sample_slot_id": slot.sample_slot_id, "branch_id": actor["job_id"],
                     "parent_branch_id": parent, "messages": clean_messages(messages),
-                    "tools": output.get("training_tools", []), "reward": float(verdict["resolved"]),
+                    "tools": output.get("training_tools", []),
+                    "reward": float(verdict["resolved"]) * (request.truncated_reward_scale if truncated else 1.0),
                     "status": "truncated" if truncated else "completed",
                     "stop_reason": output.get("stop_reason") if truncated else None,
                     "hints_removed": True,
                     "metadata": {"job_id": actor["job_id"], "attempt_id": actor["attempt_id"],
                                  "source_image": request.image,
-                                 "graded_snapshot_id": grade.get("snapshot_id"),
-                                 "origin": origin, "logprob_context": "hint_free_messages"},
+                                  "graded_snapshot_id": grade.get("snapshot_id"),
+                                  "origin": origin, "logprob_context": "hint_free_messages",
+                                  "raw_reward": float(verdict["resolved"]),
+                                  "truncated_reward_scale": request.truncated_reward_scale if truncated else 1.0,
+                                  "training_token_count": output.get("training_token_count"),
+                                  "sequence_truncation": output.get("sequence_truncation")},
                 })
                 if document.get("branching"):
                     state = document["branching"]

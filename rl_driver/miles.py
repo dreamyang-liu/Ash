@@ -94,7 +94,7 @@ class MilesAdapter:
         self.config = deepcopy(config)
         if not isinstance(config, dict) or set(config) - {
             "environment_catalog", "profile", "run_defaults", "resources", "tasks", "api_key_env", "max_samples",
-            "image_resources", "branching"}:
+            "image_resources", "branching", "sequence_tokenizers"}:
             raise ValueError("Invalid Miles adapter config")
         if "branching" in config:
             from rl_driver.branch_review import BranchingConfig

@@ -4,7 +4,7 @@ from runstore.failures import failure_kind
 from runstore.files import journal_events
 from runstore.message_export import export_messages, export_tools
 
-LIMIT_STOP_REASONS = frozenset({"max_turns_reached", "timeout"})
+LIMIT_STOP_REASONS = frozenset({"max_turns_reached", "timeout", "max_sequence_tokens"})
 TERMINATION_GRACE_SECONDS = 120
 
 
@@ -37,7 +37,7 @@ def is_truncated_result(result: dict) -> bool:
             and failure_kind(result) not in {"configuration", "infrastructure"})
 
 
-def complete_message_result(result: dict, directory, slot: str, recovery=None) -> dict:
+def complete_message_result(result: dict, directory, slot: str, recovery=None, *, contract=None) -> dict:
     result = dict(result)
     events = journal_events(directory / "trajectory.jsonl")
     stopped_by_limit = result.get("stop_reason") in LIMIT_STOP_REASONS
@@ -54,6 +54,14 @@ def complete_message_result(result: dict, directory, slot: str, recovery=None) -
         result["training_messages"] = export_messages(
             directory, session_id, slot, events, allow_incomplete_tail=is_truncated_result(result))
         result["training_tools"] = export_tools(events)
+        if contract and contract.get("max_sequence_tokens") is not None:
+            from runstore.sequence_limits import apply_sequence_limit
+
+            if (unsafe or result.get("training_snapshot_error") or not result.get("final_snapshot_id")
+                    or result.get("status") not in {"completed", "truncated"}
+                    or failure_kind(result) in {"configuration", "infrastructure"}):
+                raise ValueError("Unsafe or failed execution cannot be converted into a length-truncated reward")
+            result = apply_sequence_limit(result, directory, slot, events, recovery, contract)
         if recovery:
             result["training_origin"] = {
                 "job_id": recovery.get("job_id"), "point_id": recovery["id"],

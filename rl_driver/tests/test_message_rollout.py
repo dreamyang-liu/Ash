@@ -255,3 +255,38 @@ def test_tool_schemas_preserved():
         {"name": "shell", "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}}},
     ]}])
     assert tools[0]["function"]["parameters"]["properties"]["command"] == {"type": "string"}
+
+
+@pytest.mark.parametrize("truncated,resolved,expected", [(True, True, 0.5), (True, False, 0), (False, True, 1)])
+def test_length_cap_grades_retained_snapshot_and_discounts_only_truncated_success(
+    tmp_path, peer, truncated, resolved, expected,
+):
+    queue, client = peer
+    body = request()
+    body.update(max_sequence_tokens=81920, truncated_reward_scale=0.5)
+    settings = config(body)
+    settings["sequence_tokenizers"] = {body["model"]: "/fixture/tokenizer"}
+    driver = Driver(client, Ledger(tmp_path / "ledger"))
+    adapter = MilesAdapter(driver, settings)
+    adapter.submit(body)
+    driver.tick()
+    actor = next(iter(queue.jobs))
+    queue.finish(actor)
+    queue.jobs[actor]["result"].update(
+        training_messages=messages(), final_snapshot_id="retained-prefix-state",
+        raw_final_snapshot_id="discarded-later-state",
+        status="truncated" if truncated else "completed",
+        stop_reason="max_sequence_tokens" if truncated else None,
+    )
+    driver.tick()
+    grade = next(key for key, job in queue.jobs.items() if job["kind"] == "grade")
+    submission = next(row[2] for row in queue.requests
+                      if row[0] == "POST" and row[1] == "/v1/jobs" and row[2]["kind"] == "grade")
+    assert submission["spec"]["snapshot_id"] == "retained-prefix-state"
+    queue.finish(grade, resolved=resolved)
+    driver.tick()
+    output = adapter.get(body["rollout_job_id"])
+    assert output["status"] == "completed"
+    trajectory = output["trajectories"][0]
+    assert trajectory["reward"] == expected and trajectory["metadata"]["raw_reward"] == float(resolved)
+    assert trajectory["metadata"]["graded_snapshot_id"] == "retained-prefix-state"
