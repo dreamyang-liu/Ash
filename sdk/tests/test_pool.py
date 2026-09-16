@@ -14,7 +14,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from ash_sandbox import DockerPool, MicroVMPool, Pool
+from ash_sandbox import (
+    DockerPool,
+    GatewayBackend,
+    MicroVMPool,
+    Pool,
+    SandboxRouteUnavailable,
+)
 
 class FakeAenv(BaseHTTPRequestHandler):
     """Minimal stand-in for the AgentENV HTTP API."""
@@ -153,6 +159,113 @@ def test_calls_route_through_the_proxy_headers(aenv):
     headers = tool_calls[-1]
     assert headers["x-agentenv-sandbox-id"] == "vm-1"
     assert headers["x-agentenv-target-port"] == "3000"
+
+
+def test_gateway_retries_only_pre_dispatch_route_misses():
+    import httpx
+
+    requests = []
+
+    def responder(request):
+        requests.append(request)
+        if len(requests) < 3:
+            return httpx.Response(
+                404, text="sandbox assignment not found", request=request)
+        return httpx.Response(200, json={
+            "result": {"content": [{"type": "text", "text": "ok"}],
+                       "isError": False, "notifications": []},
+        }, request=request)
+
+    async def scenario():
+        backend = GatewayBackend("http://agentenv", "vm-1",
+                                 route_retry_attempts=2, route_retry_delay_s=0)
+        await backend._client.aclose()
+        backend._client = httpx.AsyncClient(transport=httpx.MockTransport(responder))
+        try:
+            result = await backend.call("shell", {"command": "true"})
+            assert result.output == "ok" and not result.is_error
+        finally:
+            await backend.close()
+
+    asyncio.run(scenario())
+    assert len(requests) == 3
+
+
+def test_gateway_exhausted_route_miss_proves_request_was_not_executed():
+    import httpx
+
+    async def scenario():
+        backend = GatewayBackend("http://agentenv", "vm-missing",
+                                 route_retry_attempts=1, route_retry_delay_s=0)
+        await backend._client.aclose()
+        backend._client = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                404, text="sandbox not found", request=request)))
+        try:
+            with pytest.raises(SandboxRouteUnavailable) as raised:
+                await backend.call("shell", {"command": "true"})
+            assert raised.value.execution_detail == {
+                "kind": "sandbox_route_unavailable",
+                "request_may_have_executed": False,
+                "sandbox_id": "vm-missing",
+                "message": "sandbox not found",
+            }
+        finally:
+            await backend.close()
+
+    asyncio.run(scenario())
+
+
+def test_gateway_does_not_retry_runtime_404():
+    import httpx
+
+    calls = 0
+
+    def responder(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(404, text="application route not found", request=request)
+
+    async def scenario():
+        backend = GatewayBackend("http://agentenv", "vm-1",
+                                 route_retry_attempts=3, route_retry_delay_s=0)
+        await backend._client.aclose()
+        backend._client = httpx.AsyncClient(transport=httpx.MockTransport(responder))
+        try:
+            with pytest.raises(httpx.HTTPStatusError):
+                await backend.call("shell", {"command": "missing"})
+        finally:
+            await backend.close()
+
+    asyncio.run(scenario())
+    assert calls == 1
+
+
+def test_gateway_does_not_retry_ambiguous_json_404():
+    import httpx
+
+    calls = 0
+
+    def responder(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            404, json={"error": "sandbox not found", "source": "runtime"},
+            request=request)
+
+    async def scenario():
+        backend = GatewayBackend("http://agentenv", "vm-1",
+                                 route_retry_attempts=3, route_retry_delay_s=0)
+        await backend._client.aclose()
+        backend._client = httpx.AsyncClient(transport=httpx.MockTransport(responder))
+        try:
+            with pytest.raises(httpx.HTTPStatusError):
+                await backend.call("shell", {"command": "missing"})
+        finally:
+            await backend.close()
+
+    asyncio.run(scenario())
+    assert calls == 1
 
 def test_fork_returns_independent_children(aenv):
     pool = MicroVMPool(aenv)

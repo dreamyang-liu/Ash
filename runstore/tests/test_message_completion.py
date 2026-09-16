@@ -41,7 +41,10 @@ def test_child_captures_final_state_and_exports_native_identity_on_cutoff(tmp_pa
     )
     monkeypatch.setattr(Orchestrator, "_wire_sandbox", lambda *args: (owned, None))
     monkeypatch.setattr(Orchestrator, "_wire_gateway", lambda *args: None)
-    monkeypatch.setattr(Orchestrator, "_wire_checkpoints", lambda *args: None)
+    monkeypatch.setattr(
+        "harness.checkpointing.SnapshotBridge.install",
+        classmethod(lambda *args, **kwargs: pytest.fail("installed checkpoint bridge")),
+    )
 
     class Slot:
         def run(self, task, journal, mcp):
@@ -64,6 +67,7 @@ def test_child_captures_final_state_and_exports_native_identity_on_cutoff(tmp_pa
             "prompt": "fix", "slot": "codex", "sandbox_image": "image", "extra": {
                 "rollout_contract": {
                     "message_export": True, "max_turns": 1,
+                    "capture_recovery_points": False,
                     "deadline_at": time.time() + (0.5 if reason == "timeout" else 30),
                     "model_endpoint": "http://model", "sampling_params": {},
                 }
@@ -78,6 +82,51 @@ def test_child_captures_final_state_and_exports_native_identity_on_cutoff(tmp_pa
     assert result["training_messages"][-1]["content"] == "partial solution"
     assert order.index("drain") < order.index("snapshot") < order.index("destroy")
     assert is_truncated_result(result)
+
+
+def test_child_captures_only_final_state_for_a_graded_token_rollout(tmp_path, monkeypatch):
+    directory = tmp_path / "attempt"
+    directory.mkdir()
+    order = []
+    session = SimpleNamespace(
+        snapshot=lambda **kwargs: order.append("snapshot") or SimpleNamespace(id="final-state"),
+    )
+    owned = SimpleNamespace(
+        server=SimpleNamespace(pipeline=ToolPipeline()), session=session, sandbox_id="vm",
+        stop_server=lambda: order.append("drain"),
+        destroy=lambda: order.append("destroy"),
+    )
+    monkeypatch.setattr(Orchestrator, "_wire_sandbox", lambda *args: (owned, None))
+    monkeypatch.setattr(Orchestrator, "_wire_gateway", lambda *args: None)
+    monkeypatch.setattr(
+        "harness.checkpointing.SnapshotBridge.install",
+        classmethod(lambda *args, **kwargs: pytest.fail("installed checkpoint bridge")),
+    )
+
+    class Slot:
+        def run(self, task, journal, mcp):
+            return SlotResult(status="completed")
+
+    monkeypatch.setattr("harness.slots.load_slot", lambda name: Slot)
+    request = {
+        "kind": "rollout", "attempt_id": "attempt", "profile_config": {},
+        "effective_spec": {
+            "prompt": "fix", "slot": "codex", "sandbox_image": "image",
+            "extra": {"rollout_contract": {
+                "capture_recovery_points": False,
+                "capture_final_snapshot": True,
+                "deadline_at": time.time() + 30,
+                "model_endpoint": "http://model", "sampling_params": {},
+                "max_model_calls": 1, "max_tool_calls": None,
+            }},
+        },
+    }
+
+    result = execute(request, directory)
+    assert result["status"] == "completed"
+    assert result["final_snapshot_id"] == "final-state"
+    assert order.count("snapshot") == 1
+    assert order.index("drain") < order.index("snapshot") < order.index("destroy")
 
 
 def test_cutoff_does_not_reclassify_uncertain_execution(tmp_path):

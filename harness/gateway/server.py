@@ -27,6 +27,7 @@ Implementation notes that are not obvious:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -46,6 +47,7 @@ _STRIP_REQUEST_HEADERS = {
     "proxy-authorization",
     "authorization",
     "x-api-key",
+    "x-miles-request-id",  # assigned by this gateway, never by the agent
     "accept-encoding",  # we relay bytes; let httpx negotiate identity
 }
 
@@ -58,6 +60,18 @@ _STRIP_RESPONSE_HEADERS = {
 }
 
 GATEWAY_EVENT = "gateway.request"   # wire-level tap event type
+
+
+def _transport_retry_count(headers) -> int:
+    try:
+        return max(0, int(headers.get("X-Stainless-Retry-Count", "0")))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _logical_fingerprint(shape: str, payload: dict) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(shape.encode() + b"\0" + canonical).hexdigest()
 
 
 class GatewayServer:
@@ -203,28 +217,8 @@ def _make_handler(gateway: GatewayServer):
                 self._error(400, "body is not valid JSON")
                 return
 
-            if token is not None and token.over_budget():
-                token.blocked += 1
-                gateway.record(
-                    agent_id=token.agent_id,
-                    status="budget_exceeded",
-                    spent_usd=round(token.spent_usd, 6),
-                    budget_usd=token.budget_usd,
-                )
-                # 400/invalid_request, NOT 429/rate_limit: an exhausted budget
-                # is terminal, and 429 tells every SDK "back off and retry" --
-                # measured live, the agent then burned minutes retrying a
-                # request that could never succeed. A non-retryable error fails
-                # the run NOW, which is what a kill switch is for.
-                self._error(
-                    400,
-                    "run budget exhausted: spent $%.4f of $%.4f -- this will "
-                    "not succeed on retry"
-                    % (token.spent_usd, token.budget_usd),
-                    "invalid_request_error",
-                )
-                return
-
+            retry = _transport_retry_count(self.headers) > 0
+            fingerprint = _logical_fingerprint(shape, payload)
             requested_model = payload.get("model")
             route = gateway.table.route_for(requested_model)
             if route.upstream_model:
@@ -239,10 +233,73 @@ def _make_handler(gateway: GatewayServer):
                 except ValueError as error:
                     self._error(400, str(error), "invalid_request_error")
                     return
+            retry_capable = bool(
+                getattr(
+                    gateway.request_policy,
+                    "supports_idempotent_model_retries",
+                    False,
+                )
+            )
+            if token is not None and retry_capable:
+                logical_request_id, duplicate = gateway.table.claim_request(
+                    token,
+                    fingerprint,
+                    retry=retry,
+                )
+            else:
+                # Generic provider routes neither understand Miles request IDs
+                # nor promise idempotent replay; their normal retry/accounting
+                # semantics must therefore remain untouched.
+                logical_request_id = None
+                duplicate = False
+            if token is not None and token.over_budget() and not duplicate:
+                gateway.table.discard_request(
+                    token, fingerprint, logical_request_id
+                )
+                token.blocked += 1
+                gateway.record(
+                    agent_id=token.agent_id,
+                    status="budget_exceeded",
+                    spent_usd=round(token.spent_usd, 6),
+                    budget_usd=token.budget_usd,
+                )
+                # 400/invalid_request, NOT 429/rate_limit: an exhausted budget
+                # is terminal, and 429 tells every SDK "back off and retry" --
+                # measured live, the agent then burned minutes retrying a
+                # request that could never succeed. A non-retryable error fails
+                # the run NOW, which is what a kill switch is for. A known
+                # delivery retry remains admissible because it creates no new
+                # model work or spend.
+                self._error(
+                    400,
+                    "run budget exhausted: spent $%.4f of $%.4f -- this will "
+                    "not succeed on retry"
+                    % (token.spent_usd, token.budget_usd),
+                    "invalid_request_error",
+                )
+                return
             if gateway.request_policy is not None:
                 try:
-                    payload = gateway.request_policy.prepare_model_request(payload, shape)
+                    if duplicate:
+                        prepare_retry = getattr(
+                            gateway.request_policy, "prepare_model_retry", None
+                        )
+                        payload = (
+                            prepare_retry(payload, shape)
+                            if callable(prepare_retry)
+                            else gateway.request_policy.prepare_model_request(
+                                payload, shape
+                            )
+                        )
+                    else:
+                        payload = gateway.request_policy.prepare_model_request(
+                            payload, shape
+                        )
                 except ValueError as error:
+                    if token is not None and retry_capable and not duplicate:
+                        gateway.table.discard_request(
+                            token, fingerprint, logical_request_id
+                        )
                     self._error(400, str(error), "invalid_request_error")
                     return
             body = json.dumps(payload).encode()
@@ -253,8 +310,10 @@ def _make_handler(gateway: GatewayServer):
 
             try:
                 self._forward(route, body, streaming, token, requested_model,
-                              shape, adapter)
+                              shape, adapter, logical_request_id)
             except Exception as exc:  # noqa: BLE001 - report, never crash the server
+                if retry_capable:
+                    self._abort_upstream(route, logical_request_id, shape)
                 gateway.record(
                     agent_id=getattr(token, "agent_id", None),
                     status="upstream_error",
@@ -267,6 +326,29 @@ def _make_handler(gateway: GatewayServer):
                     pass
 
         # --- forwarding -------------------------------------------------
+        def _abort_upstream(
+            self, route, logical_request_id: str | None, shape: str
+        ) -> None:
+            """Best-effort abort for a timed-out/disconnected gateway request."""
+            if not logical_request_id:
+                return
+            import httpx
+
+            try:
+                httpx.post(
+                    route.base_url.rstrip("/") + "/abort_request",
+                    json={"rid": logical_request_id},
+                    headers=self._upstream_headers(route, shape),
+                    timeout=30,
+                ).raise_for_status()
+            except Exception as error:  # noqa: BLE001 - preserve original failure
+                gateway.record(
+                    agent_id=None,
+                    status="upstream_abort_failed",
+                    logical_request_id=logical_request_id,
+                    error="%s: %s" % (type(error).__name__, error),
+                )
+
         def _upstream_headers(self, route, shape: str) -> dict:
             headers = {
                 key: value
@@ -295,11 +377,14 @@ def _make_handler(gateway: GatewayServer):
             return headers
 
         def _forward(self, route, body: bytes, streaming: bool, token,
-                     requested_model, shape: str = "messages", adapter=None) -> None:
+                     requested_model, shape: str = "messages", adapter=None,
+                     logical_request_id: str | None = None) -> None:
             import httpx
 
             url = route.base_url.rstrip("/") + "/v1/" + shape
             headers = self._upstream_headers(route, shape)
+            if logical_request_id:
+                headers["X-Miles-Request-ID"] = logical_request_id
 
             with httpx.Client(timeout=gateway.timeout_s) as client:
                 if not streaming:
@@ -319,6 +404,8 @@ def _make_handler(gateway: GatewayServer):
                         upstream.status_code,
                         usage,
                         False,
+                        logical_request_id,
+                        upstream.headers.get("x-miles-request-disposition"),
                     )
                     return
 
@@ -352,6 +439,8 @@ def _make_handler(gateway: GatewayServer):
                         upstream.status_code,
                         usage,
                         True,
+                        logical_request_id,
+                        upstream.headers.get("x-miles-request-disposition"),
                     )
 
         def _relay_head(self, status: int, headers, content_length: Optional[int]) -> None:
@@ -376,9 +465,16 @@ def _make_handler(gateway: GatewayServer):
             status,
             usage,
             streaming,
+            logical_request_id,
+            request_disposition,
         ):
             cost = usage.cost_usd or route.price(usage)
-            if token is not None:
+            first_completion = True
+            if token is not None and logical_request_id is not None and status < 400:
+                first_completion = gateway.table.complete_request(
+                    token, logical_request_id
+                )
+            if token is not None and first_completion:
                 gateway.table.charge(
                     token,
                     cost_usd=cost,
@@ -410,10 +506,13 @@ def _make_handler(gateway: GatewayServer):
                 response_id=response_id,
                 base_url=route.base_url,
                 streaming=streaming,
+                logical_request_id=logical_request_id,
+                request_disposition=request_disposition or "new",
+                accounted=first_completion,
                 usage=dict(usage.as_dict(), cost_usd=round(cost, 6)),
                 spent_usd=round(token.spent_usd, 6) if token else None,
             )
-            if status < 400 and gateway.request_policy is not None:
+            if status < 400 and first_completion and gateway.request_policy is not None:
                 completed = getattr(
                     gateway.request_policy, "model_response_completed", None
                 )

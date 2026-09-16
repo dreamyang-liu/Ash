@@ -21,6 +21,43 @@ def test_health_is_authenticated_and_reports_store_readiness():
         assert response.json() == {"status": "ok", "database": "ready"}
 
 
+def test_events_endpoint_forwards_type_selection_order_and_compresses():
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    calls = []
+    payload = [{"seq": 9, "type": "rollout.session_state", "text": "x" * 4096}]
+    fake_store = SimpleNamespace(
+        get=lambda _job_id: {"active_attempt": "attempt"},
+        attempts=lambda _job_id: [{"id": "attempt"}],
+        events=lambda *args, **kwargs: calls.append((args, kwargs)) or payload,
+    )
+    with TestClient(create_app(fake_store, "fixture-token")) as client:
+        response = client.get(
+            "/v1/jobs/job/events",
+            params=[
+                ("attempt_id", "attempt"),
+                ("after", "7"),
+                ("limit", "1"),
+                ("event_type", "rollout.usage"),
+                ("event_type", "rollout.session_state"),
+                ("newest", "true"),
+            ],
+            headers={
+                "Authorization": "Bearer fixture-token",
+                "Accept-Encoding": "gzip",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == payload
+    assert response.headers["content-encoding"] == "gzip"
+    assert calls == [(('attempt', 7, 1), {
+        "event_types": ("rollout.usage", "rollout.session_state"),
+        "newest": True,
+    })]
+
+
 def test_api_auth_validation_status_and_durable_result(store):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient

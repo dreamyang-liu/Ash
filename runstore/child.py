@@ -80,7 +80,11 @@ def execute(request: dict, directory: Path) -> dict:
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{name} override must be a nonnegative integer or null")
         extra["rollout_contract"] = {**contract, **contract_overrides}
-    message_export = extra.get("rollout_contract", {}).get("message_export", False)
+    rollout_contract = extra.get("rollout_contract", {})
+    message_export = rollout_contract.get("message_export", False)
+    from harness.rollout import capture_final_snapshot as should_capture_final_snapshot
+
+    capture_final_state = should_capture_final_snapshot(rollout_contract)
     completion = {}
     if request.get("recovery"):
         recovered = request["recovery"]
@@ -126,7 +130,7 @@ def execute(request: dict, directory: Path) -> dict:
 
     class TrackedOrchestrator(Orchestrator):
         def _teardown(self, run_spec, gateway, provisioned, claim):
-            if message_export and provisioned is not None:
+            if capture_final_state and provisioned is not None:
                 from runstore.message_completion import capture_final_snapshot
 
                 try:
@@ -162,10 +166,10 @@ def execute(request: dict, directory: Path) -> dict:
     result["journal_path"] = str(outcome.journal_path)
     result["native_home"] = str(native_home)
     result["failure_kind"] = "actor" if outcome.status != "completed" else None
+    result.update(completion)
     if message_export:
         from runstore.message_completion import complete_message_result
 
-        result.update(completion)
         result = complete_message_result(result, directory, slot, request.get("recovery"))
     return result
 

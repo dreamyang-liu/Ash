@@ -17,6 +17,7 @@ def failure_kind(result: dict) -> str | None:
         return "actor"
     if re.search(r"\b(?:502|503|504)\b", message) or any(marker in message for marker in (
             "transportclosederror", "connection reset", "connection refused", "stream stalled",
-            "execution_uncertain", "tool execution/capture did not settle", "readtimeout")):
+            "execution_uncertain", "sandbox_route_unavailable",
+            "tool execution/capture did not settle", "readtimeout")):
         return "infrastructure"
     return result.get("failure_kind") or "actor"

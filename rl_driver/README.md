@@ -38,6 +38,15 @@ point，同时恢复 Claude 原生 prefix、AgentENV snapshot 和经 Miles 验�
 SessionTree 模型位置。`rl_driver.policy.first_available_recovery` 只用于机制
 验收，不是正式选点算法或训练策略。
 
+RL driver 会据此在每个 actor 的内部 rollout contract 中明确设置
+`capture_recovery_points`：未配置 branch policy 时为 `false`，不创建逐工具
+边界 recovery snapshot；配置策略时为 `true`，为后续选点保留恢复点。这个
+开关不影响 runtime-ready 环境，也不影响 actor 结束时供独立 grader 使用的
+唯一终态 snapshot；其保留和回收仍沿用现有评分资源生命周期。直接
+调用通用 Harness/Run Store 且省略该字段时，为兼容原有分支工作流仍默认开启。
+与它正交的 `capture_final_snapshot` 由 driver 在需要独立评分时设置；因此关闭
+recovery capture 不会迫使 grader 退回到某个较早的工具边界。
+
 Policy 对每个 deferred slot 只能做三种决定：`root` 将其作为新的
 独立 rollout；`branch` 必须指定同组的 `source_sample_slot_id`、可用
 `point_id` 和受限的 `overrides`；`skip` 则释放该 slot，不产生
@@ -89,6 +98,14 @@ Run Store 的 job 可以成功产出一个截断 episode，不会把它伪装成
 留出额外时间。子进程有120秒终止收尾窗口，lease/失联检查继续生效。
 执行不确定、无法保存安全快照或原生记录无法构成有效轨迹仍会明确失败，
 不将基础设施错误变成零分训练样本。
+
+`sampling_params.max_new_tokens` 是每次模型请求的输出上限，不是整条多轮
+trajectory 的总长度上限；多个 model turn 累积后，trajectory 可以超过该值。
+单次请求还受模型 context window（输入与输出合计）、推理服务能力和剩余 wall
+time 限制。当前 profiling 配置使用 262,144-token context 和
+`max_new_tokens=262144`，因此不存在额外的 64K 单轮硬限制，但实际可生成空间会
+随历史增长而减少。由 length/context/wall-time 截断的样本是右删失样本，应与
+自然结束和基础设施失败分别统计。
 
 Miles 对去 hint 消息重新 tokenize 并计算 logprobs；这不等于恢复带 hint
 采样时的行为概率。不要给这条训练路径启用 use-rollout-logprobs、跳过
@@ -214,6 +231,13 @@ session。driver 用真实 input_ids、output_token_logprobs 和
 accumulated_token_ids 导出 generated_spans；原协议校验器验证前缀和位置。
 缺失 observed weight_version 不会被填成 expected_weight_version，版本
 不匹配也拒绝导出。
+
+终态导出不会扫描完整 Run Store journal：adapter 分别读取最新的
+`rollout.usage`、最新的 `rollout.session_state` 和有序的
+`rollout.model_response` 标识。SWE-rebench grader 准备阶段也只读取
+`environment.prepared`。因此控制面开销不会随累计 SessionTree 事件数线性
+增长；同一新终态 group 的并发 GET 共享一次进程内导出，随后均读取 ledger
+中的持久结果。
 
 **接收原 Miles 请求已经实现；真实训练是否可运行仍取决于实际推理部署。**
 仅能返回普通文本、没有 session token records 的执行可以正常跑完，但

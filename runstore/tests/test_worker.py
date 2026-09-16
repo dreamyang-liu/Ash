@@ -24,6 +24,7 @@ from runstore.worker import (
     ({"status": "completed", "resolved": False}, None),
     ({"status": "error", "error": "HTTP 502 Bad Gateway"}, "infrastructure"),
     ({"status": "error", "error": "TransportClosedError"}, "infrastructure"),
+    ({"status": "error", "error": "sandbox_route_unavailable at step 7"}, "infrastructure"),
     ({"status": "timeout", "error": "HTTP 504 during exhausted budget"}, "actor"),
     ({"status": "error", "error": "No patch produced"}, "actor"),
     ({"status": "error", "error": "Frozen dataset checksum changed"}, "configuration"),
@@ -65,9 +66,11 @@ def test_wrong_process_start_identity_never_kills_another_process():
 
 def test_branch_inherits_root_repository_baseline_from_durable_event():
     class StoreFixture:
-        def events(self, attempt_id, limit):
+        def events(self, attempt_id, limit, *, event_types=(), newest=False):
             assert attempt_id == "parent-attempt"
-            assert limit == 10000
+            assert limit == 2
+            assert event_types == ("environment.prepared",)
+            assert not newest
             return [{
                 "type": "environment.prepared",
                 "baseline_untracked": ["image-cache.txt", "vendor/generated.py"],
@@ -83,7 +86,8 @@ def test_branch_refuses_malformed_or_changed_repository_baseline():
         def __init__(self, events):
             self._events = events
 
-        def events(self, attempt_id, limit):
+        def events(self, attempt_id, limit, *, event_types=(), newest=False):
+            assert event_types == ("environment.prepared",)
             return self._events
 
     malformed = StoreFixture([{

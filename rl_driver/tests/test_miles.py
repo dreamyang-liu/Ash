@@ -1,4 +1,5 @@
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import time
@@ -108,6 +109,10 @@ def test_original_wire_request_to_runs_and_original_wire_response(tmp_path, peer
         assert all(r["spec"]["sandbox_resources"] == {"cpu": 2, "memory_mb": 8192} for r in submissions)
         assert sum(r["spec"]["extra"]["rollout_contract"]["max_model_calls"] for r in submissions) == body["budgets"]["max_model_calls"]
         assert sum(r["spec"]["extra"]["rollout_contract"]["max_tool_calls"] for r in submissions) == body["budgets"]["max_tool_calls"]
+        assert all(r["spec"]["extra"]["rollout_contract"]["capture_recovery_points"] is False
+                   for r in submissions)
+        assert all(r["spec"]["extra"]["rollout_contract"]["capture_final_snapshot"] is False
+                   for r in submissions)
         assert all(r["max_infra_retries"] == 0 for r in submissions)
         adapter.config["resources"] = {}  # retry must retain the originally planned execution
         assert http.post("/rollout-groups", json=body).json()["status"] == "running"
@@ -133,6 +138,70 @@ def test_original_wire_request_to_runs_and_original_wire_response(tmp_path, peer
         assert http.delete("/rollout-groups/" + body["rollout_job_id"]).json()["status"] == "completed"
     restored = MilesAdapter(Driver(backend, Ledger(tmp_path / "ledger")), config(body))
     assert restored.get(body["rollout_job_id"]) == result
+
+
+def test_v2_grading_requests_one_final_snapshot_without_recovery_capture(tmp_path, peer):
+    queue, backend = peer
+    body = miles_request()
+    cfg = config(body)
+    cfg["tasks"] = {body["task_id"]: {
+        "environment_ref": body["environment_ref"],
+        "grade": {"profile": "grade", "spec": {
+            "benchmark": "swebench-verified",
+            "instance_id": body["task_id"],
+            "dataset_path": "/worker/tasks.json",
+            "dataset_sha256": "fixture",
+            "grader_revision": "fixture",
+        }},
+    }}
+    adapter = MilesAdapter(Driver(backend, Ledger(tmp_path / "ledger")), cfg)
+    adapter.submit(body)
+    adapter.driver.tick()
+
+    submissions = [row[2] for row in queue.requests if row[:2] == ("POST", "/v1/jobs")]
+    assert submissions
+    for submission in submissions:
+        contract = submission["spec"]["extra"]["rollout_contract"]
+        assert contract["capture_recovery_points"] is False
+        assert contract["capture_final_snapshot"] is True
+
+
+def test_concurrent_terminal_reads_export_once(tmp_path, peer, monkeypatch):
+    queue, backend = peer
+    body = miles_request()
+    driver = Driver(backend, Ledger(tmp_path / "ledger"))
+    adapter = MilesAdapter(driver, config(body))
+    adapter.submit(body)
+    driver.tick()
+    finish(queue, body)
+    driver.tick()
+    original_export = adapter._export
+    calls = []
+
+    def export(request, document):
+        calls.append(request.rollout_job_id)
+        time.sleep(0.05)
+        return original_export(request, document)
+
+    monkeypatch.setattr(adapter, "_export", export)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: adapter.get(body["rollout_job_id"]), range(2)))
+
+    assert results[0] == results[1]
+    assert calls == [body["rollout_job_id"]]
+    typed = [
+        request[3]
+        for request in queue.requests
+        if request[1].endswith("/events") and request[3].get("event_type")
+    ]
+    assert {params["event_type"] for params in typed} == {
+        "rollout.usage", "rollout.session_state", "rollout.model_response"
+    }
+    assert all(
+        params.get("newest") == "true"
+        for params in typed
+        if params["event_type"] in {"rollout.usage", "rollout.session_state"}
+    )
 
 
 def test_claude_structured_prompt_uses_native_system_append(tmp_path, peer):
@@ -521,6 +590,13 @@ def test_internal_branch_policy_consumes_only_allocated_slots_and_preserves_trai
     adapter = MilesAdapter(driver, cfg, branch_policy=policy)
     adapter.submit(body)
     driver.tick()
+    root_request = next(
+        row[2] for row in queue.requests
+        if row[0] == "POST" and row[1] == "/v1/jobs"
+    )
+    assert root_request["spec"]["extra"]["rollout_contract"][
+        "capture_recovery_points"
+    ] is True
     assert len(queue.jobs) == 1
 
     parent_slot, child_slot = body["sample_slots"]

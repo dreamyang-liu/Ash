@@ -104,6 +104,22 @@ def test_message_controls_accept_unbounded_turn_limit(tmp_path):
     assert policy._call_limits == {"model": None, "tool": None}
 
 
+@pytest.mark.parametrize("value", [None, 0, 1, "false", [], {}])
+def test_rollout_controls_reject_non_boolean_recovery_capture(tmp_path, value):
+    controls = contract("http://model", capture_recovery_points=value)
+    with JournalWriter(tmp_path / "journal", run_id="run") as journal:
+        with pytest.raises(ValueError, match="capture_recovery_points"):
+            RolloutControls(controls, journal, RunControl())
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", [], {}])
+def test_rollout_controls_reject_non_boolean_final_snapshot_capture(tmp_path, value):
+    controls = contract("http://model", capture_final_snapshot=value)
+    with JournalWriter(tmp_path / "journal", run_id="run") as journal:
+        with pytest.raises(ValueError, match="capture_final_snapshot"):
+            RolloutControls(controls, journal, RunControl())
+
+
 def test_model_completion_publishes_constant_size_progress(tmp_path):
     updates = []
     with JournalWriter(tmp_path / "journal", run_id="run") as journal:
@@ -127,6 +143,29 @@ def test_model_completion_publishes_constant_size_progress(tmp_path):
         "peak_context_tokens": 12,
         "last_model_output_tokens": 7,
     }]
+
+
+def test_transport_retry_does_not_consume_another_model_turn(tmp_path):
+    with JournalWriter(tmp_path / "journal", run_id="run") as journal:
+        policy = RolloutControls(
+            contract("http://model", session_server_endpoint="http://sessions"),
+            journal,
+            RunControl(),
+        )
+        policy.prepare_model_request({}, "messages")
+        retry = policy.prepare_model_retry({}, "messages")
+
+    assert policy.supports_idempotent_model_retries is True
+    assert policy.model_calls == 1
+    assert retry["model"] == "checkpoint-model"
+    assert retry["max_tokens"] == 7
+
+
+def test_direct_model_endpoint_does_not_advertise_idempotent_retries(tmp_path):
+    with JournalWriter(tmp_path / "journal", run_id="run") as journal:
+        policy = RolloutControls(contract("http://model"), journal, RunControl())
+
+    assert policy.supports_idempotent_model_retries is False
 
 
 def test_message_controls_reject_legacy_count_caps(tmp_path):

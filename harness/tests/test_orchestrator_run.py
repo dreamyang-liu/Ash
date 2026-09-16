@@ -774,6 +774,40 @@ def test_owning_the_sandbox_gives_checkpoints_without_the_caller_asking(monkeypa
     assert installed == [session]
 
 
+def test_rollout_can_disable_tool_boundary_checkpoints(monkeypatch):
+    from harness.orchestrator.run import Orchestrator, OwnedSandbox, RunSpec
+
+    monkeypatch.setattr(
+        "harness.checkpointing.SnapshotBridge.install",
+        classmethod(lambda *args, **kwargs: pytest.fail("installed checkpoint bridge")),
+    )
+    owned = OwnedSandbox(session=_FakeSession(), sandbox_id="sb-owned")
+    spec = RunSpec(prompt="x", extra={"rollout_contract": {
+        "capture_recovery_points": False,
+    }})
+    assert Orchestrator()._wire_checkpoints(spec, object(), owned) is None
+
+
+def test_omitted_recovery_capture_flag_preserves_checkpointing(monkeypatch):
+    from harness.orchestrator.run import Orchestrator, OwnedSandbox, RunSpec
+
+    installed = []
+
+    class FakeBridge:
+        ledger = type("L", (), {"checkpoints": []})()
+
+    monkeypatch.setattr(
+        "harness.checkpointing.SnapshotBridge.install",
+        classmethod(lambda cls, journal, session, **kwargs:
+                    installed.append(session) or FakeBridge()),
+    )
+    session = _FakeSession()
+    owned = OwnedSandbox(session=session, sandbox_id="sb-owned")
+    spec = RunSpec(prompt="x", extra={"rollout_contract": {}})
+    Orchestrator()._wire_checkpoints(spec, object(), owned)
+    assert installed == [session]
+
+
 def test_a_remote_sandbox_has_no_session_to_snapshot(monkeypatch):
     """Not an error: a sandbox on somebody else's server cannot be snapshotted
     from here, which is precisely the limitation owning one removes."""
@@ -977,6 +1011,22 @@ def test_snapshot_every_step_reaches_the_subprocess(monkeypatch, tmp_path):
         RunSpec(prompt="x", sandbox_image="img", transport="stdio",
                 snapshot_every_step=True), None)
     assert "--checkpoint-always" in owned.mcp.command
+
+
+def test_disabled_recovery_capture_omits_stdio_checkpoint_log(monkeypatch, tmp_path):
+    session = _FakeSession()
+    session.supports_snapshot = lambda: True
+    import harness.execution.session as session_module
+
+    from harness.orchestrator.run import Orchestrator, RunSpec
+
+    monkeypatch.setattr(session_module, "SandboxSession", lambda **kw: session)
+    owned = Orchestrator(out_dir=tmp_path)._own_sandbox(
+        RunSpec(prompt="x", sandbox_image="img", transport="stdio", extra={
+            "rollout_contract": {"capture_recovery_points": False},
+        }), None)
+    assert "--checkpoint-log" not in owned.mcp.command
+    assert owned.checkpoint_log is None
 
 
 def test_a_backend_that_cannot_snapshot_is_not_asked_to(monkeypatch, tmp_path):

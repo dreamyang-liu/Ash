@@ -357,10 +357,13 @@ class Orchestrator:
 
                 def abort_on_unsafe_execution(record):
                     if (record.get("type") == "checkpoint.captured"
-                            and record.get("reason") == "execution_uncertain"):
+                            and record.get("reason") in {
+                                "execution_uncertain", "sandbox_route_unavailable"
+                            }):
+                        reason = record.get("reason")
                         control.request_stop(
-                            "execution_uncertain at step %s (call %s); terminating rollout" %
-                            (record.get("step"), record.get("call_id")))
+                            "%s at step %s (call %s); terminating rollout" %
+                            (reason, record.get("step"), record.get("call_id")))
 
                 journal.subscribe(abort_on_unsafe_execution)
                 task = TaskSpec(
@@ -640,7 +643,7 @@ class Orchestrator:
                     args += ["--backend", name]
                 if spec.tools:
                     args += ["--tools", spec.tools]
-                if session.supports_snapshot():
+                if session.supports_snapshot() and self._capture_recovery_points(spec):
                     # The tool boundary happens in the server subprocess, so the
                     # snapshot is taken there too -- the checkpoint machinery sits
                     # at the tool path, in whichever process serves the calls.
@@ -735,6 +738,7 @@ class Orchestrator:
         kwargs = {}
         if controls is not None:
             from harness.gateway.routing import ModelRoute
+            from harness.rollout import remaining_timeout
 
             previous = table.route_for(spec.model)
             route = ModelRoute(base_url=controls.base_url,
@@ -745,6 +749,13 @@ class Orchestrator:
             # credential. Only the explicitly configured rollout key may travel.
             table = RoutingTable({"default": route})
             kwargs["request_policy"] = controls
+            # A local decode can legitimately run much longer than the generic
+            # gateway default. Let the rollout watchdog own the deadline so the
+            # gateway does not manufacture an early retry while SGLang is still
+            # producing tokens.
+            kwargs["timeout_s"] = remaining_timeout(
+                controls.contract, spec.timeout_s
+            )
         gateway = GatewayServer(table, journal=journal, port=spec.gateway_port, **kwargs).start()
         token = table.mint(spec.agent_id, run_id=run_id, budget_usd=spec.budget_usd)
         # Env, not config: this is the one wiring every agent understands.
@@ -780,6 +791,8 @@ class Orchestrator:
         # two kinds holds a session. A `Provisioned` sandbox lives on somebody
         # else's server, so there is no handle here to snapshot through -- which is
         # exactly the limitation owning the sandbox removes, and not an error.
+        if not self._capture_recovery_points(spec):
+            return None
         session = spec.session or getattr(owned, "session", None)
         if session is None:
             return None
@@ -805,6 +818,16 @@ class Orchestrator:
                 validate_call=bridge.validate_call if exact else None,
                 on_unavailable=bridge.record_unavailable if exact else None)
         return bridge
+
+    @staticmethod
+    def _capture_recovery_points(spec: RunSpec) -> bool:
+        """Preserve generic checkpointing unless a rollout opts out explicitly."""
+        contract = spec.extra.get("rollout_contract")
+        if contract is None:
+            return True
+        from harness.rollout import capture_recovery_points
+
+        return capture_recovery_points(contract)
 
     def _report_missing_checkpoints(self, spec: RunSpec, journal, bridge) -> None:
         """Say so when checkpointing was on and produced nothing.

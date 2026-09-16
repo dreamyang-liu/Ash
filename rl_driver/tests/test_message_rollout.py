@@ -1,4 +1,5 @@
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 
@@ -106,6 +107,8 @@ def test_real_miles_request_to_queue_grade_and_message_response(tmp_path, peer, 
     assert actor["spec"]["extra"]["rollout_contract"]["sampling_params"]["top_k"] == 20
     assert actor["spec"]["extra"]["rollout_contract"]["message_export"] is True
     assert actor["spec"]["extra"]["rollout_contract"]["max_turns"] == body["max_turns"]
+    assert actor["spec"]["extra"]["rollout_contract"]["capture_recovery_points"] is False
+    assert actor["spec"]["extra"]["rollout_contract"]["capture_final_snapshot"] is True
     assert actor["spec"]["extra"]["repository_preflight"] == {
         "workdir": "/task-repository",
         "base_commit": "1" * 40,
@@ -113,6 +116,43 @@ def test_real_miles_request_to_queue_grade_and_message_response(tmp_path, peer, 
     assert grade["spec"]["baseline_untracked"] == ["image-cache.txt"]
     assert grade["spec"]["repository_workdir"] == "/task-repository"
     assert grade["spec"]["repository_base_commit"] == "1" * 40
+
+
+def test_concurrent_v3_terminal_reads_export_once(tmp_path, peer, monkeypatch):
+    queue, client = peer
+    body = request()
+    driver = Driver(client, Ledger(tmp_path / "ledger"))
+    adapter = MilesAdapter(driver, config(body))
+    adapter.submit(body)
+    driver.tick()
+    actors = list(queue.jobs)
+    for job_id in actors:
+        queue.finish(job_id)
+        queue.jobs[job_id]["result"]["training_messages"] = messages()
+        queue.final_point(job_id)
+    driver.tick()
+    for job_id, job in queue.jobs.items():
+        if job["kind"] == "grade":
+            queue.finish(job_id, resolved=True)
+    driver.tick()
+
+    from rl_driver.messages import MessageAdapter
+
+    original_export = MessageAdapter._export
+    calls = []
+
+    def export(self, request, document, result):
+        calls.append(request.rollout_job_id)
+        return original_export(self, request, document, result)
+
+    monkeypatch.setattr(MessageAdapter, "_export", export)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(lambda _index: adapter.get(body["rollout_job_id"]), range(2))
+        )
+
+    assert results[0] == results[1]
+    assert calls == [body["rollout_job_id"]]
 
 
 def test_health_reports_nonterminal_groups_for_storage_drain(tmp_path, peer):
@@ -229,6 +269,13 @@ def test_v3_claude_branch_policy_consumes_deferred_slot_and_exports_lineage(
     driver.tick()
     assert len(queue.jobs) == 1
     parent_job = next(iter(queue.jobs))
+    root_request = next(
+        row[2] for row in queue.requests
+        if row[0] == "POST" and row[1] == "/v1/jobs"
+    )
+    assert root_request["spec"]["extra"]["rollout_contract"][
+        "capture_recovery_points"
+    ] is True
 
     queue.finish(parent_job)
     queue.jobs[parent_job]["result"]["training_messages"] = messages()

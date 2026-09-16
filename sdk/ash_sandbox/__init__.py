@@ -1,6 +1,13 @@
 from .events import Event, EventBatch
 from .result import ToolResult
-from .backends import Backend, HTTPBackend, MCPBackend, CLIBackend, GatewayBackend
+from .backends import (
+    Backend,
+    CLIBackend,
+    GatewayBackend,
+    HTTPBackend,
+    MCPBackend,
+    SandboxRouteUnavailable,
+)
 from .sandbox import Sandbox
 from .pool import DockerPool, MicroVMPool, Pool, SandboxPool, Snapshot
 from .toolset import (
@@ -20,6 +27,7 @@ __all__ = [
     "MCPBackend",
     "CLIBackend",
     "GatewayBackend",
+    "SandboxRouteUnavailable",
     "Sandbox",
     "Pool",
     "DockerPool",

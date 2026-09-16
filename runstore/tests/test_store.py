@@ -190,7 +190,15 @@ def test_large_events_are_compressed_losslessly():
     event = {"seq": 1, "type": "rollout.session_state", "state": {"text": "x" * 1_100_000}}
     stored = _stored_event(event)
     assert stored["encoding"] == "ash.runstore.zlib-json-v1"
+    assert stored["event_type"] == "rollout.session_state"
     assert len(stored["data"]) < len(event["state"]["text"])
+    assert _loaded_event(stored) == event
+
+
+def test_legacy_large_event_envelope_remains_readable():
+    event = {"seq": 1, "type": "rollout.session_state", "state": {"text": "x" * 1_100_000}}
+    stored = _stored_event(event)
+    stored.pop("event_type")
     assert _loaded_event(stored) == event
 
 
@@ -211,6 +219,49 @@ def test_large_event_round_trips_through_postgresql(store):
             (claim["active_attempt"],),
         )
         assert cursor.fetchone()["event"]["encoding"] == _COMPRESSED_EVENT
+
+
+def test_typed_event_query_avoids_unrelated_large_state_and_selects_newest(store):
+    job = store.submit(request(), "typed-events")
+    claim = store.claim("worker")
+    events = [
+        {"seq": 1, "type": "environment.prepared", "baseline_untracked": []},
+        {"seq": 2, "type": "rollout.usage", "model_calls": 1},
+        {"seq": 3, "type": "rollout.session_state", "state": {"text": "a" * 1_100_000}},
+        {"seq": 4, "type": "rollout.usage", "model_calls": 2},
+        {"seq": 5, "type": "rollout.session_state", "state": {"text": "b" * 1_100_000}},
+    ]
+    store.append_events(job["id"], claim["lease_token"], events)
+
+    assert store.events(
+        claim["active_attempt"], event_types=("environment.prepared",), limit=2
+    ) == events[:1]
+    assert store.events(
+        claim["active_attempt"], event_types=("rollout.usage",), newest=True, limit=1
+    ) == [events[3]]
+    assert store.events(
+        claim["active_attempt"], event_types=("rollout.session_state",), newest=True, limit=1
+    ) == [events[4]]
+
+
+def test_typed_query_reads_legacy_session_state_but_not_for_other_types(store):
+    job = store.submit(request(), "legacy-typed-event")
+    claim = store.claim("worker")
+    event = {"seq": 1, "type": "rollout.session_state", "state": {"text": "x" * 1_100_000}}
+    stored = _stored_event(event)
+    stored.pop("event_type")
+    with store.transaction() as cursor:
+        cursor.execute(
+            "INSERT INTO rs_events(attempt_id,seq,event) VALUES(%s,%s,%s::jsonb)",
+            (claim["active_attempt"], 1, canonical(stored)),
+        )
+
+    assert store.events(
+        claim["active_attempt"], event_types=("environment.prepared",)
+    ) == []
+    assert store.events(
+        claim["active_attempt"], event_types=("rollout.session_state",), newest=True, limit=1
+    ) == [event]
 
 
 def test_compressed_event_marker_is_not_interpreted_without_all_fields():

@@ -33,11 +33,27 @@ class Client:
         response.raise_for_status()
         return response.json()
 
-    def events(self, job_id: str, *, attempt_id: str | None = None, after: int = 0) -> list[dict]:
-        params = {"after": after}
+    def events(
+        self,
+        job_id: str,
+        *,
+        attempt_id: str | None = None,
+        after: int = 0,
+        limit: int = 1000,
+        event_types: tuple[str, ...] = (),
+        newest: bool = False,
+    ) -> list[dict]:
+        params: list[tuple[str, object]] = [("after", after), ("limit", limit)]
         if attempt_id:
-            params["attempt_id"] = attempt_id
-        response = self.http.get(f"/v1/jobs/{job_id}/events", params=params)
+            params.append(("attempt_id", attempt_id))
+        params.extend(("event_type", kind) for kind in event_types)
+        if newest:
+            params.append(("newest", "true"))
+        # A selected SessionTree state may legitimately expand to hundreds of
+        # MiB.  Other control-plane calls retain the client's short default.
+        response = self.http.get(
+            f"/v1/jobs/{job_id}/events", params=params, timeout=300
+        )
         response.raise_for_status()
         return response.json()
 

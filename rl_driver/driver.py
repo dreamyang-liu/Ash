@@ -148,9 +148,9 @@ class Driver:
         if not attempt:
             raise ValueError("Completed actor has no attempt identity")
         output = actor.get("result") or {}
-        if document.get("message_request") and output.get("training_snapshot_error"):
+        if output.get("training_snapshot_error"):
             raise ValueError(output["training_snapshot_error"])
-        if document.get("message_request") and output.get("final_snapshot_id"):
+        if output.get("final_snapshot_id"):
             # A worker-captured final snapshot includes text-only last turns and
             # also permits scoring a run with no tool calls.
             point = {"id": None, "snapshot_id": output["final_snapshot_id"]}
@@ -170,12 +170,12 @@ class Driver:
         submission = deepcopy(grade["template"])
         submission["spec"]["snapshot_id"] = point["snapshot_id"]
         if submission["spec"].get("benchmark") == "swe-rebench-v2":
-            events = self.client.all_events(actor["job_id"], attempt_id=attempt)
-            prepared = [
-                event
-                for event in events
-                if event.get("type") == "environment.prepared"
-            ]
+            prepared = self.client.events_of_type(
+                actor["job_id"],
+                attempt_id=attempt,
+                event_types=("environment.prepared",),
+                limit=2,
+            )
             if len(prepared) != 1:
                 raise ValueError(
                     "SWE-rebench grading requires exactly one durable repository baseline"

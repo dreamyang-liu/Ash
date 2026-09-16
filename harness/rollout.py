@@ -56,6 +56,27 @@ def remaining_timeout(contract: dict, timeout_s: float) -> float:
     return min(timeout_s, remaining)
 
 
+def capture_recovery_points(contract: dict) -> bool:
+    """Whether tool boundaries should produce branch/recovery snapshots.
+
+    The field is opt-out so existing direct Harness and Run Store callers keep
+    their historical checkpoint behavior.  RL drivers set it explicitly from
+    whether a branch policy is configured.
+    """
+    value = contract.get("capture_recovery_points", True)
+    if type(value) is not bool:
+        raise ValueError("capture_recovery_points must be boolean")
+    return value
+
+
+def capture_final_snapshot(contract: dict) -> bool:
+    """Whether teardown must preserve one final filesystem state for grading."""
+    value = contract.get("capture_final_snapshot", contract.get("message_export", False))
+    if type(value) is not bool:
+        raise ValueError("capture_final_snapshot must be boolean")
+    return value
+
+
 class RolloutControls(ToolInterceptor):
     fail_mode = "closed"
 
@@ -69,12 +90,18 @@ class RolloutControls(ToolInterceptor):
 
     def __init__(self, contract: dict, journal, control, on_progress=None):
         self.contract = deepcopy(contract)
+        self.capture_recovery_points = capture_recovery_points(contract)
+        self.capture_final_snapshot = capture_final_snapshot(contract)
         self.journal = journal
         self.control = control
         self.on_progress = on_progress or (lambda payload: None)
         self.base_url = endpoint(contract["model_endpoint"])
         self.session_endpoint = (endpoint(contract["session_server_endpoint"])
                                  if contract.get("session_server_endpoint") else None)
+        # Only the per-session Miles route implements stable request IDs,
+        # replay, and /abort_request. Direct provider/model endpoints retain
+        # their native retry semantics.
+        self.supports_idempotent_model_retries = self.session_endpoint is not None
         self.session_id = None
         self.model_calls = self.tool_calls = 0
         self._observed_output_tokens = 0
@@ -280,8 +307,7 @@ class RolloutControls(ToolInterceptor):
             raise ValueError(reason)
         self._publish_progress("model_generation" if kind == "model" else "tool_execution")
 
-    def prepare_model_request(self, payload: dict, shape: str) -> dict:
-        self._reserve("model")
+    def _prepare_model_payload(self, payload: dict, shape: str) -> dict:
         if self.contract.get("message_export"):
             from runstore.message_sampling import parameters
 
@@ -293,6 +319,14 @@ class RolloutControls(ToolInterceptor):
         if self.contract.get("model"):
             payload["model"] = self.contract["model"]
         return payload
+
+    def prepare_model_request(self, payload: dict, shape: str) -> dict:
+        self._reserve("model")
+        return self._prepare_model_payload(payload, shape)
+
+    def prepare_model_retry(self, payload: dict, shape: str) -> dict:
+        """Rewrite a previously admitted HTTP attempt without charging a turn."""
+        return self._prepare_model_payload(payload, shape)
 
     def before(self, ctx):
         try:

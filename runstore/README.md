@@ -20,6 +20,13 @@ results are unchanged. There is deliberately no history-import command.
   exposes its end, not the halfway point. Missing/unsafe captures are unavailable.
 - Disk-only snapshots do not restore processes, memory, extra mounts or external
   side effects. A native prefix is not a process-memory checkpoint.
+- RL rollout contracts may set `capture_recovery_points: false` to omit per-tool
+  recovery snapshots when no branch policy can consume them. The v3 worker still
+  captures one final snapshot after the actor drains so an independent grader can
+  restore and score the final filesystem; these are separate lifecycle paths.
+  `capture_final_snapshot` requests that final state for non-message rollouts;
+  message exports retain their existing final capture. Omitting the recovery
+  field preserves the generic Harness default of per-tool capture.
 - PostgreSQL holds requests, frozen attempt payloads, status, journal events, tool responses,
   prefix nodes and recovery metadata. Native logs, patch/test artifacts and VM
   layers stay on disk. Prefix references use a shared file plus byte offset/hash;
@@ -94,6 +101,17 @@ tool-call limit; the runtime sends heartbeat bytes every 10 seconds while alive.
 Custom-tool manifests have a separate 600-second maximum. `web_fetch` caps its
 timeout at 60 seconds and `wait_for_events` at 300 seconds.
 
+AgentENV gateway routing failures are replayed only when the response proves
+that dispatch never reached the sandbox runtime. `GatewayBackend` retries the
+plain-text 404 responses `sandbox assignment not found` and `sandbox not found`
+three times with a short exponential backoff. If routing is still unavailable,
+the attempt stops with `sandbox_route_unavailable` and
+`request_may_have_executed: false`; Run Store classifies it as infrastructure
+failure and may retry from a verified point. The failed attempt admits no later
+tool calls. Other 404s and transport failures are not
+replayed because a mutating tool may already have executed. They retain the
+conservative `execution_uncertain` outcome.
+
 Profile `env` is explicitly forwarded to the agent; `worker_env` is only for the
 worker-side gateway. Credential values are not accepted in requests/profiles:
 use `{"$env": "HOST_VARIABLE"}`. Backend credentials and worker-only secret
@@ -147,7 +165,7 @@ REST endpoints (all require `Authorization: Bearer ...`):
 | `GET /v1/jobs?state=running` | Job states/phases |
 | `GET /v1/jobs/{id}` | Frozen request, lease, state, result/error |
 | `GET /v1/jobs/{id}/attempts` | Attempts, heartbeat progress, artifact directory, query scope |
-| `GET /v1/jobs/{id}/events?after=0` | Paginated full journal/trajectory events |
+| `GET /v1/jobs/{id}/events?after=0` | Paginated events; repeat `event_type`, and use `newest=true`, for bounded selection |
 | `GET /v1/jobs/{id}/tools?after=0` | Ordered tool calls and responses |
 | `GET /v1/jobs/{id}/recovery-points` | Message boundaries and snapshot/native pairs |
 | `GET /v1/jobs/{id}/result` | Repeatably readable completion/result |
@@ -158,6 +176,13 @@ REST endpoints (all require `Authorization: Bearer ...`):
 Events/tools/recovery queries accept `attempt_id`; otherwise they select the
 latest attempt. Event/tool cursors are the last returned `seq`/`depth`, respectively.
 Job-list queries are bounded to the most recent 1,000 jobs in v1.
+
+Event queries additionally accept repeated `event_type` parameters and
+`newest=true`. For example,
+`?attempt_id=A&event_type=rollout.session_state&newest=true&limit=1` returns the
+last recorded SessionTree state, while
+`?attempt_id=A&event_type=environment.prepared&limit=2` verifies that exactly
+one repository baseline exists without transferring unrelated large events.
 
 ## Resume, branch and prefix lookup
 
@@ -230,11 +255,16 @@ limit or the Run Store's normal five-second statement timeout.
 
 Run Store therefore encodes canonical JSON events larger than 1 MiB with zlib and
 Base64 before storing them in `rs_events.event`. The database wrapper is identified
-by `encoding: "ash.runstore.zlib-json-v1"`; event reads transparently restore the
+by `encoding: "ash.runstore.zlib-json-v1"`; new wrappers also retain `event_type`
+outside the compressed body so typed reads do not inflate unrelated events. Event
+reads transparently restore the
 original object. Idempotency/conflict checks also compare restored events, so this
 is a storage representation change rather than an API or journal-schema change.
-Older uncompressed rows remain readable, and an application event is decoded only
-when it has exactly the complete wrapper shape. Artifact files such as
+Older uncompressed rows remain readable. Legacy compressed wrappers without the
+outer discriminator remain readable when explicitly requesting
+`rollout.session_state`; other typed queries deliberately skip those opaque rows
+to avoid decompressing a large historical SessionTree. An application event is
+decoded only when it has exactly a complete supported wrapper shape. Artifact files such as
 `trajectory.jsonl` remain uncompressed and retain their original full content.
 Compression reduces typical repeated SessionTree payloads but is not a hard
 upper bound: an incompressible event can still approach PostgreSQL's JSONB limit.

@@ -42,11 +42,23 @@ SSE = (
 )
 
 
+class _MilesRetryPolicy:
+    supports_idempotent_model_retries = True
+
+    def prepare_model_request(self, payload, _shape):
+        return payload
+
+    def prepare_model_retry(self, payload, _shape):
+        return payload
+
+
 class _Upstream:
     """Records what it received so forwarding can be asserted."""
 
-    def __init__(self):
+    def __init__(self, *, delay_s=0.0):
         self.requests = []
+        self.aborts = []
+        self.delay_s = delay_s
         handler = _make_upstream_handler(self)
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self._httpd.daemon_threads = True
@@ -71,7 +83,23 @@ def _make_upstream_handler(state):
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
+            if self.path == "/abort_request":
+                state.aborts.append(
+                    {"headers": dict(self.headers), "body": body}
+                )
+                payload = b'{}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             state.requests.append({"headers": dict(self.headers), "body": body})
+
+            if state.delay_s:
+                import time
+
+                time.sleep(state.delay_s)
 
             if body.get("stream"):
                 self.send_response(200)
@@ -210,6 +238,101 @@ def test_correlation_and_beta_headers_are_forwarded(gateway, upstream):
     assert sent["x-claude-code-parent-agent-id"] == "root-1"
 
 
+def test_sdk_retry_reuses_logical_miles_request_id(gateway, upstream):
+    """A transport retry must refer to the same SGLang generation.
+
+    The downstream Session Server uses this stable ID plus the retry marker to
+    join/replay the first attempt instead of consuming another decode slot.
+    """
+    server, table, _journal, _path = gateway
+    server.request_policy = _MilesRetryPolicy()
+    token = table.mint("agent-1")
+    body = {"model": "m", "messages": [{"role": "user", "content": "same"}]}
+
+    first = httpx.post(
+        server.base_url + "/v1/messages",
+        json=body,
+        headers={"Authorization": "Bearer " + token.token},
+        timeout=30,
+    )
+    retry = httpx.post(
+        server.base_url + "/v1/messages",
+        json=body,
+        headers={
+            "Authorization": "Bearer " + token.token,
+            "X-Stainless-Retry-Count": "1",
+        },
+        timeout=30,
+    )
+
+    assert first.status_code == retry.status_code == 200
+    first_headers = {k.lower(): v for k, v in upstream.requests[-2]["headers"].items()}
+    retry_headers = {k.lower(): v for k, v in upstream.requests[-1]["headers"].items()}
+    assert first_headers["x-miles-request-id"] == retry_headers["x-miles-request-id"]
+
+
+def test_retry_can_replay_after_the_original_call_exhausted_budget(gateway, upstream):
+    """Delivery retries must not be rejected as new spend after completion."""
+    server, table, _journal, _path = gateway
+    server.request_policy = _MilesRetryPolicy()
+    token = table.mint("agent-1", budget_usd=1.0)
+    body = {"model": "m", "messages": [{"role": "user", "content": "same"}]}
+
+    first = post(server, token.token, body)
+    table.charge(token, cost_usd=2.0)
+    retry = httpx.post(
+        server.base_url + "/v1/messages",
+        json=body,
+        headers={
+            "Authorization": "Bearer " + token.token,
+            "X-Stainless-Retry-Count": "1",
+        },
+        timeout=30,
+    )
+
+    assert first.status_code == retry.status_code == 200
+    assert token.blocked == 0
+    assert token.input_tokens == 11
+    assert token.output_tokens == 7
+
+
+def test_agent_cannot_choose_the_miles_request_id(gateway, upstream):
+    server, table, _journal, _path = gateway
+    server.request_policy = _MilesRetryPolicy()
+    token = table.mint("agent-1")
+    response = httpx.post(
+        server.base_url + "/v1/messages",
+        json={"model": "m", "messages": []},
+        headers={
+            "Authorization": "Bearer " + token.token,
+            "X-Miles-Request-ID": "attacker-controlled",
+        },
+        timeout=30,
+    )
+
+    assert response.status_code == 200
+    sent = {key.lower(): value for key, value in upstream.requests[-1]["headers"].items()}
+    assert sent["x-miles-request-id"].startswith("ash-model-")
+    assert sent["x-miles-request-id"] != "attacker-controlled"
+
+
+def test_unmarked_same_body_gets_a_fresh_logical_request_id(gateway, upstream):
+    """Identical prompts may be intentional samples; only marked retries join."""
+    server, table, _journal, _path = gateway
+    server.request_policy = _MilesRetryPolicy()
+    token = table.mint("agent-1")
+    body = {"model": "m", "messages": [{"role": "user", "content": "same"}]}
+
+    post(server, token.token, body)
+    post(server, token.token, body)
+
+    sent = [
+        {k.lower(): v for k, v in item["headers"].items()}
+        for item in upstream.requests[-2:]
+    ]
+    assert sent[0]["x-miles-request-id"] != sent[1]["x-miles-request-id"]
+
+
 def test_response_body_is_relayed_byte_exact(gateway):
     """Unknown fields (e.g. thinking signatures) must survive untouched."""
     server, table, _journal, _path = gateway
@@ -292,6 +415,33 @@ def test_upstream_failure_becomes_502_not_a_crash(gateway):
     assert httpx.get(server.base_url + "/health", timeout=10).status_code == 200
 
 
+def test_gateway_timeout_aborts_the_same_miles_request_id(tmp_path):
+    upstream = _Upstream(delay_s=0.2)
+    table = RoutingTable(
+        {"default": ModelRoute(base_url=upstream.base_url, api_key="k")}
+    )
+    policy = _MilesRetryPolicy()
+    server = GatewayServer(
+        table, port=0, timeout_s=0.03, request_policy=policy
+    ).start()
+    try:
+        token = table.mint("agent-1")
+        response = post(server, token.token, {"model": "m", "messages": []})
+        assert response.status_code == 502
+        assert len(upstream.requests) == 1
+        assert len(upstream.aborts) == 1
+        sent = {
+            key.lower(): value
+            for key, value in upstream.requests[0]["headers"].items()
+        }
+        assert upstream.aborts[0]["body"] == {
+            "rid": sent["x-miles-request-id"]
+        }
+    finally:
+        server.stop()
+        upstream.stop()
+
+
 def test_env_for_gives_an_agent_everything_it_needs(gateway):
     server, table, _journal, _path = gateway
     token = table.mint("agent-1")
@@ -348,6 +498,30 @@ def test_tokens_are_unguessable_and_distinct():
     assert table.lookup(a.token).agent_id == "agent-a"
     assert table.lookup("Bearer " + b.token).agent_id == "agent-b"
     assert table.lookup(None) is None
+
+
+def test_logical_request_bookkeeping_is_bounded(monkeypatch):
+    from harness.gateway import routing
+
+    monkeypatch.setattr(routing, "MAX_LOGICAL_REQUESTS_PER_SLOT", 3)
+    table = RoutingTable()
+    token = table.mint("agent-a")
+    ids = []
+    for number in range(4):
+        logical_id, duplicate = table.claim_request(
+            token, "fingerprint-%d" % number, retry=False
+        )
+        assert not duplicate
+        table.complete_request(token, logical_id)
+        ids.append(logical_id)
+
+    assert list(token.logical_requests) == [
+        "fingerprint-1",
+        "fingerprint-2",
+        "fingerprint-3",
+    ]
+    assert ids[0] not in token.completed_requests
+    assert len(token.completed_requests) == 3
 
 
 # --- pricing: what makes budget_usd real -------------------------------------

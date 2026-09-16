@@ -12,7 +12,8 @@ from runstore.store import Conflict, Store
 
 
 def create_app(store: Store, token: str, *, index: Index | None = None, profiles: dict | None = None):
-    from fastapi import Depends, FastAPI, Header, HTTPException
+    from fastapi import Depends, FastAPI, Header, HTTPException, Query
+    from fastapi.middleware.gzip import GZipMiddleware
     from fastapi.responses import JSONResponse
 
     if not token:
@@ -24,6 +25,10 @@ def create_app(store: Store, token: str, *, index: Index | None = None, profiles
             raise HTTPException(401, "Invalid control-plane token")
 
     app = FastAPI(dependencies=[Depends(authenticate)])
+    # SessionTree state can be hundreds of MiB as JSON but compresses well.
+    # Compress HTTP responses independently of the transparent database
+    # encoding so remote Run Store clients do not pay the expanded wire size.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     @app.exception_handler(Conflict)
     async def conflict_handler(request, error):
@@ -114,8 +119,21 @@ def create_app(store: Store, token: str, *, index: Index | None = None, profiles
         return identifier
 
     @app.get("/v1/jobs/{job_id}/events")
-    def events(job_id: str, attempt_id: str | None = None, after: int = 0, limit: int = 1000):
-        return store.events(selected(job_id, attempt_id), after, limit)
+    def events(
+        job_id: str,
+        attempt_id: str | None = None,
+        after: int = 0,
+        limit: int = 1000,
+        event_type: list[str] | None = Query(default=None),
+        newest: bool = False,
+    ):
+        return store.events(
+            selected(job_id, attempt_id),
+            after,
+            limit,
+            event_types=tuple(event_type or ()),
+            newest=newest,
+        )
 
     @app.get("/v1/jobs/{job_id}/tools")
     def tools(job_id: str, attempt_id: str | None = None, after: int = 0, limit: int = 1000):

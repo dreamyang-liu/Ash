@@ -32,11 +32,14 @@ def recovery_repository_baseline(store, recovery: dict | None) -> list[str] | No
     """
     if recovery is None:
         return None
-    prepared = [
-        event
-        for event in store.events(recovery["attempt_id"], limit=10000)
-        if event.get("type") == "environment.prepared"
-    ]
+    # A parent attempt may contain a very large cumulative SessionTree event.
+    # The repository baseline is a tiny, uniquely typed event; ask the store
+    # for that type directly instead of inflating/scanning the complete journal.
+    prepared = store.events(
+        recovery["attempt_id"],
+        limit=2,
+        event_types=("environment.prepared",),
+    )
     if not prepared:
         return None
     baselines = [event.get("baseline_untracked") for event in prepared]

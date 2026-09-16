@@ -101,6 +101,8 @@ class MessageAdapter:
                 "message_export": True, "model_endpoint": request.model_endpoint, "model": model,
                 "sampling_params": request.sampling_params, "deadline_at": deadline,
                 "max_turns": request.max_turns,
+                "capture_recovery_points": self.config.get("branch_policy") is not None,
+                "capture_final_snapshot": True,
                 "api_key_env": self.config.get("api_key_env"),
             }
             if shared_session_id is not None:

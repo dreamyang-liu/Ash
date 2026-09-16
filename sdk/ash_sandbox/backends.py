@@ -10,6 +10,26 @@ import httpx
 from .result import ToolResult
 
 
+class SandboxRouteUnavailable(RuntimeError):
+    """A gateway rejected routing before a tool request reached its runtime.
+
+    Only errors whose response is defined by AgentENV as a missing sandbox
+    binding are represented this way.  Callers may therefore retry them
+    without risking duplicate side effects; other HTTP failures retain the
+    conservative, execution-uncertain semantics.
+    """
+
+    def __init__(self, sandbox_id: str, message: str):
+        super().__init__(message)
+        self.sandbox_id = sandbox_id
+        self.execution_detail = {
+            "kind": "sandbox_route_unavailable",
+            "request_may_have_executed": False,
+            "sandbox_id": sandbox_id,
+            "message": message,
+        }
+
+
 def call_params(tool_name: str, args: dict, agent_id: str = "") -> dict:
     """Build the JSON-RPC params for a tools/call request.
 
@@ -220,12 +240,20 @@ class GatewayBackend(Backend):
     def __init__(self, gateway_url: str, sandbox_id: str,
                  sandbox_id_header: str = "X-Sandbox-ID",
                  target_port: int | None = None,
-                 target_port_header: str = "X-Target-Port"):
+                 target_port_header: str = "X-Target-Port",
+                 route_retry_attempts: int = 3,
+                 route_retry_delay_s: float = 0.1):
         self.gateway_url = gateway_url.rstrip("/")
         self.sandbox_id = sandbox_id
         self.sandbox_id_header = sandbox_id_header
         self.target_port = target_port
         self.target_port_header = target_port_header
+        if route_retry_attempts < 0:
+            raise ValueError("route_retry_attempts must be non-negative")
+        if route_retry_delay_s < 0:
+            raise ValueError("route_retry_delay_s must be non-negative")
+        self.route_retry_attempts = route_retry_attempts
+        self.route_retry_delay_s = route_retry_delay_s
         self._client = httpx.AsyncClient(timeout=360)
 
     def _routing_headers(self) -> dict[str, str]:
@@ -234,30 +262,60 @@ class GatewayBackend(Backend):
             headers[self.target_port_header] = str(self.target_port)
         return headers
 
+    async def _post_routed(self, request: dict) -> httpx.Response:
+        """Post once logically, retrying only proven pre-dispatch misses."""
+        for attempt in range(self.route_retry_attempts + 1):
+            resp = await self._client.post(
+                self.gateway_url,
+                headers=self._routing_headers(),
+                json=request,
+            )
+            route_error = self._route_error(resp)
+            if route_error is None:
+                break
+            if attempt == self.route_retry_attempts:
+                raise SandboxRouteUnavailable(self.sandbox_id, route_error)
+            await asyncio.sleep(self.route_retry_delay_s * (2 ** attempt))
+        resp.raise_for_status()
+        return resp
+
     async def call(self, tool_name: str, args: dict,
                    agent_id: str = "") -> ToolResult:
-        resp = await self._client.post(
-            self.gateway_url,
-            headers=self._routing_headers(),
-            json={
-                "jsonrpc": "2.0", "id": 1,
-                "method": "tools/call",
-                "params": call_params(tool_name, args, agent_id),
-            },
-        )
-        resp.raise_for_status()
+        resp = await self._post_routed({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "tools/call",
+            "params": call_params(tool_name, args, agent_id),
+        })
         data = resp.json()
         if data.get("error"):
             return ToolResult(output="", is_error=True, notifications=[])
         return ToolResult.from_response(data["result"])
 
+    @staticmethod
+    def _route_error(response: httpx.Response) -> str | None:
+        """Recognize only AgentENV errors produced before runtime dispatch."""
+        if response.status_code != 404:
+            return None
+        try:
+            body = response.json()
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            body = response.text
+        # The distributed AgentENV gateway emits scheduler errors as plain
+        # text. A JSON response may have come from the sandbox runtime itself;
+        # without an explicit pre-dispatch marker it is unsafe to replay.
+        if isinstance(body, dict):
+            return None
+        message = body
+        if not isinstance(message, str):
+            return None
+        normalized = message.strip().lower()
+        if normalized in {"sandbox assignment not found", "sandbox not found"}:
+            return normalized
+        return None
+
     async def list_tools(self) -> list[dict]:
-        resp = await self._client.post(
-            self.gateway_url,
-            headers=self._routing_headers(),
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-        )
-        resp.raise_for_status()
+        resp = await self._post_routed(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
         result = resp.json()["result"]
         return result if isinstance(result, list) else result.get("tools", [])
 

@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ash_sandbox import Pool, Sandbox
+from ash_sandbox import Pool, Sandbox, SandboxRouteUnavailable
 from ash_sandbox.result import ToolResult as SdkToolResult
 
 from harness.core.result import ToolResult
@@ -592,6 +592,7 @@ class ToolBoundary:
         self._admitted = set()
         self._uncertain = False
         self._uncertain_detail = None
+        self._route_unavailable_detail = None
         self._closing = False
 
     async def drain(self):
@@ -632,15 +633,29 @@ class ToolBoundary:
             if self._uncertain:
                 self._unavailable(step, call_id, "execution_uncertain", self._uncertain_detail)
                 return _err("Previous tool execution did not settle; sandbox is not safe to continue.")
+            if self._route_unavailable_detail:
+                self._unavailable(step, call_id, "sandbox_route_unavailable",
+                                  self._route_unavailable_detail)
+                return _err("Sandbox routing is unavailable; this run cannot continue.")
             self._identity = identity
 
             async def execute_and_capture():
                 content = await operation(step)
                 uncertainty = content.pop("_execution_uncertain", None)
                 if uncertainty:
-                    self._uncertain = True
-                    self._uncertain_detail = {"origin_step": step, **uncertainty}
-                    self._unavailable(step, call_id, "execution_uncertain", self._uncertain_detail)
+                    detail = {"origin_step": step, **uncertainty}
+                    if uncertainty.get("request_may_have_executed") is False:
+                        # A routing rejection happens before runtime dispatch.
+                        # Stop this run as infrastructure-failed. It is safe for
+                        # Run Store to retry from a verified point, but this
+                        # attempt must not issue later tools after losing its
+                        # routing binding.
+                        self._route_unavailable_detail = detail
+                        self._unavailable(step, call_id, uncertainty["kind"], detail)
+                    else:
+                        self._uncertain = True
+                        self._uncertain_detail = detail
+                        self._unavailable(step, call_id, "execution_uncertain", detail)
                 else:
                     await self.after_call(step)
                 return content
@@ -814,8 +829,7 @@ class SessionHandler:
         except Exception as e:
             content = _err(str(e))
             if self.boundary:
-                content["_execution_uncertain"] = {"kind": "transport_exception",
-                    "exception": type(e).__name__, "message": str(e)[:1000]}
+                content["_execution_uncertain"] = _exception_execution_detail(e)
             return content
 
         if self.notify_mutations and name in self._MUTATING:
@@ -849,8 +863,7 @@ class SessionHandler:
             try:
                 sdk = future.result()
             except BaseException as exc:
-                uncertain = {"kind": "transport_exception", "exception": type(exc).__name__,
-                             "message": str(exc)[:1000]}
+                uncertain = _exception_execution_detail(exc)
                 raise
             uncertain = uncertain or _uncertain_outcome(sdk)
             # from_sdk, so a command's outcome reaches interceptors on this path too
@@ -878,6 +891,14 @@ def _uncertain_outcome(result):
                 "running": result.running, "timed_out": result.timed_out,
                 "exit_code": result.exit_code}
     return None
+
+
+def _exception_execution_detail(exc: BaseException) -> dict:
+    """Retain proof that a gateway failure happened before tool execution."""
+    if isinstance(exc, SandboxRouteUnavailable):
+        return dict(exc.execution_detail)
+    return {"kind": "transport_exception", "exception": type(exc).__name__,
+            "message": str(exc)[:1000]}
 
 
 def _tool_response(id_, content: dict) -> dict:

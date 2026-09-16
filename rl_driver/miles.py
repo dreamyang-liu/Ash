@@ -3,6 +3,7 @@
 from copy import deepcopy
 import hashlib
 import math
+import threading
 import time
 from urllib.parse import urlsplit
 
@@ -171,10 +172,17 @@ class MilesAdapter:
             allowed_oci_registries=config.get("allowed_oci_registries", ()),
         )
         self.defaults = deepcopy(config.get("run_defaults", {}))
+        self._export_locks_guard = threading.Lock()
+        self._export_locks: dict[str, threading.Lock] = {}
         if self.defaults.get("slot", "codex") not in {"codex", "claude-code"}:
             raise ValueError("Miles RunSpec adapter supports codex and claude-code")
         if "rollout_contract" in self.defaults.get("extra", {}):
             raise ValueError("rollout_contract is derived from each Miles request")
+
+    def _export_lock(self, identifier: str) -> threading.Lock:
+        """Return the process-wide lock for one durable rollout group."""
+        with self._export_locks_guard:
+            return self._export_locks.setdefault(identifier, threading.Lock())
 
     def environments(self):
         return {"protocol_version": PROTOCOL_VERSION,
@@ -184,7 +192,10 @@ class MilesAdapter:
         if body.get("protocol_version") == "ash-rollout-v3":
             from rl_driver.messages import MessageAdapter
 
-            return MessageAdapter(self.driver, self.config).submit(body)
+            key = body.get("rollout_job_id")
+            identifier = internal_id(key) if isinstance(key, str) else "invalid-v3"
+            with self._export_lock(identifier):
+                return MessageAdapter(self.driver, self.config).submit(body)
         request = RolloutGroupRequest.from_dict(body)
         normalized = request.to_dict()
         identifier = internal_id(request.rollout_job_id)
@@ -270,6 +281,8 @@ class MilesAdapter:
             contract = {"model_endpoint": request.model_endpoint,
                         "session_server_endpoint": request.session_server_endpoint, "model": model,
                         "sampling_params": sampling, "deadline_at": deadline,
+                        "capture_recovery_points": self.branch_policy is not None,
+                        "capture_final_snapshot": task.get("grade") is not None,
                         "max_model_calls": (None if model_calls is None
                                             else model_calls + (index < extra_models)),
                         "max_tool_calls": (None if tool_calls is None
@@ -331,7 +344,8 @@ class MilesAdapter:
         if "message_request" in document:
             from rl_driver.messages import MessageAdapter
 
-            return MessageAdapter(self.driver, self.config).get(group_id)
+            with self._export_lock(internal_id(group_id)):
+                return MessageAdapter(self.driver, self.config).get(group_id)
         request = RolloutGroupRequest.from_dict(document["miles_request"])
         if request.rollout_job_id != group_id:
             raise KeyError(group_id)
@@ -372,13 +386,22 @@ class MilesAdapter:
                 request.max_samples,
                 stop_reason="Group cancelled after Run Store execution cleanup",
             ).to_dict()
-        result = self._export(request, document)
-        document["miles_result"] = result
-        document["profiling_records"] = build_profile_records(
-            request.to_dict(), result, document, created_at=row["created_at"]
-        )
-        self.driver.ledger.save(internal_id(group_id), document, terminal=True)
-        return result
+        identifier = internal_id(group_id)
+        with self._export_lock(identifier):
+            # A caller may have completed and persisted the export while this
+            # request waited.  Re-read the ledger so concurrent GETs never
+            # repeat a large terminal export.
+            row = self.driver.ledger.get(identifier)
+            document = row["document"]
+            if "miles_result" in document:
+                return document["miles_result"]
+            result = self._export(request, document)
+            document["miles_result"] = result
+            document["profiling_records"] = build_profile_records(
+                request.to_dict(), result, document, created_at=row["created_at"]
+            )
+            self.driver.ledger.save(identifier, document, terminal=True)
+            return result
 
     def _export(self, request: RolloutGroupRequest, document: dict) -> dict:
         trajectories, errors = [], []
@@ -389,13 +412,18 @@ class MilesAdapter:
             if not actor.get("attempt_id"):
                 errors.append(f"{slot.sample_slot_id}: no execution attempt")
                 continue
-            events = self.driver.client.all_events(actor["job_id"], attempt_id=actor["attempt_id"])
-            usage = [event for event in events if event.get("type") == "rollout.usage"]
+            usage = self.driver.client.events_of_type(
+                actor["job_id"], attempt_id=actor["attempt_id"],
+                event_types=("rollout.usage",), newest=True, limit=1,
+            )
             if usage:
                 for name in consumed:
                     consumed[name] += usage[-1].get(name, 0)
             try:
-                records = [event for event in events if event.get("type") == "rollout.session_state"]
+                records = self.driver.client.events_of_type(
+                    actor["job_id"], attempt_id=actor["attempt_id"],
+                    event_types=("rollout.session_state",), newest=True, limit=1,
+                )
                 if not records:
                     raise ValueError("Execution has no recorded training tokens; see /miles-executions for ordinary trajectory")
                 error = str(actor.get("error") or (actor.get("result") or {}).get("error") or "")
@@ -403,9 +431,11 @@ class MilesAdapter:
                 execution_context = actor.get("submission", {}).get("context", {})
                 response_ids = [
                     event.get("response_id")
-                    for event in events
-                    if event.get("type") == "rollout.model_response"
-                    and event.get("response_id")
+                    for event in self.driver.client.events_of_type(
+                        actor["job_id"], attempt_id=actor["attempt_id"],
+                        event_types=("rollout.model_response",),
+                    )
+                    if event.get("response_id")
                 ]
                 origin = actor.get("origin") or {}
                 parent_branch_id = origin.get("job_id")
@@ -458,9 +488,10 @@ class MilesAdapter:
         if "message_request" in document:
             from rl_driver.messages import MessageAdapter
 
-            result = MessageAdapter(self.driver, self.config).release(group_id)
-            self._release_session_if_eligible(internal_id(group_id))
-            return result
+            with self._export_lock(internal_id(group_id)):
+                result = MessageAdapter(self.driver, self.config).release(group_id)
+                self._release_session_if_eligible(internal_id(group_id))
+                return result
         result = self.get(group_id)
         self.driver.release(internal_id(group_id))
         self._release_session_if_eligible(internal_id(group_id))

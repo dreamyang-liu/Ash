@@ -16,6 +16,49 @@ from harness.slots.claude_code import _with_timeout
 from harness.tests.test_checkpoint_identity import MemorySession
 
 
+def test_pre_dispatch_route_failure_stops_attempt_without_uncertain_execution():
+    from ash_sandbox import SandboxRouteUnavailable
+    from harness.execution.server import ToolBoundary
+
+    records = []
+    captures = []
+    calls = 0
+
+    class Sandbox:
+        async def call(self, name, **args):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise SandboxRouteUnavailable(
+                    "vm-1", "sandbox assignment not found")
+            from ash_sandbox.result import ToolResult
+            return ToolResult("ok", False)
+
+    boundary = ToolBoundary(
+        lambda step, call_id=None: captures.append((step, call_id)),
+        on_unavailable=lambda step, call_id, reason, detail=None: records.append(
+            (step, call_id, reason, detail)),
+    )
+    entry = SimpleNamespace(id="fake", sandbox=Sandbox(), visible_to=lambda _: True)
+    handler = SessionHandler(
+        Session(id="test", groups=["owner:test"], bound_id="fake"),
+        SimpleNamespace(get=lambda _: entry), pipeline=ToolPipeline(),
+        boundary=boundary)
+
+    async def scenario():
+        first = await handler.call_tool("shell", {"command": "first"})
+        second = await handler.call_tool("shell", {"command": "second"})
+        return first, second
+
+    first, second = asyncio.run(scenario())
+    assert first["isError"] and second["isError"]
+    assert "cannot continue" in second["text"]
+    assert calls == 1
+    assert records[0][2] == "sandbox_route_unavailable"
+    assert records[0][3]["request_may_have_executed"] is False
+    assert captures == []
+
+
 def test_abort_wakes_a_silent_stream_and_closes_it_in_its_owner_task():
     async def scenario():
         control = RunControl()
@@ -81,6 +124,7 @@ def test_deadline_still_stops_a_silent_stream():
 
 @pytest.mark.parametrize("failure_kind,running,exit_code", [
     ("transport_exception", False, None),
+    ("sandbox_route_unavailable", False, None),
     ("runtime_timeout", False, None),
     ("runtime_timeout", True, 137),
     ("runtime_still_running", True, None),
@@ -89,7 +133,13 @@ def test_real_orchestrator_uncertainty_event_stops_the_sdk_driver(
         tmp_path, monkeypatch, failure_kind, running, exit_code):
     sdk = pytest.importorskip("claude_agent_sdk")
     memory = MemorySession()
-    if failure_kind != "transport_exception":
+    if failure_kind == "sandbox_route_unavailable":
+        from ash_sandbox import SandboxRouteUnavailable
+
+        async def unavailable_call(name, **args):
+            raise SandboxRouteUnavailable("fake", "sandbox assignment not found")
+        memory.call = unavailable_call
+    elif failure_kind != "transport_exception":
         from ash_sandbox.result import ToolResult
 
         async def uncertain_call(name, **args):
@@ -129,16 +179,22 @@ def test_real_orchestrator_uncertainty_event_stops_the_sdk_driver(
     outcome = Orchestrator(out_dir=tmp_path).run(RunSpec(
         prompt="fake", slot="claude-code", journal_path=tmp_path / "parent.jsonl",
         timeout_s=3))
-    assert outcome.status == "error" and "execution_uncertain" in outcome.error
+    expected_reason = ("sandbox_route_unavailable"
+                       if failure_kind == "sandbox_route_unavailable"
+                       else "execution_uncertain")
+    assert outcome.status == "error" and expected_reason in outcome.error
     assert attempts == ["c1"] and closed == [True]
     events = read_journal(outcome.journal_path)
-    assert any(e.get("type") == "agent.error" and e.get("reason") == "execution_uncertain" for e in events)
+    assert any(e.get("type") == "agent.error" and e.get("reason") == expected_reason
+               for e in events)
     assert len([e for e in events if e.get("type") == "tool.started"]) == 1
     failure = next(e for e in events if e.get("type") == "checkpoint.captured"
-                   and e.get("reason") == "execution_uncertain")
+                   and e.get("reason") == expected_reason)
     assert failure["execution_detail"]["kind"] == failure_kind
     if failure_kind == "transport_exception":
         assert failure["execution_detail"]["exception"] == "TimeoutError"
+    if failure_kind == "sandbox_route_unavailable":
+        assert failure["execution_detail"]["request_may_have_executed"] is False
 
 
 @pytest.mark.parametrize("continue_after_timeout", [False, True])

@@ -33,6 +33,11 @@ def _stored_event(event: dict) -> dict:
         return event
     return {
         "encoding": _COMPRESSED_EVENT,
+        # Keep the discriminator outside the compressed payload so indexed
+        # consumers can select the event they need without inflating every
+        # large event in the attempt.  _loaded_event also accepts legacy
+        # envelopes written before this field existed.
+        "event_type": event.get("type"),
         "uncompressed_bytes": len(encoded),
         "data": base64.b64encode(zlib.compress(encoded)).decode("ascii"),
     }
@@ -42,7 +47,10 @@ def _loaded_event(event: dict) -> dict:
     if (
         not isinstance(event, dict)
         or event.get("encoding") != _COMPRESSED_EVENT
-        or set(event) != {"encoding", "uncompressed_bytes", "data"}
+        or set(event) not in (
+            {"encoding", "uncompressed_bytes", "data"},
+            {"encoding", "event_type", "uncompressed_bytes", "data"},
+        )
         or type(event.get("uncompressed_bytes")) is not int
         or not isinstance(event.get("data"), str)
     ):
@@ -240,11 +248,63 @@ class Store:
                     if _loaded_event(cursor.fetchone()["event"]) != event:
                         raise Conflict("Journal sequence was rewritten")
 
-    def events(self, attempt_id: str, after: int = 0, limit: int = 1000) -> list[dict]:
+    def events(
+        self,
+        attempt_id: str,
+        after: int = 0,
+        limit: int = 1000,
+        *,
+        event_types: tuple[str, ...] = (),
+        newest: bool = False,
+    ) -> list[dict]:
+        if any(not isinstance(kind, str) or not kind for kind in event_types):
+            raise ValueError("Event types must be nonempty strings")
+        requested = min(10000, max(1, limit))
         with self.transaction() as cursor:
-            cursor.execute("""SELECT event FROM rs_events WHERE attempt_id=%s AND seq>%s
-                ORDER BY seq LIMIT %s""", (attempt_id, after, min(10000, max(1, limit))))
-            return [_loaded_event(row["event"]) for row in cursor.fetchall()]
+            if not event_types:
+                cursor.execute(
+                    f"""SELECT event FROM rs_events WHERE attempt_id=%s AND seq>%s
+                    ORDER BY seq {'DESC' if newest else 'ASC'} LIMIT %s""",
+                    (attempt_id, after, requested),
+                )
+                rows = cursor.fetchall()
+            else:
+                # New compressed envelopes expose event_type.  Historical
+                # envelopes are opaque, and the only durable consumer that
+                # needs those large historical rows is the SessionTree export.
+                # Do not include opaque rows in other typed queries: doing so
+                # would make a tiny environment.prepared lookup decompress a
+                # hundred-MiB session state and recreate the timeout this API
+                # is intended to avoid.
+                include_legacy = "rollout.session_state" in event_types
+                cursor.execute(
+                    f"""SELECT event FROM rs_events WHERE attempt_id=%s AND seq>%s AND (
+                        event->>'type'=ANY(%s) OR (
+                            event->>'encoding'=%s AND (
+                                (%s AND NOT(event ? 'event_type')) OR
+                                event->>'event_type'=ANY(%s)
+                            )
+                        )
+                    ) ORDER BY seq {'DESC' if newest else 'ASC'} LIMIT 10000""",
+                    (
+                        attempt_id,
+                        after,
+                        list(event_types),
+                        _COMPRESSED_EVENT,
+                        include_legacy,
+                        list(event_types),
+                    ),
+                )
+                rows = cursor.fetchall()
+            result = []
+            for row in rows:
+                event = _loaded_event(row["event"])
+                if event_types and event.get("type") not in event_types:
+                    continue
+                result.append(event)
+                if len(result) == requested:
+                    break
+            return result
 
     def finish(self, job_id: str, token: str, result: dict, *, state: str = "succeeded",
                retry: bool = False, recovery: dict | None = None) -> None:

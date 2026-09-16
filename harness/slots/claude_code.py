@@ -219,7 +219,10 @@ class ClaudeCodeSlot(AgentSlot):
         except RunAborted as exc:
             status = "error"
             error = str(exc)
-            journal.emit(AGENT_ERROR, message=error, reason="execution_uncertain")
+            reason = ("sandbox_route_unavailable"
+                      if "sandbox_route_unavailable" in error
+                      else "execution_uncertain")
+            journal.emit(AGENT_ERROR, message=error, reason=reason)
         except asyncio.TimeoutError:
             status = "timeout"
             error = "timed out after %ss" % task.timeout_s
@@ -341,6 +344,23 @@ class ClaudeCodeSlot(AgentSlot):
         env.setdefault("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT",
                        os.environ.get("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT")
                        or str(DEFAULT_MCP_TOOL_IDLE_TIMEOUT_MS))
+        if extra.get("rollout_contract") is not None:
+            # The Anthropic SDK otherwise applies its shorter provider default
+            # and starts transport retries while a long local decode is still
+            # healthy. The outer slot watchdog remains the authoritative
+            # rollout deadline and its cleanup aborts any in-flight generation.
+            env.setdefault(
+                "API_TIMEOUT_MS",
+                str(max(1, int(task.timeout_s * 1000))),
+            )
+            env.setdefault(
+                "CLAUDE_STREAM_IDLE_TIMEOUT_MS",
+                str(max(1, int(task.timeout_s * 1000))),
+            )
+            env.setdefault(
+                "CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS",
+                str(max(1, int(task.timeout_s * 1000))),
+            )
         if task.env:
             if "ANTHROPIC_BASE_URL" in env:
                 # The run routed this agent's LLM traffic somewhere -- a gateway,

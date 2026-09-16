@@ -616,6 +616,49 @@ def test_mcp_tool_idle_wait_defaults_to_600_seconds_and_preserves_overrides(
     assert task.timeout_s == 10800
 
 
+def test_rollout_aligns_claude_api_timeout_with_the_outer_watchdog(monkeypatch):
+    monkeypatch.delenv("API_TIMEOUT_MS", raising=False)
+
+    class Options:
+        def __init__(self, env=None, **kwargs):
+            self.env = env
+
+    task = TaskSpec(
+        prompt="p",
+        cwd="/w",
+        timeout_s=10800,
+        extra={"rollout_contract": {}},
+    )
+    result = ClaudeCodeSlot()._build_options(Options, task, {}, [])
+
+    assert result.env["API_TIMEOUT_MS"] == "10800000"
+    assert result.env["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == "10800000"
+    assert result.env["CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS"] == "10800000"
+
+
+def test_rollout_preserves_explicit_claude_api_timeout():
+    class Options:
+        def __init__(self, env=None, **kwargs):
+            self.env = env
+
+    task = TaskSpec(
+        prompt="p",
+        cwd="/w",
+        timeout_s=10800,
+        env={
+            "API_TIMEOUT_MS": "120000",
+            "CLAUDE_STREAM_IDLE_TIMEOUT_MS": "180000",
+            "CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS": "240000",
+        },
+        extra={"rollout_contract": {}},
+    )
+    result = ClaudeCodeSlot()._build_options(Options, task, {}, [])
+
+    assert result.env["API_TIMEOUT_MS"] == "120000"
+    assert result.env["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == "180000"
+    assert result.env["CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS"] == "240000"
+
+
 @pytest.mark.parametrize("value", [0, -1, None, True, "600000"])
 def test_claude_code_rejects_invalid_mcp_server_timeout(value):
     with pytest.raises(ValueError, match="mcp_server_timeout_ms"):

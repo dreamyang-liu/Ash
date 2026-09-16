@@ -74,7 +74,17 @@ class QueueHTTP:
             return httpx.Response(200, json=self.points.get(job_id, []))
         if path.endswith("/events"):
             after = int(req.url.params.get("after", 0))
-            return httpx.Response(200, json=[e for e in self.events.get(job_id, []) if e["seq"] > after])
+            limit = int(req.url.params.get("limit", 1000))
+            event_types = tuple(req.url.params.get_list("event_type"))
+            rows = [
+                event for event in self.events.get(job_id, [])
+                if event["seq"] > after
+                and (not event_types or event.get("type") in event_types)
+            ]
+            if req.url.params.get("newest") == "true":
+                rows.reverse()
+            rows = rows[:limit]
+            return httpx.Response(200, json=rows)
         raise AssertionError((req.method, path))
 
     def finish(self, job_id, *, resolved=None):
@@ -151,6 +161,57 @@ def test_two_samples_http_polling_out_of_order_and_consumption_survives_restart(
     restored.tick()
     assert len(queue.jobs) == 2
     assert DEFAULT_PORT == 11001
+
+
+def test_all_events_uses_bounded_cursor_pages(peer):
+    queue, client = peer
+    queue.jobs["job"] = {
+        "id": "job", "kind": "rollout", "state": "succeeded",
+        "phase": "succeeded", "active_attempt": "attempt-job",
+        "result": {}, "error": None,
+    }
+    queue.events["job"] = [
+        {"seq": seq, "type": "agent.message"}
+        for seq in range(1, 122)
+    ]
+
+    assert client.all_events("job", attempt_id="attempt-job") == queue.events["job"]
+    requests = [request for request in queue.requests if request[1].endswith("/events")]
+    assert [request[3]["after"] for request in requests] == ["0", "50", "100", "121"]
+    assert {request[3]["limit"] for request in requests} == {"50"}
+
+
+def test_swe_rebench_grade_selects_only_repository_baseline_event(tmp_path, peer):
+    queue, client = peer
+    body = request(grade=True)
+    body["samples"][0]["grade"]["spec"]["benchmark"] = "swe-rebench-v2"
+    body["samples"][0]["grade"]["spec"]["parser_path"] = "/worker/parser.py"
+    driver = Driver(client, Ledger(tmp_path / "ledger.sqlite3"))
+    driver.submit(body)
+    driver.tick()
+    queue.finish("job-0")
+    queue.final_point("job-0")
+    # A real long rollout also has a very large SessionTree event.  The grade
+    # preparation path must never request or scan it just to find the baseline.
+    queue.events["job-0"].append({
+        "seq": 2,
+        "type": "rollout.session_state",
+        "state": {"text": "large-state-placeholder"},
+    })
+
+    driver.tick()
+
+    grade = next(
+        submitted
+        for method, _path, submitted, _params in queue.requests
+        if method == "POST" and submitted.get("kind") == "grade"
+    )
+    assert grade["spec"]["baseline_untracked"] == ["image-cache.txt"]
+    event_requests = [
+        request for request in queue.requests if request[1].endswith("/events")
+    ]
+    assert event_requests[-1][3]["event_type"] == "environment.prepared"
+    assert event_requests[-1][3]["limit"] == "2"
 
 
 @pytest.mark.parametrize("branch", [False, True])
@@ -398,6 +459,22 @@ def test_grade_uses_final_snapshot_and_unresolved_is_completed(tmp_path, peer, r
     assert view["status"] == "completed"
     assert view["samples"][0]["grade"]["result"]["resolved"] is resolved
     assert len(queue.jobs) == 2
+
+
+def test_v2_grade_prefers_worker_final_snapshot_without_recovery_points(tmp_path, peer):
+    queue, client = peer
+    driver = Driver(client, Ledger(tmp_path / "ledger.sqlite3"))
+    driver.submit(request(grade=True))
+    driver.tick()
+    queue.finish("job-0")
+    queue.jobs["job-0"]["result"]["final_snapshot_id"] = "actor-final"
+    driver.tick()
+
+    grades = [
+        body for method, path, body, _ in queue.requests
+        if method == "POST" and body.get("kind") == "grade"
+    ]
+    assert grades[0]["spec"]["snapshot_id"] == "actor-final"
 
 
 def test_unavailable_final_message_never_grades_an_older_snapshot(tmp_path, peer):

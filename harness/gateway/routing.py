@@ -28,11 +28,13 @@ import json
 import os
 import secrets
 import threading
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Union
 
 DEFAULT_ROUTE = "default"
+MAX_LOGICAL_REQUESTS_PER_SLOT = 1024
 
 
 @dataclass
@@ -110,6 +112,11 @@ class SlotToken:
     output_tokens: int = 0
     requests: int = 0
     blocked: int = 0
+    # Transport retries must keep the logical request identity assigned to the
+    # first attempt. These are deliberately omitted from ``as_dict``: they are
+    # short-lived gateway bookkeeping, not user-visible credentials or usage.
+    logical_requests: Dict[str, str] = field(default_factory=dict, repr=False)
+    completed_requests: set[str] = field(default_factory=set, repr=False)
 
     def over_budget(self) -> bool:
         return self.budget_usd is not None and self.spent_usd >= self.budget_usd
@@ -198,6 +205,57 @@ class RoutingTable:
             token.spent_usd += cost_usd
             token.input_tokens += input_tokens
             token.output_tokens += output_tokens
+
+    def claim_request(
+        self,
+        token: SlotToken,
+        fingerprint: str,
+        *,
+        retry: bool,
+    ) -> tuple[str, bool]:
+        """Return ``(logical_id, duplicate)`` for one HTTP attempt.
+
+        The Anthropic SDK marks retries with ``X-Stainless-Retry-Count``. A
+        retry of a body seen for this slot reuses its logical ID; an ordinary
+        request always starts a new logical model call even when the body is
+        byte-identical (explicit resampling must remain possible).
+        """
+        with self._lock:
+            if retry and fingerprint in token.logical_requests:
+                return token.logical_requests[fingerprint], True
+            logical_id = "ash-model-" + uuid.uuid4().hex
+            replaced = token.logical_requests.pop(fingerprint, None)
+            if replaced is not None:
+                token.completed_requests.discard(replaced)
+            token.logical_requests[fingerprint] = logical_id
+            # A slot normally has tens of model calls. Keep a generous recent
+            # window for delayed SDK retries without making an unbounded HTTP
+            # fingerprint cache part of a long-lived gateway credential.
+            while len(token.logical_requests) > MAX_LOGICAL_REQUESTS_PER_SLOT:
+                oldest = next(iter(token.logical_requests))
+                evicted_id = token.logical_requests.pop(oldest)
+                token.completed_requests.discard(evicted_id)
+            return logical_id, False
+
+    def discard_request(
+        self, token: SlotToken, fingerprint: str, logical_id: str
+    ) -> None:
+        """Forget a new call that failed local admission before forwarding."""
+        with self._lock:
+            if token.logical_requests.get(fingerprint) == logical_id:
+                token.logical_requests.pop(fingerprint, None)
+            token.completed_requests.discard(logical_id)
+
+    def complete_request(self, token: SlotToken, logical_id: str) -> bool:
+        """Claim exactly-once accounting for a successfully returned call."""
+        with self._lock:
+            if logical_id in token.completed_requests:
+                return False
+            token.completed_requests.add(logical_id)
+            if len(token.completed_requests) > MAX_LOGICAL_REQUESTS_PER_SLOT:
+                active_ids = set(token.logical_requests.values())
+                token.completed_requests.intersection_update(active_ids)
+            return True
 
     def stats(self) -> list:
         with self._lock:
