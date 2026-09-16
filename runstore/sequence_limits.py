@@ -24,6 +24,52 @@ def _tokenizer(path):
     return AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
 
 
+@lru_cache(maxsize=4)
+def _training_format(path):
+    """Deployment-side pairing with the learner's loss-mask serialization."""
+    config = Path(path) / "ash_sequence_counter.json"
+    if not config.exists():
+        return "full"
+    body = json.loads(config.read_text())
+    if set(body) != {"training_format"} or body["training_format"] not in {"full", "qwen3"}:
+        raise ValueError("Invalid ash_sequence_counter.json")
+    return body["training_format"]
+
+
+_MASK_PREFIX = {"role": "user", "content": "FOR CALCULATING LOSS MASK ONLY"}
+
+
+@lru_cache(maxsize=4)
+def _qwen3_framing(path):
+    tokenizer = _tokenizer(path)
+    prefix = tokenizer.apply_chat_template([_MASK_PREFIX], tokenize=True, return_dict=False)
+    twice = tokenizer.apply_chat_template([_MASK_PREFIX, _MASK_PREFIX], tokenize=True, return_dict=False)
+    body = twice[len(prefix):]
+    if not body or twice[:len(prefix)] != prefix or prefix[-len(body):] != body:
+        raise ValueError("Tokenizer does not preserve qwen3 mask framing")
+    return prefix, body
+
+
+@lru_cache(maxsize=4096)
+def _qwen3_message_length(path, serialized_message, serialized_tools, first):
+    # Cache message lengths: adjacent recovery points share almost all messages.
+    tokenizer = _tokenizer(path)
+    prefix, body = _qwen3_framing(path)
+    message = json.loads(serialized_message)
+    if first:
+        tokens = tokenizer.apply_chat_template(
+            [message, _MASK_PREFIX], tools=json.loads(serialized_tools),
+            tokenize=True, return_dict=False,
+        )
+        if tokens[-len(body):] != body:
+            raise ValueError("Tokenizer does not preserve trailing qwen3 mask prefix")
+        return len(tokens) - len(body)
+    tokens = tokenizer.apply_chat_template([_MASK_PREFIX, message], tokenize=True, return_dict=False)
+    if tokens[:len(prefix)] != prefix:
+        raise ValueError("Tokenizer does not preserve leading qwen3 mask prefix")
+    return len(tokens) - len(prefix)
+
+
 def token_count(messages, tools, tokenizer_path):
     normalized = deepcopy(messages)
     for message in normalized:
@@ -38,6 +84,18 @@ def token_count(messages, tools, tokenizer_path):
     # preserve that order in tool JSON, changing BPE boundaries even though the
     # dictionaries are equal. Count the representation Miles will receive.
     durable_tools = json.loads(json.dumps(tools, sort_keys=True)) if tools else None
+    if _training_format(tokenizer_path) == "qwen3":
+        # Miles serializes each message independently to preserve assistant
+        # reasoning and build masks. A full render merges adjacent tool results
+        # and therefore undercounts histories containing parallel tool calls.
+        serialized_tools = json.dumps(durable_tools, ensure_ascii=False)
+        return sum(
+            _qwen3_message_length(
+                tokenizer_path, json.dumps(message, ensure_ascii=False),
+                serialized_tools if index == 0 else "null", index == 0,
+            )
+            for index, message in enumerate(normalized)
+        )
     tokens = _tokenizer(tokenizer_path).apply_chat_template(
         normalized, tools=durable_tools, tokenize=True, add_generation_prompt=False, return_dict=False,
     )
