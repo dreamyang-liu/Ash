@@ -34,8 +34,12 @@ def token_count(messages, tools, tokenizer_path):
             if not isinstance(arguments, dict):
                 raise ValueError("Tool arguments must be a JSON object for sequence counting")
             call["function"]["arguments"] = arguments
+    # Durable result/ledger serialization sorts schema keys. HF templates may
+    # preserve that order in tool JSON, changing BPE boundaries even though the
+    # dictionaries are equal. Count the representation Miles will receive.
+    durable_tools = json.loads(json.dumps(tools, sort_keys=True)) if tools else None
     tokens = _tokenizer(tokenizer_path).apply_chat_template(
-        normalized, tools=tools or None, tokenize=True, add_generation_prompt=False, return_dict=False,
+        normalized, tools=durable_tools, tokenize=True, add_generation_prompt=False, return_dict=False,
     )
     return len(tokens)
 
