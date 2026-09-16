@@ -61,6 +61,25 @@ Run Store 的 job 可以成功产出一个截断 episode，不会把它伪装成
 自然完成。失败路径从 journal 的 `session.ref` 恢复原生会话身份；
 截断的最后一条未写完整 JSON 记录不进入训练，原始日志保留。
 
+请求还可指定 `max_sequence_tokens` 和 `truncated_reward_scale`（例如65536
+和0.5）。需在 `miles.sequence_tokenizers` 为实际模型名（包括 LoRA alias）
+配置本地 tokenizer 目录。超过长度时只保留完整 native checkpoint prefix，
+grader 使用该 prefix 配对的 snapshot；正确截断轨迹的 reward 乘折扣系数，
+自然完成的正确轨迹不折扣。没有可用配对边界时明确失败。
+
+长度计数必须与训练端的序列化方式一致。Miles 的 `--loss-mask-type qwen3`
+逐条渲染消息，不能用整段对话的 token 数替代：后者会合并相邻工具结果。
+在对应 tokenizer 目录放置 `ash_sequence_counter.json`：
+
+```json
+{"training_format": "qwen3"}
+```
+
+未配置时使用 `full`（完整对话模板）。工具 schema 按持久化记录的键顺序
+计数；消息内工具参数的顺序保留。启用或改变计数方式后，新 worker
+进程读取配置，并应以实际 Miles 导入结果验证长度。旧轨迹的计数元数据
+可能来自旧序列化方式，训练端仍需验证实际长度上限。
+
 `budgets.max_wall_time_seconds` 约束执行阶段；请求的
 `finalization_timeout_seconds`（默认1800）为最终快照、消息导出和评分
 留出额外时间。子进程有120秒终止收尾窗口，lease/失联检查继续生效。
