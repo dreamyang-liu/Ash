@@ -258,9 +258,15 @@ def test_tool_schemas_preserved():
 
 
 @pytest.mark.parametrize("truncated,resolved,expected", [(True, True, 0.5), (True, False, 0), (False, True, 1)])
+@pytest.mark.parametrize("actual_tokens", [123, 81921])
 def test_length_cap_grades_retained_snapshot_and_discounts_only_truncated_success(
-    tmp_path, peer, truncated, resolved, expected,
+    tmp_path, peer, truncated, resolved, expected, actual_tokens, monkeypatch,
 ):
+    def count(exported_messages, tools, path):
+        assert "check the parser" not in json.dumps(exported_messages)
+        assert path == "/fixture/tokenizer"
+        return actual_tokens
+    monkeypatch.setattr("runstore.sequence_limits.token_count", count)
     queue, client = peer
     body = request()
     body.update(max_sequence_tokens=81920, truncated_reward_scale=0.5)
@@ -274,6 +280,7 @@ def test_length_cap_grades_retained_snapshot_and_discounts_only_truncated_succes
     queue.finish(actor)
     queue.jobs[actor]["result"].update(
         training_messages=messages(), final_snapshot_id="retained-prefix-state",
+        training_token_count=120,  # Deliberately stale worker metadata.
         raw_final_snapshot_id="discarded-later-state",
         status="truncated" if truncated else "completed",
         stop_reason="max_sequence_tokens" if truncated else None,
@@ -286,7 +293,12 @@ def test_length_cap_grades_retained_snapshot_and_discounts_only_truncated_succes
     queue.finish(grade, resolved=resolved)
     driver.tick()
     output = adapter.get(body["rollout_job_id"])
+    if actual_tokens > body["max_sequence_tokens"]:
+        assert output["status"] == "failed" and output["actual_samples"] == 0
+        assert "exceeds max_sequence_tokens" in output["stop_reason"]
+        return
     assert output["status"] == "completed"
     trajectory = output["trajectories"][0]
     assert trajectory["reward"] == expected and trajectory["metadata"]["raw_reward"] == float(resolved)
     assert trajectory["metadata"]["graded_snapshot_id"] == "retained-prefix-state"
+    assert trajectory["metadata"]["training_token_count"] == actual_tokens

@@ -162,10 +162,26 @@ class MessageAdapter:
                     "job_id", "point_id", "snapshot_id", "tool_depth", "message_step",
                 ) if key in origin}
                 parent = origin.get("job_id")
+                exported_messages = clean_messages(messages)
+                exported_tools = output.get("training_tools", [])
+                training_count = output.get("training_token_count")
+                if request.max_sequence_tokens is not None:
+                    from runstore.sequence_limits import token_count
+
+                    model = request.model or self.config.get("run_defaults", {}).get("model")
+                    tokenizer = self.config.get("sequence_tokenizers", {}).get(model)
+                    if not isinstance(tokenizer, str) or not tokenizer:
+                        raise ValueError("Configured sequence tokenizer unavailable for export")
+                    # Recount the durable, hint-free representation. Older
+                    # workers may have counted before schema serialization or
+                    # with a different learner framing strategy.
+                    training_count = token_count(exported_messages, exported_tools, tokenizer)
+                    if training_count > request.max_sequence_tokens:
+                        raise ValueError("Exported training sequence exceeds max_sequence_tokens")
                 result["trajectories"].append({
                     "sample_slot_id": slot.sample_slot_id, "branch_id": actor["job_id"],
-                    "parent_branch_id": parent, "messages": clean_messages(messages),
-                    "tools": output.get("training_tools", []),
+                    "parent_branch_id": parent, "messages": exported_messages,
+                    "tools": exported_tools,
                     "reward": float(verdict["resolved"]) * (request.truncated_reward_scale if truncated else 1.0),
                     "status": "truncated" if truncated else "completed",
                     "stop_reason": output.get("stop_reason") if truncated else None,
@@ -176,7 +192,7 @@ class MessageAdapter:
                                   "origin": origin, "logprob_context": "hint_free_messages",
                                   "raw_reward": float(verdict["resolved"]),
                                   "truncated_reward_scale": request.truncated_reward_scale if truncated else 1.0,
-                                  "training_token_count": output.get("training_token_count"),
+                                  "training_token_count": training_count,
                                   "sequence_truncation": output.get("sequence_truncation")},
                 })
                 if document.get("branching"):
