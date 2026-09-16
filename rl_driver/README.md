@@ -25,7 +25,10 @@ v3 分支 continuation prompt 在执行前包上保留标记
 `<ash_training_hint>...</ash_training_hint>`；导出只从 user/system/developer
 消息删除这些注入内容，assistant/tool 原文不做全局替换。旧的未标记 hint
 不能自动可靠删除；不完整工具记录、压缩历史和不支持的内容会明确失败。
-当前 driver 默认仍是独立样本策略，没有新增 branching 策略或样本加权。
+默认仍是独立样本策略。可通过 `--branching`、`miles.branching.enabled` 或
+v3 请求的 `branching: true` 开启 review 指导的分支策略：每题先跑一条，
+失败找正例、成功找负例，默认最多两轮，返回去 hint 的首条与选中分支。
+配置、停止条件及返回数量见 [BRANCHING.md](BRANCHING.md)。
 
 v3 原生采样支持 temperature、top_p、top_k、文本 stop 和输出长度；
 其他字段明确拒绝。Responses 使用 max_output_tokens，Messages 使用

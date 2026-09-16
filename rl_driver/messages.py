@@ -5,6 +5,8 @@ import time
 
 from runstore.message_sampling import validate as validate_sampling
 from rl_driver.ledger import Conflict, canonical
+from rl_driver.branch_review import BranchingConfig
+from rl_driver.branching import initial_state, selected_samples
 from rl_driver.message_protocol import MESSAGE_VERSION, MessageRequest
 from rl_driver.miles import internal_id, validate_endpoint
 from runstore.message_export import clean_messages
@@ -14,6 +16,7 @@ from runstore.message_completion import is_truncated_result
 class MessageAdapter:
     def __init__(self, driver, config):
         self.driver, self.config = driver, deepcopy(config)
+        self.branching = BranchingConfig.from_dict(config.get("branching", {}))
 
     def submit(self, body):
         request = MessageRequest.from_dict(body)
@@ -28,10 +31,12 @@ class MessageAdapter:
                 raise Conflict("rollout_job_id already names a different request")
         else:
             plan = self._plan(request)
+            branch_state = plan.pop("_branching", None)
             self.driver.submit(plan, source_request=normalized, extra_document={
                 "message_request": normalized,
                 "execution_deadline_at": plan["context"]["deadline_at"],
                 "deadline_at": plan["context"]["deadline_at"] + request.finalization_timeout_seconds,
+                **({"branching": branch_state} if branch_state is not None else {}),
             })
         result = self.get(request.rollout_job_id)
         return {key: result[key] for key in ("protocol_version", "rollout_job_id", "status")}
@@ -41,6 +46,15 @@ class MessageAdapter:
         validate_sampling(request.sampling_params)
         if request.max_samples > self.config.get("max_samples", 1000):
             raise ValueError("Group exceeds deployment max_samples")
+        branching = self.branching.enabled or request.branching
+        if branching:
+            if self.branching.return_mode == "pair" and (
+                    request.max_samples != 2 or request.minimum_returned_samples != 2):
+                raise ValueError("Pair branching requires exactly two allocated sample slots")
+            if self.branching.return_mode == "all" and (
+                    request.max_samples < 1 + self.branching.max_rounds or request.minimum_returned_samples != 1):
+                raise ValueError("All-trajectory branching requires max_rounds+1 slots and minimum_returned_samples=1")
+            self.driver.branching.validate_config(self.branching)
         defaults = self.config.get("run_defaults", {})
         model = request.model or defaults.get("model")
         if not isinstance(model, str) or not model:
@@ -64,7 +78,7 @@ class MessageAdapter:
                 raise ValueError("Native task input must be text or one user message")
             prompt = prompt[0]["content"]
         samples = []
-        for slot in request.sample_slots[:request.max_samples]:
+        for slot in request.sample_slots[:1 if branching else request.max_samples]:
             spec = deepcopy(defaults)
             spec.update(prompt=prompt, model=model, slot=spec.get("slot", "codex"),
                         sandbox_image=image, sandbox_resources=resources, use_gateway=True, transport="http",
@@ -85,7 +99,8 @@ class MessageAdapter:
             })
         return {"rollout_job_id": internal_id(request.rollout_job_id),
                 "prompt_group_id": internal_id(request.prompt_group_id),
-                "context": {"deadline_at": deadline}, "samples": samples}
+                "context": {"deadline_at": deadline}, "samples": samples,
+                **({"_branching": initial_state(self.branching)} if branching else {})}
 
     def get(self, group_id):
         row = self.driver.ledger.get(internal_id(group_id))
@@ -113,7 +128,8 @@ class MessageAdapter:
 
     def _export(self, request, document, result):
         errors = []
-        for slot, sample in zip(request.sample_slots[:request.max_samples], document["samples"], strict=False):
+        selected = selected_samples(document)
+        for slot, sample in zip(request.sample_slots[:request.max_samples], selected, strict=False):
             actor, grade = sample["actor"], sample["grade"]
             try:
                 if actor["state"] != "succeeded":
@@ -128,9 +144,15 @@ class MessageAdapter:
                 if not isinstance(messages, list) or not messages:
                     raise ValueError("Execution has no exported native messages")
                 verdict = (grade or {}).get("result") or {}
-                if not grade or grade["state"] != "succeeded" or type(verdict.get("resolved")) is not bool:
+                if (not grade or grade["state"] != "succeeded" or verdict.get("status") != "completed"
+                        or type(verdict.get("resolved")) is not bool):
                     raise ValueError("Ash grading did not produce a resolved verdict")
                 origin = actor.get("origin") or output.get("training_origin") or {}
+                # Keep control-plane review text and injected hints out of
+                # both training messages and training metadata.
+                origin = {key: origin[key] for key in (
+                    "job_id", "point_id", "snapshot_id", "tool_depth", "message_step",
+                ) if key in origin}
                 parent = origin.get("job_id")
                 result["trajectories"].append({
                     "sample_slot_id": slot.sample_slot_id, "branch_id": actor["job_id"],
@@ -144,12 +166,26 @@ class MessageAdapter:
                                  "graded_snapshot_id": grade.get("snapshot_id"),
                                  "origin": origin, "logprob_context": "hint_free_messages"},
                 })
-                result["search_branches"] += int(parent is not None)
-                for name, count in output.get("rollout_usage", {}).items():
-                    result["consumed_budget"][name] = result["consumed_budget"].get(name, 0) + count
+                if document.get("branching"):
+                    state = document["branching"]
+                    result["trajectories"][-1]["metadata"]["branching"] = {
+                        "round": sample.get("branch_round", 0),
+                        "target_resolved": state["target_resolved"],
+                        "stop_reason": state["stop_reason"],
+                    }
             except (ValueError, KeyError, TypeError) as error:
                 errors.append(f"{slot.sample_slot_id}: {error}")
+        for sample in document["samples"]:
+            actor = sample["actor"]
+            result["search_branches"] += int(actor.get("operation") == "branch" and actor.get("job_id") is not None)
+            for name, count in (actor.get("result") or {}).get("rollout_usage", {}).items():
+                result["consumed_budget"][name] = result["consumed_budget"].get(name, 0) + count
         result["actual_samples"] = len(result["trajectories"])
+        state = document.get("branching") or {}
+        if result["actual_samples"] < request.minimum_returned_samples:
+            errors.append(f"Insufficient returned trajectories: {state.get('stop_reason') or 'execution failure'}")
+        if state.get("error"):
+            errors.append("Branching stopped: " + state["stop_reason"])
         result["status"] = ("failed" if result["actual_samples"] < request.minimum_returned_samples
                             else "early_stopped" if errors else "completed")
         result["stop_reason"] = "; ".join(errors) or None

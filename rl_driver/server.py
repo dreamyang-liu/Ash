@@ -49,6 +49,7 @@ def create_app(driver: Driver, token: str | None, *, poll_interval_s: float = 1,
                     thread.join(timeout=45)
                     if thread.is_alive():
                         raise RuntimeError("Driver polling did not stop; submission intents remain in the ledger")
+                driver.close()
 
     def authenticate(authorization: str = Header(default="")):
         if token is not None and not secrets.compare_digest(authorization, "Bearer " + token):

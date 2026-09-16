@@ -21,12 +21,20 @@ def main():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--branching", action=argparse.BooleanOptionalAction, default=None,
+        help="Set the default v3 branching policy; reviewer configuration remains in miles.branching.",
+    )
     args = parser.parse_args()
     try:
         config = json.loads(args.config.read_text())
         allowed = {"runstore_url", "runstore_token_env", "driver_token_env", "ledger", "poll_interval_s", "miles"}
         if not isinstance(config, dict) or set(config) - allowed:
             raise ValueError(f"Config fields must be drawn from {sorted(allowed)}")
+        if args.branching is not None:
+            if not isinstance(config.get("miles"), dict):
+                raise ValueError("--branching requires a configured Miles adapter")
+            config["miles"].setdefault("branching", {})["enabled"] = args.branching
         url = config.get("runstore_url", "http://127.0.0.1:18110").rstrip("/")
         parsed = httpx.URL(url)
         if parsed.scheme not in {"http", "https"} or not parsed.host or parsed.userinfo or parsed.query or parsed.fragment:

@@ -41,6 +41,7 @@ class MessageRequest:
     model: str | None = None
     finalization_timeout_seconds: float = 1800.0
     protocol_version: str = MESSAGE_VERSION
+    branching: bool = False
 
     @classmethod
     def from_dict(cls, body):
@@ -49,6 +50,8 @@ class MessageRequest:
         if body.get("protocol_version") != MESSAGE_VERSION:
             raise ValueError("Expected ash-rollout-v3")
         value = deepcopy(body)
+        if type(value.get("branching", False)) is not bool:
+            raise ValueError("branching must be boolean")
         for key in ("rollout_job_id", "prompt_group_id", "task_id", "image", "model_endpoint"):
             _required_string(value.get(key), key)
         _nonnegative_int(value.get("rollout_id"), "rollout_id")
@@ -82,4 +85,6 @@ class MessageRequest:
     def to_dict(self):
         value = asdict(self)
         value["sample_slots"] = list(value["sample_slots"])
+        if not value["branching"]:
+            del value["branching"]
         return value

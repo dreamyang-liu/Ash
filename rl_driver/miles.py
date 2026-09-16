@@ -94,8 +94,12 @@ class MilesAdapter:
         self.config = deepcopy(config)
         if not isinstance(config, dict) or set(config) - {
             "environment_catalog", "profile", "run_defaults", "resources", "tasks", "api_key_env", "max_samples",
-            "image_resources"}:
+            "image_resources", "branching"}:
             raise ValueError("Invalid Miles adapter config")
+        if "branching" in config:
+            from rl_driver.branch_review import BranchingConfig
+
+            BranchingConfig.from_dict(config["branching"])
         self.catalog = (EnvironmentCatalog.from_dict(config["environment_catalog"])
                         if config.get("environment_catalog") else None)
         self.defaults = deepcopy(config.get("run_defaults", {}))
@@ -113,6 +117,8 @@ class MilesAdapter:
             from rl_driver.messages import MessageAdapter
 
             return MessageAdapter(self.driver, self.config).submit(body)
+        if self.config.get("branching", {}).get("enabled", False):
+            raise ValueError("Review-guided branching requires ash-rollout-v3")
         request = RolloutGroupRequest.from_dict(body)
         normalized = request.to_dict()
         identifier = internal_id(request.rollout_job_id)

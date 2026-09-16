@@ -7,6 +7,7 @@ import time
 import httpx
 
 from runstore.specs import JobSpec
+from rl_driver.branching import BranchController
 from rl_driver.ledger import Ledger
 from rl_driver.specs import initial_document, submission_key, validate_request
 
@@ -14,12 +15,18 @@ DONE = {"succeeded", "failed", "cancelled", "skipped"}
 
 
 class Driver:
-    def __init__(self, client, ledger: Ledger):
+    def __init__(self, client, ledger: Ledger, *, branch_reviewer=None):
         self.client = client
         self.ledger = ledger
         self._tick_lock = threading.Lock()
         self.wakeup = threading.Event()
         self.stopping = threading.Event()
+        self.branching = BranchController(
+            client, ledger, **({"reviewer": branch_reviewer} if branch_reviewer is not None else {}),
+        )
+
+    def close(self):
+        self.branching.close()
 
     def submit(self, body: dict, *, source_request: dict | None = None, extra_document: dict | None = None) -> dict:
         request = validate_request(body)
@@ -194,9 +201,17 @@ class Driver:
                             # Do not turn a polling failure into a new execution.
                             stage["last_error"] = str(error)
                             self._save(document)
+                if document.get("branching"):
+                    try:
+                        self.branching.advance(document, cancelled=self._cancelled(document))
+                    except httpx.HTTPError as error:
+                        document["branching"]["last_error"] = str(error)
+                    except (ValueError, KeyError) as error:
+                        self.branching._finish(document, "branch_planning_failed", str(error))
                 stages = [sample[phase] for sample in document["samples"]
                           for phase in ("actor", "grade") if sample[phase] is not None]
-                document["ready"] = all(stage["state"] in DONE for stage in stages)
+                policy_done = not document.get("branching") or document["branching"]["phase"] == "finished"
+                document["ready"] = policy_done and all(stage["state"] in DONE for stage in stages)
                 if document["ready"]:
                     document["status"] = ("cancelled" if self._cancelled(document) else
                                           "failed" if any(stage["state"] != "succeeded" for stage in stages)
