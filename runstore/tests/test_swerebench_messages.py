@@ -10,7 +10,9 @@ from runstore.swerebench import grade_snapshot
 
 
 @pytest.mark.parametrize("fix,expected", [(False, False), (True, True)])
-def test_grader_runs_hidden_tests_after_actor_and_distinguishes_fix(tmp_path, monkeypatch, fix, expected):
+@pytest.mark.parametrize("destructive_hook", [False, True])
+def test_grader_runs_hidden_tests_after_actor_and_distinguishes_fix(
+        tmp_path, monkeypatch, fix, expected, destructive_hook):
     """Real git/test execution; only the VM filesystem boundary is substituted."""
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -21,11 +23,22 @@ def test_grader_runs_hidden_tests_after_actor_and_distinguishes_fix(tmp_path, mo
     command("git", "add", ".")
     command("git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
     base = command("git", "rev-parse", "HEAD")
-    patch = (
-        "diff --git a/test_answer.py b/test_answer.py\nnew file mode 100644\n"
-        "--- /dev/null\n+++ b/test_answer.py\n@@ -0,0 +1,3 @@\n"
-        "+from answer import VALUE\n+\n+def test_answer(): assert VALUE == 1\n"
-    )
+    # Use a tracked test: resetting it invokes post-checkout unless disabled.
+    (repo / "test_answer.py").write_text("def test_answer(): assert True\n")
+    command("git", "add", ".")
+    command("git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "test")
+    base = command("git", "rev-parse", "HEAD")
+    (repo / "test_answer.py").write_text("from answer import VALUE\n\ndef test_answer(): assert VALUE == 1\n")
+    patch = command("git", "diff") + "\n"
+    command("git", "checkout", "--", "test_answer.py")
+    hook_marker = tmp_path / "hook-ran"
+    if destructive_hook:
+        hook = repo / ".git/hooks/post-checkout"
+        hook.write_text(
+            "#!/bin/sh\nrm -f " + str(tmp_path / "test.patch")
+            + "\ntouch " + str(hook_marker) + "\n"
+        )
+        hook.chmod(0o755)
     # A solver-created fake test must be removed before installing hidden tests.
     (repo / "test_answer.py").write_text("def test_answer(): assert True\n")
     if fix:
@@ -69,6 +82,28 @@ def test_grader_runs_hidden_tests_after_actor_and_distinguishes_fix(tmp_path, mo
     assert result["resolved"] is expected, result
     assert lifecycle == [("create", "actor-final-snapshot"), ("destroy",)]
     assert (repo / "answer.py").read_text() == ("VALUE = 1\n" if fix else "VALUE = 0\n")
+    assert not hook_marker.exists()
+
+
+@pytest.mark.parametrize("content", [None, "corrupted verifier input"])
+def test_missing_or_corrupted_verifier_file_is_infrastructure_error(tmp_path, content):
+    from runstore.swerebench import verify_guest_file
+
+    path = tmp_path / "test.patch"
+    if content is not None:
+        path.write_text(content)
+
+    class Session:
+        def execute(self, name, arguments, **kwargs):
+            result = subprocess.run(["bash", "-c", arguments["command"]], capture_output=True, text=True)
+            return SimpleNamespace(
+                success=result.returncode == 0, output=result.stdout, error=result.stderr,
+                outcome=SimpleNamespace(running=False, timed_out=False, truncated=False,
+                                        stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode),
+            )
+
+    with pytest.raises(RuntimeError, match="setup/collection exited"):
+        verify_guest_file(Session(), str(path), "expected verifier input")
 
 
 def test_export_native_prefix_and_marked_branch_hint(tmp_path):

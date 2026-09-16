@@ -17,6 +17,14 @@ PATH = ("/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:"
         "/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 
 
+def verify_guest_file(session, path, content):
+    """A missing/corrupted verifier input is infrastructure failure, not reward 0."""
+    from swebench_pro.grade import checked
+
+    digest = hashlib.sha256(content.encode()).hexdigest()
+    checked(session, "printf '%s\\n' " + shlex.quote(f"{digest}  {path}") + " | sha256sum -c -")
+
+
 def load_parsers(spec):
     path = Path(spec.parser_path or "")
     if not path.is_file() or "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() != spec.grader_revision:
@@ -70,10 +78,12 @@ def grade_snapshot(spec, row, backend, directory, *, session_factory):
             f"base={shlex.quote(row['base_commit'])}; "
             "git apply --numstat /tmp/ash-test.patch | cut -f3- | while IFS= read -r path; do "
             'path=${path#\\"}; path=${path%\\"}; '
-            'if git cat-file -e "$base:$path" 2>/dev/null; then git checkout "$base" -- "$path"; '
+            'if git cat-file -e "$base:$path" 2>/dev/null; '
+            'then git -c core.hooksPath=/dev/null checkout "$base" -- "$path"; '
             'else rm -f -- "$path"; fi; done'
         )
         checked(session, prefix + "bash -euo pipefail -c " + shlex.quote(reset))
+        verify_guest_file(session, "/tmp/ash-test.patch", row["test_patch"])
         apply = ("git apply -v --3way --recount --ignore-space-change --whitespace=nowarn /tmp/ash-test.patch"
                  " || patch --fuzz=5 -p1 -i /tmp/ash-test.patch")
         _, stderr, code = shell(session, prefix + apply, 120)
@@ -86,6 +96,7 @@ def grade_snapshot(spec, row, backend, directory, *, session_factory):
                   + "\n".join(f"{command} || FAIL=1" for command in commands) + '\nexit "$FAIL"\n')
         encoded = base64.b64encode(script.encode()).decode()
         checked(session, f"printf %s {shlex.quote(encoded)} | base64 -d > /tmp/ash-eval.sh")
+        verify_guest_file(session, "/tmp/ash-eval.sh", script)
         stdout, stderr, code = shell(session, prefix + "bash /tmp/ash-eval.sh 2>&1", int(spec.timeout_s))
         log = directory / "swerebench-tests.log"
         log.write_text(stdout + stderr)
