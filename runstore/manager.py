@@ -23,7 +23,23 @@ class WorkerManager:
         self.active: dict[str, Future] = {}
         self.recovery_after: dict[str, float] = {}
         self.wake = Event()
+        self._drain_requested = False
         self.log = logging.getLogger(__name__)
+
+    @property
+    def draining(self) -> bool:
+        return self._drain_requested
+
+    def request_drain(self) -> None:
+        """Stop admission and finish owned work without cancelling its watchdogs.
+
+        This is one-way and idempotent. A claim already in flight may still
+        return a job; that job remains ours to supervise before exiting.
+        """
+        # Also called from a Python signal handler: do not acquire an Event's
+        # lock if the signal interrupted the manager while holding that lock.
+        # The claim loop checks this flag before admission and after each poll.
+        self._drain_requested = True
 
     def _start(self, job_id: str, action: Callable) -> None:
         future = Future()
@@ -55,27 +71,40 @@ class WorkerManager:
         backoff = self.poll_s
         retry_at = 0.0
         draining = False
+        drained = False
+        drain_logged = False
         try:
             while not stop.is_set():
                 self.wake.clear()
                 self._reap()
+                if self.draining:
+                    draining = True
+                    if not drain_logged:
+                        self.log.info("Worker %s draining %s active attempts",
+                                      self.worker.worker_id, len(self.active))
+                        drain_logged = True
                 if draining and not self.active:
+                    drained = self.draining
+                    if drained:
+                        self.log.info("Worker %s drained", self.worker.worker_id)
                     return
                 if not draining and len(self.active) < self.concurrency and time.monotonic() >= retry_at:
                     try:
                         self.worker.store.expire()
+                        if stop.is_set() or self.draining:
+                            continue
                         now = time.monotonic()
                         self.recovery_after = {job_id: deadline for job_id, deadline in self.recovery_after.items()
                                                if deadline > now}
                         excluded = tuple(set(self.active) | set(self.recovery_after))
                         for job in self.worker.store.recoverable_jobs(
                                 exclude=excluded, limit=self.concurrency - len(self.active)):
-                            if stop.is_set():
+                            if stop.is_set() or self.draining:
                                 break
                             job_id = job["id"]
                             self.recovery_after[job_id] = now + 30
                             self._start(job_id, lambda job_id=job_id: self.worker.reconcile(job_id, stop=stop))
-                        while not stop.is_set() and len(self.active) < self.concurrency:
+                        while not stop.is_set() and not self.draining and len(self.active) < self.concurrency:
                             job = self.worker.store.claim(self.worker.worker_id, lease_s=self.worker.lease_s)
                             if job is not None:
                                 self._start(job["id"], lambda job=job: self.worker.run_claimed(job, stop=stop))
@@ -90,7 +119,10 @@ class WorkerManager:
                         backoff = min(30, backoff * 2)
                 self.wake.wait(self.poll_s)
         finally:
-            stop.set()
+            # A graceful drain has no owned work left. Do not turn it into a
+            # cancellation of siblings that may share the caller's stop Event.
+            if not drained:
+                stop.set()
             deadline = time.monotonic() + self.shutdown_s
             while self.active and time.monotonic() < deadline:
                 self._reap()

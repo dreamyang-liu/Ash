@@ -81,6 +81,54 @@ def test_journal_append_is_idempotent_but_not_rewritable(store):
         store.append_events(job["id"], claim["lease_token"], [{**event, "call_id": "changed"}])
 
 
+def test_nul_events_results_and_execution_survive_postgres_exactly(store):
+    job = store.submit(request(), "nul-fixture")
+    claim = store.claim("worker")
+    event = {"seq": 1, "type": "tool.finished", "output": "\x7fELF\0data"}
+    store.append_events(job["id"], claim["lease_token"], [event])
+    store.append_events(job["id"], claim["lease_token"], [event])
+    assert store.events(claim["active_attempt"]) == [event]
+    store.heartbeat(job["id"], claim["lease_token"], execution={"binary_note": "a\0b"})
+    store.heartbeat(job["id"], claim["lease_token"], execution={"next": 2})
+    result = {"final_text": "result\0tail", "error": "error\0detail"}
+    store.finish(job["id"], claim["lease_token"], result)
+    assert store.get(job["id"])["result"] == result
+    assert store.attempts(job["id"])[0]["execution"]["binary_note"] == "a\0b"
+    assert store.attempts(job["id"])[0]["execution"]["next"] == 2
+
+
+def test_global_claim_limit_preserves_existing_attempts_during_handover(store):
+    for index in range(8):
+        store.submit(request(), f"limited-{index}")
+    old = store.claim("old-worker")
+    limited = Store(store.dsn, max_running_jobs=2)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        claims = list(pool.map(lambda i: limited.claim(f"new-{i}"), range(8)))
+    new = [claim for claim in claims if claim]
+    assert len(new) == 1
+    assert limited.get(old["id"])["state"] == "running"
+    limited.finish(old["id"], old["lease_token"], {"status": "completed"})
+    assert limited.claim("new-after-release") is not None
+
+
+def test_binary_tool_projection_is_lossless_and_idempotent(store):
+    from runstore.index import Index
+
+    job = store.submit(request(), "binary-projection")
+    claim = store.claim("worker")
+    index = Index(store)
+    events = [
+        {"seq": 1, "type": "tool.started", "call_id": "binary", "name": "shell",
+         "args": {"command": "a\0b"}},
+        {"seq": 2, "type": "tool.finished", "call_id": "binary", "output": "\x7fELF\0payload"},
+    ]
+    index.project(job["id"], claim["lease_token"], {}, events)
+    index.project(job["id"], claim["lease_token"], {}, events)
+    (tool,) = index.tools(claim["active_attempt"])
+    assert tool["call"]["arguments"]["command"] == "a\0b"
+    assert tool["response"]["output"] == "\x7fELF\0payload"
+
+
 def test_actor_retry_needs_verified_pair_and_preserves_cap(store):
     job = store.submit(request(), "fixture")
     claim = store.claim("worker")

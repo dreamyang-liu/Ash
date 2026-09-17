@@ -11,10 +11,10 @@
 agent_tools:
   - name: shell
     description: |-
-      Execute a shell command synchronously or in the background.
+      Execute a shell command synchronously.
       Use for: running tests (pytest), installing packages (pip), git operations, and any other shell commands.
       Working directory defaults to the task's own, and `working_dir` overrides it.
-    arguments: [background, command, env, max_output_bytes, stdin, tail, timeout, truncate_mode, working_dir]
+    arguments: [command, env, max_output_bytes, stdin, tail, timeout, truncate_mode, working_dir]
     required: [command]
 
   - name: text_editor

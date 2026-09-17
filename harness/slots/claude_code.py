@@ -219,7 +219,8 @@ class ClaudeCodeSlot(AgentSlot):
         except RunAborted as exc:
             status = "error"
             error = str(exc)
-            journal.emit(AGENT_ERROR, message=error, reason="execution_uncertain")
+            reason = (task.control.stop_reason if task.control is not None else None) or "execution_uncertain"
+            journal.emit(AGENT_ERROR, message=error, reason=reason)
         except asyncio.TimeoutError:
             status = "timeout"
             error = "timed out after %ss" % task.timeout_s

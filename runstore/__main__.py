@@ -1,6 +1,7 @@
 """Run Store service and concurrent worker manager; no historical-data import command."""
 
 import argparse
+import logging
 import os
 from pathlib import Path
 import signal
@@ -28,7 +29,7 @@ def main() -> None:
     reason = volatile_reason(config["artifact_root"])
     if reason:
         parser.error(reason)
-    store = Store(os.environ["ASH_RUNSTORE_DSN"])
+    store = Store(os.environ["ASH_RUNSTORE_DSN"], max_running_jobs=config.get("max_running_jobs"))
     if args.command == "init":
         store.initialize()
     elif args.command == "serve":
@@ -49,10 +50,13 @@ def main() -> None:
             return
         from runstore.manager import WorkerManager
 
+        manager = WorkerManager(worker, concurrency=args.concurrency)
         stop = Event()
         signal.signal(signal.SIGTERM, lambda *_: stop.set())
         signal.signal(signal.SIGINT, lambda *_: stop.set())
-        WorkerManager(worker, concurrency=args.concurrency).run(stop=stop, once=args.once)
+        signal.signal(signal.SIGUSR1, lambda *_: manager.request_drain())
+        logging.basicConfig(level=logging.INFO)
+        manager.run(stop=stop, once=args.once)
 
 
 if __name__ == "__main__":

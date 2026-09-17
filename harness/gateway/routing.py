@@ -56,6 +56,18 @@ class ModelRoute:
     #: not code: prices change and differ per route (an RL checkpoint is free).
     pricing: Dict[str, float] = field(default_factory=dict)
     flatten_tool_namespaces: bool = False
+    #: Some Messages-compatible frontends require Bearer authentication.
+    #: Protocol defaults remain x-api-key for Messages and Bearer for Responses.
+    auth_scheme: str = "protocol"
+    #: Use the provider's model default when its Messages effort mapping is incompatible.
+    #: Other output_config fields and Responses reasoning controls are preserved.
+    omit_anthropic_effort: bool = False
+
+    def __post_init__(self):
+        if not isinstance(self.auth_scheme, str) or self.auth_scheme not in {"protocol", "bearer", "x-api-key"}:
+            raise ValueError("auth_scheme must be protocol, bearer or x-api-key")
+        if not isinstance(self.omit_anthropic_effort, bool):
+            raise ValueError("omit_anthropic_effort must be a boolean")
 
     def price(self, usage) -> float:
         """USD for one request's usage, 0.0 when this route has no pricing.
@@ -93,6 +105,8 @@ class ModelRoute:
             headers=dict(payload.get("headers") or {}),
             pricing=dict(payload.get("pricing") or {}),
             flatten_tool_namespaces=flatten,
+            auth_scheme=payload.get("auth_scheme", "protocol"),
+            omit_anthropic_effort=payload.get("omit_anthropic_effort", False),
         )
 
 

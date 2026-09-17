@@ -37,3 +37,28 @@ def journal_events(path: Path) -> list[dict]:
     except FileNotFoundError:
         return []
     return [json.loads(line) for line in lines if line.endswith(b"\n") and line.strip()]
+
+
+class JournalFrame:
+    """Parse only appended complete lines, while checking the observed prefix."""
+
+    def __init__(self) -> None:
+        self.data = b""
+        self.events: list[dict] = []
+        self.persisted = 0
+
+    def read(self, path: Path) -> list[dict]:
+        from runstore.store import Conflict
+
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            data = b""
+        if not data.startswith(self.data):
+            raise Conflict("Observed journal prefix was rewritten or truncated")
+        end = data.rfind(b"\n") + 1
+        complete = data[:end]
+        added = [json.loads(line) for line in complete[len(self.data):].splitlines() if line.strip()]
+        self.events.extend(added)
+        self.data = complete
+        return self.events

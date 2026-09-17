@@ -1,14 +1,9 @@
 {
   "tools": [
     {
-      "description": "Execute a shell command synchronously or in the background",
+      "description": "Execute a shell command synchronously",
       "inputSchema": {
         "properties": {
-          "background": {
-            "default": false,
-            "description": "Run in background, returns pid",
-            "type": "boolean"
-          },
           "command": {
             "description": "Shell command to execute",
             "type": "string"

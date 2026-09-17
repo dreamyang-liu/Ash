@@ -4,6 +4,7 @@ from copy import deepcopy
 from functools import lru_cache
 import json
 from pathlib import Path
+from threading import RLock
 
 from runstore.files import journal_events
 from runstore.message_export import (
@@ -14,6 +15,7 @@ from runstore.native import index_native, read_prefix
 
 SEQUENCE_STOP_REASON = "max_sequence_tokens"
 FRAMING_RESERVE = 1024
+_TOKENIZATION_LOCK = RLock()
 
 
 @lru_cache(maxsize=4)
@@ -71,6 +73,15 @@ def _qwen3_message_length(path, serialized_message, serialized_tools, first):
 
 
 def token_count(messages, tools, tokenizer_path):
+    # lru_cache protects its map, but concurrent cold misses can still enter
+    # Transformers' lazy import and tokenizer construction simultaneously.
+    # Fast tokenizer configuration is mutable too; serialize use within each
+    # process while retaining the existing per-message caches.
+    with _TOKENIZATION_LOCK:
+        return _token_count(messages, tools, tokenizer_path)
+
+
+def _token_count(messages, tools, tokenizer_path):
     normalized = deepcopy(messages)
     for message in normalized:
         for call in message.get("tool_calls") or []:

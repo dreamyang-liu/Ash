@@ -245,6 +245,18 @@ def _make_handler(gateway: GatewayServer):
                 except ValueError as error:
                     self._error(400, str(error), "invalid_request_error")
                     return
+            if shape == "messages" and route.omit_anthropic_effort:
+                output_config = payload.get("output_config")
+                if isinstance(output_config, dict) and "effort" in output_config:
+                    payload = {**payload, "output_config": {
+                        key: value for key, value in output_config.items() if key != "effort"
+                    }}
+                    gateway.record(agent_id=getattr(token, "agent_id", None),
+                                   status="compatibility_adaptation",
+                                   adaptation="omit_anthropic_effort",
+                                   requested_effort=output_config["effort"],
+                                   effective_effort="provider_model_default",
+                                   base_url=route.base_url)
             body = json.dumps(payload).encode()
             streaming = bool(payload.get("stream"))
 
@@ -279,7 +291,8 @@ def _make_handler(gateway: GatewayServer):
                 # Each protocol's own convention -- an Anthropic upstream reads
                 # x-api-key, an OpenAI-shaped one reads a bearer. Sending the
                 # wrong one is a 401 that looks like a bad key.
-                if shape == "responses":
+                if (route.auth_scheme == "bearer"
+                        or (route.auth_scheme == "protocol" and shape == "responses")):
                     headers["Authorization"] = "Bearer %s" % key
                 else:
                     headers["x-api-key"] = key

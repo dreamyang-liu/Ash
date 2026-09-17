@@ -1,0 +1,25 @@
+# Synchronous sandbox execution with file editing and search.
+agent_tools:
+  - name: shell
+    description: |-
+      Execute a shell command inside the sandbox. Use it for building, testing,
+      and git operations. Each call starts a fresh process; set working_dir
+      when needed. Use timeout for long commands and tail to limit noisy output.
+    arguments: [command, working_dir, timeout, tail]
+    required: [command]
+
+  - name: text_editor
+    description: |-
+      View or edit a file in the sandbox. view reads numbered lines,
+      str_replace replaces an exact string that must occur once, insert adds
+      text after a line, and write creates or replaces a whole file.
+    arguments: [command, path, view_range, old_str, new_str, insert_line,
+                insert_text, file_text]
+    required: [command, path]
+
+  - name: grep_files
+    description: |-
+      Search sandbox files using a ripgrep regex. Set path for the directory
+      or file, include for a file glob, and limit to bound the result count.
+    arguments: [pattern, path, include, limit]
+    required: [pattern]

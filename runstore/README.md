@@ -249,6 +249,36 @@ lease-expiry reconciliation after restart, not blindly replayed. A manager crash
 still removes supervision of all its attempts; shared DB/host failures can affect
 all tasks. This is bounded fault handling, not a guarantee against every outage.
 
+### Drain one worker before removing it
+
+Send `SIGUSR1` to the **manager process** of a worker running this version:
+
+```bash
+kill -USR1 <worker-manager-pid>
+# For a systemd service, signal only its main process:
+systemctl kill --kill-whom=main --signal=SIGUSR1 <worker-unit>
+```
+
+The manager logs that it is draining, stops admitting new jobs and recovery work,
+and keeps supervising and renewing leases for its current attempts. A claim
+already in flight may still return one job; the manager finishes that job too.
+When all admitted work has finished, it logs completion and exits successfully.
+Other workers continue claiming from the shared queue. Repeated drain requests
+are harmless; draining is one-way. A service configured with `Restart=always`
+will relaunch the worker after it drains; use `Restart=on-failure` for this flow.
+
+For an embedded manager, call `manager.request_drain()`; `manager.draining`
+reports whether draining was requested. Custom launchers must wire their own
+control signal to that method. The request only latches a flag, so the signal
+handler acquires no locks; the loop observes it before admission and after each
+poll (normally within one second when idle). Drain does not set the cancellation event passed
+to active attempts. Their deadlines and lease checks still apply. It waits for
+supervisors to finish, including blocked I/O; SIGINT/SIGTERM retains the bounded
+forced-shutdown behavior above if an operator needs to stop waiting.
+
+An older running worker has no drain handler. Verify its code/launcher version
+before sending SIGUSR1; the default signal action can terminate such a process.
+
 Known expired attempts are reconciled by polling workers. Other quarantines
 require investigation; explicit reconciliation is available with:
 

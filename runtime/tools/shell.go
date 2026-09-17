@@ -37,16 +37,15 @@ type ShellTool struct{}
 func (s *ShellTool) Name() string { return "shell" }
 
 func (s *ShellTool) Description() string {
-	return "Execute a shell command synchronously or in the background"
+	return "Execute a shell command synchronously"
 }
 
 func (s *ShellTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"command":    map[string]any{"type": "string", "description": "Shell command to execute"},
-			"background": map[string]any{"type": "boolean", "default": false, "description": "Run in background, returns pid"},
-			"timeout":    map[string]any{"type": "integer", "default": 300, "description": "Timeout in seconds"},
+			"command": map[string]any{"type": "string", "description": "Shell command to execute"},
+			"timeout": map[string]any{"type": "integer", "default": 300, "description": "Timeout in seconds"},
 			"tail": map[string]any{
 				"type":        "integer",
 				"description": "Return only the last N lines of each stream. Applied after the byte budget, so if the command produced more than max_output_bytes these are the last N lines of what was captured. Setting this makes the capture keep the tail of the output (truncate_mode T1) unless you name a mode yourself.",

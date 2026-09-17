@@ -29,7 +29,7 @@ class Watchdog:
 
     def renew(self, started: float) -> None:
         with self.lock:
-            self.lease_deadline = started + self.lease_s
+            self.lease_deadline = max(self.lease_deadline, started + self.lease_s)
         self.check()
 
     def arm(self, identity: dict, deadline: float, *, running: Callable | None = None) -> None:
@@ -72,3 +72,33 @@ class Watchdog:
             except Exception:
                 logging.getLogger(__name__).exception("Attempt watchdog could not stop its process")
             return
+
+
+class LeaseKeeper:
+    """Renew independently of ingestion, native indexing and final collection.
+
+    A failed/blocked renewal never extends the local watchdog deadline.
+    Database fencing remains authoritative on every write.
+    """
+
+    def __init__(self, store, job: dict, lease_s: float, watchdog: Watchdog) -> None:
+        self.finished = Event()
+
+        def run() -> None:
+            while not self.finished.wait(min(10, lease_s / 4)):
+                try:
+                    watchdog.check()
+                    started = time.monotonic()
+                    store.heartbeat(job["id"], job["lease_token"], lease_s=lease_s)
+                    watchdog.renew(started)
+                except Exception:
+                    # A final publication can fence this last heartbeat too.
+                    # In either case, do not renew a lease we cannot prove.
+                    return
+
+        self.thread = Thread(target=run, name="attempt-lease", daemon=True)
+        self.thread.start()
+
+    def close(self) -> None:
+        self.finished.set()
+        self.thread.join(timeout=16)

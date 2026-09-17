@@ -94,6 +94,54 @@ def test_cutoff_does_not_reclassify_uncertain_execution(tmp_path):
     assert not is_truncated_result(result)
 
 
+@pytest.mark.parametrize("stop_reason", ["max_turns_reached", "timeout", None])
+def test_real_claude_slot_distinguishes_limit_from_uncertain_execution(tmp_path, monkeypatch, stop_reason):
+    sdk = pytest.importorskip("claude_agent_sdk")
+    from harness.slots.claude_code import ClaudeCodeSlot
+
+    directory = tmp_path / "attempt"
+    directory.mkdir()
+    order = []
+    session = SimpleNamespace(snapshot=lambda **kwargs: order.append("snapshot") or SimpleNamespace(id="final"))
+    owned = SimpleNamespace(server=SimpleNamespace(pipeline=ToolPipeline()), session=session,
+                            sandbox_id="vm", stop_server=lambda: order.append("drain"),
+                            destroy=lambda: order.append("destroy"))
+    monkeypatch.setattr(Orchestrator, "_wire_sandbox", lambda *args: (owned, None))
+    monkeypatch.setattr(Orchestrator, "_wire_gateway", lambda *args: None)
+    monkeypatch.setattr(Orchestrator, "_wire_checkpoints", lambda *args: None)
+    monkeypatch.setattr(ClaudeCodeSlot, "version", lambda self: "test")
+    original = ClaudeCodeSlot.run_async
+
+    async def run_async(self, task, journal, mcp=None):
+        async def query(**kwargs):
+            yield sdk.SystemMessage(subtype="init", data={"session_id": "native"})
+            task.control.request_stop("rollout budget exhausted" if stop_reason else "execution_uncertain",
+                                      stop_reason=stop_reason)
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(sdk, "query", query)
+        return await original(self, task, journal, mcp)
+
+    import asyncio
+    monkeypatch.setattr(ClaudeCodeSlot, "run_async", run_async)
+    result = execute({"kind": "rollout", "attempt_id": "attempt", "profile_config": {},
+                      "effective_spec": {"prompt": "task", "slot": "claude-code", "extra": {
+                          "rollout_contract": {"message_export": True, "max_turns": 1,
+                                               "deadline_at": time.time() + 10,
+                                               "model_endpoint": "http://model", "sampling_params": {}}
+                      }}}, directory)
+    if stop_reason:
+        assert result["status"] == "truncated", result
+        assert result["stop_reason"] == stop_reason
+        assert result["final_snapshot_id"] == "final"
+        assert order.index("drain") < order.index("snapshot") < order.index("destroy")
+    else:
+        assert result["status"] == "error"
+        assert "final_snapshot_id" not in result
+        assert "snapshot" not in order
+        assert "Uncertain tool execution" in result["training_snapshot_error"]
+
+
 def test_cutoff_exports_complete_records_without_rewriting_partial_native_tail(tmp_path):
     path = write_history(tmp_path)
     path.write_bytes(path.read_bytes() + b'{"unfinished":')

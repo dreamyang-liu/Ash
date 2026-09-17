@@ -89,6 +89,20 @@ def test_a_parameter_the_runtime_does_not_accept_is_refused():
     assert "max_length" in str(caught.value)
 
 
+def test_background_cannot_be_offered_or_routed_by_the_file_panel():
+    with pytest.raises(PanelError, match="background"):
+        compile_panel([_spec(arguments=["command", "background"])], DECL)
+    panel = load_panel("file_tools", format="raw")
+    assert panel.names() == ["shell", "text_editor", "grep_files"]
+    with pytest.raises(ValueError, match="background"):
+        panel.route("shell", {"command": "true", "background": True})
+    assert panel.route("text_editor", {
+        "command": "write", "path": "/app/probe", "file_text": "probe"
+    }) == ("text_editor", {
+        "command": "write", "path": "/app/probe", "file_text": "probe"
+    })
+
+
 def test_a_view_of_a_tool_the_runtime_does_not_serve_is_refused():
     with pytest.raises(PanelError) as caught:
         compile_panel([_spec(name="run_tests", runtime_tool="pytest")], DECL)
@@ -293,5 +307,3 @@ def _tool_dir(root, name, binary):
         f"name: {name}\ndescription: {name}\nbinary: {{path: {binary}}}\n"
         f"parameters: {{target: {{type: string, map: {{positional: 0}}}}}}\n")
     return str(d)
-
-

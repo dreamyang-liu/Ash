@@ -149,13 +149,12 @@ EXEC_TOOLS = [
         "description": (
             "Execute a shell command in a sandbox container.\n"
             "Working directory defaults to /testbed.\n"
-            "Use 'tail' to limit output. Use 'background: true' for long-running commands."
+            "Use 'tail' to limit output and 'timeout' for long-running commands."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "Shell command to execute"},
-                "background": {"type": "boolean", "default": False},
                 "timeout": {"type": "integer", "default": 300},
                 "tail": {"type": "integer", "description": "Only return last N lines"},
                 "working_dir": {"type": "string", "description": "Working directory (default: /testbed)"},

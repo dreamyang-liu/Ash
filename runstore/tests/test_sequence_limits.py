@@ -1,6 +1,9 @@
 import hashlib
 import json
+import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +19,33 @@ class CharacterTokenizer:
             for call in message.get("tool_calls") or []:
                 assert isinstance(call["function"]["arguments"], dict)
         return [0] * sum(len(message.get("content", "")) for message in messages)
+
+
+def test_concurrent_cold_counts_initialize_one_tokenizer(monkeypatch):
+    loads = []
+    barrier = Barrier(32)
+
+    class Loader:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            loads.append(args[0])
+            time.sleep(0.02)
+            return CharacterTokenizer()
+
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(AutoTokenizer=Loader))
+    monkeypatch.setattr(limits, "_training_format", lambda path: "full")
+    limits._tokenizer.cache_clear()
+
+    def count(_):
+        barrier.wait(timeout=10)
+        return limits.token_count([{"role": "user", "content": "task"}], [], "/cold-fixture")
+
+    try:
+        with ThreadPoolExecutor(max_workers=32) as executor:
+            assert list(executor.map(count, range(32))) == [4] * 32
+        assert loads == ["/cold-fixture"]
+    finally:
+        limits._tokenizer.cache_clear()
 
 
 @pytest.fixture

@@ -13,14 +13,14 @@ from threading import Event
 from uuid import uuid4
 
 from runstore.config import merge, referenced_env, resolve, snapshot_validator
-from runstore.files import journal_events, read_json, write_json
+from runstore.files import JournalFrame, journal_events, read_json, write_json
 from runstore.failures import failure_kind
 from runstore.index import Index
 from runstore.native import index_native
 from runstore.payload import PayloadUnavailable, encode_payload, send_payload
 from runstore.specs import digest, validate_continuation
 from runstore.store import Store
-from runstore.watchdog import Watchdog
+from runstore.watchdog import LeaseKeeper, Watchdog
 
 
 def process_identity(pid: int) -> dict | None:
@@ -91,6 +91,7 @@ class Worker:
         self.worker_id = worker_id or f"{os.uname().nodename}-{os.getpid()}-{uuid4().hex[:8]}"
         self.lease_s = lease_s
         self.index = Index(store, snapshot_valid or snapshot_validator(store, config))
+        self._frames: dict[Path, JournalFrame] = {}
 
     def _scope(self, request: dict, envelope: dict | None = None) -> dict:
         recovery = (envelope or {}).get("recovery") or {}
@@ -100,10 +101,16 @@ class Worker:
                 "native_prefix_hash": recovery.get("native", {}).get("sha256")}
 
     def _ingest(self, job: dict, directory: Path, envelope: dict) -> list[dict]:
-        events = journal_events(directory / "trajectory.jsonl")
+        frame = self._frames.setdefault(directory, JournalFrame())
+        events = frame.read(directory / "trajectory.jsonl")
         if not events:
             return []
-        self.store.append_events(job["id"], job["lease_token"], events)
+        # Each transaction releases the fenced job row promptly so that the
+        # independent heartbeat can renew even when catching up a long journal.
+        while frame.persisted < len(events):
+            end = min(len(events), frame.persisted + 256)
+            self.store.append_events(job["id"], job["lease_token"], events[frame.persisted:end])
+            frame.persisted = end
         refs = [event["native_session_id"] for event in events
                 if event.get("type") == "session.ref" and event.get("native_session_id")]
         points = []
@@ -216,6 +223,7 @@ class Worker:
         directory = self.root / job["id"] / job["active_attempt"]
         process = None
         identity = None
+        keeper = None
         watchdog = Watchdog(stop_process, stop if stop is not None else Event(), self.lease_s)
         try:
             watchdog.check()
@@ -293,6 +301,7 @@ class Worker:
                                      execution={"directory": str(directory), "process": identity,
                                                 "request_hash": digest(envelope), "scope": self._scope(request, envelope)})
                 watchdog.renew(heartbeat_started)
+                keeper = LeaseKeeper(self.store, job, self.lease_s, watchdog)
                 send_payload(process.stdin, payload, timeout_s=min(30, self.lease_s / 4,
                                                                   timeout - (time.monotonic() - started)))
                 while process.poll() is None:
@@ -334,7 +343,10 @@ class Worker:
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
         finally:
+            if keeper is not None:
+                keeper.close()
             watchdog.close()
+            self._frames.pop(directory, None)
         return job["id"]
 
     def reconcile(self, job_id: str, *, stop: Event | None = None) -> bool:
@@ -351,6 +363,8 @@ class Worker:
         job = self.store.adopt_quarantined(job_id, self.worker_id, self.lease_s)
         if job is None:
             return False
+        watchdog = Watchdog(stop_process, stop if stop is not None else Event(), self.lease_s)
+        keeper = LeaseKeeper(self.store, job, self.lease_s, watchdog)
         try:
             if stop is not None and stop.is_set():
                 raise RuntimeError("Worker is shutting down")
@@ -365,3 +379,7 @@ class Worker:
             self.store.finish(job_id, job["lease_token"], {"error": f"Recovery failed: {type(error).__name__}: {error}"},
                               state="quarantined")
             return False
+        finally:
+            keeper.close()
+            watchdog.close()
+            self._frames.pop(directory, None)

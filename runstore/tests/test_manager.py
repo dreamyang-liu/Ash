@@ -116,6 +116,137 @@ def test_once_claims_at_most_one_new_job_even_with_large_capacity():
     assert executed == ["0"] and len(queue.jobs) == 19
 
 
+def test_drain_before_start_admits_nothing_and_preserves_caller_stop():
+    queue = Queue(3)
+    stop = Event()
+    manager = WorkerManager(SimpleNamespace(store=queue, worker_id="drained"))
+    manager.request_drain()
+    manager.request_drain()
+    manager.run(stop=stop)
+    assert manager.draining and not manager.active
+    assert not stop.is_set() and not queue.claimers and len(queue.jobs) == 3
+
+
+def drain_signal_inside_event_lock() -> None:
+    import signal
+
+    manager = WorkerManager(SimpleNamespace(worker_id="signal-lock"))
+    signal.signal(signal.SIGUSR1, lambda *_: manager.request_drain())
+    with manager.wake._cond:
+        signal.raise_signal(signal.SIGUSR1)
+    assert manager.draining
+
+
+def test_drain_signal_cannot_deadlock_an_interrupted_manager_event():
+    process = multiprocessing.get_context("spawn").Process(target=drain_signal_inside_event_lock)
+    process.start()
+    try:
+        process.join(timeout=5)
+        assert not process.is_alive() and process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.kill()
+        process.join(timeout=5)
+
+
+def test_drain_finishes_active_work_without_refilling_or_cancelling():
+    queue = Queue(4)
+    entered, release, stop = Event(), Event(), Event()
+    completed = []
+
+    def execute(job, *, stop):
+        entered.set()
+        assert release.wait(5)
+        assert not stop.is_set()
+        completed.append(job["id"])
+
+    manager = WorkerManager(SimpleNamespace(store=queue, worker_id="drain", lease_s=60,
+                                            run_claimed=execute), poll_s=0.01, shutdown_s=0.01)
+    thread = Thread(target=lambda: manager.run(stop=stop))
+    thread.start()
+    try:
+        assert entered.wait(5)
+        manager.request_drain()
+        thread.join(timeout=0.1)  # Drain must outlive the cancellation grace.
+        assert thread.is_alive() and not stop.is_set()
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive() and completed == ["0"]
+        assert len(queue.jobs) == 3 and not stop.is_set()
+    finally:
+        release.set()
+        stop.set()
+        thread.join(timeout=5)
+
+
+def test_drain_during_claim_supervises_the_returned_job():
+    queue = Queue(2)
+    entered, release, stop = Event(), Event(), Event()
+    original_claim = queue.claim
+    completed = []
+
+    def claim(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original_claim(*args, **kwargs)
+
+    queue.claim = claim
+    manager = WorkerManager(SimpleNamespace(store=queue, worker_id="claim", lease_s=60,
+        run_claimed=lambda job, **kw: completed.append((job["id"], kw["stop"].is_set()))), poll_s=0.01)
+    thread = Thread(target=lambda: manager.run(stop=stop))
+    thread.start()
+    try:
+        assert entered.wait(5)
+        manager.request_drain()
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive() and completed == [("0", False)]
+        assert len(queue.jobs) == 1 and not stop.is_set()
+    finally:
+        release.set()
+        stop.set()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("during", ["expire", "recoverable_jobs"])
+def test_drain_during_queue_scan_stops_recovery_and_new_claims(during):
+    queue = Queue(2)
+    recovered = []
+    manager = WorkerManager(SimpleNamespace(store=queue, worker_id="scan", lease_s=60,
+                                            reconcile=lambda job, **kw: recovered.append(job)))
+
+    def scan(**kwargs):
+        manager.request_drain()
+        return [{"id": "expired-1"}, {"id": "expired-2"}]
+
+    setattr(queue, during, scan)
+    manager.run()
+    assert not recovered and not queue.claimers and len(queue.jobs) == 2
+
+
+def test_stop_during_drain_still_cancels_owned_work():
+    queue = Queue(2)
+    entered, stop = Event(), Event()
+
+    def execute(job, *, stop):
+        entered.set()
+        assert stop.wait(5)
+
+    manager = WorkerManager(SimpleNamespace(store=queue, worker_id="stop", lease_s=60,
+                                            run_claimed=execute), poll_s=0.01)
+    thread = Thread(target=lambda: manager.run(stop=stop))
+    thread.start()
+    try:
+        assert entered.wait(5)
+        manager.request_drain()
+        stop.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive() and len(queue.jobs) == 1
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+
+
 def test_shutdown_does_not_wait_forever_for_blocked_io():
     queue = Queue(2)
     entered, release, stop = Event(), Event(), Event()
@@ -267,23 +398,133 @@ def test_cli_routes_concurrency_and_once_to_manager(tmp_path, monkeypatch):
     configuration = tmp_path / "worker.json"
     configuration.write_text(json.dumps(config(tmp_path / "artifacts")))
     captured = {}
+    handlers = {}
 
     class Manager:
         def __init__(self, worker, *, concurrency):
             captured["concurrency"] = concurrency
 
+        def request_drain(self):
+            captured["drain_requests"] = captured.get("drain_requests", 0) + 1
+
         def run(self, *, stop, once):
             captured["once"] = once
             assert not stop.is_set()
+            handlers[cli.signal.SIGUSR1](None, None)
+            assert not stop.is_set()
+            handlers[cli.signal.SIGTERM](None, None)
+            assert stop.is_set()
 
     monkeypatch.setenv("ASH_RUNSTORE_DSN", "fixture-not-connected")
     monkeypatch.setattr(sys, "argv", ["runstore", "worker", "--config", str(configuration),
                                     "--concurrency", "24", "--once"])
     monkeypatch.setattr(cli, "volatile_reason", lambda root: None)
-    monkeypatch.setattr(cli.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(cli.signal, "signal", lambda signum, handler: handlers.__setitem__(signum, handler))
     monkeypatch.setattr("runstore.manager.WorkerManager", Manager)
     cli.main()
-    assert captured == {"concurrency": 24, "once": True}
+    assert captured == {"concurrency": 24, "once": True, "drain_requests": 1}
+
+
+def test_drain_preserves_live_child_lease_and_sibling_worker(store, tmp_path, fixture_children):
+    gated = store.submit(request(prompt="gate-fixture", timeout_s=30), "draining-job")
+    stop = Event()
+    manager = WorkerManager(Worker(store, config(tmp_path), worker_id="draining", lease_s=3),
+                            poll_s=0.02, shutdown_s=0.1)
+    peer = WorkerManager(Worker(store, config(tmp_path), worker_id="peer", lease_s=3), poll_s=0.02)
+    thread = Thread(target=lambda: manager.run(stop=stop))
+    peer_thread = Thread(target=lambda: peer.run(stop=stop))
+    thread.start()
+    directory = None
+    try:
+        eventually(lambda: bool(store.get(gated["id"])["active_attempt"]))
+        directory = attempt_directory(store, tmp_path, gated)
+        eventually(lambda: (directory / "executed.json").exists())
+        attempt = store.attempts(gated["id"])[0]
+        identity = attempt["execution"]["process"]
+        lease = store.get(gated["id"])["lease_until"]
+        manager.request_drain()
+        queued = store.submit(request(), "peer-job")
+        peer_thread.start()
+        eventually(lambda: store.get(queued["id"])["state"] == "succeeded")
+        assert store.attempts(queued["id"])[0]["worker_id"] == "peer"
+        time.sleep(3.2)  # Exceed the draining worker's original lease duration.
+        assert store.get(gated["id"])["lease_until"] > lease and store.expire() == []
+        assert process_identity(identity["pid"]) == identity
+        assert thread.is_alive() and not stop.is_set()
+        (directory / "release").touch()
+        thread.join(timeout=10)
+        assert not thread.is_alive() and not stop.is_set()
+        assert store.get(gated["id"])["state"] == "succeeded"
+        following = store.submit(request(), "after-drain")
+        eventually(lambda: store.get(following["id"])["state"] == "succeeded")
+        assert store.attempts(following["id"])[0]["worker_id"] == "peer"
+        assert peer_thread.is_alive()
+        assert len(store.attempts(gated["id"])) == 1
+    finally:
+        if directory is not None:
+            (directory / "release").touch()
+        stop.set()
+        thread.join(timeout=15)
+        if peer_thread.ident is not None:
+            peer_thread.join(timeout=15)
+        assert not thread.is_alive() and not peer_thread.is_alive()
+
+
+def run_drain_cli_fixture(dsn: str, root: str) -> None:
+    import os
+    import sys
+    from runstore import __main__ as cli
+
+    popen = subprocess.Popen
+
+    def launch(command, **kwargs):
+        return popen([*command[:2], "runstore.tests.payload_child", *command[3:]], **kwargs)
+
+    subprocess.Popen = launch
+    cli.volatile_reason = lambda _: None  # Only these disposable test artifacts use /tmp.
+    os.environ["ASH_RUNSTORE_DSN"] = dsn
+    sys.argv = ["runstore", "worker", "--config", str(Path(root) / "cli-config.json")]
+    cli.main()
+
+
+def test_cli_sigusr1_drains_real_worker_without_interrupting_child(store, tmp_path):
+    import json
+    import os
+    import signal
+
+    gated = store.submit(request(prompt="gate-fixture", timeout_s=30), "signal-job")
+    queued = store.submit(request(), "queued-after-signal")
+    (tmp_path / "cli-config.json").write_text(json.dumps(config(tmp_path)))
+    process = multiprocessing.get_context("spawn").Process(
+        target=run_drain_cli_fixture, args=(store.dsn, str(tmp_path)))
+    identity = directory = None
+    process.start()
+    try:
+        eventually(lambda: bool(store.get(gated["id"])["active_attempt"]))
+        directory = attempt_directory(store, tmp_path, gated)
+        eventually(lambda: (directory / "executed.json").exists())
+        attempt = store.attempts(gated["id"])[0]
+        identity = attempt["execution"]["process"]
+        os.kill(process.pid, signal.SIGUSR1)
+        time.sleep(0.2)
+        assert process.is_alive() and process_identity(identity["pid"]) == identity
+        (directory / "release").touch()
+        process.join(timeout=15)
+        assert not process.is_alive() and process.exitcode == 0
+        assert store.get(gated["id"])["state"] == "succeeded"
+        assert len(store.attempts(gated["id"])) == 1
+        assert store.get(queued["id"])["state"] == "queued"
+        assert process_identity(identity["pid"]) is None
+    finally:
+        if directory is not None:
+            (directory / "release").touch()
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=15)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=5)
+        stop_process(identity)
 
 
 def test_shutdown_stops_all_owned_children_and_leaves_queued_jobs(store, tmp_path, fixture_children):

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+import json
 from typing import Iterator
 from uuid import uuid4
 
 from runstore.payload import checked_payload, encode_payload
-from runstore.specs import JobSpec, canonical, digest
+from runstore.specs import JobSpec, digest
+from runstore.jsonb_codec import diagnostic_text, dumps as db_json, loads as db_loads
 
 
 class Conflict(ValueError):
@@ -20,17 +22,21 @@ class Fenced(Conflict):
 
 
 class Store:
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, *, max_running_jobs: int | None = None) -> None:
         self.dsn = dsn
+        if max_running_jobs is not None and (type(max_running_jobs) is not int or max_running_jobs < 1):
+            raise ValueError("max_running_jobs must be a positive integer")
+        self.max_running_jobs = max_running_jobs
 
     @contextmanager
     def transaction(self) -> Iterator:
         import psycopg2
-        from psycopg2.extras import RealDictCursor
+        from psycopg2.extras import RealDictCursor, register_default_jsonb
 
         connection = psycopg2.connect(self.dsn, connect_timeout=5, keepalives=1,
                                       keepalives_idle=5, keepalives_interval=2,
                                       keepalives_count=2, tcp_user_timeout=10000)
+        register_default_jsonb(connection, loads=db_loads)
         try:
             with connection:
                 with connection.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -53,7 +59,7 @@ class Store:
                 (id,idempotency_key,request_hash,request,kind,max_attempts)
                 VALUES (%s,%s,%s,%s::jsonb,%s,%s)
                 ON CONFLICT(idempotency_key) DO NOTHING""",
-                           (uuid4().hex, idempotency_key, digest(body), canonical(body),
+                           (uuid4().hex, idempotency_key, digest(body), db_json(body),
                             request.kind, request.max_infra_retries + 1))
             cursor.execute("SELECT * FROM rs_jobs WHERE idempotency_key=%s", (idempotency_key,))
             job = dict(cursor.fetchone())
@@ -84,6 +90,13 @@ class Store:
         if lease_s <= 0:
             raise ValueError("Lease must be positive")
         with self.transaction() as cursor:
+            if self.max_running_jobs is not None:
+                # New claimers share a database-wide admission limit during a
+                # rolling worker handover; existing attempts keep their leases.
+                cursor.execute("SELECT pg_advisory_xact_lock(82951735)")
+                cursor.execute("SELECT count(*) AS count FROM rs_jobs WHERE state='running'")
+                if cursor.fetchone()["count"] >= self.max_running_jobs:
+                    return None
             cursor.execute("""SELECT * FROM rs_jobs WHERE state='queued'
                 AND ready_at <= clock_timestamp() AND attempt_count < max_attempts
                 AND kind=ANY(%s) ORDER BY ready_at,created_at,id
@@ -108,7 +121,7 @@ class Store:
             data = encode_payload(payload, job_id, job["active_attempt"])
             if payload["kind"] != job["kind"]:
                 raise ValueError("Attempt payload kind differs from job")
-            cursor.execute("SELECT %s::jsonb AS payload", (data.decode("utf-8"),))
+            cursor.execute("SELECT %s::jsonb AS payload", (db_json(json.loads(data)),))
             frozen = cursor.fetchone()["payload"]
             fingerprint = digest(frozen)
             cursor.execute("SELECT payload,payload_hash FROM rs_attempts WHERE id=%s",
@@ -120,7 +133,7 @@ class Store:
                     raise Conflict("Attempt payload is already frozen")
             else:
                 cursor.execute("UPDATE rs_attempts SET payload=%s::jsonb,payload_hash=%s WHERE id=%s",
-                               (canonical(frozen), fingerprint, job["active_attempt"]))
+                               (db_json(frozen), fingerprint, job["active_attempt"]))
             return frozen
 
     def payload(self, job_id: str, attempt_id: str) -> dict:
@@ -148,8 +161,10 @@ class Store:
             cursor.execute("""UPDATE rs_jobs SET lease_until=clock_timestamp()+%s*interval '1 second',
                 phase=COALESCE(%s,phase),updated_at=clock_timestamp() WHERE id=%s""", (lease_s, phase, job_id))
             if execution is not None:
-                cursor.execute("UPDATE rs_attempts SET execution=execution || %s::jsonb WHERE id=%s",
-                               (canonical(execution), job["active_attempt"]))
+                cursor.execute("SELECT execution FROM rs_attempts WHERE id=%s", (job["active_attempt"],))
+                merged = {**cursor.fetchone()["execution"], **execution}
+                cursor.execute("UPDATE rs_attempts SET execution=%s::jsonb WHERE id=%s",
+                               (db_json(merged), job["active_attempt"]))
 
     def expire(self) -> list[str]:
         with self.transaction() as cursor:
@@ -168,20 +183,30 @@ class Store:
             return [dict(row) for row in cursor.fetchall()]
 
     def append_events(self, job_id: str, token: str, events: list[dict]) -> None:
+        from psycopg2.extras import execute_values
+
+        unique = {}
+        for event in events:
+            seq = event.get("seq")
+            if type(seq) is not int or seq < 1:
+                raise ValueError("Journal sequence must be positive")
+            if seq in unique and unique[seq] != event:
+                raise Conflict("Journal sequence was rewritten")
+            unique[seq] = event
         with self.transaction() as cursor:
             job = self._fence(cursor, job_id, token)
-            for event in events:
-                seq = event.get("seq")
-                if type(seq) is not int or seq < 1:
-                    raise ValueError("Journal sequence must be positive")
-                cursor.execute("""INSERT INTO rs_events(attempt_id,seq,event) VALUES(%s,%s,%s::jsonb)
-                    ON CONFLICT(attempt_id,seq) DO NOTHING""",
-                               (job["active_attempt"], seq, canonical(event)))
-                if cursor.rowcount == 0:
-                    cursor.execute("SELECT event FROM rs_events WHERE attempt_id=%s AND seq=%s",
-                                   (job["active_attempt"], seq))
-                    if cursor.fetchone()["event"] != event:
-                        raise Conflict("Journal sequence was rewritten")
+            if not unique:
+                return
+            inserted = execute_values(cursor, """INSERT INTO rs_events(attempt_id,seq,event) VALUES %s
+                ON CONFLICT(attempt_id,seq) DO NOTHING RETURNING seq""",
+                [(job["active_attempt"], seq, db_json(event)) for seq, event in unique.items()],
+                template="(%s,%s,%s::jsonb)", page_size=256, fetch=True)
+            duplicates = list(unique.keys() - {row["seq"] for row in inserted})
+            if duplicates:
+                cursor.execute("SELECT seq,event FROM rs_events WHERE attempt_id=%s AND seq=ANY(%s)",
+                               (job["active_attempt"], duplicates))
+                if any(row["event"] != unique[row["seq"]] for row in cursor.fetchall()):
+                    raise Conflict("Journal sequence was rewritten")
 
     def events(self, attempt_id: str, after: int = 0, limit: int = 1000) -> list[dict]:
         with self.transaction() as cursor:
@@ -200,15 +225,17 @@ class Store:
             if retry and job["kind"] == "rollout" and not recovery:
                 raise ValueError("Actor retry requires a verified continuation and remaining budget")
             next_state = "queued" if retry and job["attempt_count"] < job["max_attempts"] else state
+            cursor.execute("SELECT execution FROM rs_attempts WHERE id=%s", (job["active_attempt"],))
+            execution = {**cursor.fetchone()["execution"], "recovery": recovery}
             cursor.execute("""UPDATE rs_attempts SET state=%s,result=%s::jsonb,error=%s,
-                finished_at=clock_timestamp(),execution=execution || %s::jsonb WHERE id=%s""",
-                           (state, canonical(result), result.get("error"),
-                            canonical({"recovery": recovery}), job["active_attempt"]))
+                finished_at=clock_timestamp(),execution=%s::jsonb WHERE id=%s""",
+                           (state, db_json(result), diagnostic_text(result.get("error")),
+                            db_json(execution), job["active_attempt"]))
             cursor.execute("""UPDATE rs_jobs SET state=%s,phase=%s,result=%s::jsonb,error=%s,
                 lease_until=NULL,lease_token=NULL,updated_at=clock_timestamp(),
                 ready_at=clock_timestamp()+%s*interval '1 second' WHERE id=%s""",
                            (next_state, "retry_wait" if next_state == "queued" else state,
-                            canonical(result), result.get("error"),
+                            db_json(result), diagnostic_text(result.get("error")),
                             30 * job["attempt_count"] if retry else 0, job_id))
 
     def cancel_queued(self, job_id: str) -> None:

@@ -331,6 +331,68 @@ def test_routing_table_from_file(tmp_path):
     assert table.models() == ["local"]
 
 
+@pytest.mark.parametrize("scheme,shape,expected", [
+    ("bearer", "messages", "authorization"),
+    ("x-api-key", "responses", "x-api-key"),
+])
+def test_explicit_upstream_auth_replaces_slot_credentials(upstream, monkeypatch, scheme, shape, expected):
+    monkeypatch.setenv("ASH_UPSTREAM_TEST_KEY", "provider-secret")
+    route = ModelRoute.from_dict({"base_url": upstream.base_url,
+                                  "api_key_env": "ASH_UPSTREAM_TEST_KEY", "auth_scheme": scheme})
+    table = RoutingTable({"default": route})
+    token = table.mint("test-agent")
+    gateway = GatewayServer(table).start()
+    try:
+        response = httpx.post(gateway.base_url + "/v1/" + shape,
+                              headers={"Authorization": "Bearer " + token.token,
+                                       "x-api-key": token.token}, json={"model": "model"}, timeout=5)
+        assert response.status_code == 200
+        headers = {key.lower(): value for key, value in upstream.requests[0]["headers"].items()}
+        assert headers[expected] == ("Bearer provider-secret" if expected == "authorization" else "provider-secret")
+        assert ("x-api-key" if expected == "authorization" else "authorization") not in headers
+        assert token.token not in json.dumps(headers)
+    finally:
+        gateway.stop()
+
+
+@pytest.mark.parametrize("scheme", [None, "unknown", True, []])
+def test_invalid_upstream_auth_is_rejected(scheme):
+    with pytest.raises(ValueError, match="auth_scheme"):
+        ModelRoute.from_dict({"auth_scheme": scheme})
+
+
+@pytest.mark.parametrize("shape,omit", [("messages", True), ("messages", False), ("responses", True)])
+def test_model_default_effort_preserves_other_controls(upstream, tmp_path, shape, omit):
+    route = ModelRoute.from_dict({"base_url": upstream.base_url, "omit_anthropic_effort": omit})
+    table = RoutingTable({"default": route})
+    token = table.mint("agent")
+    path = tmp_path / "gateway.jsonl"
+    with JournalWriter(path, run_id="test") as journal:
+        gateway = GatewayServer(table, journal=journal).start()
+        try:
+            output = {"effort": "xhigh", "format": {"type": "json_schema", "schema": {"type": "object"}}}
+            response = httpx.post(gateway.base_url + "/v1/" + shape,
+                headers={"Authorization": "Bearer " + token.token}, json={
+                    "model": "qwen", "output_config": output,
+                    "reasoning": {"effort": "xhigh"}, "thinking": {"type": "adaptive"},
+                    "max_tokens": 8192}, timeout=5)
+            assert response.status_code == 200
+            sent = upstream.requests[0]["body"]
+            assert sent["output_config"] == ({"format": output["format"]} if omit and shape == "messages" else output)
+            assert sent["reasoning"] == {"effort": "xhigh"}
+            assert sent["thinking"] == {"type": "adaptive"}
+            assert sent["max_tokens"] == 8192
+        finally:
+            gateway.stop()
+    adaptations = [e for e in read_journal(path) if e.get("status") == "compatibility_adaptation"]
+    assert len(adaptations) == int(omit and shape == "messages")
+
+
+def test_effort_omission_requires_boolean():
+    with pytest.raises(ValueError, match="omit_anthropic_effort"):
+        ModelRoute.from_dict({"omit_anthropic_effort": "false"})
+
+
 def test_api_key_env_is_resolved_lazily(monkeypatch):
     route = ModelRoute(api_key_env="ASH_TEST_KEY")
     monkeypatch.delenv("ASH_TEST_KEY", raising=False)

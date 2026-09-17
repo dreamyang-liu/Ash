@@ -643,7 +643,9 @@ class Orchestrator:
             route = ModelRoute(base_url=controls.base_url,
                                upstream_model=controls.contract.get("model"),
                                api_key_env=controls.contract.get("api_key_env"),
-                               flatten_tool_namespaces=previous.flatten_tool_namespaces)
+                               flatten_tool_namespaces=previous.flatten_tool_namespaces,
+                               auth_scheme=previous.auth_scheme,
+                               omit_anthropic_effort=previous.omit_anthropic_effort)
             # An endpoint in the request must never inherit another provider's
             # credential. Only the explicitly configured rollout key may travel.
             table = RoutingTable({"default": route})

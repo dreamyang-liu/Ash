@@ -5,8 +5,9 @@ from __future__ import annotations
 from uuid import uuid4
 
 from runstore.native import NativePoint, valid_prefix
-from runstore.specs import canonical, digest
+from runstore.specs import digest
 from runstore.store import Conflict, Store
+from runstore.jsonb_codec import dumps as db_json
 
 
 def normalized_call(name: str, arguments: dict) -> dict:
@@ -38,15 +39,15 @@ class Index:
                 nodes[depth] = node
                 cursor.execute("""INSERT INTO rs_prefix_nodes(node,scope,parent,depth,call)
                     VALUES(%s,%s,%s,%s,%s::jsonb) ON CONFLICT DO NOTHING""",
-                               (node, scope_hash, parent, depth, canonical(call)))
+                               (node, scope_hash, parent, depth, db_json(call)))
                 response = results.get(event["call_id"])
                 cursor.execute("""INSERT INTO rs_tools(attempt_id,depth,call_id,call,response,prefix_node)
                     VALUES(%s,%s,%s,%s::jsonb,%s::jsonb,%s)
                     ON CONFLICT(attempt_id,depth) DO UPDATE SET response=COALESCE(rs_tools.response,EXCLUDED.response)
                     WHERE rs_tools.call_id=EXCLUDED.call_id AND rs_tools.call=EXCLUDED.call
                     AND rs_tools.prefix_node=EXCLUDED.prefix_node""",
-                               (job["active_attempt"], depth, event["call_id"], canonical(call),
-                                canonical(response) if response is not None else None, node))
+                               (job["active_attempt"], depth, event["call_id"], db_json(call),
+                                db_json(response) if response is not None else None, node))
                 if cursor.rowcount != 1:
                     raise Conflict("Indexed tool prefix changed")
             for point in points:
@@ -61,7 +62,7 @@ class Index:
                     AND rs_recoveries.prefix_node=EXCLUDED.prefix_node""",
                                (uuid4().hex, job["active_attempt"], point.message_step,
                                 point.tool_depth, nodes[point.tool_depth], point.snapshot_id,
-                                canonical(point.native)))
+                                db_json(point.native)))
                 if cursor.rowcount != 1:
                     raise Conflict("Recovery point changed after publication")
             cursor.execute("""UPDATE rs_recoveries SET valid=false,invalid_reason='boundary_no_longer_proven'
