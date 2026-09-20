@@ -148,7 +148,7 @@ def check_claude_sdk(contract: dict, report: Report) -> None:
 def check_normalizer_alignment(contract: dict, report: Report) -> None:
     """The normalizer must still map every event/usage key the contract lists."""
     slot = contract["slot"]
-    module = {
+    module = contract.get("normalizer_module") or {
         "codex": "harness.normalize.codex_sdk",
         "opencode": "harness.normalize.opencode",
         "opencode-server": "harness.normalize.opencode_server",
@@ -183,6 +183,18 @@ def check_python_api(contract: dict, report: Report) -> None:
     spec = contract.get("python_api") or {}
     if not spec:
         return
+    upstream = contract.get("upstream", {})
+    if upstream.get("exact_version"):
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            installed = version(upstream["package"])
+        except PackageNotFoundError:
+            installed = None
+        expected = upstream["verified_versions"]["sdk"]
+        (report.ok if installed == expected else report.fail)(
+            f"{upstream['package']} == {expected}",
+            **({} if installed == expected else {"detail": f"installed: {installed}"}))
     module_name = spec.get("module")
     try:
         mod = importlib.import_module(module_name)

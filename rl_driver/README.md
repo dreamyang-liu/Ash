@@ -1,5 +1,9 @@
 # Miles rollout driver
 
+`mini-swe-agent` is supported through v3 message rollouts and a dedicated worker
+profile. Its model endpoint uses `/v1/chat/completions`; see
+[mini setup, checkpointing and training export](../docs/MINI_SWE_AGENT.md).
+
 ## 去 hint 的消息训练（v3）
 
 `POST /rollout-groups` 现在也接收 `protocol_version: "ash-rollout-v3"`；

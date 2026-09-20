@@ -160,7 +160,7 @@ def claude_messages(entries):
 
 
 def export_messages(directory, session_id, slot, events, *, allow_incomplete_tail=False):
-    if not isinstance(session_id, str) or not session_id or slot not in {"codex", "claude-code"}:
+    if not isinstance(session_id, str) or not session_id or slot not in {"codex", "claude-code", "mini-swe-agent"}:
         raise ValueError("Missing or unsupported native session identity")
     files = list((directory / "native-home").glob(f"**/*{session_id}.jsonl"))
     if len(files) != 1:
@@ -171,6 +171,12 @@ def export_messages(directory, session_id, slot, events, *, allow_incomplete_tai
             raise ValueError("Native history has an incomplete final record")
         data = data[:data.rfind(b"\n") + 1]
     entries = [json.loads(line) for line in data.splitlines() if line.strip()]
+    if slot == "mini-swe-agent":
+        from harness.slots.mini_history import training_messages
+
+        # mini writes its actual formatted observation before closing the turn.
+        # Do not substitute the MCP's different presentation from tool.finished.
+        return clean_messages(training_messages(entries))
     messages = (codex_messages if slot == "codex" else claude_messages)(entries)
     # Some SDK histories stop after the last tool call. Use only actual
     # observed results with the same call_id; never synthesize a tool response.
@@ -199,6 +205,8 @@ def export_tools(events):
             if event["shape"] == "messages":
                 item = {"name": tool["name"], "description": tool.get("description", ""),
                         "parameters": tool.get("input_schema", {})}
+            elif event["shape"] == "chat/completions" and tool.get("type") == "function":
+                item = deepcopy(tool["function"])
             elif tool.get("type") == "function":
                 item = {key: tool[key] for key in ("name", "description", "parameters", "strict") if key in tool}
             else:

@@ -86,8 +86,8 @@ class JobSpec:
                 raise ValueError("Unknown RunSpec fields")
             if not isinstance(self.spec.get("prompt"), str) or not self.spec["prompt"].strip():
                 raise ValueError("RunSpec requires a nonempty prompt")
-            if self.spec.get("slot", "claude-code") not in {"claude-code", "codex"}:
-                raise ValueError("v1 slots are claude-code and codex SDK")
+            if self.spec.get("slot", "claude-code") not in {"claude-code", "codex", "mini-swe-agent"}:
+                raise ValueError("v1 slots are claude-code, codex SDK and mini-swe-agent")
             for name in ("session", "journal_path", "run_id", "sandbox_id", "mcp_url", "mcp_stdio_args"):
                 if self.spec.get(name) is not None:
                     raise ValueError(f"Queued runs cannot supply {name}")
@@ -100,7 +100,7 @@ class JobSpec:
             if not isinstance(self.spec.get("extra", {}), dict):
                 raise ValueError("RunSpec extra must be a JSON object")
             if any(key in self.spec.get("extra", {}) for key in (
-                    "native_prefix", "resume_session_id", "fork", "checkpoint_identity")):
+                    "native_prefix", "native_home", "resume_session_id", "fork", "checkpoint_identity")):
                 raise ValueError("Native restoration fields are worker-owned")
         elif self.kind == "grade":
             grade = GradeSpec(**self.spec)

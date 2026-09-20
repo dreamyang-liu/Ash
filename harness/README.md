@@ -34,6 +34,9 @@ effect it can cause travels through MCP into the sandbox.
 | `claude-code` | claude-agent-sdk (typed messages + PreToolUse hook) | yes | yes (`fork_session`) | builtin tools denied; verdict seam enforced in-process |
 | `codex` | openai-codex SDK / app-server | yes (`thread_resume`) | yes (`thread_fork`) | host sandbox `read-only`; exact capture uses Ash dynamic tools |
 | `opencode` | `opencode run --format json` | yes | **yes, natively** (`--session --fork`) | `--pure` to ignore local plugins |
+| `mini-swe-agent` | upstream DefaultAgent 2.4.6 | yes | exact immutable prefix | HTTP MCP shell, Chat Completions, v3 training export |
+
+See [mini-swe-agent setup and RL integration](../docs/MINI_SWE_AGENT.md).
 
 Verified against claude-agent-sdk 0.2.145 / claude 2.1.239, openai-codex 0.147.0,
 opencode 1.18.5. Those versions are asserted by `contracts/ci_check.py`.

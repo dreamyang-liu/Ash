@@ -34,14 +34,14 @@ import json
 import os
 import sys
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ash_sandbox import Pool, Sandbox
 from ash_sandbox.result import ToolResult as SdkToolResult
 
-from harness.core.result import ToolResult
+from harness.core.result import CommandOutcome, ToolResult
 from harness.core.checkpoint_identity import CALL_IDENTITY_KEY
 from harness.execution.backends import BACKENDS, BackendError, build_pool
 from harness.execution.interceptors import GuardrailInterceptor, TruncateInterceptor
@@ -807,6 +807,9 @@ class SessionHandler:
                 result: SdkToolResult = await entry.sandbox.call(name, **args)
                 content = {"type": "text", "text": result.output,
                            "isError": result.is_error}
+                outcome = _runtime_result(name, args, result).outcome
+                if outcome is not None:
+                    content["_command_outcome"] = asdict(outcome)
                 if self.boundary:
                     uncertainty = _uncertain_outcome(result)
                     if uncertainty:
@@ -855,7 +858,7 @@ class SessionHandler:
             uncertain = uncertain or _uncertain_outcome(sdk)
             # from_sdk, so a command's outcome reaches interceptors on this path too
             # (a presenter rendering it, audit reading its byte counts).
-            result = ToolResult.from_sdk(sdk)
+            result = _runtime_result(tool, tool_args, sdk)
             if sdk.is_error and not result.error:
                 result.error = "tool error"
             return result
@@ -867,9 +870,23 @@ class SessionHandler:
         text = result.output if (result.success or result.output) \
             else f"Error: {result.error or 'unknown error'}"
         content = {"type": "text", "text": text, "isError": not result.success}
+        if result.outcome is not None:
+            content["_command_outcome"] = asdict(result.outcome)
         if uncertain and self.boundary:
             content["_execution_uncertain"] = uncertain
         return content
+
+
+def _runtime_result(name: str, args: dict, sdk: SdkToolResult) -> ToolResult:
+    result = ToolResult.from_sdk(sdk)
+    # shell.runSync/CommandOutcome.Result encode an unclipped exit-0 command
+    # with no stderr as bare stdout. Decode that documented variant only for
+    # foreground shell, before any presenter/interceptor modifies the text.
+    if (name == "shell" and not args.get("background") and not sdk.is_error
+            and result.outcome is None):
+        result.outcome = CommandOutcome(exit_code=0, stdout=sdk.output,
+                                        stdout_bytes=len(sdk.output.encode("utf-8")))
+    return result
 
 
 def _uncertain_outcome(result):
@@ -890,10 +907,11 @@ def _tool_response(id_, content: dict) -> dict:
     "rejected". Claude's client tolerated the extra field, which is why this
     server appeared to work.
     """
-    block = {k: v for k, v in content.items() if k != "isError"}
-    return {"jsonrpc": "2.0", "id": id_,
-            "result": {"content": [block],
-                       "isError": bool(content.get("isError", False))}}
+    block = {k: v for k, v in content.items() if k != "isError" and not k.startswith("_")}
+    result = {"content": [block], "isError": bool(content.get("isError", False))}
+    if "_command_outcome" in content:
+        result["structuredContent"] = {"command_outcome": content["_command_outcome"]}
+    return {"jsonrpc": "2.0", "id": id_, "result": result}
 
 
 def _ok(text: str) -> dict:

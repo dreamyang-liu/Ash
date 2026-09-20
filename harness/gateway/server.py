@@ -186,6 +186,8 @@ def _make_handler(gateway: GatewayServer):
                 shape = "responses"
             elif self.path.startswith("/v1/messages"):
                 shape = "messages"
+            elif self.path == "/v1/chat/completions":
+                shape = "chat/completions"
             else:
                 self._error(404, "unknown path %s" % self.path)
                 return
@@ -279,7 +281,7 @@ def _make_handler(gateway: GatewayServer):
                 # Each protocol's own convention -- an Anthropic upstream reads
                 # x-api-key, an OpenAI-shaped one reads a bearer. Sending the
                 # wrong one is a 401 that looks like a bad key.
-                if shape == "responses":
+                if shape in {"responses", "chat/completions"}:
                     headers["Authorization"] = "Bearer %s" % key
                 else:
                     headers["x-api-key"] = key
@@ -297,7 +299,16 @@ def _make_handler(gateway: GatewayServer):
 
             with httpx.Client(timeout=gateway.timeout_s) as client:
                 if not streaming:
-                    upstream = client.post(url, content=body, headers=headers)
+                    if shape == "chat/completions":
+                        # mini's nonstreaming request must release inference on
+                        # rollout stop, even when the provider sends no bytes.
+                        from harness.core.http import post
+
+                        upstream = post(url, content=body, headers=headers,
+                                        timeout_s=gateway.timeout_s,
+                                        control=getattr(gateway.request_policy, "control", None))
+                    else:
+                        upstream = client.post(url, content=body, headers=headers)
                     content = upstream.content
                     if adapter is not None and upstream.is_success:
                         content = json.dumps(adapter.restore(upstream.json())).encode()
@@ -405,14 +416,14 @@ def _absorb_usage(native, usage: Usage) -> None:
     """
     if not isinstance(native, dict):
         return
-    usage.input_tokens += int(native.get("input_tokens") or 0)
-    usage.output_tokens += int(native.get("output_tokens") or 0)
+    usage.input_tokens += int(native.get("input_tokens", native.get("prompt_tokens")) or 0)
+    usage.output_tokens += int(native.get("output_tokens", native.get("completion_tokens")) or 0)
     usage.cached_input_tokens += int(native.get("cache_read_input_tokens") or 0)
     usage.cache_creation_tokens += int(native.get("cache_creation_input_tokens") or 0)
-    details = native.get("input_tokens_details")
+    details = native.get("input_tokens_details", native.get("prompt_tokens_details"))
     if isinstance(details, dict):
         usage.cached_input_tokens += int(details.get("cached_tokens") or 0)
-    details = native.get("output_tokens_details")
+    details = native.get("output_tokens_details", native.get("completion_tokens_details"))
     if isinstance(details, dict):
         usage.reasoning_output_tokens += int(details.get("reasoning_tokens") or 0)
 
@@ -482,6 +493,9 @@ def _scan_sse_lines(lines, usage: Usage) -> Optional[str]:
             output = int(native.get("output_tokens") or 0)
             if output:
                 usage.output_tokens = max(usage.output_tokens, output)
+        elif "choices" in event:
+            model = event.get("model") or model
+            _absorb_usage(event.get("usage"), usage)
     return model
 
 

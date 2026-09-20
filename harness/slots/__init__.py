@@ -21,6 +21,7 @@ from harness.core.slot import AgentSlot
 _REGISTRY: Dict[str, str] = {
     "claude-code": "harness.slots.claude_code:ClaudeCodeSlot",
     "codex": "harness.slots.codex_sdk:CodexSdkSlot",
+    "mini-swe-agent": "harness.slots.mini_swe:MiniSweSlot",
     "opencode": "harness.slots.opencode_server:OpenCodeServerSlot",
     "opencode-cli": "harness.slots.opencode:OpenCodeSlot",
 }

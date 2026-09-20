@@ -31,7 +31,7 @@ def validate(value):
 
 def parameters(value, shape):
     validate(value)
-    if shape not in {"responses", "messages"}:
+    if shape not in {"responses", "messages", "chat/completions"}:
         raise ValueError("Unsupported native API shape")
     result = deepcopy(value)
     limits = [result.pop(k) for k in ("max_tokens", "max_new_tokens", "max_output_tokens") if k in result]

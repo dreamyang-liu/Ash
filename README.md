@@ -51,9 +51,11 @@ classes in `sympy/core/numbers.py` override comparison, so unknown-type comparis
 never reach `Basic.__eq__` — branched at the step before that edit, and **2 of 3
 branches came back resolved**, all 89 `PASS_TO_PASS` regressions passing.
 
-Three agent integrations are supported:
+Four agent integrations are supported:
 `claude-code` (resume + `fork_session`), `codex` (SDK `thread_fork`), `opencode`
-(`/session/{id}/fork`). The infrastructure is agent-agnostic: one orchestrator, one
+(`/session/{id}/fork`), and [mini-swe-agent](docs/MINI_SWE_AGENT.md)
+(upstream loop, exact history prefixes and v3 RL message export).
+The infrastructure is agent-agnostic: one orchestrator, one
 checkpoint mechanism, one MCP server.
 
 `--slot codex` uses the SDK/app-server; the unused `codex-cli` execution adapter
