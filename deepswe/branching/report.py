@@ -42,13 +42,15 @@ def report(root: Path) -> dict:
         parts = row.get("owner", "").split("/")
         stage = parts[1] if len(parts) == 3 else "unknown"
         actor.setdefault(stage, []).append(row.get("usage"))
+    scoring = [load(p).get("response", {}).get("usage")
+               for p in (root / "bpo").glob("*/entropy/step-*.request.json")]
     selector = [load(p).get("response", {}).get("usage")
                 for p in (root / "shepherd").glob("*/meta-request.json")]
     return {"tasks": len(manifest["tasks"]), "max_rollouts_including_initial": manifest["config"]["max_rollouts"],
             "methods": methods, "actor_usage_by_stage": {k: usage_total(v) for k, v in actor.items()},
-            "shepherd_selector_usage": usage_total(selector),
+            "bpo_scoring_usage": usage_total(scoring), "shepherd_selector_usage": usage_total(selector),
             "imported_initial_usage_note": "When initial_root is set, initial API costs remain in the source cohort audits.",
-            "cost_usd": None, "cost_note": "No prices assumed; selector overhead is separate from rollout count."}
+            "cost_usd": None, "cost_note": "No prices assumed; scoring/selector overhead is separate from rollout count."}
 
 
 def main() -> None:

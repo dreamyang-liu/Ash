@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
@@ -12,8 +13,8 @@ import subprocess
 import time
 from types import SimpleNamespace
 
-from .policies import SHEPHERD_SYSTEM, shepherd_select
-from .provider import ChatClient
+from .policies import SHEPHERD_SYSTEM, bpo_select, shepherd_select
+from .provider import ChatClient, candidates_from_audit, score_candidate
 from .storage import fingerprint, load, rows, save
 
 CONTINUE = "Continue the original task from this state. Complete the implementation, validate it, and commit your work."
@@ -26,12 +27,18 @@ class Config:
     output: str
     runtime_bin: str
     bridge_url: str = "http://127.0.0.1:18187"
-    methods: tuple[str, ...] = ("baseline", "shepherd")
+    methods: tuple[str, ...] = ("baseline", "bpo", "shepherd")
     tasks: tuple[str, ...] = ()
     max_rollouts: int = 8
     effort: str = "high"
     initial_root: str | None = None
+    provider_audit_root: str | None = None
+    initial_owner_template: str = "experiment:{task}/initial/parent"
     task_locks: str | None = None
+    bpo_top_k: int = 5
+    bpo_min_spacing: int = 64
+    bpo_max_points: int = 7
+    bpo_scoring_workers: int = 2
     meta_max_tokens: int = 65536
     meta_transcript_tokens: int = 60000
     meta_extra: dict | None = None
@@ -41,10 +48,13 @@ class Config:
     def __post_init__(self):
         if not self.model or not 1 <= self.max_rollouts <= 8:
             raise ValueError("Specify a model and max_rollouts between 1 and 8")
-        if not self.methods or set(self.methods) - {"baseline", "shepherd"}:
-            raise ValueError("Methods must be baseline or shepherd")
+        if not self.methods or set(self.methods) - {"baseline", "bpo", "shepherd"}:
+            raise ValueError("Methods must be baseline, bpo, or shepherd")
         if len(set(self.methods)) != len(self.methods):
             raise ValueError("Duplicate method")
+        if (not 1 <= self.bpo_top_k <= 20 or self.bpo_max_points < 1
+                or self.bpo_min_spacing < 0 or self.bpo_scoring_workers < 1):
+            raise ValueError("Invalid BPO settings")
         if self.timeout is not None and self.timeout <= 0:
             raise ValueError("Timeout must be positive")
         if type(self.api_timeout_ms) is not int or not 1 <= self.api_timeout_ms <= 2147483647:
@@ -70,9 +80,11 @@ def actor_environment(config: Config, owner: str) -> dict[str, str]:
             "CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS": str(min(config.api_timeout_ms, 1800000))}
 
 
-def select_plan(method: str, *, proposal: dict | None,
+def select_plan(method: str, *, scores: list[dict] | None, proposal: dict | None,
                 eligible: list[int], config: Config) -> list[dict]:
     budget = config.max_rollouts - 1
+    if method == "bpo":
+        return bpo_select(scores or [], budget, config.bpo_min_spacing, config.bpo_max_points)
     if method == "shepherd":
         return shepherd_select(proposal or {}, eligible, budget)
     return [{} for _ in range(budget)]
@@ -202,26 +214,38 @@ class BenchmarkRunner:
             return plan, points
         if not points:
             raise ValueError("No exact snapshot/session pairs available for branching")
-        transcript, lo, hi = self.ev.render_transcript(
-            journal, token_budget=self.config.meta_transcript_tokens)
-        payload = {"model": self.config.model, "reasoning_effort": self.config.effort,
-                   "temperature": 1., "top_p": .95, "stream": False,
-                   "max_tokens": self.config.meta_max_tokens,
-                   "messages": [{"role": "system", "content": SHEPHERD_SYSTEM}, {
-                       "role": "user", "content": json.dumps({
-                           "task": task.instruction, "reward": int(result_resolved(initial)),
-                           "eligible_checkpoint_steps": sorted(points),
-                           "transcript_visible_step_range": [lo, hi], "trajectory": transcript})}]}
-        payload.update(self.config.meta_extra or {})
-        audit = folder / "meta-request.json"
-        if audit.exists() and load(audit).get("request_sha256") == fingerprint(payload) and load(audit).get("response"):
-            response = load(audit)["response"]
+        scores, proposal = None, None
+        if method == "bpo":
+            audit_root = Path(self.config.provider_audit_root or self.root)
+            owner = (self.config.initial_owner_template.format(task=task.task_id)
+                     if self.config.initial_root else "branchbench:%s/initial/parent" % task.task_id)
+            candidates = candidates_from_audit(audit_root, owner, points, self.config.model)
+            def score(candidate):
+                return score_candidate(candidate, self.client, folder / "entropy",
+                                       top_k=self.config.bpo_top_k)
+            with ThreadPoolExecutor(max_workers=self.config.bpo_scoring_workers) as pool:
+                scores = list(pool.map(score, candidates))
         else:
-            response = self.client.complete(payload, audit)
-        if response["choices"][0]["finish_reason"] != "stop":
-            raise ValueError("Incomplete Shepherd decision; refusing a partial plan")
-        proposal = self.ev.extract_json(response["choices"][0]["message"]["content"])
-        selected = select_plan(method, proposal=proposal,
+            transcript, lo, hi = self.ev.render_transcript(
+                journal, token_budget=self.config.meta_transcript_tokens)
+            payload = {"model": self.config.model, "reasoning_effort": self.config.effort,
+                       "temperature": 1., "top_p": .95, "stream": False,
+                       "max_tokens": self.config.meta_max_tokens,
+                       "messages": [{"role": "system", "content": SHEPHERD_SYSTEM}, {
+                           "role": "user", "content": json.dumps({
+                               "task": task.instruction, "reward": int(result_resolved(initial)),
+                               "eligible_checkpoint_steps": sorted(points),
+                               "transcript_visible_step_range": [lo, hi], "trajectory": transcript})}]}
+            payload.update(self.config.meta_extra or {})
+            audit = folder / "meta-request.json"
+            if audit.exists() and load(audit).get("request_sha256") == fingerprint(payload) and load(audit).get("response"):
+                response = load(audit)["response"]
+            else:
+                response = self.client.complete(payload, audit)
+            if response["choices"][0]["finish_reason"] != "stop":
+                raise ValueError("Incomplete Shepherd decision; refusing a partial plan")
+            proposal = self.ev.extract_json(response["choices"][0]["message"]["content"])
+        selected = select_plan(method, scores=scores, proposal=proposal,
                                eligible=sorted(points), config=self.config)
         plan = {"identity": identity, "method": method, "training": False,
                 "shared_initial": str(journal), "eligible_steps": sorted(points),
@@ -229,6 +253,9 @@ class BenchmarkRunner:
                 "max_total_rollouts": self.config.max_rollouts,
                 "branch_index_semantics": "state after completed tool step",
                 "hint_delivery": "fixed-neutral", "created_at": time.time()}
+        if method == "bpo":
+            plan["entropy_note"] = ("Top-k plus tail lower bound of first reported content token; "
+                                    "hidden reasoning-token entropy is not observable via this API.")
         save(path, plan)
         return plan, points
 

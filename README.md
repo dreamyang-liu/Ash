@@ -61,9 +61,9 @@ has been removed. Historical trajectories and their readers are retained.
 
 ## SWE-bench Verified
 
-For paired DeepSWE sampling with Shepherd meta-agent-selected branching and an
-independent baseline, see [the branch benchmark guide](deepswe/branching/README.md).
-It includes a reusable DeepSeek configuration, exact checkpoint restoration, and
+For paired DeepSWE sampling with BPO entropy-based branching and Shepherd
+meta-agent-selected branching, see [the branch benchmark guide](deepswe/branching/README.md).
+It includes reusable DeepSeek/Qwen configs, exact checkpoint restoration, and
 the shared-initial, at-most-eight-rollout protocol.
 
 <table>

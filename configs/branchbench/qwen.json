@@ -1,0 +1,18 @@
+{
+  "model": "qwen3.8-27b",
+  "tasks_dir": "../deep-swe/tasks",
+  "output": "runs/branchbench-qwen",
+  "runtime_bin": "runtime/ash-runtime",
+  "methods": ["baseline", "bpo", "shepherd"],
+  "max_rollouts": 8,
+  "effort": "high",
+  "bridge_url": "http://127.0.0.1:18186",
+  "bpo_top_k": 5,
+  "bpo_min_spacing": 64,
+  "bpo_max_points": 7,
+  "bpo_scoring_workers": 2,
+  "meta_extra": {
+    "top_k": 20,
+    "chat_template_kwargs": {"enable_thinking": true, "preserve_thinking": true}
+  }
+}
