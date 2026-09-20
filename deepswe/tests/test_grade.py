@@ -180,6 +180,15 @@ def test_grade_snapshot_reports_a_snapshot_that_will_not_restore(monkeypatch, tm
     assert grade.error and "snap-x" in grade.error and "gone" in grade.error
 
 
+def test_verifier_uses_its_own_declared_resources(monkeypatch, tmp_path):
+    from dataclasses import replace
+    FakeSession.instances = []
+    monkeypatch.setattr(grade_mod, "SandboxSession", FakeSession)
+    task = replace(load_task(make_task(tmp_path)), verifier_cpus=4, verifier_memory_mb=16384)
+    grade_snapshot("snap-x", task, {}, artifacts_dir=tmp_path / "logs")
+    assert FakeSession.instances[-1].resources == {"cpu": 4, "memory_mb": 16384}
+
+
 @pytest.mark.parametrize("failure", [None, "timeout", "transport", "setup", "invalid_reward", "interrupt"])
 def test_verifier_exports_raw_logs_before_cleanup_on_every_exit(tmp_path, monkeypatch, failure):
     events = []

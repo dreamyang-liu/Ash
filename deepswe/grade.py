@@ -200,7 +200,9 @@ def verify_patch(task: Task, patch: str, backend: dict, *,
     started_at = datetime.now(timezone.utc).isoformat()
     session = (session_factory or SandboxSession)(quiet=True, backend=dict(backend))
     try:
-        if not session.create(task.image, {"cpu": task.cpus, "memory_mb": task.memory_mb}):
+        resources = {"cpu": task.verifier_cpus or task.cpus,
+                     "memory_mb": task.verifier_memory_mb or task.memory_mb}
+        if not session.create(task.image, resources):
             outcome.error = "could not start verifier VM from %s: %s" % (
                 task.image, session.create_error)
             return outcome

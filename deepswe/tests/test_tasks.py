@@ -93,6 +93,18 @@ def test_verifier_image_must_be_the_task_image(tmp_path):
         load_task(make_task(tmp_path, dockerfile=other))
 
 
+def test_verifier_resource_shape_is_loaded_separately(tmp_path):
+    task = load_task(make_task(tmp_path, toml=TASK_TOML +
+                              '\n[verifier.environment]\ncpus = 4\nmemory_mb = 16384\n'))
+    assert (task.cpus, task.memory_mb) == (2, 8192)
+    assert (task.verifier_cpus, task.verifier_memory_mb) == (4, 16384)
+
+
+def test_verifier_resources_default_to_actor_shape(tmp_path):
+    task = load_task(make_task(tmp_path))
+    assert (task.verifier_cpus, task.verifier_memory_mb) == (task.cpus, task.memory_mb)
+
+
 def test_dockerfile_instructions_we_cannot_replay_are_refused(tmp_path):
     with_env = DOCKERFILE + "ENV FOO=bar\n"
     with pytest.raises(TaskError, match="ENV"):

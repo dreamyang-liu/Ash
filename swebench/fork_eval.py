@@ -842,6 +842,8 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
         network = network_policy_for(args, bench, "agent")
         prompt += f"\n\nSandbox internet access for this attempt: {network}."
     extra: dict = {}
+    if getattr(args, "setting_sources", None) is not None:
+        extra["setting_sources"] = args.setting_sources
     if args.slot == "codex":
         # Native Bedrock provider: OpenAI's own models are hosted there, so no
         # translator and no login. Pre-serialized TOML values, which is what

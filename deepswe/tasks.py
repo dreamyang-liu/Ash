@@ -66,6 +66,9 @@ class Task:
     f2p: Tuple[str, ...]
     p2p: Tuple[str, ...]
     task_dir: Path
+    # Verifiers may request a different shape from actor sandboxes.
+    verifier_cpus: int = 0
+    verifier_memory_mb: int = 0
 
     @property
     def repo(self) -> str:
@@ -150,6 +153,7 @@ def load_task(task_dir: Path) -> Task:
     env = _require(meta, "environment", where=where)
     agent = meta.get("agent") or {}
     verifier = meta.get("verifier") or {}
+    verifier_env = verifier.get("environment") or {}
 
     instruction_path = task_dir / "instruction.md"
     if not instruction_path.is_file():
@@ -216,6 +220,8 @@ def load_task(task_dir: Path) -> Task:
         verifier_run_steps=tuple(runs),
         f2p=f2p, p2p=p2p,
         task_dir=task_dir,
+        verifier_cpus=int(verifier_env.get("cpus") or env.get("cpus") or 2),
+        verifier_memory_mb=int(verifier_env.get("memory_mb") or env.get("memory_mb") or 8192),
     )
 
 

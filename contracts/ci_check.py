@@ -138,10 +138,11 @@ def check_claude_sdk(contract: dict, report: Report) -> None:
             report.skip("ClaudeAgentOptions fields", "not introspectable")
             return
     for field in contract.get("options_fields") or []:
-        (report.ok if field in known else report.fail)(
-            "ClaudeAgentOptions.%s" % field,
-            "" if field in known else "dropped silently at runtime by _accepts()",
-        )
+        if field in known:
+            report.ok("ClaudeAgentOptions.%s" % field)
+        else:
+            report.fail("ClaudeAgentOptions.%s" % field,
+                        "dropped silently at runtime by _accepts()")
 
 
 def check_normalizer_alignment(contract: dict, report: Report) -> None:
