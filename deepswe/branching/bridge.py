@@ -6,6 +6,7 @@ variables; the SDK key is an experiment owner label, never an upstream key.
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -174,11 +175,17 @@ def message_events(message: dict):
 
 
 def create_app(model: str, audit_root: Path, *, effort: str = "high",
-               extra: dict | None = None, concurrency: int = 2, timeout: float = 1800.):
+               extra: dict | None = None, concurrency: int = 2, timeout: float = 1800.,
+               queue_timeout: float = 30., disconnect_poll: float = 1.,
+               max_attempts: int = 3, retry_delay: float = 2.):
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, StreamingResponse
 
+    if (concurrency < 1 or max_attempts < 1 or retry_delay < 0
+            or min(timeout, queue_timeout, disconnect_poll) <= 0):
+        raise ValueError("Bridge concurrency and deadlines must be positive")
     app = FastAPI()
+    bridge_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     semaphore = asyncio.Semaphore(concurrency)
     audit_root.mkdir(parents=True, exist_ok=True)
     base_url = os.environ["OPENAI_BASE_URL"].rstrip("/")
@@ -186,7 +193,11 @@ def create_app(model: str, audit_root: Path, *, effort: str = "high",
 
     @app.get("/health")
     async def health():
-        return {"model": model, "effort": effort, "audit_root": str(audit_root.resolve())}
+        return {"model": model, "effort": effort, "audit_root": str(audit_root.resolve()),
+                "concurrency": concurrency, "queue_timeout": queue_timeout,
+                "upstream_timeout": timeout, "cancel_on_disconnect": True,
+                "max_upstream_attempts": max_attempts,
+                "bridge_sha256": bridge_sha256}
 
     @app.post("/v1/messages/count_tokens")
     async def count(request: Request):
@@ -200,12 +211,36 @@ def create_app(model: str, audit_root: Path, *, effort: str = "high",
         record = {"request_id": request_id, "owner": owner, "time": started,
                   "model": model, "status": None}
         audit_path = audit_root / "provider-responses" / (request_id + ".json")
-        audit = {"owner": owner, "request": payload, "started_at": started}
+        audit = {"owner": owner, "request": payload, "started_at": started,
+                 "client_stream": bool(body.get("stream")), "stage": "queued", "attempts": []}
         save(audit_path, audit)
+        acquired = False
         try:
-            async with semaphore, httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(base_url + "/chat/completions", json=payload,
-                                            headers={"Authorization": "Bearer " + api_key})
+            await asyncio.wait_for(semaphore.acquire(), timeout=queue_timeout)
+            acquired = True
+            record["queue_seconds"] = time.time() - started
+            audit.update(stage="upstream", acquired_at=time.time())
+            save(audit_path, audit)
+            async with asyncio.timeout(timeout):
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    for number in range(1, max_attempts + 1):
+                        attempt = {"number": number, "started_at": time.time()}
+                        audit["attempts"].append(attempt)
+                        save(audit_path, audit)
+                        try:
+                            response = await client.post(base_url + "/chat/completions", json=payload,
+                                                        headers={"Authorization": "Bearer " + api_key})
+                            attempt["status"] = response.status_code
+                            if response.status_code not in (429, 502, 503, 504) or number == max_attempts:
+                                break
+                        except httpx.TransportError as exc:
+                            attempt.update(error_type=type(exc).__name__, usage_unknown=True)
+                            if number == max_attempts:
+                                raise
+                        finally:
+                            attempt["seconds"] = time.time() - attempt["started_at"]
+                            save(audit_path, audit)
+                        await asyncio.sleep(retry_delay * 2 ** (number - 1))
             record["status"] = response.status_code
             if response.status_code != 200:
                 raise RuntimeError("Upstream HTTP %s" % response.status_code)
@@ -221,8 +256,18 @@ def create_app(model: str, audit_root: Path, *, effort: str = "high",
             record["validation_error"] = type(exc).__name__
             raise
         finally:
+            if acquired:
+                semaphore.release()
+            else:
+                record["queue_seconds"] = time.time() - started
             record["seconds"] = time.time() - started
-            audit.update({key: record[key] for key in ("status", "seconds", "validation_error") if key in record})
+            record["usage_unknown"] = (acquired and not bool(record.get("usage"))) or any(
+                attempt.get("usage_unknown", False) for attempt in audit["attempts"])
+            record["upstream_attempts"] = len(audit["attempts"])
+            audit.update({key: record[key] for key in (
+                "status", "seconds", "queue_seconds", "validation_error", "usage_unknown") if key in record})
+            audit["finished_stage"] = audit["stage"]
+            audit["stage"] = "finished"
             save(audit_path, audit)
             # One uvicorn process owns this file; no await inside the append.
             with (audit_root / "actor-usage.jsonl").open("a", encoding="utf-8") as stream:
@@ -236,11 +281,22 @@ def create_app(model: str, audit_root: Path, *, effort: str = "high",
             return JSONResponse({"error": {"type": "authentication_error",
                                            "message": "Expected branchbench owner label"}}, status_code=401)
         if not body.get("stream"):
+            task = asyncio.create_task(complete(body, owner))
             try:
-                return await complete(body, owner)
+                while not task.done():
+                    await asyncio.wait({task}, timeout=disconnect_poll)
+                    if not task.done() and await request.is_disconnected():
+                        return JSONResponse({"error": {"type": "api_error", "message": "Client disconnected"}},
+                                            status_code=499)
+                return await task
             except Exception as exc:
                 return JSONResponse({"error": {"type": "api_error", "message": type(exc).__name__}},
                                     status_code=502)
+            finally:
+                # Non-streaming ASGI handlers survive client disconnects unless
+                # cancelled explicitly, including queued compaction retries.
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         async def stream():
             task = asyncio.create_task(complete(body, owner))
             try:
@@ -269,11 +325,16 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=18187)
     parser.add_argument("--effort", default="high")
     parser.add_argument("--concurrency", type=int, default=2)
+    parser.add_argument("--queue-timeout", type=float, default=30.)
+    parser.add_argument("--upstream-timeout", type=float, default=1800.)
+    parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--extra-json", default="{}")
     args = parser.parse_args()
     uvicorn.run(create_app(args.model, args.audit_root, effort=args.effort,
-                           extra=json.loads(args.extra_json), concurrency=args.concurrency),
-                host="127.0.0.1", port=args.port)
+                           extra=json.loads(args.extra_json), concurrency=args.concurrency,
+                           queue_timeout=args.queue_timeout, timeout=args.upstream_timeout,
+                           max_attempts=args.max_attempts),
+                host="127.0.0.1", port=args.port, timeout_graceful_shutdown=5)
 
 
 if __name__ == "__main__":
