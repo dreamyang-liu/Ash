@@ -52,3 +52,21 @@ completed pilot's prefix, journal and verifier result were rechecked using the
 Shepherd-only release code; no extra model rollout was charged for packaging.
 
 Original production checkouts, experiment services and outputs were not modified.
+
+## Clean CI environment follow-up
+
+The initial GitHub run failed because the harness job omitted `claude-agent-sdk`.
+The Linux regression environment above already had that package installed and
+therefore did not detect this CI setup gap. Reproduced the same import failure in
+a new Python 3.12 virtual environment using the original CI dependency command.
+
+The workflow now installs `configs/branchbench/requirements.txt` (including the
+validated SDK pin), runs the Shepherd and exact-prefix tests explicitly, and uses
+the current paths and names for both tool-panel guards. With the corrected
+dependencies and a freshly built runtime, the clean environment passed:
+
+- SWE-bench suite: **241 passed**.
+- Shepherd sampling and exact-prefix restore: **34 passed**.
+- Explicit tool-panel guards: **2 passed**, none skipped.
+
+These checks do not make model API calls or change the live pilot result above.
