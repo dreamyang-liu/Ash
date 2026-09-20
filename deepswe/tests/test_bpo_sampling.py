@@ -172,3 +172,18 @@ def test_bpo_missing_probabilities_blocks_before_any_branch(tmp_path, monkeypatc
     summary = runner.run_task(SimpleNamespace(task_id="task"))
     assert summary["methods"]["bpo"]["status"] == "blocked"
     assert summary["methods"]["bpo"]["error_type"] == "ProbabilityUnavailable"
+
+
+def test_report_preserves_unfinalized_usage_without_double_counting(tmp_path):
+    from deepswe.branching.report import report
+    save(tmp_path / "benchmark-manifest.json", {"tasks": ["task"], "config": {"methods": ["bpo"], "max_rollouts": 2}})
+    for name in ("completed", "interrupted"):
+        save(tmp_path / "provider-responses" / (name + ".json"),
+             {"owner": "branchbench:task/bpo/branch", "started_at": 1})
+    (tmp_path / "actor-usage.jsonl").write_text(json.dumps({
+        "request_id": "completed", "owner": "branchbench:task/bpo/branch",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2}}) + "\n")
+    result = report(tmp_path)
+    assert result["actor_usage_by_stage"]["bpo"]["requests"] == 1
+    assert result["unfinalized_actor_requests_by_stage"] == {"bpo": 1}
+    assert result["methods"]["bpo"]["success_rate"] is None

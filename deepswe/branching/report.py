@@ -38,16 +38,30 @@ def report(root: Path) -> dict:
                            "completed_extra_rollouts": extra,
                            "success_rate": successes / completed if completed == len(manifest["tasks"]) and completed else None}
     actor = {}
+    finalized_ids = set()
     for row in rows(root / "actor-usage.jsonl"):
+        finalized_ids.add(row.get("request_id"))
         parts = row.get("owner", "").split("/")
         stage = parts[1] if len(parts) == 3 else "unknown"
         actor.setdefault(stage, []).append(row.get("usage"))
+    unfinalized = {}
+    for path in (root / "provider-responses").glob("*.json"):
+        if path.stem in finalized_ids:
+            continue
+        audit = load(path)
+        if "started_at" not in audit:
+            continue
+        parts = audit.get("owner", "").split("/")
+        stage = parts[1] if len(parts) == 3 else "unknown"
+        unfinalized[stage] = unfinalized.get(stage, 0) + 1
     scoring = [load(p).get("response", {}).get("usage")
                for p in (root / "bpo").glob("*/entropy/step-*.request.json")]
     selector = [load(p).get("response", {}).get("usage")
                 for p in (root / "shepherd").glob("*/meta-request.json")]
     return {"tasks": len(manifest["tasks"]), "max_rollouts_including_initial": manifest["config"]["max_rollouts"],
             "methods": methods, "actor_usage_by_stage": {k: usage_total(v) for k, v in actor.items()},
+            "unfinalized_actor_requests_by_stage": unfinalized,
+            "unfinalized_usage_note": "In-flight or interrupted request audits without final accounting; usage is unknown, not zero, and excluded from finalized actor totals.",
             "bpo_scoring_usage": usage_total(scoring), "shepherd_selector_usage": usage_total(selector),
             "imported_initial_usage_note": "When initial_root is set, initial API costs remain in the source cohort audits.",
             "cost_usd": None, "cost_note": "No prices assumed; scoring/selector overhead is separate from rollout count."}

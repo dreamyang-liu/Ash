@@ -7,6 +7,7 @@ reproduce the papers' policy-gradient training or reported training results.
 
 This branch extends the published Shepherd implementation. Its original live
 validation is recorded in [VALIDATION.md](VALIDATION.md).
+The BPO-specific checks are recorded in [BPO_VALIDATION.md](BPO_VALIDATION.md).
 
 | Method | Selection | Additional rollouts |
 | --- | --- | --- |
@@ -90,6 +91,14 @@ the task's overall actor timeout. The runner also configures the separate
 reasoning requests even while SSE heartbeat pings arrive. Interrupted
 requests are retained with `CancelledError`; unknown usage is never called zero
 cost. See the [Claude Code environment reference](https://code.claude.com/docs/en/env-vars).
+
+Both streaming and non-streaming client disconnects cancel the corresponding
+queued/upstream work. Admission waits at most 30 seconds (`--queue-timeout`);
+the full upstream operation is bounded by `--upstream-timeout` (1,800 seconds).
+Transient transport errors and HTTP 429/502/503/504 receive at most three attempts
+(`--max-attempts`), with backoff inside that same deadline. Each attempt is audited;
+transport failures with unknown usage are not assumed free. Bridge shutdown
+allows five seconds to drain before cancelling outstanding handlers.
 
 For another model, copy one config, change `model`, `output` and bridge port,
 then start the bridge with the same values. Remove Qwen-only extras unless the
