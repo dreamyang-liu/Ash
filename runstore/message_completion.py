@@ -65,4 +65,40 @@ def complete_message_result(result: dict, directory, slot: str, recovery=None) -
         } if usage else {}
     except (ValueError, KeyError, TypeError, OSError) as error:
         result["training_export_error"] = str(error)
+        if slot == "mini-swe-agent" and is_truncated_result(result) and not unsafe:
+            # A timeout between two actions in one response cannot train the
+            # half response against the later disk. Keep a proven earlier pair.
+            from runstore.mini_native import index_mini
+            from runstore.native import read_prefix
+            from harness.slots.mini_history import read_entries, training_messages
+            from runstore.message_export import clean_messages
+
+            files = list((directory / "native-home").glob(f"**/*{session_id}.jsonl"))
+            try:
+                points = (index_mini(directory / "trajectory.jsonl", files[0], session_id,
+                                     events=events, inherited_native=(recovery or {}).get("native"))
+                          if len(files) == 1 else [])
+                if points:
+                    point = points[-1]
+                    result["training_messages"] = clean_messages(
+                        training_messages(read_entries(read_prefix(point.native))))
+                    result["training_tools"] = export_tools(events)
+                    result["timeout_fallback"] = {
+                        "tool_depth": point.tool_depth, "message_step": point.message_step,
+                        "native_prefix": point.native,
+                        "discarded_final_snapshot_id": result["final_snapshot_id"],
+                    }
+                    result["final_snapshot_id"] = point.snapshot_id
+                    result.pop("training_export_error", None)
+                    if recovery:
+                        result["training_origin"] = {
+                            "job_id": recovery.get("job_id"), "point_id": recovery["id"],
+                            "tool_depth": recovery["tool_depth"],
+                        }
+                    usage = [e for e in events if e.get("type") == "rollout.usage"]
+                    result["rollout_usage"] = {
+                        key: usage[-1][key] for key in ("model_calls", "tool_calls")
+                    } if usage else {}
+            except (ValueError, KeyError, TypeError, OSError) as fallback_error:
+                result["training_export_error"] += f"; mini prefix recovery: {fallback_error}"
     return result

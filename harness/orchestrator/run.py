@@ -303,7 +303,7 @@ class Orchestrator:
     def run(self, spec: RunSpec) -> RunOutcome:
         from harness.slots import load_slot
 
-        if spec.slot == "claude-code" and spec.tools in (None, "default") and not spec.mcp_url:
+        if spec.slot in {"claude-code", "mini-swe-agent"} and spec.tools in (None, "default") and not spec.mcp_url:
             spec = replace(spec, tools="shell_only")
         run_id = spec.run_id or new_run_id()
         journal_path = Path(spec.journal_path or self.out_dir / ("%s.jsonl" % run_id))
@@ -342,6 +342,15 @@ class Orchestrator:
                     rollout_controls = RolloutControls(extra["rollout_contract"], journal, control)
                     rollout_controls.start()
                 provisioned, mcp = self._wire_sandbox(spec, claim)
+                if spec.slot == "mini-swe-agent" and getattr(provisioned, "session", None) is not None:
+                    from harness.slots.mini_runtime_update import ensure_runtime
+                    from harness.slots.mini_workspace import resolve_workspace
+
+                    if spec.runtime_bin and getattr(provisioned.session, "runtime_bin", None):
+                        ensure_runtime(provisioned.session, spec.runtime_bin, journal, claim,
+                                       keep=getattr(provisioned, "keep", False))
+                        provisioned.sandbox_id = provisioned.session.sandbox_id
+                    extra = resolve_workspace(provisioned.session, extra, journal)
                 if rollout_controls is not None:
                     from harness.execution.pipeline import ToolPipeline
 
@@ -652,6 +661,8 @@ class Orchestrator:
         token = table.mint(spec.agent_id, run_id=run_id, budget_usd=spec.budget_usd)
         # Env, not config: this is the one wiring every agent understands.
         task.env.update(gateway.env_for(token))
+        if spec.slot == "mini-swe-agent":
+            task.env.update(OPENAI_BASE_URL=gateway.base_url + "/v1", OPENAI_API_KEY=token.token)
         if spec.slot == "codex":
             import json
 
@@ -688,7 +699,7 @@ class Orchestrator:
             return None
         from harness.checkpointing import SnapshotBridge
 
-        exact = (spec.slot == "claude-code" or
+        exact = (spec.slot in {"claude-code", "mini-swe-agent"} or
                  (spec.slot == "codex" and spec.extra.get("exact_capture"))) and bool(
             getattr(owned, "server", None) or getattr(owned, "checkpoint_log", None))
         bridge = SnapshotBridge.install(journal, session,

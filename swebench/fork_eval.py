@@ -849,6 +849,15 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
         extra["config_overrides"] = {"model_provider": '"amazon-bedrock"'}
     if args.slot.startswith("opencode"):
         extra["data_home"] = str(out_dir / "state" / "shared")
+    if args.slot == "mini-swe-agent":
+        extra["native_home"] = str(out_dir / "state" / "mini-native")
+        if resume and origin and origin.get("parent_journal"):
+            from runstore.mini_native import reference_at
+
+            reference = reference_at(origin["parent_journal"], origin["branch_step"], resume)
+            if reference is None:
+                raise ValueError("Selected mini branch has no exact native prefix")
+            extra["native_prefix"] = reference
     if resume_at:
         # Transcript entry (uuid) the resumed conversation ends at. The slot
         # passes it to the SDK's resume_session_at; see conversation_cut.
@@ -859,7 +868,7 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
         prompt=prompt, slot=args.slot, cwd=str(cwd) if cwd is not None else "/tmp", model=args.model,
         timeout_s=args.timeout, run_id=name,
         journal_path=out_dir / ("%s.jsonl" % name),
-        transport="http", tools="shell_only" if args.slot == "claude-code" else "default",
+        transport="http", tools="shell_only" if args.slot in {"claude-code", "mini-swe-agent"} else "default",
         backend=backend_for(args, bench), runtime_bin=runtime_bin,
         sandbox_image=image, sandbox_resources=resources,
         resume_session_id=resume, fork=fork, origin=origin, extra=extra,
@@ -1153,6 +1162,12 @@ def conversation_cut(journal_path, step: int, session_ref: Optional[str] = None)
 
 def conversation_restore(journal_path, step: int, session_ref: str) -> tuple[str, PrefixSource | None] | None:
     """Choose a direct native cut or a validated original-prefix source."""
+    if any(row.get("type") == "run.started" and row.get("slot") == "mini-swe-agent"
+           for row in read_journal(journal_path)):
+        from runstore.mini_native import reference_at
+
+        reference = reference_at(journal_path, step, session_ref)
+        return (reference["cut"], None) if reference else None
     cut = conversation_cut(journal_path, step, session_ref)
     if cut is not None:
         return cut, None
@@ -1732,6 +1747,7 @@ def run_one(orch: Orchestrator, args, raw, schedule: List[int],
                 image=checkpoint.snapshot_id, resume=resume_session, cwd=actor_cwd,
                 fork=True, resume_at=choice.cut,
                 origin={"parent_run_id": base.name, "branch_step": checkpoint.step,
+                        "parent_journal": str(base.outcome.journal_path),
                         "snapshot_id": checkpoint.snapshot_id,
                         "conversation_cut": choice.cut,
                         "cut_note": "explicit-full-conversation" if full_conversation else None,
