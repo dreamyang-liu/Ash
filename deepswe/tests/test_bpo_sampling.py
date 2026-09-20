@@ -98,6 +98,38 @@ def test_provider_omits_logprobs_fails_closed(tmp_path):
     assert not (tmp_path / "step-2.json").exists()
 
 
+def test_original_probabilities_do_not_spend_a_rescoring_request(tmp_path):
+    candidate = {"step": 2, "token_position": 64, "snapshot_id": "s", "request_id": "id",
+                 "request": {"model": "m"}, "native_response": {
+                     "choices": [{"logprobs": {"content": [token(.5, .25)]}}]}}
+    client = SimpleNamespace(complete=lambda *args: pytest.fail("Original probabilities exist"))
+    result = score_candidate(candidate, client, tmp_path)
+    assert result["source"] == "original-response"
+    assert result["scoring_usage"] is None
+    assert result["entropy_lower_bound_nats"] == pytest.approx(1.0397207708399179)
+    assert not (tmp_path / "step-2.request.json").exists()
+
+
+@pytest.mark.parametrize("status", [400, 422, 403, 502])
+def test_http_rejection_is_audited_without_credentials(tmp_path, monkeypatch, status):
+    import httpx
+    from deepswe.branching import provider
+
+    original_client = httpx.Client
+    transport = httpx.MockTransport(lambda request: httpx.Response(status, json={"error": "rejected"}))
+    monkeypatch.setattr(provider.httpx, "Client", lambda **kwargs: original_client(transport=transport, **kwargs))
+    client = provider.ChatClient(base_url="https://example.invalid/v1", api_key="private-test-key")
+    audit = tmp_path / "request.json"
+    error = ProbabilityUnavailable if status in (400, 422) else RuntimeError
+    with pytest.raises(error):
+        client.complete({"model": "m", "logprobs": True}, audit)
+    record = json.loads(audit.read_text())
+    assert record["http_status"] == status
+    assert record["error_type"] == error.__name__
+    assert "private-test-key" not in audit.read_text()
+    assert "Authorization" not in audit.read_text()
+
+
 def bpo_runner(tmp_path, monkeypatch):
     from deepswe.branching.runner import BenchmarkRunner, Config
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")

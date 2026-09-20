@@ -279,8 +279,8 @@ jobs:
       - name: Test harness (agent loop, L2 pipeline, eval layer, tool panel)
         run: python3 -m pytest swebench/tests -q
 
-      - name: Test Shepherd sampling and exact-prefix restore
-        run: python3 -m pytest deepswe/tests/test_shepherd_sampling.py harness/tests/test_claude_history.py -q
+      - name: Test BPO and Shepherd sampling and exact-prefix restore
+        run: python3 -m pytest deepswe/tests/test_bpo_sampling.py deepswe/tests/test_shepherd_sampling.py harness/tests/test_claude_history.py -q
 
       # Asserted, not assumed. The declaration check skips without the binary;
       # require both named guards to pass, not merely to be collected or skipped.
