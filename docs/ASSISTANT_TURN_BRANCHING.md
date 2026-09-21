@@ -176,9 +176,20 @@ be resumed or exported normally. Missing rejection evidence prevents indexing
 past that turn.
 
 Transport/authentication errors, uncertain command execution and duplicate or
-missing call IDs are not treated as recoverable schema errors. Invalid reviewer
-plans remain rejected before launching a branch; this mechanism is for actor
-responses during execution.
+missing call IDs are not treated as recoverable schema errors.
+
+## Reviewer correction
+
+The reviewer also receives its previous response and the exact validator error
+when its JSON, tool arguments or branch selection is invalid. It regenerates the
+complete plan; the controller never repairs commands or launches a partially
+valid plan. `--reviewer-max-attempts` defaults to 3 total requests per round;
+set it to 1 to disable correction retries. This does not change branch counts.
+
+Each round's plan file retains every prompt, raw response, validation error and
+attempt status in `review_attempts`. Malformed nested arguments include the tool
+call index and JSON error location. Request failures and unavailable native
+history stop immediately rather than being retried as reviewer format errors.
 
 ## Verification
 

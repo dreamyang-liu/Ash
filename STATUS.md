@@ -1,3 +1,34 @@
+## Reviewer validation feedback — 2026-09-21
+
+### Original request (verbatim, unedited)
+reviewer also do ir
+
+### Current agreement
+Return reviewer parse/plan errors with the original response for bounded
+correction (default 3 total attempts per round, configurable). Execute only
+fully validated plans. Preserve all attempts. Keep branch and actor budgets.
+
+### Confirmed
+- 2026-09-21: full regression: 1214 passed, 66 skipped using
+  `PYTHONPATH=.:sdk python -m pytest harness/tests swebench/tests runstore/tests sdk/tests deepswe/tests swebench_pro/tests -q`.
+- Reviewer loop tests cover malformed JSON, inner arguments, invalid selection,
+  exhaustion, state/request failures and persistence: `swebench/tests/test_reviewer_feedback.py`.
+
+### Unconfirmed / unknowns
+Live remote reviewer correction and final branch outcomes pending.
+
+### Failure log
+No implementation test failures.
+
+### Decisions
+User, 2026-09-21: “reviewer also do ir”. Apply the correction loop to reviewer.
+
+### Next steps
+Publish, validate remotely, resume the two existing failed parents in isolation.
+
+### Pending re-review
+None.
+
 ## Recoverable mini tool-schema feedback — 2026-09-21
 
 ### Original request (verbatim, unedited)

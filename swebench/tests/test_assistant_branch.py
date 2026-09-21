@@ -40,7 +40,8 @@ def test_assistant_prompt_and_report_schema_keep_the_synthetic_turn():
 
 @mini_only
 @pytest.mark.parametrize("mode", ["assistant-turn", "none"])
-def test_core_reviewer_selection_reaches_mini_without_a_user_hint(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize("correct_first", [False, True])
+def test_core_reviewer_selection_reaches_mini_without_a_user_hint(tmp_path, monkeypatch, mode, correct_first):
     memory, parent, native_points = parent_run(tmp_path / "parent", monkeypatch)
     cut = native_points[0]
     child_memory = restore_files(memory, cut.snapshot_id, tmp_path / "child-sandbox")
@@ -64,6 +65,14 @@ def test_core_reviewer_selection_reaches_mini_without_a_user_hint(tmp_path, monk
     def analyst(model, prompt):
         if "## Every attempt so far" in prompt:
             reviewer_inputs.append(prompt)
+            if correct_first and len(reviewer_inputs) == 1:
+                assert not wire_specs
+                invalid = json.loads(json.dumps(plan))
+                if mode == "assistant-turn":
+                    invalid["branches"][0]["assistant_turn"]["tool_calls"][0]["function"]["arguments"] = '{"command":"bad\\escape"}'
+                else:
+                    invalid["branches"][0]["hint"] = "not allowed"
+                return "```branch-plan\n" + json.dumps(invalid) + "\n```"
             return "```branch-plan\n" + json.dumps(plan) + "\n```"
         return json.dumps({"failure_reason": "Inspect the initial file.", "lesson": "Check it.",
                            "salvage": "file", "branch_candidates": [{"step": cut.tool_depth}]})
@@ -110,6 +119,9 @@ def test_core_reviewer_selection_reaches_mini_without_a_user_hint(tmp_path, monk
     assert "PRIVATE_REVIEWER_REASON_NOT_FOR_ACTOR" not in json.dumps(requests)
     assert recorded["branch_guidance"] == mode
     assert recorded["review"] == plan
+    assert len(recorded["review_attempts"]) == (2 if correct_first else 1)
+    if correct_first:
+        assert recorded["review_attempts"][0]["validation_error"] in reviewer_inputs[1]
     if turn is not None:
         assert recorded["selected_branches"][0]["assistant_turn"] == turn
     else:

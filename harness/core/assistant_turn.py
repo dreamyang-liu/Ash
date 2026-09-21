@@ -19,7 +19,7 @@ def validate_assistant_turn(message: dict, *, history: Sequence[dict] = (),
     if not isinstance(calls, list) or not calls:
         raise ValueError("assistant_turn requires at least one bash tool call")
     used = {call["id"] for entry in history for call in entry.get("tool_calls") or []}
-    for call in calls:
+    for index, call in enumerate(calls):
         if not isinstance(call, dict) or set(call) != {"id", "type", "function"}:
             raise ValueError("assistant_turn tool calls require id, type and function")
         identifier = call["id"]
@@ -34,10 +34,14 @@ def validate_assistant_turn(message: dict, *, history: Sequence[dict] = (),
         try:
             arguments = json.loads(function["arguments"])
         except ValueError as error:
-            raise ValueError("assistant_turn bash arguments are not valid JSON") from error
+            raise ValueError(
+                f"assistant_turn.tool_calls[{index}] ({identifier}) bash arguments are not valid JSON: {error}"
+            ) from error
         if (not isinstance(arguments, dict) or set(arguments) != {"command"}
                 or not isinstance(arguments["command"], str) or not arguments["command"].strip()):
-            raise ValueError("assistant_turn bash arguments require exactly one non-empty string command")
+            raise ValueError(
+                f"assistant_turn.tool_calls[{index}] ({identifier}) bash arguments require exactly one non-empty string command"
+            )
         if tools is not None:
             from jsonschema import Draft202012Validator, ValidationError
 
