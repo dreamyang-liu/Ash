@@ -61,7 +61,7 @@ from swebench.branch_plan import extract_branch_plan
 from swebench.branching import BRANCH_COUNT_MODES, branch_count_rule, branch_run_name
 from swebench.assistant_branch import (
     ASSISTANT_REVIEW_PROMPT, POINT_REVIEW_PROMPT, BRANCH_GUIDANCE_MODES, require_mini_parent,
-    reviewer_context, selected_prefix, validate_guidance,
+    actor_tools_at, reviewer_context, selected_prefix, validate_guidance,
 )
 from harness.core.assistant_turn import validate_assistant_turn
 from swebench.dataset import (SYMPY_RUNNER, build_batch_test_command,
@@ -127,6 +127,10 @@ timeout (seconds) for long commands. Use tail to limit noisy output.
 
 
 def tool_primer(slot: str = "", workdir: str = "/testbed") -> str:
+    if slot == "mini-swe-agent":
+        from harness.core.mini_tools import mini_tool_primer
+
+        return mini_tool_primer(workdir)
     primer = SHELL_TOOL_PRIMER if slot == "claude-code" else TOOL_PRIMER
     return primer.replace("/testbed", workdir)
 
@@ -1269,7 +1273,8 @@ def prepare_branches(plan: dict, *, limit: int, round_no: int,
             native = selected_prefix(base.outcome.journal_path, checkpoints[base_name][step])
             assistant_turn = validate_assistant_turn(
                 branch.get("assistant_turn"),
-                history=[e["message"] for e in native if e["type"] == "mini.message"])
+                history=[e["message"] for e in native if e["type"] == "mini.message"],
+                tools=actor_tools_at(base.outcome.journal_path, step))
             hint = ""
         else:
             if "assistant_turn" in branch:

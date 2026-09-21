@@ -71,6 +71,19 @@ reviewer receives analyses, the task, and each attempt's native messages with
 eligible step. This includes inherited messages for branches of branches.
 The reviewer must distinguish the selected prefix from its discarded suffix.
 
+`native_history.tools` supplies the tool definitions actually recorded during
+the parent attempt; `native_history.workspace` supplies its inherited working
+directory when available. The controller validates reviewer calls against the
+recorded parameter schema at the selected checkpoint. Missing tool records or
+unsupported tool interfaces are errors, not invitations to guess.
+
+New mini actor task prompts and actual requests use the same upstream-derived
+`bash(command)` definition. Its schema declares `additionalProperties: false`
+to match the existing executor's rejection of extra arguments. The task primer
+uses `cd` inside commands and leaves timeouts to the runner; it no longer
+advertises the generic MCP shell/text_editor interface to mini. This correction
+applies to new task prompts and does not rewrite saved parent histories.
+
 Instead of `hint`, each new-mode branch contains `assistant_turn`:
 
 ```branch-plan

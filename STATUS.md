@@ -1,3 +1,45 @@
+## Mini actor/reviewer tool-contract correction — 2026-09-21
+
+### Original request (verbatim, unedited)
+那是不是你的system prompt没写好，你可能要让reviewer知道actor能用哪些tool
+
+### Current agreement
+Correct the mini actor task primer and expose recorded actor tools to the
+reviewer. Keep strict argument validation, retained histories and grading.
+Publish the fix without rewriting failed experiments or launching replacements.
+
+### Confirmed
+- 2026-09-21: the observed failure was the parent actor's first response, before
+  reviewer execution. Generic shell/text_editor instructions conflicted with
+  mini's bash(command) interface; extra timeout/working_dir were rejected.
+- Actor primer and actual requests now use one shared contract, checked against
+  pinned mini2.4.6 at actor startup. Extra arguments remain forbidden. Rendering
+  the primer does not import mini or load host-global configuration.
+- Reviewer context includes recorded tools/workspace; plan validation uses the
+  parameter schema at the selected checkpoint. Missing declarations fail.
+- Local regression1193passed/66skipped; mini API contract14/14passed.
+  Reproduce: `PYTHONPATH=.:sdk python -m pytest harness/tests swebench/tests runstore/tests sdk/tests deepswe/tests swebench_pro/tests -q`.
+  Targeted evidence: `swebench/tests/test_mini_tool_context.py`.
+
+### Unconfirmed / unknowns
+Corrected live-model adherence and benchmark outcomes have not been measured.
+Replacement sampling is not authorized by this correction alone.
+
+### Failure log
+No new model or benchmark attempts in this correction round.
+
+### Decisions
+Correct misleading instructions and validate real tool contracts; do not
+silently discard invalid arguments or change the executor to accept them.
+
+### Next steps
+Use the corrected feature branch for a separately authorized continuation.
+Keep original failed-run evidence and frozen source intact.
+
+### Pending re-review
+Prompt/schema correction resolved; experiment replacement remains a separate
+decision recorded in the coordinating workspace.
+
 ## Mini branch guidance release — 2026-09-21
 
 ### Original request (verbatim, unedited)

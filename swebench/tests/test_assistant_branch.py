@@ -115,6 +115,9 @@ def test_core_reviewer_selection_reaches_mini_without_a_user_hint(tmp_path, monk
     else:
         assert "assistant_turn" not in recorded["selected_branches"][0]
     assert '"native_history":' in reviewer_inputs[0] and '"prefix_message_counts":' in reviewer_inputs[0]
+    assert '"tools":' in reviewer_inputs[0] and '"name": "bash"' in reviewer_inputs[0]
+    assert '"additionalProperties": false' in reviewer_inputs[0]
+    assert '"workspace":' in reviewer_inputs[0] and '"/testbed"' in reviewer_inputs[0]
     assert "Return exactly 1 branches" in reviewer_inputs[0]
     events = read_journal(attempts[1].outcome.journal_path)
     origin = next(e for e in events if e["type"] == "fork.origin")

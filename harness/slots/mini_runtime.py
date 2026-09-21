@@ -30,6 +30,7 @@ from minisweagent.models.utils.actions_toolcall import BASH_TOOL
 
 from harness.core.checkpoint_identity import CALL_IDENTITY_KEY
 from harness.core.assistant_turn import validate_assistant_turn
+from harness.core.mini_tools import mini_tool_schema
 from harness.core.control import RunControl
 from harness.core.events import Usage
 from harness.core.http import post
@@ -57,6 +58,7 @@ class ChatModel(LitellmModel):
                                        else "/v1/chat/completions")
         self.key = env.get("OPENAI_API_KEY", "")
         self.usage = Usage()
+        self.tools = mini_tool_schema(BASH_TOOL)
 
     def _query(self, messages: list[dict], **kwargs) -> litellm.ModelResponse:
         self.control.raise_if_stopped()
@@ -64,7 +66,7 @@ class ChatModel(LitellmModel):
         if remaining <= 0:
             self.control.request_stop("mini wall-time budget exhausted", stop_reason="timeout")
             self.control.raise_if_stopped()
-        payload = {"model": self.config.model_name, "messages": messages, "tools": [BASH_TOOL],
+        payload = {"model": self.config.model_name, "messages": messages, "tools": self.tools,
                    **self.config.model_kwargs, **kwargs, "stream": False}
         response = post(self.url, json=payload, timeout_s=remaining, control=self.control,
                         headers={"Authorization": "Bearer " + self.key})
@@ -196,7 +198,7 @@ class CheckpointAgent(DefaultAgent):
             raise ValueError("Point-only continuation cannot include an assistant_turn")
         if (assistant_turn is not None or resume_without_hint) and not history.prefix_messages:
             raise ValueError("This branch mode requires an exact mini history prefix")
-        self.pending_turn = (validate_assistant_turn(assistant_turn, history=history.prefix_messages)
+        self.pending_turn = (validate_assistant_turn(assistant_turn, history=history.prefix_messages, tools=model.tools)
                              if assistant_turn is not None else None)
         self.omit_user_hint = assistant_turn is not None or resume_without_hint
 
@@ -372,7 +374,7 @@ def run(task: TaskSpec, journal: JournalWriter, mcp: McpWiring,
     timer.start()
     try:
         model = ChatModel(task, journal, deadline, control, **model_config)
-        journal.emit("rollout.model_tools", shape="chat/completions", tools=[BASH_TOOL])
+        journal.emit("rollout.model_tools", shape="chat/completions", tools=model.tools)
         env = McpEnvironment(mcp, journal, deadline, control, env_config)
         env.repository_dir = workspace["repository_dir"]
         agent = CheckpointAgent(model, env, history, journal, control,
