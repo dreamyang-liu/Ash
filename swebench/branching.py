@@ -37,7 +37,8 @@ def review_branches(review: dict) -> list[dict]:
     return [dict(base=branch.get("base", review.get("base", "parent")),
                  branch_step=branch.get("branch_step", review.get("branch_step")),
                  why=branch.get("why", review.get("why", "")),
-                 name=branch.get("name"), hint=branch.get("hint"))
+                 name=branch.get("name"), hint=branch.get("hint"),
+                 **({"assistant_turn": branch["assistant_turn"]} if "assistant_turn" in branch else {}))
             for branch in review.get("branches") or []]
 
 

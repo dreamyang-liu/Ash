@@ -58,6 +58,13 @@ Four agent integrations are supported:
 The infrastructure is agent-agnostic: one orchestrator, one
 checkpoint mechanism, one MCP server.
 
+For mini-only branches, `--branch-guidance assistant-turn` lets the reviewer
+write an ordinary assistant response with bash calls that execute before the
+actor continues. `--branch-guidance none` selects only a checkpoint and continues
+with the retained history alone, adding no messages. The default remains `user-hint`.
+See [branch guidance modes](docs/ASSISTANT_TURN_BRANCHING.md) for the schemas,
+history guarantees and usage.
+
 `--slot codex` uses the SDK/app-server; the unused `codex-cli` execution adapter
 has been removed. Historical trajectories and their readers are retained.
 

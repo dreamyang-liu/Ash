@@ -29,6 +29,7 @@ from minisweagent.models.litellm_model import LitellmModel
 from minisweagent.models.utils.actions_toolcall import BASH_TOOL
 
 from harness.core.checkpoint_identity import CALL_IDENTITY_KEY
+from harness.core.assistant_turn import validate_assistant_turn
 from harness.core.control import RunControl
 from harness.core.events import Usage
 from harness.core.http import post
@@ -180,19 +181,33 @@ class McpEnvironment:
 
 class CheckpointAgent(DefaultAgent):
     def __init__(self, model: ChatModel, env: McpEnvironment, history: History,
-                 journal: JournalWriter, control: RunControl, **kwargs) -> None:
+                 journal: JournalWriter, control: RunControl, *, assistant_turn: dict | None = None,
+                 resume_without_hint: bool = False,
+                 **kwargs) -> None:
         super().__init__(model, env, **kwargs)
         self.history, self.journal, self.control = history, journal, control
         self.initialized = False
         self.turn_id = None
+        self.turn_count = 0
+        self.turn_source = "actor"
+        if type(resume_without_hint) is not bool:
+            raise ValueError("resume_without_hint must be a boolean")
+        if assistant_turn is not None and resume_without_hint:
+            raise ValueError("Point-only continuation cannot include an assistant_turn")
+        if (assistant_turn is not None or resume_without_hint) and not history.prefix_messages:
+            raise ValueError("This branch mode requires an exact mini history prefix")
+        self.pending_turn = (validate_assistant_turn(assistant_turn, history=history.prefix_messages)
+                             if assistant_turn is not None else None)
+        self.omit_user_hint = assistant_turn is not None or resume_without_hint
 
     def add_messages(self, *messages: dict) -> list[dict]:
         if not self.initialized:
             self.initialized = True
             if self.history.prefix_messages:
                 self.messages = deepcopy(self.history.prefix_messages)
-                # Original task and system stay intact; only the new hint is appended.
-                messages = (self.model.format_message(role="user", content=self.extra_template_vars["task"]),)
+                # The new mode continues the prefix directly, without a user hint.
+                messages = (() if self.omit_user_hint else (
+                    self.model.format_message(role="user", content=self.extra_template_vars["task"]),))
         for message in messages:
             response = message.get("extra", {}).get("response")
             if message.get("extra", {}).get("interrupt_type") == "FormatError" and isinstance(response, dict):
@@ -218,7 +233,19 @@ class CheckpointAgent(DefaultAgent):
     def query(self) -> dict:
         self.control.raise_if_stopped()
         self.turn_id = uuid4().hex
-        self.journal.emit("turn.started", turn=self.n_calls + 1)
+        self.turn_count += 1
+        self.turn_source = "reviewer" if self.pending_turn is not None else "actor"
+        self.journal.emit("turn.started", turn=self.turn_count, source=self.turn_source)
+        if self.pending_turn is not None:
+            message, self.pending_turn = self.pending_turn, None
+            # Use mini's real parser; no model request, usage or fake observation.
+            response = litellm.ModelResponse(choices=[{
+                "index": 0, "finish_reason": "tool_calls", "message": message}])
+            message["extra"] = {"actions": self.model._parse_actions(response), "source": "reviewer"}
+            self.journal.emit("branch.assistant_turn", source="reviewer", turn_id=self.turn_id,
+                              message={k: v for k, v in message.items() if k != "extra"})
+            self.add_messages(message)
+            return message
         return super().query()
 
     def execute_actions(self, message: dict) -> list[dict]:
@@ -239,11 +266,12 @@ class CheckpointAgent(DefaultAgent):
         calls = [action["tool_call_id"] for action in actions]
         if len(observed) == len(actions):
             self.journal.emit("model.turn.output_completed", turn_id=self.turn_id,
-                              call_ids=calls, closure="mini-response-and-observations")
+                              call_ids=calls, closure="mini-response-and-observations", source=self.turn_source)
             self.journal.emit("model.turn.completed", turn_id=self.turn_id, call_ids=calls,
-                              step=self.journal.tool_calls()[-1]["step"])
-            self.history.append({"type": "mini.turn", "turn_id": self.turn_id, "call_ids": calls})
-            self.journal.emit("turn.completed", turn=self.n_calls)
+                              step=self.journal.tool_calls()[-1]["step"], source=self.turn_source)
+            self.history.append({"type": "mini.turn", "turn_id": self.turn_id,
+                                 "call_ids": calls, "source": self.turn_source})
+            self.journal.emit("turn.completed", turn=self.turn_count, source=self.turn_source)
         if submitted:
             if len(observed) != len(actions):
                 raise ValueError("mini submitted before completing its model response's actions")
@@ -314,6 +342,17 @@ def run(task: TaskSpec, journal: JournalWriter, mcp: McpWiring,
         parent = next(entry for entry in prefix if entry.get("type") == "mini.session")
         if parent.get("workspace") is not None and parent["workspace"] != workspace:
             raise ValueError("mini branch workspace differs from its inherited history")
+    assistant_turn = task.extra.get("assistant_turn")
+    resume_without_hint = task.extra.get("resume_without_hint", False)
+    if type(resume_without_hint) is not bool:
+        raise ValueError("resume_without_hint must be a boolean")
+    if assistant_turn is not None and resume_without_hint:
+        raise ValueError("Point-only continuation cannot include an assistant_turn")
+    if (assistant_turn is not None or resume_without_hint) and not prefix:
+        raise ValueError("This branch mode requires an exact mini history prefix")
+    if assistant_turn is not None:
+        validate_assistant_turn(assistant_turn, history=[
+            entry["message"] for entry in prefix if entry.get("type") == "mini.message"])
     history = History(home / f"{session_id}.jsonl", session_id, prefix=prefix, workspace=workspace)
     model, agent = None, None
     status, error, final_text = "error", None, ""
@@ -336,7 +375,9 @@ def run(task: TaskSpec, journal: JournalWriter, mcp: McpWiring,
         journal.emit("rollout.model_tools", shape="chat/completions", tools=[BASH_TOOL])
         env = McpEnvironment(mcp, journal, deadline, control, env_config)
         env.repository_dir = workspace["repository_dir"]
-        agent = CheckpointAgent(model, env, history, journal, control, **agent_config)
+        agent = CheckpointAgent(model, env, history, journal, control,
+                                assistant_turn=assistant_turn, resume_without_hint=resume_without_hint,
+                                **agent_config)
         info = agent.run(task.prompt)
         final_text = info.get("submission", "")
         status = "completed" if info.get("exit_status") == "Submitted" else "error"
