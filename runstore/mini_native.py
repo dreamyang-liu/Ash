@@ -16,11 +16,21 @@ def index_mini(journal: Path, transcript: Path, session_id: str, *,
     local_calls = [e["call_id"] for e in events if e.get("type") == "tool.started"]
     positions = {call: i for i, call in enumerate(local_calls, 1)}
     admitted = set(local_calls)
+    rejection_events = {e["call_id"]: e for e in events
+                        if e.get("type") == "tool.rejected" and e.get("source") == "schema_validation"
+                        and e.get("executed") is False and e.get("call_id")}
+    rejected_turns = {e["turn_id"]: e for e in events
+                      if e.get("type") == "mini.turn.rejected" and e.get("source") == "schema_validation"
+                      and e.get("executed") is False and e.get("turn_id")}
+    admitted.update(rejection_events)
+    inherited_rejections = {}
     if inherited_native:
         if inherited_native["slot"] != "mini-swe-agent":
             raise ValueError("Inherited native prefix uses a different slot")
         for entry in read_entries(read_prefix(inherited_native)):
             admitted.update(call["id"] for call in entry.get("message", {}).get("tool_calls") or [])
+            if entry.get("type") == "mini.turn" and entry.get("rejected") is True:
+                inherited_rejections[entry["turn_id"]] = entry["call_ids"]
     checkpoints = branch_checkpoints(journal, events=events)
     turns = completed_turn_steps(events) or {}
     closed = {value["turn_id"]: value for value in turns.values()}
@@ -50,12 +60,31 @@ def index_mini(journal: Path, transcript: Path, session_id: str, *,
                 call_id = message.get("tool_call_id")
                 if call_id not in pending:
                     break
+                if call_id in rejection_events and message.get("content") != rejection_events[call_id].get("feedback"):
+                    break
                 pending.remove(call_id)
                 seen.add(call_id)
         elif kind == "mini.turn":
             if pending or row.get("call_ids") != group:
                 break
             message_step += 1
+            is_rejection = (bool(set(group) & set(rejection_events))
+                            or row.get("turn_id") in rejected_turns
+                            or row.get("turn_id") in inherited_rejections)
+            if is_rejection or row.get("rejected") is True:
+                if row.get("rejected") is not True:
+                    break
+                tid = row.get("turn_id")
+                if set(group) & set(local_calls):
+                    break
+                if tid in inherited_rejections:
+                    if inherited_rejections[tid] != group:
+                        break
+                elif (rejected_turns.get(tid, {}).get("call_ids") != group
+                      or any(rejection_events.get(call, {}).get("turn_id") != tid for call in group)):
+                    break
+                group = []
+                continue
             local = [call for call in group if call in positions]
             if local:
                 depth = max(positions[call] for call in local)

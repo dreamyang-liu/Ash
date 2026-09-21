@@ -1,3 +1,44 @@
+## Recoverable mini tool-schema feedback — 2026-09-21
+
+### Original request (verbatim, unedited)
+Then I feel like we can return the schema error back to the model and let it reflect and adjust its tool call
+
+### Current agreement
+Return actor argument-schema errors as tool feedback, preserving the original
+bad response and executing none of its calls. Retry through mini's existing
+FormatError loop and budgets. Preserve native checkpoint/replay/export
+causality; protocol identity errors and uncertain execution remain hard errors.
+
+### Confirmed
+- 2026-09-21: local regression1203passed/66skipped. Targeted32tests pass,
+  including malformed→corrected execution, mixed-batch non-execution,
+  consecutive/model-call limits, native indexing and exact branch restoration.
+  Reproduce: `PYTHONPATH=.:sdk python -m pytest harness/tests swebench/tests runstore/tests sdk/tests deepswe/tests swebench_pro/tests -q`.
+- Invalid calls now get tool_schema_error feedback; valid siblings of a rejected
+  batch get tool_batch_rejected. All state executed=false and preserve the
+  original arguments. Rejection events do not count as shell execution or
+  snapshots; later real checkpoints retain the complete feedback history.
+
+### Unconfirmed / unknowns
+Live-model correction and benchmark outcomes are not established by local
+controlled-model tests. Frozen processes cannot adopt new code merely by pull.
+
+### Failure log
+First test used NativePoint.step instead of message_step; corrected the
+assertion. Runtime correction and indexing had already succeeded.
+
+### Decisions
+User approves recoverable schema feedback. Keep original budgets and atomic
+validation-before-execution; do not silently strip extra arguments.
+
+### Next steps
+Use this version for controlled continuation/retest with explicit provenance.
+Operational probe and deployment receipts live in the coordinating workspace.
+
+### Pending re-review
+Error-policy direction resolved. Existing frozen-run continuation still needs
+consistent checkpoint/budget handling.
+
 ## Mini actor/reviewer tool-contract correction — 2026-09-21
 
 ### Original request (verbatim, unedited)

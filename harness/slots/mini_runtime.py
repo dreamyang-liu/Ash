@@ -24,13 +24,14 @@ import yaml
 from minisweagent import package_dir
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.environments.local import LocalEnvironment
-from minisweagent.exceptions import Submitted
+from minisweagent.exceptions import FormatError, Submitted
 from minisweagent.models.litellm_model import LitellmModel
 from minisweagent.models.utils.actions_toolcall import BASH_TOOL
 
 from harness.core.checkpoint_identity import CALL_IDENTITY_KEY
 from harness.core.assistant_turn import validate_assistant_turn
 from harness.core.mini_tools import mini_tool_schema
+from harness.core.tool_schema_feedback import tool_schema_feedback
 from harness.core.control import RunControl
 from harness.core.events import Usage
 from harness.core.http import post
@@ -59,9 +60,12 @@ class ChatModel(LitellmModel):
         self.key = env.get("OPENAI_API_KEY", "")
         self.usage = Usage()
         self.tools = mini_tool_schema(BASH_TOOL)
+        self.history_call_ids = set()
 
     def _query(self, messages: list[dict], **kwargs) -> litellm.ModelResponse:
         self.control.raise_if_stopped()
+        self.history_call_ids = {call["id"] for message in messages
+                                 for call in message.get("tool_calls") or []}
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             self.control.request_stop("mini wall-time budget exhausted", stop_reason="timeout")
@@ -92,15 +96,44 @@ class ChatModel(LitellmModel):
         return {"cost": 0.0}
 
     def _parse_actions(self, response: litellm.ModelResponse) -> list[dict]:
-        actions = super()._parse_actions(response)
-        calls = response.choices[0].message.tool_calls
-        if (len({call.id for call in calls}) != len(calls)
-                or any(not isinstance(call.id, str) or not call.id
-                       or set(json.loads(call.function.arguments)) != {"command"}
-                       or not isinstance(action["command"], str)
-                       for call, action in zip(calls, actions, strict=True))):
-            raise ValueError("mini bash calls require unique ids and exactly one string command")
-        return actions
+        from jsonschema import Draft202012Validator
+
+        calls = response.choices[0].message.tool_calls or []
+        ids = [call.id for call in calls]
+        if (any(not isinstance(identifier, str) or not identifier.strip() for identifier in ids)
+                or len(set(ids)) != len(ids) or set(ids) & self.history_call_ids):
+            # Ambiguous identities cannot be paired with truthful tool feedback.
+            raise ValueError("mini bash calls require unique ids across history")
+        validator = Draft202012Validator(self.tools[0]["function"]["parameters"])
+        errors = {}
+        for call in calls:
+            function = call.function
+            if (call.type != "function" or function is None
+                    or not isinstance(function.name, str) or not function.name.strip()
+                    or not isinstance(function.arguments, str)):
+                raise ValueError("mini tool calls require a function name and JSON-string arguments")
+            if function.name != "bash":
+                errors[call.id] = "Unknown tool. The available function is bash(command)."
+                continue
+            try:
+                arguments = json.loads(function.arguments)
+            except ValueError as error:
+                errors[call.id] = f"Arguments are not valid JSON: {error}"
+                continue
+            problems = list(validator.iter_errors(arguments))
+            if problems:
+                errors[call.id] = "; ".join(error.message for error in problems)
+        if errors:
+            # DefaultAgent already charges this response and retries FormatError.
+            # The marker is consumed below, producing tool-role errors, not a hint.
+            raise FormatError({
+                "role": "user",
+                "content": "Tool schema validation failed. No calls in this response were executed. "
+                           "Correct the arguments and submit new tool calls matching the tool schema.",
+                "extra": {"interrupt_type": "FormatError", "tool_schema_feedback": True,
+                          "call_errors": errors, "tools": deepcopy(self.tools)},
+            })
+        return super()._parse_actions(response)
 
 
 class McpEnvironment:
@@ -212,6 +245,9 @@ class CheckpointAgent(DefaultAgent):
                     self.model.format_message(role="user", content=self.extra_template_vars["task"]),))
         for message in messages:
             response = message.get("extra", {}).get("response")
+            if message.get("extra", {}).get("tool_schema_feedback") is True and isinstance(response, dict):
+                self._schema_feedback(message, response)
+                continue
             if message.get("extra", {}).get("interrupt_type") == "FormatError" and isinstance(response, dict):
                 # Upstream retains a malformed completion inside the feedback's
                 # extra field. Preserve it as actual assistant context as well.
@@ -231,6 +267,27 @@ class CheckpointAgent(DefaultAgent):
                 if message.get("reasoning_content"):
                     self.journal.emit("agent.thinking", text=message["reasoning_content"])
         return list(messages)
+
+    def _schema_feedback(self, feedback: dict, response: dict) -> None:
+        """Persist real validation outcomes without pretending commands ran."""
+        original = deepcopy(response["choices"][0]["message"])
+        calls = original["tool_calls"]
+        errors = feedback["extra"]["call_errors"]
+        self.add_messages(original)
+        observations = tool_schema_feedback(original, errors, feedback["extra"]["tools"])
+        for call, observation in zip(calls, observations, strict=True):
+            identifier = call["id"]
+            self.journal.emit("tool.rejected", call_id=identifier, turn_id=self.turn_id,
+                              name=(call.get("function") or {}).get("name"), executed=False,
+                              source="schema_validation", feedback=observation["content"])
+            self.add_messages(observation)
+        ids = [call["id"] for call in calls]
+        # Rejected turns close conversation only: no tool step or snapshot exists.
+        self.history.append({"type": "mini.turn", "turn_id": self.turn_id,
+                             "call_ids": ids, "rejected": True, "source": "schema_validation"})
+        self.journal.emit("mini.turn.rejected", turn_id=self.turn_id, call_ids=ids,
+                          source="schema_validation", executed=False)
+        self.journal.emit("turn.completed", turn=self.turn_count, source="actor", rejected=True)
 
     def query(self) -> dict:
         self.control.raise_if_stopped()

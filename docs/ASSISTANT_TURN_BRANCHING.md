@@ -149,6 +149,37 @@ natural continuation and prohibit invented prior observations or hidden grader
 details. Structural checks establish execution and history consistency, not
 that the generated reasoning is natural or that the repair will succeed.
 
+## Recoverable actor tool-schema errors
+
+When the actor produces extra arguments, malformed JSON, a wrong parameter
+type or an unknown function name, the adapter returns a structured schema error
+to the model instead of terminating the actor. This requires valid, unique
+tool-call identities and a well-formed function-call envelope.
+
+Validation happens before execution. If any call in a response is invalid, none
+of that response's calls execute. Every call receives a matching tool-role
+message: `tool_schema_error` for invalid calls or `tool_batch_rejected` for
+otherwise-valid siblings. The feedback includes `executed: false`, the error
+and the available tool schema, asking the model to correct and resend.
+
+The original assistant call and its arguments remain unchanged in history.
+The feedback is a real validator result, not fabricated command output.
+No shell exit code or filesystem snapshot is invented. The actor continues
+through mini's existing FormatError loop, with its existing consecutive-error
+limit, model-call budget and wall-time limit. Errors do not reset those budgets.
+
+`tool.rejected` and `mini.turn.rejected` journal events corroborate the native
+rejected-turn record. Rejected turns advance conversation history but not
+executed tool depth. They are not independently branchable snapshot points;
+later real checkpoints retain the rejection and correction history and can
+be resumed or exported normally. Missing rejection evidence prevents indexing
+past that turn.
+
+Transport/authentication errors, uncertain command execution and duplicate or
+missing call IDs are not treated as recoverable schema errors. Invalid reviewer
+plans remain rejected before launching a branch; this mechanism is for actor
+responses during execution.
+
 ## Verification
 
 The new tests drive the pinned mini loop through local HTTP model and MCP
@@ -160,6 +191,7 @@ PYTHONPATH=.:sdk python -m pytest \
   harness/tests/test_assistant_turn.py \
   runstore/tests/test_assistant_turn_branch.py \
   runstore/tests/test_no_hint_branch.py \
+  runstore/tests/test_schema_feedback.py \
   swebench/tests/test_assistant_branch.py -q
 ```
 
