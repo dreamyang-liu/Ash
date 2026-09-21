@@ -28,9 +28,16 @@ def validate_assistant_turn(message: dict, *, history: Sequence[dict] = (),
         used.add(identifier)
         function = call["function"]
         if (call["type"] != "function" or not isinstance(function, dict)
-                or set(function) != {"name", "arguments"} or function["name"] != "bash"
+                or set(function) != {"name", "arguments"}
                 or not isinstance(function["arguments"], str)):
             raise ValueError("assistant_turn supports only bash with JSON-string arguments")
+        if function["name"] != "bash":
+            raise ValueError(
+                f"assistant_turn.tool_calls[{index}] ({identifier}) has forbidden tool name "
+                f"{function['name']!r}; only bash is allowed. Return function.name='bash' "
+                "with JSON-string arguments containing exactly command. "
+                "No calls from this plan have executed."
+            )
         try:
             arguments = json.loads(function["arguments"])
         except ValueError as error:

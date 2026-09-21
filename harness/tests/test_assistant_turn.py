@@ -44,3 +44,18 @@ def test_invalid_synthetic_turn_is_rejected(change):
 def test_call_id_cannot_repeat_an_inherited_call():
     with pytest.raises(ValueError, match="unique across history"):
         validate_assistant_turn(assistant_turn(), history=[assistant_turn()])
+
+
+@pytest.mark.parametrize("name", ["shell", "python", "apply_patch", "text_editor", "Bash", "mcp__bash"])
+def test_non_bash_name_is_reported_for_reviewer_correction(name):
+    message = assistant_turn()
+    message["tool_calls"][0]["function"]["name"] = name
+    with pytest.raises(ValueError, match="only bash is allowed") as error:
+        validate_assistant_turn(message)
+    assert repr(name) in str(error.value)
+    assert "tool_calls[0]" in str(error.value)
+
+
+def test_bash_programs_are_not_mistaken_for_tool_names():
+    message = assistant_turn('python3 -c "print(1)" && git status --short')
+    assert validate_assistant_turn(message) == message

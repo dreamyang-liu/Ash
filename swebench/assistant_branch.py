@@ -110,10 +110,29 @@ There is no user hint or opportunity for the actor to revise your first action.
 - Do not mention reviewers, guidance, other branches, scores, hidden test
   names/IDs, grader paths or outside feedback. Do not write an acknowledgment,
   a user instruction, a task restatement or invented tool observations.
+- Never describe the continuation as a checkpoint, restore, replay, restart,
+  injected turn or selected branch. Phrases such as "from this checkpoint",
+  "the clean checkpoint" and "resuming this trajectory" expose controller-only
+  knowledge. Speak only about the code and observations in the retained history:
+  for example, "I've inspected the merge APIs; I'll check the working tree
+  before implementing the merge logic." A task's own database checkpoint or
+  application restore API may still be discussed as domain functionality.
+- Claims that work is complete or tests have passed must be supported by
+  observations BEFORE the selected cut. Otherwise describe a hypothesis and
+  the check you will run, not a fact learned from discarded history or grading.
 - Supply one or more bash function calls, in execution order. Every call needs
   a non-empty unique id not used anywhere in the retained history, type=function,
   and function.name=bash. function.arguments is a JSON STRING containing exactly
   one string field, command. Commands may inspect or modify the sandbox.
+- bash is the ONLY allowed tool name. Calls named shell, python, apply_patch,
+  text_editor, or any host/MCP tool are rejected before any branch executes;
+  the validation error will be returned for you to correct the complete plan.
+  Python, git and other available programs can be invoked INSIDE bash commands.
+- A bash tool does not imply a shell executable named apply_patch exists.
+  Do not invoke the host's apply_patch helper inside bash. Use ordinary shell
+  redirection or Python file edits when those programs are supported by the
+  retained context. Ensure a failed edit stops subsequent checks and commits,
+  using explicit error checks, && chaining, or set -e as appropriate.
 - Use only files, working-directory conventions and tools supported by the
   selected prefix. Preserve the original task's behavioral constraints.
 - Do not include hint, reasoning_content, extra, tool results or additional

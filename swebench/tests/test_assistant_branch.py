@@ -40,7 +40,7 @@ def test_assistant_prompt_and_report_schema_keep_the_synthetic_turn():
 
 @mini_only
 @pytest.mark.parametrize("mode", ["assistant-turn", "none"])
-@pytest.mark.parametrize("correct_first", [False, True])
+@pytest.mark.parametrize("correct_first", [False, True, "non-bash"])
 def test_core_reviewer_selection_reaches_mini_without_a_user_hint(tmp_path, monkeypatch, mode, correct_first):
     memory, parent, native_points = parent_run(tmp_path / "parent", monkeypatch)
     cut = native_points[0]
@@ -69,7 +69,12 @@ def test_core_reviewer_selection_reaches_mini_without_a_user_hint(tmp_path, monk
                 assert not wire_specs
                 invalid = json.loads(json.dumps(plan))
                 if mode == "assistant-turn":
-                    invalid["branches"][0]["assistant_turn"]["tool_calls"][0]["function"]["arguments"] = '{"command":"bad\\escape"}'
+                    if correct_first == "non-bash":
+                        invalid["branches"][0]["assistant_turn"]["tool_calls"].append({
+                            "id": "forbidden-second-call", "type": "function",
+                            "function": {"name": "apply_patch", "arguments": '{"command":"touch forbidden"}'}})
+                    else:
+                        invalid["branches"][0]["assistant_turn"]["tool_calls"][0]["function"]["arguments"] = '{"command":"bad\\escape"}'
                 else:
                     invalid["branches"][0]["hint"] = "not allowed"
                 return "```branch-plan\n" + json.dumps(invalid) + "\n```"
@@ -122,6 +127,10 @@ def test_core_reviewer_selection_reaches_mini_without_a_user_hint(tmp_path, monk
     assert len(recorded["review_attempts"]) == (2 if correct_first else 1)
     if correct_first:
         assert recorded["review_attempts"][0]["validation_error"] in reviewer_inputs[1]
+        if correct_first == "non-bash" and mode == "assistant-turn":
+            assert "only bash is allowed" in reviewer_inputs[1]
+            assert "'apply_patch'" in reviewer_inputs[1]
+            assert not (child_memory.root / "forbidden").exists()
     if turn is not None:
         assert recorded["selected_branches"][0]["assistant_turn"] == turn
     else:

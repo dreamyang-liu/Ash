@@ -1,3 +1,39 @@
+## Reviewer continuation wording and bash-only feedback — 2026-09-21
+
+### Original request (verbatim, unedited)
+我我觉得加一些prompt，不要让他说checkpoint 这些，然后command应该只允许bash，不允许别的。这个可以guard一下，如果用了非bash的tool call 打回去
+
+### Current agreement
+Strengthen natural continuation prompt; reject non-bash tool names with precise
+feedback before any branch executes. Keep existing reviewer retry limits.
+Allow ordinary programs inside bash; do not conflate tool names with shell text.
+
+### Confirmed
+- 2026-09-21: targeted51passed. Non-bash mixed-call plan rejected before sandbox
+  execution, then corrected plan runs mini normally. Files:
+  harness/tests/test_assistant_turn.py and swebench/tests/test_assistant_branch.py.
+- Full regression1228passed/66skipped:
+  `PYTHONPATH=.:sdk python -m pytest harness/tests swebench/tests runstore/tests sdk/tests deepswe/tests swebench_pro/tests -q`.
+- Reviewer prompt forbids controller checkpoint/restart phrasing, requires prefix
+  evidence for past observations, and warns against host apply_patch inside bash.
+
+### Unconfirmed / unknowns
+Prompt adherence is not certified by the tool-name guard. Live baseline runs are
+frozen to their original commits; this revision applies to subsequent runs.
+
+### Failure log
+No implementation test failures.
+
+### Decisions
+User authorized prompt changes and returning non-bash calls for correction.
+No blanket lexical checkpoint ban (domain checkpoint APIs remain valid).
+
+### Next steps
+Publish and validate remote checkout; use this version for future experiments.
+
+### Pending re-review
+None for this scoped revision.
+
 ## Reviewer validation feedback — 2026-09-21
 
 ### Original request (verbatim, unedited)

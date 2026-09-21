@@ -191,6 +191,19 @@ attempt status in `review_attempts`. Malformed nested arguments include the tool
 call index and JSON error location. Request failures and unavailable native
 history stop immediately rather than being retried as reviewer format errors.
 
+Reviewer content must speak from the retained actor history, without describing
+the checkpoint, restart, reviewer or injection mechanism. Domain concepts such
+as a database checkpoint remain legitimate task content. Unsupported diagnoses
+must be expressed as hypotheses to check, not as previously observed facts.
+
+Every tool call must have `function.name == "bash"`. A non-bash name rejects the
+whole plan before any branch executes; feedback identifies the name and call
+position so the reviewer can correct it. This is a tool-name guard, not a ban on
+running Python or git inside bash. The prompt separately warns that the host's
+`apply_patch` helper is not a sandbox command and that failed edits must stop
+later checks and commits. Natural wording and shell-program availability are
+prompt requirements; the schema guard does not prove them.
+
 ## Verification
 
 The new tests drive the pinned mini loop through local HTTP model and MCP
