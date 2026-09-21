@@ -1,3 +1,41 @@
+## Mini branch guidance release — 2026-09-21
+
+### Original request (verbatim, unedited)
+你放到远程吧，可以push 然后远程拉一下
+
+### Current agreement
+Publish the mini-only assistant-turn and none branching modes as a focused
+feature branch. Preserve baseline user-hint behavior, exclude unrelated local
+changes, and verify the release before using it. No benchmark launch.
+
+### Confirmed
+- 2026-09-21: isolated branch based on58b9d0d;96focused checks passed.
+- 2026-09-21: full isolated regression1189passed/66skipped in74.28s.
+  Reproduce with mini2.4.6 installed:
+  `PYTHONPATH=.:sdk python -m pytest harness/tests swebench/tests runstore/tests sdk/tests deepswe/tests swebench_pro/tests -q`.
+- New-mode parser uses the explicit branch-plan fence; baseline user-hint
+  prompt/parser and Claude history restoration remain unchanged.
+  Sources: `swebench/fork_eval.py`, `swebench/assistant_branch.py`,
+  `harness/slots/mini_runtime.py`; usage `docs/ASSISTANT_TURN_BRANCHING.md`.
+
+### Unconfirmed / unknowns
+No live benchmark improvement or live reviewer naturalness claim. Git/remote
+deployment receipts are maintained in the coordinating workspace's state pack.
+
+### Failure log
+None in isolated release validation.
+
+### Decisions
+Separate feature branch/worktrees preserve dirty dev checkouts and live services.
+Only the required labelled plan parser accompanies the new branching modes.
+
+### Next steps
+Use --slot mini-swe-agent with --branch-guidance assistant-turn or none for
+explicitly requested experiments. User-hint remains the default.
+
+### Pending re-review
+None for this release.
+
 # STATUS — Ash / SWE-bench branching project
 
 State pack per the behavioral contract. Read this FIRST in any new session; the
