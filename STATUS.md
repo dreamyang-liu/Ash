@@ -1,3 +1,38 @@
+## Publish portable Kimi bridge correction — 2026-09-22
+
+### Original request (verbatim, unedited)
+现在的change 能push一下
+
+### Current agreement
+Publish current branching work and the verified Kimi bridge error-handling fix.
+Package the bridge with configurable paths/credentials and tests; exclude unrelated
+local changes and experiment secrets/results. Leave active runs unchanged.
+
+### Confirmed
+- Branching/prompt/bash guard already published at c5ff4da.
+- Added scripts/kimi_bedrock_bridge.py and docs/KIMI_BEDROCK_BRIDGE.md, retaining
+  native reasoning/tool history, None-safe error mapping, request/error records,
+  default360s read timeout and zero SDK retries. No machine-specific paths.
+- 2026-09-22:64targeted tests passed:
+  `PYTHONPATH=.:sdk python -m pytest harness/tests/test_kimi_bedrock_bridge.py harness/tests/test_assistant_turn.py swebench/tests/test_assistant_branch.py swebench/tests/test_reviewer_feedback.py -q`.
+- CLI --help and git diff --check passed. Import does not construct an AWS client;
+  tests cover explicit CLI wiring using injected/mocked clients, with no AWS calls.
+
+### Unconfirmed / unknowns
+This publication does not change live experiment configurations or remove provider timeouts.
+
+### Failure log
+No test failures during packaging.
+
+### Decisions
+Publish only this session's related work on feat/mini-branch-guidance.
+
+### Next steps
+Push commit and verify remote branch head.
+
+### Pending re-review
+None for publication.
+
 ## Reviewer continuation wording and bash-only feedback — 2026-09-21
 
 ### Original request (verbatim, unedited)

@@ -206,6 +206,9 @@ prompt requirements; the schema guard does not prove them.
 
 ## Verification
 
+For the native Kimi K3 transport and its timeout error handling, see
+[Kimi Bedrock bridge](KIMI_BEDROCK_BRIDGE.md).
+
 The new tests drive the pinned mini loop through local HTTP model and MCP
 servers. Commands run against temporary filesystems with checkpoint copies;
 they make no external model calls and do not create microVMs.
