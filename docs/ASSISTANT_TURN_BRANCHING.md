@@ -2,15 +2,27 @@
 
 `swebench.fork_eval` supports three guidance modes:
 
+The default agent is `mini-swe-agent`, and its default guidance is `assistant-turn`.
+With no `--slot` or `--branch-guidance` flags, both defaults apply. Explicitly
+selecting another agent (such as `--slot codex` or `--slot claude-code`) keeps
+`user-hint` as that agent's default. An explicit guidance flag always wins,
+subject to the compatibility checks below.
+
 | Flag | Branch continuation |
 |---|---|
-| `--branch-guidance user-hint` (default) | Deliver the reviewer's hint as before. |
-| `--branch-guidance assistant-turn` | Restore a mini prefix, execute a reviewer-authored assistant turn, then continue mini. |
+| `--branch-guidance user-hint` | Deliver the reviewer's hint as before; default for non-mini slots. |
+| `--branch-guidance assistant-turn` | Restore a mini prefix, execute a reviewer-authored assistant turn, then continue mini; default for mini. |
 | `--branch-guidance none` | Select a mini checkpoint and query the actor directly with its retained history alone. |
 
 The `assistant-turn` and `none` modes accept **only mini-swe-agent parents and mini continuations**.
 They require an exact completed-turn checkpoint; `--fork-full-conversation` is
 rejected. Existing Claude Code/Codex trajectories are not converted.
+
+These are branching-controller defaults. Low-level `RunSpec` and existing
+Run Store profile defaults are unchanged, and `harness run` still asks for an
+explicit slot. Configure mini's Chat Completions endpoint as described in
+[mini setup](MINI_SWE_AGENT.md); changing the default slot does not configure
+model credentials or analyst/reviewer routes.
 
 In `none` mode, the reviewer chooses restart points only. No user message,
 empty message, assistant response, command or continuation instruction is added.

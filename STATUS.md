@@ -1,3 +1,41 @@
+## Integrate mini branching and new defaults into dev — 2026-09-22
+
+### Original request (verbatim, unedited)
+直接merge 然后push 上去，然后默认改成mini swe agent 用 assistant turn
+
+### Current agreement
+Fast-forward the feature work into dev and make swebench.fork_eval default to
+mini-swe-agent with assistant-turn guidance. Explicit non-mini slots retain
+user-hint defaults; explicit guidance flags still override. Preserve low-level
+RunSpec/RunStore profile defaults, unrelated local changes and frozen live runs.
+
+### Confirmed
+- Integrated feature011d25c over dev58b9d0d in a clean worktree.
+- CLI and programmatic run_one share guidance resolution. Tests run real mini
+  continuation with omitted guidance and verify CLI defaults reach saved summaries.
+-2026-09-22:101focused branching tests passed;31network-policy tests passed;
+  complete regression1250passed/66skipped:
+  `PYTHONPATH=.:sdk python -m pytest harness/tests swebench/tests runstore/tests sdk/tests deepswe/tests swebench_pro/tests -q`.
+
+### Unconfirmed / unknowns
+Default mini still requires a configured Chat Completions model endpoint;
+analyst/reviewer credentials are independently configured. No live run deployment.
+
+### Failure log
+First full run exposed four network-fixture failures:mock journals omitted
+run.started/slot metadata present in real execution. Added truthful fixture
+metadata and assertions for mini/assistant-turn defaults; complete rerun passed.
+
+### Decisions
+User authorized direct integration and push. Keep explicit legacy agent selection
+working rather than assigning mini-only guidance to Claude/Codex.
+
+### Next steps
+Publish tested commit to refs/heads/dev and verify remote head.
+
+### Pending re-review
+None.
+
 ## Publish portable Kimi bridge correction — 2026-09-22
 
 ### Original request (verbatim, unedited)

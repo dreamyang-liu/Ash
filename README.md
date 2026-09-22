@@ -61,7 +61,9 @@ checkpoint mechanism, one MCP server.
 For mini-only branches, `--branch-guidance assistant-turn` lets the reviewer
 write an ordinary assistant response with bash calls that execute before the
 actor continues. `--branch-guidance none` selects only a checkpoint and continues
-with the retained history alone, adding no messages. The default remains `user-hint`.
+with the retained history alone, adding no messages. `swebench.fork_eval` defaults
+to `mini-swe-agent` with `assistant-turn` guidance. Explicitly choosing another
+agent retains `user-hint` by default; mini can also opt into `user-hint` or `none`.
 See [branch guidance modes](docs/ASSISTANT_TURN_BRANCHING.md) for the schemas,
 history guarantees and usage.
 

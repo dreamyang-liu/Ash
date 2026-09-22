@@ -7,9 +7,12 @@ the execution plane deliberately does not know -- what the answer is (a patch
 that makes FAIL_TO_PASS pass without breaking PASS_TO_PASS) and what to do when
 the answer is wrong.
 
+With a configured mini Chat Completions endpoint, the defaults select
+mini-swe-agent and assistant-turn guidance:
+
     python -m swebench.fork_eval --instance sympy__sympy-13091 \
-        --slot codex --model openai.gpt-5.6-luna \
-        --rounds 2 --branches 3 --fork-full-conversation -o runs/fork-eval
+        --model openai.gpt-5.6-luna \
+        --rounds 2 --branches 3 -o runs/fork-eval
 
 The loop:
 
@@ -61,7 +64,7 @@ from swebench.branch_plan import ReviewerPlanError, extract_branch_plan, review_
 from swebench.branching import BRANCH_COUNT_MODES, branch_count_rule, branch_run_name
 from swebench.assistant_branch import (
     ASSISTANT_REVIEW_PROMPT, POINT_REVIEW_PROMPT, BRANCH_GUIDANCE_MODES, require_mini_parent,
-    actor_tools_at, reviewer_context, selected_prefix, validate_guidance,
+    actor_tools_at, reviewer_context, selected_prefix, resolve_guidance, validate_guidance,
 )
 from harness.core.assistant_turn import validate_assistant_turn
 from swebench.dataset import (SYMPY_RUNNER, build_batch_test_command,
@@ -1455,7 +1458,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="instance id, or a comma list of them. Not needed "
                              "with --regrade, which reads what is on disk.")
     parser.add_argument("--subset", default="verified")
-    parser.add_argument("--slot", default="codex")
+    parser.add_argument("--slot", default="mini-swe-agent",
+                        help="agent slot (default: mini-swe-agent)")
     parser.add_argument("--model", default="openai.gpt-5.6-luna")
     parser.add_argument("--analyst-model", default="openai.gpt-5.6-luna")
     parser.add_argument("--rounds", type=int, default=2,
@@ -1470,10 +1474,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--branch-count-mode", choices=BRANCH_COUNT_MODES, default="adaptive",
                         help="adaptive: reviewer chooses up to --branches; "
                              "fixed: require exactly --branches valid directions per round")
-    parser.add_argument("--branch-guidance", choices=BRANCH_GUIDANCE_MODES, default="user-hint",
+    parser.add_argument("--branch-guidance", choices=BRANCH_GUIDANCE_MODES, default=None,
                         help="user-hint: existing reviewer hint; assistant-turn: mini-only "
                              "reviewer response executed before continuation; none: mini-only "
-                             "point selection followed by direct continuation without added messages")
+                             "point selection followed by direct continuation without added messages. "
+                             "Default: assistant-turn for mini-swe-agent, user-hint for other slots.")
     parser.add_argument("--reviewer-max-attempts", type=int, default=3,
                         help="maximum reviewer responses per round, including validation corrections (default: 3)")
     parser.add_argument("--analyst-tokens", type=int, default=100_000,
@@ -1521,6 +1526,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "a fresh parent: grade its last snapshot, then branch. "
                              "Refuses an instance that has none.")
     args = parser.parse_args(argv)
+    args.branch_guidance = resolve_guidance(args.branch_guidance, args.slot)
     if args.reviewer_max_attempts < 1:
         parser.error("--reviewer-max-attempts must be positive")
     try:
@@ -1631,7 +1637,7 @@ def run_one(orch: Orchestrator, args, raw, schedule: List[int],
             out_dir: Path, bench: "Optional[Benchmark]" = None) -> List["Attempt"]:
     """One instance: attempt, grade, and branch until resolved or out of rounds."""
     count_mode = getattr(args, "branch_count_mode", "adaptive")
-    guidance_mode = getattr(args, "branch_guidance", "user-hint")
+    guidance_mode = resolve_guidance(getattr(args, "branch_guidance", None), args.slot)
     reviewer_max_attempts = getattr(args, "reviewer_max_attempts", 3)
     if type(reviewer_max_attempts) is not int or reviewer_max_attempts < 1:
         raise ValueError("reviewer_max_attempts must be a positive integer")
