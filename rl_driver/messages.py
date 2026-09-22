@@ -9,6 +9,7 @@ from rl_driver.message_protocol import MESSAGE_VERSION, MessageRequest
 from rl_driver.miles import internal_id, validate_endpoint
 from runstore.message_export import clean_messages
 from runstore.message_completion import is_truncated_result
+from runstore.branch_guidance import resolve_guidance
 
 
 class MessageAdapter:
@@ -66,7 +67,7 @@ class MessageAdapter:
         samples = []
         for slot in request.sample_slots[:request.max_samples]:
             spec = deepcopy(defaults)
-            spec.update(prompt=prompt, model=model, slot=spec.get("slot", "codex"),
+            spec.update(prompt=prompt, model=model, slot=spec.get("slot", "mini-swe-agent"),
                         sandbox_image=image, sandbox_resources=resources, use_gateway=True, transport="http",
                         timeout_s=min(spec.get("timeout_s", float("inf")), request.budgets.max_wall_time_seconds))
             spec["extra"] = {**spec.get("extra", {}), "rollout_contract": {
@@ -75,9 +76,12 @@ class MessageAdapter:
                 "max_turns": request.max_turns,
                 "api_key_env": self.config.get("api_key_env"),
             }}
+            spec["extra"]["branch_guidance"] = resolve_guidance(
+                spec["extra"].get("branch_guidance"), spec["slot"])
             samples.append({
                 "sample_slot_id": internal_id(slot.sample_slot_id),
-                "run": {"kind": "rollout", "profile": self.config.get("profile", "codex"),
+                "run": {"kind": "rollout", "profile": self.config.get(
+                    "profile", "mini-swe-agent" if spec["slot"] == "mini-swe-agent" else "codex"),
                         "spec": spec, "max_infra_retries": 0,
                         "context": {"task_id": request.task_id, "image": request.image,
                                     "sample_slot_id": slot.sample_slot_id}},
@@ -130,8 +134,10 @@ class MessageAdapter:
                 verdict = (grade or {}).get("result") or {}
                 if not grade or grade["state"] != "succeeded" or type(verdict.get("resolved")) is not bool:
                     raise ValueError("Ash grading did not produce a resolved verdict")
-                origin = actor.get("origin") or output.get("training_origin") or {}
+                origin = {**(output.get("training_origin") or {}), **(actor.get("origin") or {})}
                 parent = origin.get("job_id")
+                if origin.get("recovery_kind") == "retry" and parent == actor["job_id"]:
+                    parent = None
                 result["trajectories"].append({
                     "sample_slot_id": slot.sample_slot_id, "branch_id": actor["job_id"],
                     "parent_branch_id": parent, "messages": clean_messages(messages),

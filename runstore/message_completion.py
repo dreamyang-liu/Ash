@@ -59,6 +59,12 @@ def complete_message_result(result: dict, directory, slot: str, recovery=None) -
                 "job_id": recovery.get("job_id"), "point_id": recovery["id"],
                 "tool_depth": recovery["tool_depth"],
             }
+            origin = next((e for e in events if e.get("type") == "fork.origin"), {})
+            result["training_origin"].update({
+                key: origin[key] for key in ("branch_guidance", "hint_delivery", "recovery_kind",
+                                             "assistant_turn_source", "assistant_turn_call_ids")
+                if key in origin
+            })
         usage = [e for e in events if e.get("type") == "rollout.usage"]
         result["rollout_usage"] = {
             key: usage[-1][key] for key in ("model_calls", "tool_calls")
@@ -95,6 +101,12 @@ def complete_message_result(result: dict, directory, slot: str, recovery=None) -
                             "job_id": recovery.get("job_id"), "point_id": recovery["id"],
                             "tool_depth": recovery["tool_depth"],
                         }
+                        origin = next((e for e in events if e.get("type") == "fork.origin"), {})
+                        result["training_origin"].update({
+                            key: origin[key] for key in ("branch_guidance", "hint_delivery", "recovery_kind",
+                                                         "assistant_turn_source", "assistant_turn_call_ids")
+                            if key in origin
+                        })
                     usage = [e for e in events if e.get("type") == "rollout.usage"]
                     result["rollout_usage"] = {
                         key: usage[-1][key] for key in ("model_calls", "tool_calls")

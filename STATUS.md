@@ -1,3 +1,49 @@
+## RL mini assistant-turn transport draft — 2026-09-22
+
+### Original request (verbatim, unedited)
+RL 我们应该也是要默认这个setup
+
+### Current agreement
+Implement v3 mini defaults and validated assistant-turn branch transport, worker
+execution and training export, preserving explicit agents and old stored jobs.
+Automatic reviewer4→3search is pending user policy choice; do not alter sample
+allocation or publish an automatic-search claim without that decision.
+
+### Confirmed
+- V3 omitted slot/profile selects mini-swe-agent; root guidance preference defaults
+  to assistant-turn. Example profiles include mini. V2 remains legacy-compatible.
+- Driver forwards authored assistant_turn. Branch API validates schema and IDs
+  against the exact native prefix before queuing; non-bash/mixed hints are rejected.
+- Worker executes the seed without adding a user hint, and same-job retry does not
+  reinject it. Export retains real assistant/tool messages and provenance.
+-1326tests passed/70skipped, including RL driver suite:
+  `PYTHONPATH=.:sdk python -m pytest harness/tests swebench/tests runstore/tests sdk/tests deepswe/tests swebench_pro/tests rl_driver/tests -q`.
+- Targeted API/driver/worker/export tests63passed. Real mini test observes seed
+  effect once, then restores/retries without repeating it.
+
+### Unconfirmed / unknowns
+Whether RL should automatically review failures and spawn4→3branches, or callers
+continue selecting when to branch. This changes interpretation/allocation of
+max_samples and group deadlines. Question pending; current draft preserves the
+independent-root scheduling policy and accepts caller-authored branch requests.
+No live RL configuration, existing queue or learner loss masks changed.
+
+### Failure log
+First complete run found a driver-layer import boundary violation. Validation
+was routed through RunStore contract helpers; architectural test retained and
+complete rerun passed. No test requirements weakened.
+
+### Decisions
+Prepare reviewable code independently of the unresolved automatic-search policy.
+Keep draft isolated from dev until that policy is clarified.
+
+### Next steps
+Publish draft feature branch and get automatic-scheduling ruling before dev merge.
+
+### Pending re-review
+Open policy question:automatic failure-triggered4→3search versus caller-triggered
+branches. Existing v3 max_samples and time-budget semantics must remain explicit.
+
 ## Integrate mini branching and new defaults into dev — 2026-09-22
 
 ### Original request (verbatim, unedited)

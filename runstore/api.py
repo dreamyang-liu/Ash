@@ -8,6 +8,7 @@ import secrets
 from runstore.index import Index
 from runstore.config import merge
 from runstore.specs import JobSpec, digest, validate_continuation
+from runstore.branch_guidance import branch_spec, validate_at_point
 from runstore.store import Conflict, Store
 
 
@@ -60,6 +61,7 @@ def create_app(store: Store, token: str, *, index: Index | None = None, profiles
                 raise ValueError("Continuation must use its native history slot")
             if spec.profile != parent["profile"]:
                 raise ValueError("v1 continuation must use the source execution profile")
+            validate_at_point(spec.spec, point)
         return store.submit(spec, key)
 
     @app.post("/v1/jobs", status_code=202)
@@ -112,9 +114,8 @@ def create_app(store: Store, token: str, *, index: Index | None = None, profiles
         if point["job_id"] != job_id or parent.kind != "rollout":
             raise ValueError("Branch point does not belong to this rollout")
         overrides = body.get("overrides", {})
-        if set(overrides) - {"prompt", "model", "timeout_s", "budget_usd"}:
-            raise ValueError("v1 branches can change prompt, model and budgets only")
-        request = replace(parent, spec={**parent.spec, **overrides}, parent_point=point["id"])
+        request = replace(parent, spec=branch_spec(parent.spec, overrides, point["native"]["slot"]),
+                          parent_point=point["id"])
         return submit(request.validate(), idempotency_key)
 
     @app.post("/v1/jobs/{job_id}/cancel")

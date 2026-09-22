@@ -16,6 +16,7 @@ from runstore.config import referenced_env, resolve
 from runstore.files import write_json
 from runstore.native import materialize
 from runstore.payload import receive_payload
+from runstore.branch_guidance import execution_guidance
 
 
 class TrackingSession(SandboxSession):
@@ -72,11 +73,14 @@ def execute(request: dict, directory: Path) -> dict:
         native = recovered["native"]
         if native["slot"] != slot:
             raise ValueError("Native prefix slot differs from requested slot")
+        extra, guidance, guidance_origin = execution_guidance(
+            {**spec, "extra": extra}, recovered, request.get("job_id"))
         extra.update(materialize(native, cwd, directory / "restoration", native_home))
         spec["sandbox_image"] = recovered["snapshot_id"]
         spec["origin"] = {"point_id": recovered["id"], "snapshot_id": recovered["snapshot_id"],
-                          "tool_depth": recovered["tool_depth"], "message_step": recovered["message_step"]}
-        if extra.get("rollout_contract", {}).get("message_export"):
+                          "tool_depth": recovered["tool_depth"], "message_step": recovered["message_step"],
+                          **guidance_origin}
+        if guidance == "user-hint" and extra.get("rollout_contract", {}).get("message_export"):
             from runstore.message_export import mark_hint
 
             spec["prompt"] = mark_hint(spec["prompt"])

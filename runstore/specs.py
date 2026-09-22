@@ -9,6 +9,7 @@ import math
 from typing import Any
 
 from harness.orchestrator.run import RunSpec
+from runstore.branch_guidance import validate_extra, without_guidance
 
 
 def canonical(value: Any) -> str:
@@ -37,11 +38,12 @@ def no_credentials(value: Any) -> None:
 
 def validate_continuation(parent: dict, child: dict) -> None:
     mutable = {"prompt", "model", "timeout_s", "budget_usd"}
-    parent_spec = {key: value for key, value in parent["spec"].items() if key not in mutable}
-    child_spec = {key: value for key, value in child["spec"].items() if key not in mutable}
+    parent_spec = {key: value for key, value in without_guidance(parent["spec"]).items() if key not in mutable}
+    child_spec = {key: value for key, value in without_guidance(child["spec"]).items() if key not in mutable}
     if (parent["kind"] != "rollout" or child["kind"] != "rollout"
             or parent["profile"] != child["profile"] or parent_spec != child_spec):
         raise ValueError("Continuation must retain its source environment, slot and tool configuration")
+    validate_extra(child["spec"], continuation=child.get("parent_point") is not None)
 
 
 @dataclass(frozen=True)
@@ -102,6 +104,7 @@ class JobSpec:
             if any(key in self.spec.get("extra", {}) for key in (
                     "native_prefix", "native_home", "resume_session_id", "fork", "checkpoint_identity")):
                 raise ValueError("Native restoration fields are worker-owned")
+            validate_extra(self.spec, continuation=self.parent_point is not None)
         elif self.kind == "grade":
             grade = GradeSpec(**self.spec)
             if grade.benchmark not in {"swebench-verified", "swebench-pro", "swe-rebench-v2", "deepswe"}:

@@ -5,6 +5,7 @@ import hashlib
 import re
 
 from runstore.specs import JobSpec, no_credentials
+from runstore.branch_guidance import validate_overrides
 from rl_driver.ledger import canonical
 
 PROTOCOL_VERSION = "ash-runstore-driver-v1"
@@ -58,7 +59,7 @@ def validate_request(body: dict) -> dict:
             identifier(branch.get("job_id"), "branch.job_id")
             identifier(branch.get("point_id"), "branch.point_id")
             branch.setdefault("overrides", {})
-            object_fields(branch["overrides"], {"prompt", "model", "timeout_s", "budget_usd"}, "branch overrides")
+            validate_overrides(branch["overrides"])
         if "grade" in sample:
             grade = sample["grade"]
             if not isinstance(grade, dict) or not isinstance(grade.get("spec"), dict):

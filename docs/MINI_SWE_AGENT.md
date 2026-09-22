@@ -45,6 +45,11 @@ cost budgets and output files, so conflicting upstream limits are rejected.
 
 ## Run Store and RL
 
+New `ash-rollout-v3` requests default to mini when slot/profile are omitted.
+New mini branch requests default to assistant-turn delivery and require an
+authored assistant message; see [RL assistant-turn branches](RL_ASSISTANT_TURN.md)
+for the API, retry behavior and scheduling boundary.
+
 Add a profile using the existing microVM/backend and credential references,
 the interpreter containing mini, and these rollout defaults:
 

@@ -5,8 +5,8 @@
   "ledger": "../runs/rl-driver/groups.sqlite3",
   "poll_interval_s": 1,
   "miles": {
-    "profile": "codex",
-    "run_defaults": {"slot": "codex", "tools": "shell_only"},
+    "profile": "mini-swe-agent",
+    "run_defaults": {"slot": "mini-swe-agent", "tools": "shell_only", "transport": "http"},
     "resources": {"standard": {"cpu": 2, "memory_mb": 12288}},
     "environment_catalog": {
       "environments": [{

@@ -44,6 +44,54 @@ def messages():
     ]
 
 
+def test_v3_defaults_to_mini_when_slot_and_profile_are_omitted(tmp_path, peer):
+    queue, client = peer
+    body = request()
+    cfg = config(body)
+    cfg.pop("profile")
+    cfg["run_defaults"].pop("slot")
+    adapter = MilesAdapter(Driver(client, Ledger(tmp_path / "ledger")), cfg)
+    adapter.submit(body)
+    adapter.driver.tick()
+    actors = [row[2] for row in queue.requests if row[0] == "POST" and row[1] == "/v1/jobs"]
+    assert actors
+    assert all(a["spec"]["slot"] == "mini-swe-agent" and a["profile"] == "mini-swe-agent" for a in actors)
+    assert all(a["spec"]["transport"] == "http" for a in actors)
+    assert all(a["spec"]["extra"]["rollout_contract"]["message_export"] for a in actors)
+    assert all(a["spec"]["extra"]["branch_guidance"] == "assistant-turn" for a in actors)
+
+
+def test_export_keeps_injected_assistant_text_and_guidance_provenance():
+    from rl_driver.messages import MessageAdapter
+    from harness.tests.test_assistant_turn import assistant_turn
+
+    body = request()
+    req = MessageRequest.from_dict(body)
+    turn = assistant_turn()
+    observation = {"role": "tool", "tool_call_id": turn["tool_calls"][0]["id"], "content": "real output"}
+    actor = {
+        "state": "succeeded", "job_id": "child", "attempt_id": "attempt",
+        "origin": {"job_id": "parent", "point_id": "cut"},
+        "result": {
+            "status": "completed", "training_messages": [
+                {"role": "user", "content": "original task"}, turn, observation],
+            "training_origin": {"job_id": "parent", "point_id": "cut",
+                "branch_guidance": "assistant-turn", "assistant_turn_source": "reviewer",
+                "assistant_turn_call_ids": [turn["tool_calls"][0]["id"]]},
+        },
+    }
+    document = {"samples": [{"actor": actor, "grade": {
+        "state": "succeeded", "snapshot_id": "final", "result": {"resolved": True}}}]}
+    result = {"trajectories": [], "search_branches": 0, "consumed_budget": {}}
+    MessageAdapter(None, {})._export(req, document, result)
+    trajectory = result["trajectories"][0]
+    assert trajectory["messages"][1:] == [turn, observation]
+    assert trajectory["parent_branch_id"] == "parent"
+    assert trajectory["metadata"]["origin"]["assistant_turn_source"] == "reviewer"
+    assert trajectory["metadata"]["origin"]["assistant_turn_call_ids"] == [turn["tool_calls"][0]["id"]]
+    assert result["search_branches"] == 1
+
+
 def test_real_miles_request_to_queue_grade_and_message_response(tmp_path, peer):
     queue, client = peer
     body = request()

@@ -1,6 +1,27 @@
 {
   "artifact_root": "/home/ec2-user/ash-runstore-data",
   "profiles": {
+    "mini-swe-agent": {
+      "python": "/path/to/mini-venv/bin/python",
+      "run_defaults": {
+        "slot": "mini-swe-agent",
+        "transport": "http",
+        "tools": "shell_only",
+        "runtime_bin": "/path/to/Ash/runtime/ash-runtime",
+        "sandbox_resources": {"cpu": 2, "memory_mb": 12288},
+        "backend": {
+          "backend": "microvm",
+          "microvm": {
+            "server_url": {"$env": "AENV_SERVER_URL"},
+            "api_key": {"$env": "AENV_API_KEY"},
+            "from_image": true,
+            "runtime_bin": "/path/to/Ash/runtime/ash-runtime",
+            "image_env": true,
+            "allow_internet": false
+          }
+        }
+      }
+    },
     "codex": {
       "python": "/usr/bin/python3.11",
       "snapshot_repository": "/opt/aenv-bench/home/snapshot-store/repository",
