@@ -1,3 +1,226 @@
+## Integrate mini branching and new defaults into dev — 2026-09-22
+
+### Original request (verbatim, unedited)
+直接merge 然后push 上去，然后默认改成mini swe agent 用 assistant turn
+
+### Current agreement
+Fast-forward the feature work into dev and make swebench.fork_eval default to
+mini-swe-agent with assistant-turn guidance. Explicit non-mini slots retain
+user-hint defaults; explicit guidance flags still override. Preserve low-level
+RunSpec/RunStore profile defaults, unrelated local changes and frozen live runs.
+
+### Confirmed
+- Integrated feature011d25c over dev58b9d0d in a clean worktree.
+- CLI and programmatic run_one share guidance resolution. Tests run real mini
+  continuation with omitted guidance and verify CLI defaults reach saved summaries.
+-2026-09-22:101focused branching tests passed;31network-policy tests passed;
+  complete regression1250passed/66skipped:
+  `PYTHONPATH=.:sdk python -m pytest harness/tests swebench/tests runstore/tests sdk/tests deepswe/tests swebench_pro/tests -q`.
+
+### Unconfirmed / unknowns
+Default mini still requires a configured Chat Completions model endpoint;
+analyst/reviewer credentials are independently configured. No live run deployment.
+
+### Failure log
+First full run exposed four network-fixture failures:mock journals omitted
+run.started/slot metadata present in real execution. Added truthful fixture
+metadata and assertions for mini/assistant-turn defaults; complete rerun passed.
+
+### Decisions
+User authorized direct integration and push. Keep explicit legacy agent selection
+working rather than assigning mini-only guidance to Claude/Codex.
+
+### Next steps
+Publish tested commit to refs/heads/dev and verify remote head.
+
+### Pending re-review
+None.
+
+## Publish portable Kimi bridge correction — 2026-09-22
+
+### Original request (verbatim, unedited)
+现在的change 能push一下
+
+### Current agreement
+Publish current branching work and the verified Kimi bridge error-handling fix.
+Package the bridge with configurable paths/credentials and tests; exclude unrelated
+local changes and experiment secrets/results. Leave active runs unchanged.
+
+### Confirmed
+- Branching/prompt/bash guard already published at c5ff4da.
+- Added scripts/kimi_bedrock_bridge.py and docs/KIMI_BEDROCK_BRIDGE.md, retaining
+  native reasoning/tool history, None-safe error mapping, request/error records,
+  default360s read timeout and zero SDK retries. No machine-specific paths.
+- 2026-09-22:64targeted tests passed:
+  `PYTHONPATH=.:sdk python -m pytest harness/tests/test_kimi_bedrock_bridge.py harness/tests/test_assistant_turn.py swebench/tests/test_assistant_branch.py swebench/tests/test_reviewer_feedback.py -q`.
+- CLI --help and git diff --check passed. Import does not construct an AWS client;
+  tests cover explicit CLI wiring using injected/mocked clients, with no AWS calls.
+
+### Unconfirmed / unknowns
+This publication does not change live experiment configurations or remove provider timeouts.
+
+### Failure log
+No test failures during packaging.
+
+### Decisions
+Publish only this session's related work on feat/mini-branch-guidance.
+
+### Next steps
+Push commit and verify remote branch head.
+
+### Pending re-review
+None for publication.
+
+## Reviewer continuation wording and bash-only feedback — 2026-09-21
+
+### Original request (verbatim, unedited)
+我我觉得加一些prompt，不要让他说checkpoint 这些，然后command应该只允许bash，不允许别的。这个可以guard一下，如果用了非bash的tool call 打回去
+
+### Current agreement
+Strengthen natural continuation prompt; reject non-bash tool names with precise
+feedback before any branch executes. Keep existing reviewer retry limits.
+Allow ordinary programs inside bash; do not conflate tool names with shell text.
+
+### Confirmed
+- 2026-09-21: targeted51passed. Non-bash mixed-call plan rejected before sandbox
+  execution, then corrected plan runs mini normally. Files:
+  harness/tests/test_assistant_turn.py and swebench/tests/test_assistant_branch.py.
+- Full regression1228passed/66skipped:
+  `PYTHONPATH=.:sdk python -m pytest harness/tests swebench/tests runstore/tests sdk/tests deepswe/tests swebench_pro/tests -q`.
+- Reviewer prompt forbids controller checkpoint/restart phrasing, requires prefix
+  evidence for past observations, and warns against host apply_patch inside bash.
+
+### Unconfirmed / unknowns
+Prompt adherence is not certified by the tool-name guard. Live baseline runs are
+frozen to their original commits; this revision applies to subsequent runs.
+
+### Failure log
+No implementation test failures.
+
+### Decisions
+User authorized prompt changes and returning non-bash calls for correction.
+No blanket lexical checkpoint ban (domain checkpoint APIs remain valid).
+
+### Next steps
+Publish and validate remote checkout; use this version for future experiments.
+
+### Pending re-review
+None for this scoped revision.
+
+## Reviewer validation feedback — 2026-09-21
+
+### Original request (verbatim, unedited)
+reviewer also do ir
+
+### Current agreement
+Return reviewer parse/plan errors with the original response for bounded
+correction (default 3 total attempts per round, configurable). Execute only
+fully validated plans. Preserve all attempts. Keep branch and actor budgets.
+
+### Confirmed
+- 2026-09-21: full regression: 1214 passed, 66 skipped using
+  `PYTHONPATH=.:sdk python -m pytest harness/tests swebench/tests runstore/tests sdk/tests deepswe/tests swebench_pro/tests -q`.
+- Reviewer loop tests cover malformed JSON, inner arguments, invalid selection,
+  exhaustion, state/request failures and persistence: `swebench/tests/test_reviewer_feedback.py`.
+
+### Unconfirmed / unknowns
+Live remote reviewer correction and final branch outcomes pending.
+
+### Failure log
+No implementation test failures.
+
+### Decisions
+User, 2026-09-21: “reviewer also do ir”. Apply the correction loop to reviewer.
+
+### Next steps
+Publish, validate remotely, resume the two existing failed parents in isolation.
+
+### Pending re-review
+None.
+
+## Recoverable mini tool-schema feedback — 2026-09-21
+
+### Original request (verbatim, unedited)
+Then I feel like we can return the schema error back to the model and let it reflect and adjust its tool call
+
+### Current agreement
+Return actor argument-schema errors as tool feedback, preserving the original
+bad response and executing none of its calls. Retry through mini's existing
+FormatError loop and budgets. Preserve native checkpoint/replay/export
+causality; protocol identity errors and uncertain execution remain hard errors.
+
+### Confirmed
+- 2026-09-21: local regression1203passed/66skipped. Targeted32tests pass,
+  including malformed→corrected execution, mixed-batch non-execution,
+  consecutive/model-call limits, native indexing and exact branch restoration.
+  Reproduce: `PYTHONPATH=.:sdk python -m pytest harness/tests swebench/tests runstore/tests sdk/tests deepswe/tests swebench_pro/tests -q`.
+- Invalid calls now get tool_schema_error feedback; valid siblings of a rejected
+  batch get tool_batch_rejected. All state executed=false and preserve the
+  original arguments. Rejection events do not count as shell execution or
+  snapshots; later real checkpoints retain the complete feedback history.
+
+### Unconfirmed / unknowns
+Live-model correction and benchmark outcomes are not established by local
+controlled-model tests. Frozen processes cannot adopt new code merely by pull.
+
+### Failure log
+First test used NativePoint.step instead of message_step; corrected the
+assertion. Runtime correction and indexing had already succeeded.
+
+### Decisions
+User approves recoverable schema feedback. Keep original budgets and atomic
+validation-before-execution; do not silently strip extra arguments.
+
+### Next steps
+Use this version for controlled continuation/retest with explicit provenance.
+Operational probe and deployment receipts live in the coordinating workspace.
+
+### Pending re-review
+Error-policy direction resolved. Existing frozen-run continuation still needs
+consistent checkpoint/budget handling.
+
+## Mini actor/reviewer tool-contract correction — 2026-09-21
+
+### Original request (verbatim, unedited)
+那是不是你的system prompt没写好，你可能要让reviewer知道actor能用哪些tool
+
+### Current agreement
+Correct the mini actor task primer and expose recorded actor tools to the
+reviewer. Keep strict argument validation, retained histories and grading.
+Publish the fix without rewriting failed experiments or launching replacements.
+
+### Confirmed
+- 2026-09-21: the observed failure was the parent actor's first response, before
+  reviewer execution. Generic shell/text_editor instructions conflicted with
+  mini's bash(command) interface; extra timeout/working_dir were rejected.
+- Actor primer and actual requests now use one shared contract, checked against
+  pinned mini2.4.6 at actor startup. Extra arguments remain forbidden. Rendering
+  the primer does not import mini or load host-global configuration.
+- Reviewer context includes recorded tools/workspace; plan validation uses the
+  parameter schema at the selected checkpoint. Missing declarations fail.
+- Local regression1193passed/66skipped; mini API contract14/14passed.
+  Reproduce: `PYTHONPATH=.:sdk python -m pytest harness/tests swebench/tests runstore/tests sdk/tests deepswe/tests swebench_pro/tests -q`.
+  Targeted evidence: `swebench/tests/test_mini_tool_context.py`.
+
+### Unconfirmed / unknowns
+Corrected live-model adherence and benchmark outcomes have not been measured.
+Replacement sampling is not authorized by this correction alone.
+
+### Failure log
+No new model or benchmark attempts in this correction round.
+
+### Decisions
+Correct misleading instructions and validate real tool contracts; do not
+silently discard invalid arguments or change the executor to accept them.
+
+### Next steps
+Use the corrected feature branch for a separately authorized continuation.
+Keep original failed-run evidence and frozen source intact.
+
+### Pending re-review
+Prompt/schema correction resolved; experiment replacement remains a separate
+decision recorded in the coordinating workspace.
+
 ## Mini branch guidance release — 2026-09-21
 
 ### Original request (verbatim, unedited)

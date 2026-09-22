@@ -110,8 +110,11 @@ def fake_benchmark(monkeypatch):
 
         def run(self, spec):
             seen["actor"].append(spec.backend)
-            Path(spec.journal_path).write_text(json.dumps({"type": "checkpoint.captured", "step": 1,
-                                                          "snapshot_id": "saved", "reason": "captured"}) + "\n")
+            events = [
+                {"type": "run.started", "slot": spec.slot},
+                {"type": "checkpoint.captured", "step": 1, "snapshot_id": "saved", "reason": "captured"},
+            ]
+            Path(spec.journal_path).write_text("".join(json.dumps(event) + "\n" for event in events))
             return RunOutcome(run_id=spec.run_id, journal_path=spec.journal_path, status="completed")
 
     monkeypatch.setattr(fork_eval, "select_benchmark", lambda args: Bench())
@@ -128,6 +131,8 @@ def test_cli_network_flags_reach_execution_grading_and_summary(tmp_path, fake_be
     assert fake_benchmark["actor"][0]["microvm"]["allow_internet"] is (actor == "allow")
     assert fake_benchmark["verifier"][0]["microvm"]["allow_internet"] is (verifier == "allow")
     summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["slot"] == "mini-swe-agent"
+    assert summary["branch_guidance"] == "assistant-turn"
     assert summary["network_policy"] == {"agent": actor, "verifier": verifier}
     assert summary["network_requested"] == summary["network_policy"]
     assert summary["no_network"] is None

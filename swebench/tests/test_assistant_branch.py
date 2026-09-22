@@ -39,8 +39,11 @@ def test_assistant_prompt_and_report_schema_keep_the_synthetic_turn():
 
 
 @mini_only
-@pytest.mark.parametrize("mode", ["assistant-turn", "none"])
-def test_core_reviewer_selection_reaches_mini_without_a_user_hint(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize("mode", [None, "assistant-turn", "none"])
+@pytest.mark.parametrize("correct_first", [False, True, "non-bash"])
+def test_core_reviewer_selection_reaches_mini_without_a_user_hint(tmp_path, monkeypatch, mode, correct_first):
+    requested_mode = mode
+    mode = mode or "assistant-turn"
     memory, parent, native_points = parent_run(tmp_path / "parent", monkeypatch)
     cut = native_points[0]
     child_memory = restore_files(memory, cut.snapshot_id, tmp_path / "child-sandbox")
@@ -64,6 +67,19 @@ def test_core_reviewer_selection_reaches_mini_without_a_user_hint(tmp_path, monk
     def analyst(model, prompt):
         if "## Every attempt so far" in prompt:
             reviewer_inputs.append(prompt)
+            if correct_first and len(reviewer_inputs) == 1:
+                assert not wire_specs
+                invalid = json.loads(json.dumps(plan))
+                if mode == "assistant-turn":
+                    if correct_first == "non-bash":
+                        invalid["branches"][0]["assistant_turn"]["tool_calls"].append({
+                            "id": "forbidden-second-call", "type": "function",
+                            "function": {"name": "apply_patch", "arguments": '{"command":"touch forbidden"}'}})
+                    else:
+                        invalid["branches"][0]["assistant_turn"]["tool_calls"][0]["function"]["arguments"] = '{"command":"bad\\escape"}'
+                else:
+                    invalid["branches"][0]["hint"] = "not allowed"
+                return "```branch-plan\n" + json.dumps(invalid) + "\n```"
             return "```branch-plan\n" + json.dumps(plan) + "\n```"
         return json.dumps({"failure_reason": "Inspect the initial file.", "lesson": "Check it.",
                            "salvage": "file", "branch_candidates": [{"step": cut.tool_depth}]})
@@ -84,6 +100,8 @@ def test_core_reviewer_selection_reaches_mini_without_a_user_hint(tmp_path, monk
                            rounds=1, timeout=30, analyst_tokens=10000, runtime_bin="runtime/ash-runtime",
                            parent_from="fixture", fork_full_conversation=False,
                            branch_count_mode="fixed", branch_guidance=mode)
+    if requested_mode is None:
+        del args.branch_guidance  # Exercise the programmatic default as well as CLI defaulting.
     with model_server([reply("cat answer"), reply("echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")]) as (url, requests):
         monkeypatch.setenv("OPENAI_BASE_URL", url)
         monkeypatch.setenv("OPENAI_API_KEY", "local-fixture")
@@ -110,11 +128,21 @@ def test_core_reviewer_selection_reaches_mini_without_a_user_hint(tmp_path, monk
     assert "PRIVATE_REVIEWER_REASON_NOT_FOR_ACTOR" not in json.dumps(requests)
     assert recorded["branch_guidance"] == mode
     assert recorded["review"] == plan
+    assert len(recorded["review_attempts"]) == (2 if correct_first else 1)
+    if correct_first:
+        assert recorded["review_attempts"][0]["validation_error"] in reviewer_inputs[1]
+        if correct_first == "non-bash" and mode == "assistant-turn":
+            assert "only bash is allowed" in reviewer_inputs[1]
+            assert "'apply_patch'" in reviewer_inputs[1]
+            assert not (child_memory.root / "forbidden").exists()
     if turn is not None:
         assert recorded["selected_branches"][0]["assistant_turn"] == turn
     else:
         assert "assistant_turn" not in recorded["selected_branches"][0]
     assert '"native_history":' in reviewer_inputs[0] and '"prefix_message_counts":' in reviewer_inputs[0]
+    assert '"tools":' in reviewer_inputs[0] and '"name": "bash"' in reviewer_inputs[0]
+    assert '"additionalProperties": false' in reviewer_inputs[0]
+    assert '"workspace":' in reviewer_inputs[0] and '"/testbed"' in reviewer_inputs[0]
     assert "Return exactly 1 branches" in reviewer_inputs[0]
     events = read_journal(attempts[1].outcome.journal_path)
     origin = next(e for e in events if e["type"] == "fork.origin")
@@ -171,20 +199,39 @@ def test_nonmini_parent_is_rejected_even_with_mini_actor(tmp_path):
 
 
 @pytest.mark.parametrize("mode", [None, "user-hint", "assistant-turn", "none"])
-def test_cli_guidance_flag_reaches_runner_and_summary(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize("slot", [None, "mini-swe-agent"])
+def test_cli_guidance_flag_reaches_runner_and_summary(tmp_path, monkeypatch, mode, slot):
     seen = []
     bench = SimpleNamespace(name="fixture", no_network=False, image_env=False, catalogue=lambda _: {"task": {}})
     monkeypatch.setattr(fork_eval, "select_benchmark", lambda _: bench)
     monkeypatch.setattr(fork_eval, "Orchestrator", lambda **_: None)
 
     def run(orch, args, raw, schedule, out_dir, benchmark):
-        seen.append(args.branch_guidance)
+        seen.append((args.slot, args.branch_guidance))
         return []
 
     monkeypatch.setattr(fork_eval, "run_one", run)
-    args = ["--slot", "mini-swe-agent", "--instance", "task", "--out", str(tmp_path), "--volatile-ok"]
+    args = ["--instance", "task", "--out", str(tmp_path), "--volatile-ok"]
+    if slot:
+        args.extend(["--slot", slot])
     if mode:
         args.extend(["--branch-guidance", mode])
     assert fork_eval.main(args) == 1
-    assert seen == [mode or "user-hint"]
-    assert json.loads((tmp_path / "summary.json").read_text())["branch_guidance"] == (mode or "user-hint")
+    assert seen == [("mini-swe-agent", mode or "assistant-turn")]
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["slot"] == "mini-swe-agent"
+    assert summary["branch_guidance"] == (mode or "assistant-turn")
+
+
+@pytest.mark.parametrize("slot", ["codex", "claude-code"])
+def test_explicit_other_agent_retains_user_hint_default(tmp_path, monkeypatch, slot):
+    seen = []
+    bench = SimpleNamespace(name="fixture", no_network=False, image_env=False, catalogue=lambda _: {"task": {}})
+    monkeypatch.setattr(fork_eval, "select_benchmark", lambda _: bench)
+    monkeypatch.setattr(fork_eval, "Orchestrator", lambda **_: None)
+    monkeypatch.setattr(fork_eval, "run_one",
+                        lambda orch, args, *rest: seen.append((args.slot, args.branch_guidance)) or [])
+    assert fork_eval.main(["--slot", slot, "--instance", "task",
+                           "--out", str(tmp_path), "--volatile-ok"]) == 1
+    assert seen == [(slot, "user-hint")]
+    assert json.loads((tmp_path / "summary.json").read_text())["branch_guidance"] == "user-hint"
