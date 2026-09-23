@@ -18,7 +18,7 @@ from harness.execution.templates import find_regctl
 from swebench import fork_eval, structured_review
 from swebench.assistant_branch import ASSISTANT_REVIEW_PROMPT, reviewer_context
 from swebench.branching import branch_count_rule
-from terminalbench.review_transport import ReviewTransport
+from swebench.review_transport import ReviewTransport
 
 
 def _write(path: Path, value: dict) -> None:

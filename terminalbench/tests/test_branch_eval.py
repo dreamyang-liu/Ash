@@ -12,8 +12,8 @@ pytest.importorskip("harbor")
 from harbor.models.task.task import Task
 from swebench import structured_review
 from swebench.assistant_branch import ASSISTANT_REVIEW_PROMPT
+from swebench.review_transport import ReviewTransport
 from terminalbench import branch_eval
-from terminalbench.review_transport import ReviewTransport
 
 
 def _result(path: Path, reward, *, error=None):
@@ -87,9 +87,9 @@ def test_review_transport_keeps_keys_out_of_receipts_and_rejects_model_switch(tm
     monkeypatch.setenv("TEST_KEY", "super-secret")
     with pytest.raises(ValueError, match="differs"):
         transport("other-model", "prompt")
-    monkeypatch.setattr("terminalbench.review_transport.structured_review.request_format",
+    monkeypatch.setattr("swebench.review_transport.structured_review.request_format",
                         lambda prompt: ("analyst", prompt, {}))
-    monkeypatch.setattr("terminalbench.review_transport.structured_review.response_text",
+    monkeypatch.setattr("swebench.review_transport.structured_review.response_text",
                         lambda kind, value: value["choices"][0]["message"]["content"])
     requests = []
 
@@ -104,7 +104,7 @@ def test_review_transport_keeps_keys_out_of_receipts_and_rejects_model_switch(tm
         requests.append((url, kwargs))
         return Response()
 
-    monkeypatch.setattr("terminalbench.review_transport.httpx.post", post)
+    monkeypatch.setattr("swebench.review_transport.httpx.post", post)
     assert transport("fixture", "prompt") == "valid"
     assert requests[0][0].endswith("/v1/chat/completions")
     assert requests[0][1]["headers"]["Authorization"] == "Bearer super-secret"
@@ -137,7 +137,7 @@ def test_review_transport_preserves_fenced_object_arguments(tmp_path, monkeypatc
         requests.append(kwargs["json"])
         return Response()
 
-    monkeypatch.setattr("terminalbench.review_transport.httpx.post", post)
+    monkeypatch.setattr("swebench.review_transport.httpx.post", post)
     prompt = ASSISTANT_REVIEW_PROMPT.format(problem="task", reports="[]", count_rule="At most 1.")
     parsed = structured_review.extract_branch_plan(transport("fixture", prompt))
     assert json.loads(parsed["branches"][0]["assistant_turn"]["tool_calls"][0]["function"]["arguments"]) == {"command": "printf answer"}
