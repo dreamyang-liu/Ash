@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from swebench import fork_eval, mini_branch_eval, structured_review
+from harness.core.result import CommandOutcome, ToolResult
+from harness.execution.pipeline import CallContext
 
 
 def options(tmp_path, benchmark):
@@ -64,3 +67,21 @@ def test_shared_wrapper_wires_model_route_and_strict_reviewer(tmp_path, monkeypa
     manifest = json.loads((tmp_path / "result/shared-source.json").read_text())
     assert manifest["branch_caps"] == [4, 3] and manifest["source_commit"] == "pinned"
     assert "local-test" not in (tmp_path / "result/shared-source.json").read_text()
+
+
+def test_pro_mini_budget_caps_commands_and_stops_after_official_timeout_limit():
+    budget = mini_branch_eval.ProMiniBudget()
+    stopped = []
+    budget.control = SimpleNamespace(request_stop=stopped.append)
+    for _ in range(3):
+        context = CallContext(agent_id="agent", sandbox_id="vm", tool_name="shell",
+                              args={"command": "slow", "timeout": 900})
+        rewrite = budget.before(context)
+        assert rewrite.new_args["timeout"] == 450
+        budget.after(context, ToolResult(False, "timed out",
+                                         outcome=CommandOutcome(exit_code=124, timed_out=True)))
+    assert budget.consecutive == 3
+    assert stopped[-1] == "official consecutive tool timeout limit exceeded"
+    with pytest.raises(RuntimeError, match="official consecutive tool timeout"):
+        budget.before(CallContext(agent_id="agent", sandbox_id="vm", tool_name="shell",
+                                  args={"command": "fourth"}))
