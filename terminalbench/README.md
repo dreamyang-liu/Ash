@@ -32,6 +32,37 @@ native session references and a final actor snapshot are retained for replay.
 The TB4 CLI does not yet schedule analyst/reviewer branches; `--attempts` still
 means independent trials, and `--resume` resumes a Harbor job, not a tool step.
 
+For a host mini-swe-agent root trial, select `--agent mini-swe-agent` with
+`--env agentenv`, an explicit `--model`, `--model-endpoint` and
+`--model-key-env`. The key variable is read at runtime and its value is not
+stored in the Harbor config. The actor uses the same Harbor-owned VM and
+per-tool checkpoint bridge as the Claude Code adapter. The model endpoint
+must speak nonstreaming Chat Completions with the mini bash tool schema.
+
+`python -m terminalbench.branch_eval` runs one pinned TB2.1 task through
+Harbor's official verifier, then up to two adaptive assistant-turn branch
+rounds (default caps 4 then 3). Each branch restores a full AgentENV snapshot
+and an exact closed mini-native prefix. It requires the prepared cohort's
+`input-manifest.json` and dataset digest; the task definition hash must match
+before and after execution. Pass a task's cached directory using `--task-dir`,
+the immutable result directory with `--output`, and the same model bridge
+parameters used for the actor. For example:
+
+```bash
+python -m terminalbench.branch_eval \
+  --task-dir /path/to/pinned/task --dataset-digest sha256:... \
+  --preparation-manifest /path/to/input-manifest.json \
+  --model MODEL --model-endpoint http://127.0.0.1:PORT \
+  --model-key-env MODEL_BRIDGE_KEY --runtime-bin /path/to/ash-runtime \
+  --image-registry localhost:5000 --output /path/to/new/task-result
+```
+
+The branch controller never substitutes another snapshot or silently retries
+an interrupted Harbor trial. `summary.json` and each `plan-round*.json` retain
+the official reward, selected points and validation failures. Its one-task
+entrypoint is a gate and building block for a pinned cohort controller;
+the normal `terminalbench.eval` Job CLI still schedules independent roots.
+
 Explicit `--env docker`, `--env modal`, etc. retain the earlier Harbor-native
 container-side Claude Code driver (`terminalbench.agent:AshClaudeCode`). That
 route retains task MCP services but has no AgentENV checkpoints. There is no

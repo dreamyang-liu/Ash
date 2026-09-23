@@ -208,7 +208,7 @@ def test_cpu_memory_disk_are_sent_through_template_and_cold_start(tmp_path, monk
 @pytest.mark.parametrize("slot", ["claude-code", "mini-swe-agent"])
 def test_actor_requires_a_snapshot_for_each_successful_sandbox_call(tmp_path, monkeypatch, paired, slot):
     env = environment(tmp_path)
-    env.session = SimpleNamespace(on_swap=[], snapshot=lambda **kwargs: Snapshot("final"))
+    env.session = SimpleNamespace(on_swap=[], snapshot=lambda **kwargs: Snapshot("final"), sandbox_id="sandbox")
     original_session = env.session
 
     def run(self, spec):

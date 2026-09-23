@@ -125,7 +125,9 @@ class AgentENVClaudeCode(BaseAgent):
         previous_listeners = list(environment.session.on_swap)
         pending = asyncio.create_task(asyncio.to_thread(orchestrator.run, spec))
         context.metadata = {"environment_owner": "harbor", "backend": "agentenv",
-                            "checkpoint_mode": environment.checkpoint_mode, "journal": str(journal)}
+                            "checkpoint_mode": environment.checkpoint_mode,
+                            "sandbox_id": environment.session.sandbox_id,
+                            "journal": str(journal)}
         try:
             try:
                 result = await asyncio.shield(pending)
