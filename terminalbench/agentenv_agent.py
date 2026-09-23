@@ -96,6 +96,16 @@ class AgentENVClaudeCode(BaseAgent):
             raise ValueError("Task MCP service networking is not implemented for AgentENV")
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
+    def _make_spec(self, prompt: str, workspace, journal, environment: AgentENVEnvironment) -> RunSpec:
+        return RunSpec(
+            prompt=prompt, slot="claude-code", model=(self.model_name or "").removeprefix("anthropic/"),
+            cwd=str(workspace.resolve()), run_id=self.logs_dir.parent.name, journal_path=journal,
+            timeout_s=math.inf, session=environment.session, keep_sandbox=True,
+            transport="http", tools="shell_only", backend=environment.backend,
+            runtime_bin=environment.runtime_bin, sandbox_image=environment.image,
+            extra={"setting_sources": []},
+        )
+
     async def run(self, instruction: str, environment: AgentENVEnvironment, context: AgentContext) -> None:
         journal = self.logs_dir / "trajectory.jsonl"
         if journal.exists():
@@ -110,14 +120,7 @@ class AgentENVClaudeCode(BaseAgent):
         )
         if self.skills_dir:
             prompt += f"\nTask skills are available inside the sandbox at {self.skills_dir}."
-        spec = RunSpec(
-            prompt=prompt, slot="claude-code", model=(self.model_name or "").removeprefix("anthropic/"),
-            cwd=str(workspace.resolve()), run_id=self.logs_dir.parent.name, journal_path=journal,
-            timeout_s=math.inf, session=environment.session, keep_sandbox=True,
-            transport="http", tools="shell_only", backend=environment.backend,
-            runtime_bin=environment.runtime_bin, sandbox_image=environment.image,
-            extra={"setting_sources": []},
-        )
+        spec = self._make_spec(prompt, workspace, journal, environment)
         orchestrator = AgentENVOrchestrator(environment, self.extra_env, out_dir=self.logs_dir)
         previous_listeners = list(environment.session.on_swap)
         pending = asyncio.create_task(asyncio.to_thread(orchestrator.run, spec))

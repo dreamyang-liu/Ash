@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,7 @@ from harness.slots.claude_code import ClaudeCodeSlot
 from harness.orchestrator.run import RunOutcome
 from terminalbench.agentenv import AgentENVEnvironment, shell_command
 from terminalbench.agentenv_agent import AgentENVClaudeCode, AgentENVOrchestrator
+from terminalbench.agentenv_mini import AgentENVMini
 from terminalbench.eval import build_config, parse_args
 
 
@@ -45,11 +47,28 @@ def test_default_config_wires_agentenv_environment_and_checkpoint_actor():
     assert config.environment.kwargs["sandbox_ttl"] >= 30000
 
 
+def test_mini_config_uses_the_same_agentenv_sandbox_without_storing_a_key():
+    config = build_config(parse_args([
+        "--agent", "mini-swe-agent", "--model", "fixture-model",
+        "--model-endpoint", "http://127.0.0.1:18252", "--model-key-env", "EVAL_BRIDGE_KEY",
+    ]))
+    assert config.environment.import_path == "terminalbench.agentenv:AgentENVEnvironment"
+    assert config.agents[0].import_path == "terminalbench.agentenv_mini:AgentENVMini"
+    assert config.agents[0].kwargs["api_key_env"] == "EVAL_BRIDGE_KEY"
+    assert "secret-value" not in config.model_dump_json()
+
+
+def test_mini_rejects_a_container_backend_or_missing_bridge():
+    for argv in (["--agent", "mini-swe-agent", "--model", "fixture-model", "--env", "docker"],
+                 ["--agent", "mini-swe-agent", "--model", "fixture-model"]):
+        with pytest.raises(SystemExit):
+            parse_args(argv)
+
+
 @pytest.mark.parametrize("change", [
     {"task_env_config": EnvironmentConfig(docker_image="image", gpus=1)},
     {"network_policy": NetworkPolicy(network_mode=NetworkMode.ALLOWLIST, allowed_hosts=["example.com"])},
     {"task_env_config": EnvironmentConfig(docker_image="image", storage_mb=1536)},
-    {"task_env_config": EnvironmentConfig(docker_image="image", storage_mb=8192)},
     {"phase_network_policies": [NetworkPolicy(network_mode=NetworkMode.NO_NETWORK)]},
 ])
 def test_unsupported_requirements_fail_before_start(tmp_path, change):
@@ -145,10 +164,15 @@ def test_real_tool_hook_pipeline_and_bridge_capture_after_execution(tmp_path, mo
     assert {row["call_id"] for row in points} == {"call-0", "call-1"}
 
 
-def test_cpu_memory_disk_are_sent_through_template_and_cold_start(tmp_path, monkeypatch):
+@pytest.mark.parametrize("requested_disk,effective_disk", [
+    (None, 65536), (8192, 65536), (10240, 65536), (65536, 65536), (131072, 131072),
+])
+def test_cpu_memory_disk_are_sent_through_template_and_cold_start(tmp_path, monkeypatch,
+                                                                requested_disk, effective_disk):
     from terminalbench import agentenv
 
-    env = environment(tmp_path, task_env_config=EnvironmentConfig(docker_image="image:tag", cpus=3, memory_mb=2048, storage_mb=65536))
+    env = environment(tmp_path, task_env_config=EnvironmentConfig(
+        docker_image="image:tag", cpus=3, memory_mb=2048, storage_mb=requested_disk))
     calls = []
 
     class FakeSession:
@@ -172,17 +196,26 @@ def test_cpu_memory_disk_are_sent_through_template_and_cold_start(tmp_path, monk
 
     monkeypatch.setattr(env, "_upload_environment_dir_after_start", no_upload)
     asyncio.run(env.start())
-    assert calls == [("image@sha256:digest", {"cpu": 3, "memory_mb": 2048, "disk_size_mb": 65536})]
+    assert calls == [("image@sha256:digest", {"cpu": 3, "memory_mb": 2048, "disk_size_mb": effective_disk})]
+    record = json.loads((tmp_path / "test.agentenv.json").read_text())
+    assert record["requested_disk_size_mb"] == requested_disk
+    assert record["resources"] == calls[0][1]
+    assert env.task_env_config.storage_mb == requested_disk
     assert env.image_user == "nobody" and env.image_workdir == "/work"
 
 
 @pytest.mark.parametrize("paired", [True, False])
-def test_actor_requires_a_snapshot_for_each_successful_sandbox_call(tmp_path, monkeypatch, paired):
+@pytest.mark.parametrize("slot", ["claude-code", "mini-swe-agent"])
+def test_actor_requires_a_snapshot_for_each_successful_sandbox_call(tmp_path, monkeypatch, paired, slot):
     env = environment(tmp_path)
     env.session = SimpleNamespace(on_swap=[], snapshot=lambda **kwargs: Snapshot("final"))
     original_session = env.session
 
     def run(self, spec):
+        assert spec.slot == slot
+        if slot == "mini-swe-agent":
+            assert spec.extra["rollout_contract"]["model"] == "test"
+            assert spec.extra["rollout_contract"]["api_key_env"] == "EVAL_BRIDGE_KEY"
         with JournalWriter(spec.journal_path) as journal:
             journal.emit("run.started", slot="test", task_prompt=spec.prompt)
             journal.emit("tool.started", call_id="call", name="mcp__ash__shell", args={"command": "write"})
@@ -193,7 +226,13 @@ def test_actor_requires_a_snapshot_for_each_successful_sandbox_call(tmp_path, mo
         return RunOutcome(run_id="test", journal_path=spec.journal_path, status="completed", checkpoints=1)
 
     monkeypatch.setattr(AgentENVOrchestrator, "run", run)
-    agent = AgentENVClaudeCode(logs_dir=tmp_path / "agent", model_name="test")
+    if slot == "mini-swe-agent":
+        monkeypatch.setenv("EVAL_BRIDGE_KEY", "secret-value")
+        agent = AgentENVMini(logs_dir=tmp_path / "agent", model_name="test",
+                            inference_endpoint="http://127.0.0.1:18252",
+                            api_key_env="EVAL_BRIDGE_KEY")
+    else:
+        agent = AgentENVClaudeCode(logs_dir=tmp_path / "agent", model_name="test")
     context = AgentContext()
     if paired:
         asyncio.run(agent.run("task", env, context))

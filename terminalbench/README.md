@@ -48,11 +48,14 @@ changes, arbitrary host bind mounts and multi-step tasks. CPU and memory limits
 are supported; resource reservation/guarantee policies are not claimed.
 
 The current AgentENV OCI layer implementation has a **64 GiB minimum virtual
-disk** and cannot shrink the base image. Smaller explicit task disk budgets are
-rejected rather than silently enlarged. Disk sizes must also be multiples of
-1024 MiB. Thus this backend cannot currently execute the full unmodified TB4
-cohort. Admission is a compatibility check, not proof that an image will build
-or a task's verifier is correct; real oracle/nop gates remain necessary.
+disk** and cannot shrink the base image. Tasks requesting smaller disks use
+64 GiB; larger requests are preserved. The task definition stays unchanged,
+and each `*.agentenv.json` records `requested_disk_size_mb` alongside the
+effective `resources.disk_size_mb`. This backend does not enforce a task's
+smaller disk quota. Requested sizes must still be at least 1024 MiB and multiples
+of 1024 MiB. Other limits above still prevent full TB4 execution. Admission is a
+compatibility check, not proof that an image will build or a task's verifier is
+correct; real oracle/nop gates remain necessary.
 
 Prebuilt images must be reachable from AgentENV. Tasks or separate verifiers
 with only a Dockerfile require `--image-registry HOST:PORT`: the wrapper builds

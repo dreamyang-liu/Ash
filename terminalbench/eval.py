@@ -24,8 +24,18 @@ def build_config(args: argparse.Namespace) -> Any:
                {"name": DATASET, "version": DATASET_VERSION})
     if args.task:
         dataset["task_names"] = args.task
-    agent = ({"import_path": "terminalbench.agent:AshClaudeCode", "model_name": args.model}
-             if args.agent == "claude-code" else {"name": args.agent})
+    if args.agent == "claude-code":
+        agent = {"import_path": "terminalbench.agent:AshClaudeCode", "model_name": args.model}
+    elif args.agent == "mini-swe-agent":
+        agent = {"import_path": "terminalbench.agentenv_mini:AgentENVMini",
+                 "model_name": args.model,
+                 "kwargs": {"inference_endpoint": args.model_endpoint,
+                            "api_key_env": args.model_key_env,
+                            "actor_timeout_s": args.actor_timeout_s,
+                            "max_output_tokens": args.max_output_tokens,
+                            "max_turns": args.max_turns}}
+    else:
+        agent = {"name": args.agent}
     environment = {"type": args.env, "delete": True}
     if args.env == "agentenv":
         environment = {"import_path": "terminalbench.agentenv:AgentENVEnvironment", "delete": True,
@@ -176,7 +186,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--phase", choices=["plan", "audit", "run", "summarize"], default="plan")
     parser.add_argument("--output", type=Path, default=Path("runs/terminalbench4"))
     parser.add_argument("--model")
-    parser.add_argument("--agent", choices=["claude-code", "oracle", "nop"], default="claude-code")
+    parser.add_argument("--agent", choices=["claude-code", "mini-swe-agent", "oracle", "nop"], default="claude-code")
+    parser.add_argument("--model-endpoint", help="mini: host-reachable Chat Completions bridge")
+    parser.add_argument("--model-key-env", help="mini: environment variable holding the bridge key")
+    parser.add_argument("--actor-timeout-s", type=float, default=36000)
+    parser.add_argument("--max-output-tokens", type=int, default=64000)
+    parser.add_argument("--max-turns", type=int, default=300)
     parser.add_argument("--env", default="agentenv")
     parser.add_argument("--runtime-bin", type=Path, default=Path(__file__).resolve().parents[1] / "runtime/ash-runtime")
     parser.add_argument("--server-url")
@@ -194,8 +209,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("workers and attempts must be positive")
     if args.phase == "audit" and args.env != "agentenv":
         parser.error("--phase audit currently checks the AgentENV adapter only")
-    if args.phase != "summarize" and args.agent == "claude-code" and not args.model:
-        parser.error("--model is required for claude-code")
+    if args.phase != "summarize" and args.agent in {"claude-code", "mini-swe-agent"} and not args.model:
+        parser.error("--model is required for the selected agent")
+    if args.agent == "mini-swe-agent":
+        if args.env != "agentenv":
+            parser.error("mini-swe-agent requires --env agentenv")
+        if args.phase != "summarize" and (not args.model_endpoint or not args.model_key_env):
+            parser.error("mini-swe-agent requires --model-endpoint and --model-key-env")
+        if args.actor_timeout_s <= 0 or not math.isfinite(args.actor_timeout_s):
+            parser.error("--actor-timeout-s must be finite and positive")
+        if args.max_output_tokens <= 0 or args.max_turns <= 0:
+            parser.error("mini output tokens and turns must be positive")
     return args
 
 

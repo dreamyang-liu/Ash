@@ -87,8 +87,6 @@ class AgentENVEnvironment(BaseEnvironment):
         disk = self.task_env_config.storage_mb
         if disk is not None and (disk < 1024 or disk % 1024):
             raise ValueError("AgentENV disk size must be at least 1024 MiB and divisible by 1024")
-        if disk is not None and disk < MIN_OCI_DISK_MB:
-            raise ValueError("Current AgentENV OCI layers have a 64 GiB floor; refusing to enlarge the task's disk budget")
         for policy in self._phase_network_policies:
             if policy != self._network_policy:
                 raise ValueError("AgentENV in-place network policy changes are not implemented")
@@ -132,9 +130,8 @@ class AgentENVEnvironment(BaseEnvironment):
             section["api_key_file"] = self.api_key_file
         self.backend = {"backend": "microvm", "microvm": section}
         self.session = SandboxSession(backend=self.backend, quiet=True)
-        resources = {"cpu": self._effective_cpus or 2, "memory_mb": self._effective_memory_mb or 1024}
-        if self._effective_storage_mb is not None:
-            resources["disk_size_mb"] = self._effective_storage_mb
+        resources = {"cpu": self._effective_cpus or 2, "memory_mb": self._effective_memory_mb or 1024,
+                     "disk_size_mb": max(self._effective_storage_mb or MIN_OCI_DISK_MB, MIN_OCI_DISK_MB)}
         try:
             creation = asyncio.create_task(asyncio.to_thread(self.session.create, self.image, resources))
             try:
@@ -147,6 +144,7 @@ class AgentENVEnvironment(BaseEnvironment):
             await self._checked("mkdir -p /logs/agent /logs/user-agent /logs/verifier /logs/artifacts && "
                                 "chmod 777 /logs/agent /logs/user-agent /logs/verifier /logs/artifacts")
             record = {"sandbox_id": self.session.sandbox_id, "image": self.image,
+                      "requested_disk_size_mb": self._effective_storage_mb,
                       "resources": resources, "network": self._network_policy.model_dump(mode="json"),
                       "checkpoint_mode": self.checkpoint_mode}
             (self.trial_paths.trial_dir / f"{self.session_id}.agentenv.json").write_text(json.dumps(record, indent=2))
