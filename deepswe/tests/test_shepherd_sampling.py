@@ -150,7 +150,7 @@ def test_settings_isolation_reaches_orchestrator(tmp_path):
     assert specs[0].extra["setting_sources"] == []
 
 
-def test_branch_wiring_uses_selected_snapshot_and_independent_prefix(tmp_path, monkeypatch):
+def test_branch_wiring_uses_project_binding_and_independent_prefix(tmp_path, monkeypatch):
     from deepswe.branching.runner import CONTINUE
     runner = fake_runner(tmp_path, monkeypatch)
     source = SimpleNamespace(sha256="original-sha")
@@ -160,15 +160,19 @@ def test_branch_wiring_uses_selected_snapshot_and_independent_prefix(tmp_path, m
         conversation_restore=lambda *args: ("cut-uuid", source),
         prepare_prefix=lambda *args: prepared, CLAUDE_PROJECTS_DIR=tmp_path)
     calls = []
-    monkeypatch.setattr(runner, "run_attempt", lambda *args, **kwargs: calls.append(kwargs))
+    binding = {"workdir": "/app", "archive_sha256": "project-sha"}
+    monkeypatch.setattr(runner, "materialize_project_binding",
+                        lambda *args: dict(binding))
+    monkeypatch.setattr(runner, "run_project_branch_attempt",
+                        lambda *args, **kwargs: calls.append(kwargs))
     checkpoint = SimpleNamespace(step=4, snapshot_id="exact-snapshot", session_ckpt="parent-session")
     runner.branch(SimpleNamespace(task_id="task"), "shepherd", 1, {"step": 4}, checkpoint,
                   tmp_path / "parent.jsonl")
-    assert calls[0]["image"] == "exact-snapshot"
-    assert calls[0]["resume"] == "independent-session"
-    assert calls[0]["fork"] and calls[0]["resume_at"] is None
-    assert calls[0]["prompt"] == CONTINUE
+    assert calls[0]["binding_data"]["archive_sha256"] == "project-sha"
+    assert calls[0]["prepared"]["resume_session_id"] == "independent-session"
     assert calls[0]["origin"]["conversation_cut"] == "cut-uuid"
+    assert calls[0]["origin"]["whole_sandbox_snapshot_restored"] is False
+    assert "snapshot_id" not in calls[0]["origin"]
 
 
 def test_report_does_not_score_blocked_as_failure(tmp_path):

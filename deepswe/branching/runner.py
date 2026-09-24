@@ -13,6 +13,8 @@ import time
 from types import SimpleNamespace
 
 from .policies import SHEPHERD_SYSTEM, shepherd_select
+from .project_scope import (ProjectBindingSnapshot, capture_command,
+                            restore_commands, sha256_file, verify_snapshot)
 from .provider import ChatClient
 from .storage import fingerprint, load, rows, save
 
@@ -169,6 +171,135 @@ class BenchmarkRunner:
         save(result_path, result)
         return result
 
+    def materialize_project_binding(self, task, checkpoint, folder: Path) -> dict:
+        """Copy only the selected project directory out of a parent checkpoint.
+
+        Imported parents may predate project-binding capture. Their legacy VM
+        checkpoint is mounted once as a read source, then discarded; siblings
+        never use it as an image and inherit no files outside ``/app``.
+        """
+        from harness.execution.session import SandboxSession
+        from deepswe.grade import shell_parts
+        target = folder / "project-binding" / ("step-%d.json" % checkpoint.step)
+        if target.exists():
+            data = load(target)
+            verify_snapshot(data)
+            return data
+        target.parent.mkdir(parents=True, exist_ok=True)
+        archive = target.with_suffix(".tgz").resolve()
+        args = self.args(task)
+        backend = self.ev.backend_for(args, self.bench)
+        session = SandboxSession(runtime_bin=args.runtime_bin, backend=backend, quiet=True)
+        try:
+            if not session.create(checkpoint.snapshot_id, self.bench.resources(self.bench.instance(task))):
+                raise RuntimeError("Cannot mount selected parent checkpoint: " + session.create_error)
+            command = capture_command("/app", "/tmp/shepherd-project-binding.tgz")
+            result = session.execute("shell", {"command": command, "timeout": 1800}, timeout=1860)
+            _, error, code = shell_parts(result)
+            if code:
+                raise RuntimeError("Project binding capture failed: " + error[-1000:])
+            if not session.download_file("/tmp/shepherd-project-binding.tgz", archive):
+                raise RuntimeError("Project binding download failed")
+        finally:
+            session.destroy()
+        binding = ProjectBindingSnapshot(
+            workdir="/app", checkpoint_step=checkpoint.step, archive=str(archive),
+            archive_sha256=sha256_file(archive), archive_bytes=archive.stat().st_size,
+            conversation_session_id=checkpoint.session_ckpt,
+            conversation_cut="materialized-by-branch",
+        ).to_dict()
+        binding["provenance"] = {
+            "kind": "legacy-parent-project-import",
+            "source_snapshot_id": checkpoint.snapshot_id,
+            "source_snapshot_used_for_branch_execution": False,
+            "files_outside_project_imported": False,
+        }
+        save(target, binding)
+        return binding
+
+    def run_project_branch_attempt(self, task, method: str, name: str, *,
+                                   binding_data: dict, prepared: dict,
+                                   origin: dict) -> dict:
+        """Run and grade a sibling without restoring or creating a VM snapshot."""
+        from harness.execution.session import SandboxSession
+        from harness.orchestrator.run import Orchestrator, OwnedSandbox, RunSpec
+        from deepswe.grade import (collect_patch, grade_from_verifier, shell_parts,
+                                   verify_patch)
+
+        class ExistingSessionOrchestrator(Orchestrator):
+            def _wire_sandbox(self, spec, claim):
+                if spec.session is not None and not spec.mcp_url:
+                    owned = OwnedSandbox(session=spec.session, keep=True,
+                                         sandbox_id=spec.session.sandbox_id)
+                    owned.mcp = self._serve_in_process(spec, owned)
+                    return owned, owned.mcp
+                return super()._wire_sandbox(spec, claim)
+
+        folder = self.root / method / task.task_id
+        journal = folder / (name + ".jsonl")
+        result_path = folder / (name + ".result.json")
+        if result_path.exists():
+            result = load(result_path)
+            if result.get("journal_sha256") != hashlib.sha256(journal.read_bytes()).hexdigest():
+                raise ValueError("Completed journal changed after verification")
+            result_resolved(result)
+            return result
+        if journal.exists():
+            raise RuntimeError("Interrupted project branch requires a fresh-image retry: " + str(journal))
+        binding = verify_snapshot(binding_data)
+        args = self.args(task)
+        backend = self.ev.backend_for(args, self.bench)
+        instance = self.bench.instance(task)
+        session = SandboxSession(runtime_bin=args.runtime_bin, backend=backend, quiet=True)
+        started = time.time()
+        try:
+            if not session.create(task.image, self.bench.resources(instance)):
+                raise RuntimeError("Cannot start fresh task image: " + session.create_error)
+            remote = "/tmp/shepherd-project-binding.tgz"
+            if not session.upload_file(Path(binding.archive), remote):
+                raise RuntimeError("Project binding upload failed")
+            for command in restore_commands(binding.workdir, remote):
+                result = session.execute("shell", {"command": command, "timeout": 1800}, timeout=1860)
+                _, error, code = shell_parts(result)
+                if code:
+                    raise RuntimeError("Project binding restore failed: " + error[-1000:])
+            os.environ.update(actor_environment(
+                self.config, "branchbench:%s/%s/%s" % (task.task_id, method, name)))
+            spec = RunSpec(
+                prompt=CONTINUE, slot="claude-code", cwd=prepared["cwd"],
+                model=self.config.model, timeout_s=args.timeout, run_id=name,
+                journal_path=journal, transport="http", tools="shell_only",
+                backend=backend, runtime_bin=args.runtime_bin, session=session,
+                sandbox_id=session.sandbox_id, keep_sandbox=True,
+                snapshot_every_step=False,
+                resume_session_id=prepared["resume_session_id"], fork=True,
+                origin=origin, extra={"setting_sources": []},
+            )
+            outcome = ExistingSessionOrchestrator(out_dir=folder).run(spec)
+            if outcome.status == "error":
+                raise RuntimeError("Actor infrastructure error; journal retained: " + str(journal))
+            patch, diagnostics = collect_patch(session, task)
+        finally:
+            session.destroy()
+        instance["verifier_artifacts_dir"] = str(folder / (name + ".verifier"))
+        grade = grade_from_verifier(
+            patch, verify_patch(task, patch, backend,
+                                artifacts_dir=Path(instance["verifier_artifacts_dir"])),
+            diagnostics)
+        result = {"task": task.task_id, "method": method, "name": name,
+                  "journal": str(journal),
+                  "journal_sha256": hashlib.sha256(journal.read_bytes()).hexdigest(),
+                  "status": outcome.status, "grade": asdict(grade),
+                  "checkpoint_backend": binding.backend,
+                  "whole_sandbox_snapshot_restored": False,
+                  "finished_at": time.time(),
+                  "seconds_this_invocation": time.time() - started}
+        if grade.error or grade.verifier_artifact_error:
+            save(folder / (name + ".grading-error.json"), result)
+            result_resolved(result)
+        save(result_path, result)
+        return result
+
     def initial(self, task) -> tuple[dict, Path]:
         if self.config.initial_root:
             journal = Path(self.config.initial_root).resolve() / task.task_id / "parent.jsonl"
@@ -258,15 +389,23 @@ class BenchmarkRunner:
         else:
             prepared = self.ev.prepare_prefix(source, folder / "actor-workspaces" / name,
                                                receipt, self.ev.CLAUDE_PROJECTS_DIR)
+        binding = self.materialize_project_binding(task, checkpoint, folder)
+        binding["conversation_cut"] = cut
+        binding["conversation_session_id"] = prepared["resume_session_id"]
+        save(folder / "project-binding" / ("step-%d.json" % checkpoint.step), binding)
         origin = {"parent_run_id": "parent", "parent_journal": str(journal),
-                  "branch_step": checkpoint.step, "snapshot_id": checkpoint.snapshot_id,
+                  "branch_step": checkpoint.step,
+                  "checkpoint_backend": "project-binding-tar-v1",
+                  "project_workdir": binding["workdir"],
+                  "project_archive_sha256": binding["archive_sha256"],
+                  "whole_sandbox_snapshot_restored": False,
                   "conversation_cut": cut, "conversation_restore": "original-prefix",
                   "conversation_prefix_manifest": prepared["manifest_path"],
                   "branch_policy": method, "selection": choice, "actor_hint": CONTINUE,
                   "hint_delivery": "fixed-neutral"}
-        return self.run_attempt(task, method, name, prompt=CONTINUE, image=checkpoint.snapshot_id,
-                                resume=prepared["resume_session_id"], fork=True, resume_at=None,
-                                cwd=Path(prepared["cwd"]), origin=origin)
+        return self.run_project_branch_attempt(task, method, name,
+                                               binding_data=binding,
+                                               prepared=prepared, origin=origin)
 
     def run_task(self, task) -> dict:
         initial, journal = self.initial(task)
