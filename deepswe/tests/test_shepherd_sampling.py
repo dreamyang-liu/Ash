@@ -7,6 +7,10 @@ import pytest
 
 from deepswe.branching.bridge import from_chat, message_events, to_chat
 from deepswe.branching.policies import shepherd_select
+from deepswe.branching.project_scope import (
+    ProjectBindingSnapshot, capture_command, checked_workdir, restore_commands,
+    verify_snapshot,
+)
 from deepswe.branching.runner import BenchmarkRunner, Config, result_resolved
 from deepswe.branching.storage import rows, save
 
@@ -28,6 +32,37 @@ def test_shepherd_one_state_and_no_hint():
     assert len(selected) == 7
     assert {r["step"] for r in selected} == {4}
     assert all("hint" not in r for r in selected)
+
+
+@pytest.mark.parametrize("path", ["/", "/etc", "/root", "relative", "/app/../etc"])
+def test_project_binding_rejects_system_or_non_normalized_roots(path):
+    with pytest.raises(ValueError):
+        checked_workdir(path)
+
+
+def test_project_binding_commands_touch_only_declared_root():
+    assert capture_command("/app/project", "/tmp/state.tgz") == (
+        "tar -czf /tmp/state.tgz -C /app/project .")
+    prepare, restore = restore_commands("/app/project", "/tmp/state.tgz")
+    assert "find /app/project" in prepare
+    assert " -C /app/project" in restore
+    assert "/etc" not in prepare + restore
+
+
+def test_project_binding_manifest_is_content_addressed(tmp_path):
+    archive = tmp_path / "state.tgz"
+    archive.write_bytes(b"project-state")
+    import hashlib
+    manifest = ProjectBindingSnapshot(
+        workdir="/app", checkpoint_step=3, archive=str(archive),
+        archive_sha256=hashlib.sha256(b"project-state").hexdigest(),
+        archive_bytes=len(b"project-state"), conversation_session_id="session",
+        conversation_cut="cut",
+    ).to_dict()
+    assert verify_snapshot(manifest).checkpoint_step == 3
+    archive.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="size|hash"):
+        verify_snapshot(manifest)
 
 
 def test_reasoning_and_tool_history_survive_protocol_round_trip():

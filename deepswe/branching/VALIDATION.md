@@ -3,7 +3,10 @@
 Date: 2026-09-20. Based on Ash `dev`
 `c5a1d30795af974ad0c6fe1923e4e08878d08d45`.
 
-## Real DeepSeek / AgentENV pilot
+## Historical DeepSeek / AgentENV pilot
+
+This pilot predates the project-binding backend and is retained only as
+historical evidence. It must not be pooled with project-scoped Shepherd runs.
 
 - Model: `deepseek-v4.1-flash`; Claude Code harness; reasoning `high`.
 - AgentENV: `v0.1.2-ash.1`; original digest-pinned task image and verifier.

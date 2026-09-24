@@ -18,10 +18,10 @@ silently pool their measurements. See [validation results](VALIDATION.md).
 
 ## Setup
 
-Use Linux, Python 3.12, and a reachable
-[AgentENV v0.1.2-ash.1](https://github.com/dreamyang-liu/AgentENV/releases/tag/v0.1.2-ash.1)
-server. This release uses Ash's existing microVM snapshots; no Docker restore
-implementation is claimed.
+Use Linux and Python 3.12. Shepherd branches use a project binding archive, not
+an AgentENV or whole-sandbox snapshot. A benchmark adapter may use any fresh
+sandbox provider for execution, but every sibling starts from the original task
+image and restores only the declared project workdir.
 
 ```bash
 python3.12 -m venv .venv
@@ -97,8 +97,8 @@ Add the following to the configuration, using your own paths:
 ```
 
 `initial_root/<task>/parent.jsonl` needs a completed run and a sibling
-`parent.result.json` with its grade. Original Claude transcripts and AgentENV
-snapshots must still exist on this host. The runner checks the parent model and
+`parent.result.json` with its grade. Original Claude transcripts and
+project-binding snapshots must still exist on this host. The runner checks the parent model and
 freezes journal/verdict hashes. The optional image lock format is
 `{"task-id": {"pinned_image": "registry/image@sha256:..."}}`.
 
@@ -121,11 +121,19 @@ is saved for audit but never given to the worker. Siblings receive the same fixe
 neutral continuation prompt required by the CLI resume interface; this adaptation
 is recorded as `hint_delivery: fixed-neutral`.
 
-Each branch restores the exact snapshot and copies the native conversation only
-through that checkpoint's tool-result cut. Each sibling has its own Claude session,
-working directory and sandbox, with user/project Claude settings disabled. There
-is no nearest-snapshot substitution or full-future-history fallback. Disk snapshots
-do not preserve RAM or background processes; Ash's foreground-tool contract applies.
+Each branch restores the exact project binding and copies the native conversation
+only through that checkpoint's tool-result cut. Each sibling has its own agent
+session, working directory and fresh sandbox, with user/project settings disabled.
+There is no nearest-snapshot substitution or full-future-history fallback. Files
+outside the project binding, RAM, background processes and external side effects
+are deliberately not inherited. Required services must be rebuilt by the branch.
+
+`project_scope.ProjectBindingSnapshot` is the durable fork contract. Archives are
+content-addressed and verified before every restore; replacement is refused for
+system roots. Whole-sandbox snapshots are not accepted as branch images.
+The boundary follows the project-workdir MetaGit scopes in Shepherd Experiments
+commit `c12ebd1b774cf12f70ef2b4486e61e7052f3e3ab`; the tar backend is Ash's
+portable binding transport for Terminal-Bench images that do not ship MetaGit.
 
 ## Records, recovery and accounting
 
