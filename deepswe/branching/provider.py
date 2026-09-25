@@ -1,4 +1,4 @@
-"""OpenAI-compatible probability scoring and Shepherd meta-agent calls."""
+"""OpenAI-compatible probability scoring for BPO branch selection."""
 
 from __future__ import annotations
 

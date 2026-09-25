@@ -6,14 +6,13 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 import hashlib
-import json
 import os
 from pathlib import Path
 import subprocess
 import time
 from types import SimpleNamespace
 
-from .policies import SHEPHERD_SYSTEM, bpo_select, shepherd_select
+from .policies import bpo_select
 from .provider import ChatClient, candidates_from_audit, score_candidate
 from .storage import fingerprint, load, rows, save
 
@@ -27,7 +26,7 @@ class Config:
     output: str
     runtime_bin: str
     bridge_url: str = "http://127.0.0.1:18187"
-    methods: tuple[str, ...] = ("baseline", "bpo", "shepherd")
+    methods: tuple[str, ...] = ("bpo",)
     tasks: tuple[str, ...] = ()
     max_rollouts: int = 8
     effort: str = "high"
@@ -39,17 +38,14 @@ class Config:
     bpo_min_spacing: int = 64
     bpo_max_points: int = 7
     bpo_scoring_workers: int = 2
-    meta_max_tokens: int = 65536
-    meta_transcript_tokens: int = 60000
-    meta_extra: dict | None = None
     timeout: float | None = None
     api_timeout_ms: int = 1860000
 
     def __post_init__(self):
         if not self.model or not 1 <= self.max_rollouts <= 8:
             raise ValueError("Specify a model and max_rollouts between 1 and 8")
-        if not self.methods or set(self.methods) - {"baseline", "bpo", "shepherd"}:
-            raise ValueError("Methods must be baseline, bpo, or shepherd")
+        if self.methods != ("bpo",):
+            raise ValueError("This branch is BPO-only; methods must be ['bpo']")
         if len(set(self.methods)) != len(self.methods):
             raise ValueError("Duplicate method")
         if (not 1 <= self.bpo_top_k <= 20 or self.bpo_max_points < 1
@@ -59,8 +55,6 @@ class Config:
             raise ValueError("Timeout must be positive")
         if type(self.api_timeout_ms) is not int or not 1 <= self.api_timeout_ms <= 2147483647:
             raise ValueError("API timeout must be an integer between 1 and 2147483647 milliseconds")
-        if self.meta_extra and set(self.meta_extra) & {"model", "messages", "stream", "reasoning_effort"}:
-            raise ValueError("Meta extras override protected settings")
 
 
 def result_resolved(result: dict) -> bool:
@@ -76,19 +70,16 @@ def actor_environment(config: Config, owner: str) -> dict[str, str]:
             "API_TIMEOUT_MS": str(config.api_timeout_ms)}
 
 
-def select_plan(method: str, *, scores: list[dict] | None, proposal: dict | None,
-                eligible: list[int], config: Config) -> list[dict]:
+def select_plan(method: str, *, scores: list[dict] | None, config: Config) -> list[dict]:
     budget = config.max_rollouts - 1
-    if method == "bpo":
-        return bpo_select(scores or [], budget, config.bpo_min_spacing, config.bpo_max_points)
-    if method == "shepherd":
-        return shepherd_select(proposal or {}, eligible, budget)
-    return [{} for _ in range(budget)]
+    if method != "bpo":
+        raise ValueError("This branch implements only BPO")
+    return bpo_select(scores or [], budget, config.bpo_min_spacing, config.bpo_max_points)
 
 
 def dataset_hash(task) -> str:
     # Includes verifier and oracle hashes for provenance, never sends their
-    # contents to the worker or Shepherd selector.
+    # contents to the worker or probability scorer.
     digest = hashlib.sha256()
     for path in sorted(task.task_dir.rglob("*")):
         if path.is_file() and "__pycache__" not in path.parts:
@@ -210,48 +201,24 @@ class BenchmarkRunner:
             return plan, points
         if not points:
             raise ValueError("No exact snapshot/session pairs available for branching")
-        scores, proposal = None, None
-        if method == "bpo":
-            audit_root = Path(self.config.provider_audit_root or self.root)
-            owner = (self.config.initial_owner_template.format(task=task.task_id)
-                     if self.config.initial_root else "branchbench:%s/initial/parent" % task.task_id)
-            candidates = candidates_from_audit(audit_root, owner, points, self.config.model)
-            def score(candidate):
-                return score_candidate(candidate, self.client, folder / "entropy",
-                                       top_k=self.config.bpo_top_k)
-            with ThreadPoolExecutor(max_workers=self.config.bpo_scoring_workers) as pool:
-                scores = list(pool.map(score, candidates))
-        else:
-            transcript, lo, hi = self.ev.render_transcript(
-                journal, token_budget=self.config.meta_transcript_tokens)
-            payload = {"model": self.config.model, "reasoning_effort": self.config.effort,
-                       "temperature": 1., "top_p": .95, "stream": False,
-                       "max_tokens": self.config.meta_max_tokens,
-                       "messages": [{"role": "system", "content": SHEPHERD_SYSTEM}, {
-                           "role": "user", "content": json.dumps({
-                               "task": task.instruction, "reward": int(result_resolved(initial)),
-                               "eligible_checkpoint_steps": sorted(points),
-                               "transcript_visible_step_range": [lo, hi], "trajectory": transcript})}]}
-            payload.update(self.config.meta_extra or {})
-            audit = folder / "meta-request.json"
-            if audit.exists() and load(audit).get("request_sha256") == fingerprint(payload) and load(audit).get("response"):
-                response = load(audit)["response"]
-            else:
-                response = self.client.complete(payload, audit)
-            if response["choices"][0]["finish_reason"] != "stop":
-                raise ValueError("Incomplete Shepherd decision; refusing a partial plan")
-            proposal = self.ev.extract_json(response["choices"][0]["message"]["content"])
-        selected = select_plan(method, scores=scores, proposal=proposal,
-                               eligible=sorted(points), config=self.config)
+        audit_root = Path(self.config.provider_audit_root or self.root)
+        owner = (self.config.initial_owner_template.format(task=task.task_id)
+                 if self.config.initial_root else "branchbench:%s/initial/parent" % task.task_id)
+        candidates = candidates_from_audit(audit_root, owner, points, self.config.model)
+        def score(candidate):
+            return score_candidate(candidate, self.client, folder / "entropy",
+                                   top_k=self.config.bpo_top_k)
+        with ThreadPoolExecutor(max_workers=self.config.bpo_scoring_workers) as pool:
+            scores = list(pool.map(score, candidates))
+        selected = select_plan(method, scores=scores, config=self.config)
         plan = {"identity": identity, "method": method, "training": False,
                 "shared_initial": str(journal), "eligible_steps": sorted(points),
-                "selected": selected, "proposal": proposal,
+                "selected": selected,
                 "max_total_rollouts": self.config.max_rollouts,
                 "branch_index_semantics": "state after completed tool step",
-                "hint_delivery": "fixed-neutral", "created_at": time.time()}
-        if method == "bpo":
-            plan["entropy_note"] = ("Top-k plus tail lower bound of first reported content token; "
-                                    "hidden reasoning-token entropy is not observable via this API.")
+                "hint_delivery": "point-only", "created_at": time.time(),
+                "entropy_note": ("Top-k plus tail lower bound of first reported content token; "
+                                 "hidden reasoning-token entropy is not observable via this API.")}
         save(path, plan)
         return plan, points
 
@@ -292,13 +259,10 @@ class BenchmarkRunner:
                 continue
             try:
                 attempts = []
-                plan, points = (None, None) if method == "baseline" else self.plan(task, method, journal, initial)
-                choices = plan["selected"] if plan else [{}] * (self.config.max_rollouts - 1)
+                plan, points = self.plan(task, method, journal, initial)
+                choices = plan["selected"]
                 for index, choice in enumerate(choices, 1):
-                    if method == "baseline":
-                        record = self.run_attempt(task, method, "b%02d" % index)
-                    else:
-                        record = self.branch(task, method, index, choice, points[choice["step"]], journal)
+                    record = self.branch(task, method, index, choice, points[choice["step"]], journal)
                     attempts.append(record)
                     if result_resolved(record):
                         break

@@ -56,15 +56,13 @@ def report(root: Path) -> dict:
         unfinalized[stage] = unfinalized.get(stage, 0) + 1
     scoring = [load(p).get("response", {}).get("usage")
                for p in (root / "bpo").glob("*/entropy/step-*.request.json")]
-    selector = [load(p).get("response", {}).get("usage")
-                for p in (root / "shepherd").glob("*/meta-request.json")]
     return {"tasks": len(manifest["tasks"]), "max_rollouts_including_initial": manifest["config"]["max_rollouts"],
             "methods": methods, "actor_usage_by_stage": {k: usage_total(v) for k, v in actor.items()},
             "unfinalized_actor_requests_by_stage": unfinalized,
             "unfinalized_usage_note": "In-flight or interrupted request audits without final accounting; usage is unknown, not zero, and excluded from finalized actor totals.",
-            "bpo_scoring_usage": usage_total(scoring), "shepherd_selector_usage": usage_total(selector),
+            "bpo_scoring_usage": usage_total(scoring),
             "imported_initial_usage_note": "When initial_root is set, initial API costs remain in the source cohort audits.",
-            "cost_usd": None, "cost_note": "No prices assumed; scoring/selector overhead is separate from rollout count."}
+            "cost_usd": None, "cost_note": "No prices assumed; BPO scoring overhead is separate from rollout count."}
 
 
 def main() -> None:

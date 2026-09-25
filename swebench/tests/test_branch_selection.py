@@ -60,7 +60,8 @@ def exercise(tmp_path, monkeypatch, plans, *, limits=None, alter_parent=None, co
     args = SimpleNamespace(rounds=len(plans), slot="claude-code", model="model",
                            analyst_model="model", analyst_tokens=1000, timeout=1,
                            runtime_bin="runtime/ash-runtime", parent_from=str(tmp_path / "source"),
-                           fork_full_conversation=False, branch_count_mode=count_mode)
+                           fork_full_conversation=False, branch_count_mode=count_mode,
+                           reviewer_max_attempts=1)
     attempts = fork_eval.run_one(None, args, "task", limits or [4], tmp_path / "out", Bench())
     return attempts, calls, analyst_inputs, reviewer_inputs
 

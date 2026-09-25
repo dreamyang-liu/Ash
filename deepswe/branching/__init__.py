@@ -1,1 +1,1 @@
-"""Reproducible, inference-only BPO and Shepherd sampling benchmarks."""
+"""Reproducible, inference-only BPO sampling benchmark."""

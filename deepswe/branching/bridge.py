@@ -1,4 +1,4 @@
-"""Local Claude Code Messages -> OpenAI chat bridge with native request audits.
+"""Audited OpenAI-compatible model bridge for the BPO mini-swe-agent runner.
 
 Run one instance per model/cohort. Its upstream credentials stay in environment
 variables; the SDK key is an experiment owner label, never an upstream key.
