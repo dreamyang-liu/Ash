@@ -2,6 +2,13 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+pytest.importorskip(
+    "claude_agent_sdk",
+    reason="legacy Claude native-prefix tests require the optional Claude SDK",
+)
+
 from swebench import fork_eval
 from swebench.tests.test_conversation_cut import journal_with_session, write_transcript
 from swebench.tests.test_parent_from import write_journal
