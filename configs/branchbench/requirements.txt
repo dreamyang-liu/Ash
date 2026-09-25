@@ -1,5 +1,5 @@
-# Live validation uses Python 3.12 and claude-agent-sdk 0.2.145.
-claude-agent-sdk==0.2.145
+# Live validation uses Python 3.12 and mini-swe-agent 2.4.6.
+mini-swe-agent==2.4.6
 httpx>=0.28,<1
 fastapi>=0.115,<1
 uvicorn>=0.30,<1

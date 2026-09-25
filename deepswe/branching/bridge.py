@@ -204,8 +204,11 @@ def create_app(model: str, audit_root: Path, *, effort: str = "high",
         # Claude uses this only for its context guard, not benchmark accounting.
         return {"input_tokens": max(1, len(json.dumps(await request.json())) // 3)}
 
-    async def complete(body: dict, owner: str) -> dict:
-        payload = to_chat(body, model, effort, extra)
+    async def complete(body: dict, owner: str, *, openai_wire: bool = False) -> dict:
+        payload = dict(body) if openai_wire else to_chat(body, model, effort, extra)
+        if openai_wire:
+            payload.update(model=model, reasoning_effort=effort, stream=False)
+            payload.update(extra or {})
         request_id = uuid4().hex
         started = time.time()
         record = {"request_id": request_id, "owner": owner, "time": started,
@@ -248,7 +251,7 @@ def create_app(model: str, audit_root: Path, *, effort: str = "high",
             audit["native_response"] = data
             save(audit_path, audit)
             record["usage"] = data.get("usage")
-            return from_chat(data, model)
+            return data if openai_wire else from_chat(data, model)
         except asyncio.CancelledError:
             record["validation_error"] = "CancelledError"
             raise
@@ -312,6 +315,32 @@ def create_app(model: str, audit_root: Path, *, effort: str = "high",
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
         return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request):
+        body = await request.json()
+        authorization = request.headers.get("authorization", "")
+        owner = authorization[7:] if authorization.lower().startswith("bearer ") else ""
+        if not owner.startswith("branchbench:"):
+            return JSONResponse({"error": {"type": "authentication_error",
+                                           "message": "Expected branchbench owner label"}}, status_code=401)
+        if body.get("stream"):
+            return JSONResponse({"error": {"type": "invalid_request_error",
+                                           "message": "mini bridge requires stream=false"}}, status_code=400)
+        task = asyncio.create_task(complete(body, owner, openai_wire=True))
+        try:
+            while not task.done():
+                await asyncio.wait({task}, timeout=disconnect_poll)
+                if not task.done() and await request.is_disconnected():
+                    return JSONResponse({"error": {"type": "api_error",
+                                                   "message": "Client disconnected"}}, status_code=499)
+            return await task
+        except Exception as exc:
+            return JSONResponse({"error": {"type": "api_error", "message": type(exc).__name__}},
+                                status_code=502)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     # FastAPI resolves postponed annotation names against module globals.
     return app

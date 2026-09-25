@@ -1,6 +1,7 @@
 """Reviewer context and response schemas for mini-native branch modes."""
 
 from harness.core.journal import read_journal
+from harness.core.mini_tools import validate_mini_tools
 from harness.slots.mini_history import load_prefix, training_messages
 
 
@@ -38,6 +39,19 @@ def selected_prefix(journal, checkpoint) -> list[dict]:
     return load_prefix(reference)
 
 
+def actor_tools_at(journal, step: int) -> list[dict]:
+    """Read the last actual tool declaration before the selected turn closed."""
+    tools = None
+    for event in read_journal(journal):
+        if event.get("type") == "rollout.model_tools" and event.get("shape") == "chat/completions":
+            tools = event.get("tools")
+        if event.get("type") == "model.turn.completed" and event.get("step") == step:
+            if tools is None:
+                raise ValueError("No recorded actor tool schema at the selected checkpoint")
+            return validate_mini_tools(tools)
+    raise ValueError("No completed turn for the selected actor tool schema")
+
+
 def reviewer_context(journal, checkpoints: dict) -> dict:
     """Supply each attempt once, with precise message offsets for eligible cuts."""
     if not checkpoints:
@@ -55,7 +69,9 @@ def reviewer_context(journal, checkpoints: dict) -> dict:
                 cuts[str(step)] = count
     if set(cuts) != {str(step) for step in checkpoints}:
         raise ValueError("Reviewer mini history does not cover every eligible checkpoint")
-    return {"messages": training_messages(prefix), "prefix_message_counts": cuts}
+    workspace = next((e.get("workspace") for e in prefix if e["type"] == "mini.session"), None)
+    return {"messages": training_messages(prefix), "prefix_message_counts": cuts,
+            "tools": actor_tools_at(journal, max(checkpoints)), "workspace": workspace}
 
 
 # Braces are escaped because the controller supplies variables with str.format.
@@ -87,6 +103,12 @@ There is no user hint or opportunity for the actor to revise your first action.
   Prior assistant_turn_given records show directions already tried.
 
 ## The response you author
+- native_history.tools contains the actor's recorded function definitions.
+  Match the function names, required arguments and parameter types exactly.
+  The mini executor accepts only command; never add timeout, working_dir, tail
+  or other arguments, or use host/MCP tools absent from that list.
+- native_history.workspace records the inherited working directory when
+  available. To change directories, use cd inside the bash command.
 - Write assistant_turn as a normal assistant message: role="assistant",
   ordinary content containing concise code-focused reasoning, and tool_calls.
   Reasoning belongs in content, NOT a provider-native reasoning/thinking field.
@@ -95,10 +117,29 @@ There is no user hint or opportunity for the actor to revise your first action.
 - Do not mention reviewers, guidance, other branches, scores, hidden test
   names/IDs, grader paths or outside feedback. Do not write an acknowledgment,
   a user instruction, a task restatement or invented tool observations.
+- Never describe the continuation as a checkpoint, restore, replay, restart,
+  injected turn or selected branch. Phrases such as "from this checkpoint",
+  "the clean checkpoint" and "resuming this trajectory" expose controller-only
+  knowledge. Speak only about the code and observations in the retained history:
+  for example, "I've inspected the merge APIs; I'll check the working tree
+  before implementing the merge logic." A task's own database checkpoint or
+  application restore API may still be discussed as domain functionality.
+- Claims that work is complete or tests have passed must be supported by
+  observations BEFORE the selected cut. Otherwise describe a hypothesis and
+  the check you will run, not a fact learned from discarded history or grading.
 - Supply one or more bash function calls, in execution order. Every call needs
   a non-empty unique id not used anywhere in the retained history, type=function,
   and function.name=bash. function.arguments is a JSON STRING containing exactly
   one string field, command. Commands may inspect or modify the sandbox.
+- bash is the ONLY allowed tool name. Calls named shell, python, apply_patch,
+  text_editor, or any host/MCP tool are rejected before any branch executes;
+  the validation error will be returned for you to correct the complete plan.
+  Python, git and other available programs can be invoked INSIDE bash commands.
+- A bash tool does not imply a shell executable named apply_patch exists.
+  Do not invoke the host's apply_patch helper inside bash. Use ordinary shell
+  redirection or Python file edits when those programs are supported by the
+  retained context. Ensure a failed edit stops subsequent checks and commits,
+  using explicit error checks, && chaining, or set -e as appropriate.
 - Use only files, working-directory conventions and tools supported by the
   selected prefix. Preserve the original task's behavioral constraints.
 - Do not include hint, reasoning_content, extra, tool results or additional
