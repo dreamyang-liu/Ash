@@ -140,25 +140,22 @@ def test_grading_error_is_not_a_failure():
         result_resolved({"grade": {"resolved": False, "error": "verifier unavailable"}})
 
 
-def test_settings_isolation_reaches_orchestrator(tmp_path):
+def test_mini_native_home_reaches_orchestrator(tmp_path):
     from swebench.fork_eval import run_attempt
     specs = []
-    args = SimpleNamespace(slot="claude-code", model="m", runtime_bin="runtime/ash-runtime",
+    args = SimpleNamespace(slot="mini-swe-agent", model="m", runtime_bin="runtime/ash-runtime",
                            timeout=60, setting_sources=[])
     run_attempt(SimpleNamespace(run=specs.append), args, {}, name="parent", prompt="task",
                 image="image", out_dir=tmp_path)
-    assert specs[0].extra["setting_sources"] == []
+    assert specs[0].extra["native_home"] == str(tmp_path / "state" / "mini-native")
 
 
 def test_branch_wiring_uses_project_binding_and_independent_prefix(tmp_path, monkeypatch):
-    from deepswe.branching.runner import CONTINUE
     runner = fake_runner(tmp_path, monkeypatch)
-    source = SimpleNamespace(sha256="original-sha")
-    prepared = {"resume_session_id": "independent-session", "cwd": str(tmp_path / "actor"),
-                "manifest_path": "receipt.json"}
-    runner.ev = SimpleNamespace(
-        conversation_restore=lambda *args: ("cut-uuid", source),
-        prepare_prefix=lambda *args: prepared, CLAUDE_PROJECTS_DIR=tmp_path)
+    reference = {"slot": "mini-swe-agent", "session_id": "parent-session",
+                 "path": str(tmp_path / "native.jsonl"), "byte_length": 123,
+                 "sha256": "native-sha", "cut": "cut-uuid"}
+    monkeypatch.setattr("runstore.mini_native.reference_at", lambda *args: reference)
     calls = []
     binding = {"workdir": "/app", "archive_sha256": "project-sha"}
     monkeypatch.setattr(runner, "materialize_project_binding",
@@ -169,7 +166,8 @@ def test_branch_wiring_uses_project_binding_and_independent_prefix(tmp_path, mon
     runner.branch(SimpleNamespace(task_id="task"), "shepherd", 1, {"step": 4}, checkpoint,
                   tmp_path / "parent.jsonl")
     assert calls[0]["binding_data"]["archive_sha256"] == "project-sha"
-    assert calls[0]["prepared"]["resume_session_id"] == "independent-session"
+    assert calls[0]["native_reference"] == reference
+    assert calls[0]["binding_data"]["conversation_session_id"] == "parent-session"
     assert calls[0]["origin"]["conversation_cut"] == "cut-uuid"
     assert calls[0]["origin"]["whole_sandbox_snapshot_restored"] is False
     assert "snapshot_id" not in calls[0]["origin"]
@@ -215,13 +213,13 @@ def test_invalid_api_timeout_is_rejected(value):
         Config("model", "tasks", "output", "runtime", api_timeout_ms=value)
 
 
-def test_buffered_bridge_sets_both_client_and_stream_watchdog_deadlines():
+def test_mini_bridge_environment_uses_openai_wire():
     from deepswe.branching.runner import actor_environment
     env = actor_environment(Config("model", "tasks", "output", "runtime"), "branchbench:t/shepherd/b01")
     assert env["API_TIMEOUT_MS"] == "1860000"
-    assert env["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == "1860000"
-    assert env["CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS"] == "1800000"
-    assert env["ANTHROPIC_API_KEY"] == "branchbench:t/shepherd/b01"
+    assert env["OPENAI_API_KEY"] == "branchbench:t/shepherd/b01"
+    assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:18187/v1"
+    assert not any(key.startswith("CLAUDE_") or key.startswith("ANTHROPIC_") for key in env)
 
 
 def test_bridge_cancellation_retains_request_but_not_credentials(tmp_path, monkeypatch):

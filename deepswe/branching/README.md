@@ -1,6 +1,6 @@
 # Shepherd sampling benchmark
 
-Run a fixed DeepSWE task set through Ash's Claude Code harness, exact checkpoint
+Run a fixed DeepSWE task set through Ash's mini-swe-agent harness, exact checkpoint
 restore, and existing verifier. This implements the **inference-time sampling
 policy** from [Shepherd Algorithm 2](https://arxiv.org/html/2605.10913#A6.SS6),
 with frozen API model weights, not the paper's reinforcement-learning training.
@@ -77,13 +77,10 @@ at most two concurrent upstream calls by default. `/health` exposes the model,
 effort and audit directory, which the runner checks before sampling. Do not
 point validation at an existing experiment's bridge.
 
-The client `api_timeout_ms` defaults to 1,860,000 (31 minutes), above the bridge's
-30-minute upstream timeout. The independent event- and byte-stream watchdogs are
-also configured: raising the total API timeout alone does not prevent a buffered
-reasoning request from being cancelled by an idle watchdog. SSE pings are
-keepalives, not fabricated model progress. Interrupted requests retain cancellation
-audits and unknown usage is not represented as zero cost. See the
-[Claude Code environment reference](https://code.claude.com/docs/en/env-vars).
+The bridge's upstream timeout defaults to 30 minutes. mini-swe-agent uses
+OpenAI-compatible non-streaming Chat Completions and remains bounded by the task's
+overall actor deadline. Interrupted requests retain cancellation audits and unknown
+usage is not represented as zero cost.
 
 ## Reuse existing initial rollouts
 
@@ -97,7 +94,7 @@ Add the following to the configuration, using your own paths:
 ```
 
 `initial_root/<task>/parent.jsonl` needs a completed run and a sibling
-`parent.result.json` with its grade. Original Claude transcripts and
+`parent.result.json` with its grade. Original mini native transcripts and
 project-binding snapshots must still exist on this host. The runner checks the parent model and
 freezes journal/verdict hashes. The optional image lock format is
 `{"task-id": {"pinned_image": "registry/image@sha256:..."}}`.
@@ -117,9 +114,9 @@ replacement-tool-call probe or trajectory-compression hint variant.
 
 Checkpoint N means state **after completed tool step N**, before the next model
 decision. Out-of-range or incomplete decisions fail closed. The selector's reason
-is saved for audit but never given to the worker. Siblings receive the same fixed,
-neutral continuation prompt required by the CLI resume interface; this adaptation
-is recorded as `hint_delivery: fixed-neutral`.
+is saved for audit but never given to the worker. Siblings resume the exact mini
+history directly, without a user hint; this is recorded as
+`hint_delivery: point-only`.
 
 Each branch restores the exact project binding and copies the native conversation
 only through that checkpoint's tool-result cut. Each sibling has its own agent
@@ -140,7 +137,7 @@ portable binding transport for Terminal-Bench images that do not ship MetaGit.
 `benchmark-manifest.json` freezes configuration, task list, dataset/image references,
 Git revision, source fingerprint and runtime hash. `parents/` freezes initial
 journals. Each method/task stores its selection, selector request, branch journals,
-prefix receipts, results and verifier outputs. Infrastructure failures are marked
+native-prefix references, results and verifier outputs. Infrastructure failures are marked
 `blocked`, not ordinary model failures; the runner exits nonzero for blocked tasks.
 
 Rerunning the same configuration/code reuses plans and completed outcomes. Finished

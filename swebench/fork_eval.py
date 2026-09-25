@@ -7,9 +7,12 @@ the execution plane deliberately does not know -- what the answer is (a patch
 that makes FAIL_TO_PASS pass without breaking PASS_TO_PASS) and what to do when
 the answer is wrong.
 
+With a configured mini Chat Completions endpoint, the defaults select
+mini-swe-agent and assistant-turn guidance:
+
     python -m swebench.fork_eval --instance sympy__sympy-13091 \
-        --slot codex --model openai.gpt-5.6-luna \
-        --rounds 2 --branches 3 --fork-full-conversation -o runs/fork-eval
+        --model openai.gpt-5.6-luna \
+        --rounds 2 --branches 3 -o runs/fork-eval
 
 The loop:
 
@@ -57,7 +60,13 @@ from harness.rollback import Checkpoint, branch_checkpoints, load_checkpoints, t
 from harness.normalize.claude_turns import completed_turn_steps
 from harness.execution.backends import with_sandbox_budget
 from harness.slots.claude_history import PrefixSource, find_prefix_source, prepare_prefix
+from swebench.branch_plan import ReviewerPlanError, extract_branch_plan, review_with_feedback
 from swebench.branching import BRANCH_COUNT_MODES, branch_count_rule, branch_run_name
+from swebench.assistant_branch import (
+    ASSISTANT_REVIEW_PROMPT, POINT_REVIEW_PROMPT, BRANCH_GUIDANCE_MODES, require_mini_parent,
+    actor_tools_at, reviewer_context, selected_prefix, resolve_guidance, validate_guidance,
+)
+from harness.core.assistant_turn import validate_assistant_turn
 from swebench.dataset import (SYMPY_RUNNER, build_batch_test_command,
                               load_instances, malformed_test_ids,
                               needs_file_runner, parse_test_list, resolve_image,
@@ -121,6 +130,10 @@ timeout (seconds) for long commands. Use tail to limit noisy output.
 
 
 def tool_primer(slot: str = "", workdir: str = "/testbed") -> str:
+    if slot == "mini-swe-agent":
+        from harness.core.mini_tools import mini_tool_primer
+
+        return mini_tool_primer(workdir)
     primer = SHELL_TOOL_PRIMER if slot == "claude-code" else TOOL_PRIMER
     return primer.replace("/testbed", workdir)
 
@@ -803,6 +816,7 @@ class Attempt:
     #: it so the reviewer can see hypothesis -> outcome in one place.
     hint: str = ""
     round_no: int = 0
+    assistant_turn: Optional[dict] = None
 
     def verdict_text(self) -> str:
         """The grading verdict as the analysts and branch prompts see it."""
@@ -830,7 +844,9 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
                 resources: Optional[dict] = None,
                 bench: "Optional[Benchmark]" = None,
                 resume_at: Optional[str] = None,
-                cwd: Optional[Path] = None) -> RunOutcome:
+                cwd: Optional[Path] = None,
+                assistant_turn: Optional[dict] = None,
+                resume_without_hint: bool = False) -> RunOutcome:
     """One attempt. Parent and branches differ only in the arguments.
 
     ``out_dir`` is per instance: eight instances writing `parent.jsonl` into one
@@ -842,8 +858,14 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
         network = network_policy_for(args, bench, "agent")
         prompt += f"\n\nSandbox internet access for this attempt: {network}."
     extra: dict = {}
-    if getattr(args, "setting_sources", None) is not None:
-        extra["setting_sources"] = args.setting_sources
+    if resume_without_hint:
+        if args.slot != "mini-swe-agent" or not resume or assistant_turn is not None:
+            raise ValueError("Point-only continuation requires a resumed mini without an assistant_turn")
+        extra["resume_without_hint"] = True
+    if assistant_turn is not None:
+        if args.slot != "mini-swe-agent" or not resume:
+            raise ValueError("assistant-turn execution requires a resumed mini-swe-agent")
+        extra["assistant_turn"] = validate_assistant_turn(assistant_turn)
     if args.slot == "codex":
         # Native Bedrock provider: OpenAI's own models are hosted there, so no
         # translator and no login. Pre-serialized TOML values, which is what
@@ -851,6 +873,17 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
         extra["config_overrides"] = {"model_provider": '"amazon-bedrock"'}
     if args.slot.startswith("opencode"):
         extra["data_home"] = str(out_dir / "state" / "shared")
+    if args.slot == "mini-swe-agent":
+        extra["native_home"] = str(out_dir / "state" / "mini-native")
+        if resume and origin and origin.get("parent_journal"):
+            from runstore.mini_native import reference_at
+
+            reference = reference_at(origin["parent_journal"], origin["branch_step"], resume)
+            if reference is None:
+                raise ValueError("Selected mini branch has no exact native prefix")
+            extra["native_prefix"] = reference
+        if (assistant_turn is not None or resume_without_hint) and "native_prefix" not in extra:
+            raise ValueError("This branch mode requires an exact native prefix")
     if resume_at:
         # Transcript entry (uuid) the resumed conversation ends at. The slot
         # passes it to the SDK's resume_session_at; see conversation_cut.
@@ -861,7 +894,7 @@ def run_attempt(orch: Orchestrator, args, instance: dict, *, name: str,
         prompt=prompt, slot=args.slot, cwd=str(cwd) if cwd is not None else "/tmp", model=args.model,
         timeout_s=args.timeout, run_id=name,
         journal_path=out_dir / ("%s.jsonl" % name),
-        transport="http", tools="shell_only" if args.slot == "claude-code" else "default",
+        transport="http", tools="shell_only" if args.slot in {"claude-code", "mini-swe-agent"} else "default",
         backend=backend_for(args, bench), runtime_bin=runtime_bin,
         sandbox_image=image, sandbox_resources=resources,
         resume_session_id=resume, fork=fork, origin=origin, extra=extra,
@@ -1155,6 +1188,12 @@ def conversation_cut(journal_path, step: int, session_ref: Optional[str] = None)
 
 def conversation_restore(journal_path, step: int, session_ref: str) -> tuple[str, PrefixSource | None] | None:
     """Choose a direct native cut or a validated original-prefix source."""
+    if any(row.get("type") == "run.started" and row.get("slot") == "mini-swe-agent"
+           for row in read_journal(journal_path)):
+        from runstore.mini_native import reference_at
+
+        reference = reference_at(journal_path, step, session_ref)
+        return (reference["cut"], None) if reference else None
     cut = conversation_cut(journal_path, step, session_ref)
     if cut is not None:
         return cut, None
@@ -1193,38 +1232,62 @@ class BranchChoice:
     hint: str
     why: str
     prefix: Optional[PrefixSource] = None
+    assistant_turn: Optional[dict] = None
 
 
 def prepare_branches(plan: dict, *, limit: int, round_no: int,
                      attempts: dict, checkpoints: dict,
                      full_conversation: bool = False,
-                     count_mode: str = "adaptive") -> List[BranchChoice]:
+                     count_mode: str = "adaptive",
+                     guidance_mode: str = "user-hint") -> List[BranchChoice]:
     """Resolve each selected point exactly before any continuation starts."""
     if count_mode not in BRANCH_COUNT_MODES:
         raise ValueError("unknown branch count mode: %r" % count_mode)
+    validate_guidance(guidance_mode, "mini-swe-agent", full_conversation)
     branches = plan.get("branches") if isinstance(plan, dict) else None
     if not isinstance(branches, list):
-        raise ValueError("reviewer must return a branches list")
+        raise ReviewerPlanError("reviewer must return a branches list")
     if count_mode == "fixed" and len(branches) != limit:
-        raise ValueError("fixed branch count requires exactly %d branches; reviewer returned %d" %
+        raise ReviewerPlanError("fixed branch count requires exactly %d branches; reviewer returned %d" %
                          (limit, len(branches)))
     if len(branches) > limit:
-        raise ValueError("reviewer returned %d branches above limit %d" % (len(branches), limit))
+        raise ReviewerPlanError("reviewer returned %d branches above limit %d" % (len(branches), limit))
     choices = []
     cuts = {}
     for index, branch in enumerate(branches, 1):
         if not isinstance(branch, dict):
-            raise ValueError("branch %d is not an object" % index)
+            raise ReviewerPlanError("branch %d is not an object" % index)
         base_name = branch.get("base")
         if not isinstance(base_name, str) or base_name not in attempts:
-            raise ValueError("branch %d names an unknown base %r" % (index, base_name))
+            raise ReviewerPlanError("branch %d names an unknown base %r" % (index, base_name))
         step = branch.get("branch_step")
         if type(step) is not int or step not in checkpoints.get(base_name, {}):
-            raise ValueError("branch %d has no eligible checkpoint at %s:%r" % (index, base_name, step))
-        hint = branch.get("hint")
-        if not isinstance(hint, str) or not hint.strip():
-            raise ValueError("branch %d must supply a non-empty hint" % index)
+            raise ReviewerPlanError("branch %d has no eligible checkpoint at %s:%r" % (index, base_name, step))
         base = attempts[base_name]
+        assistant_turn = None
+        if guidance_mode == "none":
+            if set(branch) - {"name", "base", "branch_step", "why"}:
+                raise ReviewerPlanError("none branches may contain only point-selection fields, not guidance")
+            selected_prefix(base.outcome.journal_path, checkpoints[base_name][step])
+            hint = ""
+        elif guidance_mode == "assistant-turn":
+            if "hint" in branch:
+                raise ReviewerPlanError("assistant-turn branches must not include a user hint")
+            native = selected_prefix(base.outcome.journal_path, checkpoints[base_name][step])
+            tools = actor_tools_at(base.outcome.journal_path, step)
+            try:
+                assistant_turn = validate_assistant_turn(
+                    branch.get("assistant_turn"),
+                    history=[e["message"] for e in native if e["type"] == "mini.message"], tools=tools)
+            except ValueError as error:
+                raise ReviewerPlanError(f"branch {index} ({base_name}@{step}): {error}") from error
+            hint = ""
+        else:
+            if "assistant_turn" in branch:
+                raise ReviewerPlanError("assistant_turn requires --branch-guidance assistant-turn")
+            hint = branch.get("hint")
+            if not isinstance(hint, str) or not hint.strip():
+                raise ReviewerPlanError("branch %d must supply a non-empty hint" % index)
         cut = None
         prefix = None
         if not full_conversation:
@@ -1239,7 +1302,7 @@ def prepare_branches(plan: dict, *, limit: int, round_no: int,
             cut, prefix = restoration
         choices.append(BranchChoice(
             branch_run_name(round_no, index, branch.get("name")), base,
-            checkpoints[base_name][step], cut, hint, str(branch.get("why") or ""), prefix))
+            checkpoints[base_name][step], cut, hint, str(branch.get("why") or ""), prefix, assistant_turn))
     return choices
 
 
@@ -1395,7 +1458,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="instance id, or a comma list of them. Not needed "
                              "with --regrade, which reads what is on disk.")
     parser.add_argument("--subset", default="verified")
-    parser.add_argument("--slot", default="codex")
+    parser.add_argument("--slot", default="mini-swe-agent",
+                        help="agent slot (default: mini-swe-agent)")
     parser.add_argument("--model", default="openai.gpt-5.6-luna")
     parser.add_argument("--analyst-model", default="openai.gpt-5.6-luna")
     parser.add_argument("--rounds", type=int, default=2,
@@ -1410,6 +1474,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--branch-count-mode", choices=BRANCH_COUNT_MODES, default="adaptive",
                         help="adaptive: reviewer chooses up to --branches; "
                              "fixed: require exactly --branches valid directions per round")
+    parser.add_argument("--branch-guidance", choices=BRANCH_GUIDANCE_MODES, default=None,
+                        help="user-hint: existing reviewer hint; assistant-turn: mini-only "
+                             "reviewer response executed before continuation; none: mini-only "
+                             "point selection followed by direct continuation without added messages. "
+                             "Default: assistant-turn for mini-swe-agent, user-hint for other slots.")
+    parser.add_argument("--reviewer-max-attempts", type=int, default=3,
+                        help="maximum reviewer responses per round, including validation corrections (default: 3)")
     parser.add_argument("--analyst-tokens", type=int, default=100_000,
                         help="transcript budget handed to the analyst")
     parser.add_argument("--timeout", type=float, default=1800.0)
@@ -1455,6 +1526,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "a fresh parent: grade its last snapshot, then branch. "
                              "Refuses an instance that has none.")
     args = parser.parse_args(argv)
+    args.branch_guidance = resolve_guidance(args.branch_guidance, args.slot)
+    if args.reviewer_max_attempts < 1:
+        parser.error("--reviewer-max-attempts must be positive")
+    try:
+        validate_guidance(args.branch_guidance, args.slot, args.fork_full_conversation)
+    except ValueError as error:
+        parser.error(str(error))
     bench = select_benchmark(args)
     try:
         schedule = [int(x) for x in str(args.branches).split(",") if x.strip()]
@@ -1532,6 +1610,8 @@ def main(argv: Optional[List[str]] = None) -> int:
              "branch_schedule": schedule, "rounds": args.rounds,
              "branch_schedule_semantics": ("exact_counts" if args.branch_count_mode == "fixed" else "upper_bounds"),
              "branch_count_mode": args.branch_count_mode,
+             "branch_guidance": args.branch_guidance,
+             "reviewer_max_attempts": args.reviewer_max_attempts,
              "branch_policy": "per-branch",
              "instances": results,
              **(bench.summary(results, expected_ids=wanted) if hasattr(bench, "summary") else {})}, indent=2, ensure_ascii=False),
@@ -1557,6 +1637,11 @@ def run_one(orch: Orchestrator, args, raw, schedule: List[int],
             out_dir: Path, bench: "Optional[Benchmark]" = None) -> List["Attempt"]:
     """One instance: attempt, grade, and branch until resolved or out of rounds."""
     count_mode = getattr(args, "branch_count_mode", "adaptive")
+    guidance_mode = resolve_guidance(getattr(args, "branch_guidance", None), args.slot)
+    reviewer_max_attempts = getattr(args, "reviewer_max_attempts", 3)
+    if type(reviewer_max_attempts) is not int or reviewer_max_attempts < 1:
+        raise ValueError("reviewer_max_attempts must be a positive integer")
+    validate_guidance(guidance_mode, args.slot, bool(getattr(args, "fork_full_conversation", False)))
     if count_mode not in BRANCH_COUNT_MODES:
         raise ValueError("unknown branch count mode: %r" % count_mode)
     bench = bench or SweBench()
@@ -1598,6 +1683,8 @@ def run_one(orch: Orchestrator, args, raw, schedule: List[int],
                               prompt=bench.prompt(instance),
                               image=image, out_dir=out_dir,
                               resources=resources, bench=bench)
+    if guidance_mode in {"assistant-turn", "none"}:
+        require_mini_parent(outcome.journal_path)
     parent = Attempt("parent", outcome, grade_attempt(outcome, instance, args, bench))
     attempts.append(parent)
     report(parent)
@@ -1651,6 +1738,8 @@ def run_one(orch: Orchestrator, args, raw, schedule: List[int],
         plan_record = {
             "reports": case_reports, "branch_policy": "per-branch",
             "branch_limit": width, "branch_count_mode": count_mode,
+            "branch_guidance": guidance_mode,
+            "reviewer_max_attempts": reviewer_max_attempts,
             "available_steps": {name: sorted(pairs) for name, pairs in points.items()},
         }
         if not any(points.values()):
@@ -1659,38 +1748,51 @@ def run_one(orch: Orchestrator, args, raw, schedule: List[int],
             print("   no eligible snapshot/session pairs -- stopping")
             break
 
-        reports_text = json.dumps(
-            [{**case_reports.get(a.name, {}), "name": a.name, "round": a.round_no,
+        reports = [
+            {**case_reports.get(a.name, {}), "name": a.name, "round": a.round_no,
               "hint_given": a.hint or None, "grade": a.grade.summary(),
-              "available_steps": sorted(points[a.name])} for a in attempts],
-            indent=1, ensure_ascii=False)
+              "available_steps": sorted(points[a.name])} for a in attempts]
+        review_prompt = _REVIEW_PROMPT
         try:
-            plan = extract_json(ask_analyst(
-                args.analyst_model, _REVIEW_PROMPT.format(
-                    problem=instance["problem"][:20000],
-                    reports=reports_text, count_rule=branch_count_rule(count_mode, width))))
+            if guidance_mode in {"assistant-turn", "none"}:
+                review_prompt = ASSISTANT_REVIEW_PROMPT if guidance_mode == "assistant-turn" else POINT_REVIEW_PROMPT
+                for report_row, attempt in zip(reports, attempts):
+                    report_row.pop("hint_given")
+                    report_row.update(
+                        assistant_turn_given=attempt.assistant_turn,
+                        native_history=reviewer_context(attempt.outcome.journal_path, points[attempt.name]))
+            reports_text = json.dumps(reports, indent=1, ensure_ascii=False)
+            parse_review = extract_json if guidance_mode == "user-hint" else extract_branch_plan
+            prompt = review_prompt.format(
+                problem=instance["problem"][:20000],
+                reports=reports_text, count_rule=branch_count_rule(count_mode, width))
         except Exception as exc:
             plan_record.update(review=None, validation_error="reviewer failed: %s" % exc)
             plan_path.write_text(json.dumps(plan_record, indent=2, ensure_ascii=False), encoding="utf-8")
             print("   reviewer failed: %s -- stopping" % exc)
             break
-        plan_record["review"] = plan
         full_conversation = bool(getattr(args, "fork_full_conversation", False))
-        try:
-            choices = prepare_branches(
+        result = review_with_feedback(
+            lambda text: ask_analyst(args.analyst_model, text), prompt, parse_review,
+            lambda plan: prepare_branches(
                 plan, limit=width, round_no=round_no, attempts=by_name,
-                checkpoints=points, full_conversation=full_conversation, count_mode=count_mode)
-        except ValueError as exc:
-            plan_record["validation_error"] = str(exc)
-            plan_path.write_text(json.dumps(plan_record, indent=2, ensure_ascii=False), encoding="utf-8")
-            print("   invalid branch plan: %s -- stopping without fallback" % exc)
+                checkpoints=points, full_conversation=full_conversation, count_mode=count_mode,
+                guidance_mode=guidance_mode),
+            max_attempts=reviewer_max_attempts, record=plan_record,
+            persist=lambda data: plan_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"))
+        if result is None:
+            print("   reviewer did not produce a valid plan: %s" % plan_record.get("validation_error"))
             break
+        plan, choices = result
         plan_record["selected_branches"] = [
             {"run_name": choice.run_name, "base": choice.base.name,
              "branch_step": choice.checkpoint.step,
              "snapshot_id": choice.checkpoint.snapshot_id,
              "conversation_cut": choice.cut,
-             "conversation_restore": "original-prefix" if choice.prefix else "native"} for choice in choices]
+             "conversation_restore": "original-prefix" if choice.prefix else "native",
+             "branch_guidance": guidance_mode,
+             **({"assistant_turn": choice.assistant_turn} if choice.assistant_turn is not None else {})}
+            for choice in choices]
         plan_path.write_text(json.dumps(plan_record, indent=2, ensure_ascii=False), encoding="utf-8")
         print("   reviewer selected %d/%d branches" % (len(choices), width))
         print("   synthesis   %s" % str(plan.get("synthesis"))[:200])
@@ -1703,7 +1805,9 @@ def run_one(orch: Orchestrator, args, raw, schedule: List[int],
             name, base, checkpoint = choice.run_name, choice.base, choice.checkpoint
             print("\n== attempt: %s ==" % name)
             print("   base %s @ step %d -- %s" % (base.name, checkpoint.step, choice.why[:160]))
-            print("   hint  %s" % choice.hint[:200].replace("\n", " "))
+            print("   guidance  %s" % (
+                choice.assistant_turn["content"] if choice.assistant_turn is not None else choice.hint
+            )[:200].replace("\n", " "))
             started = time.time()
             resume_session = checkpoint.session_ckpt
             actor_cwd = None
@@ -1728,26 +1832,34 @@ def run_one(orch: Orchestrator, args, raw, schedule: List[int],
                 plan_path.write_text(json.dumps(plan_record, indent=2, ensure_ascii=False))
             outcome = run_attempt(
                 orch, args, instance, name=name, out_dir=out_dir,
-                prompt=bench.branch_prompt(
+                prompt="" if guidance_mode != "user-hint" else bench.branch_prompt(
                     instance, verdict="", hint=choice.hint,
                     truncated=choice.cut is not None, step=checkpoint.step),
                 image=checkpoint.snapshot_id, resume=resume_session, cwd=actor_cwd,
                 fork=True, resume_at=choice.cut,
                 origin={"parent_run_id": base.name, "branch_step": checkpoint.step,
+                        "parent_journal": str(base.outcome.journal_path),
                         "snapshot_id": checkpoint.snapshot_id,
                         "conversation_cut": choice.cut,
                         "cut_note": "explicit-full-conversation" if full_conversation else None,
-                        "actor_hint": choice.hint, "hint_delivery": "reviewer-direct",
+                        "actor_hint": choice.hint,
+                        "hint_delivery": guidance_mode if guidance_mode != "user-hint" else "reviewer-direct",
+                        "branch_guidance": guidance_mode,
+                        **({"assistant_turn": choice.assistant_turn, "assistant_turn_source": "reviewer"}
+                           if choice.assistant_turn is not None else {}),
                         "branch_policy": "per-branch", "branch_count_mode": count_mode,
                         "selection_reason": choice.why,
                         "round": round_no, "direction": name.split("-", 1)[-1],
                         **prefix_origin},
-                bench=bench)
+                bench=bench, **({"assistant_turn": choice.assistant_turn}
+                               if choice.assistant_turn is not None else {}),
+                **({"resume_without_hint": True} if guidance_mode == "none" else {}))
             if choice.cut is not None and "No message found with message.uuid" in str(outcome.error or ""):
                 grade = Grade(error="selected native cut refused; no full-conversation retry")
             else:
                 grade = grade_attempt(outcome, instance, args, bench)
-            attempt = Attempt(name, outcome, grade, plan, hint=choice.hint, round_no=round_no)
+            attempt = Attempt(name, outcome, grade, plan, hint=choice.hint, round_no=round_no,
+                              assistant_turn=choice.assistant_turn)
             round_attempts.append(attempt)
             attempts.append(attempt)
             by_name[name] = attempt

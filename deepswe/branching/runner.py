@@ -63,13 +63,11 @@ def result_resolved(result: dict) -> bool:
 
 
 def actor_environment(config: Config, owner: str) -> dict[str, str]:
-    # Total API and semantic-event watchdogs are independent. The buffered
-    # bridge emits keepalive pings, not fake model progress, while reasoning.
-    return {"ANTHROPIC_API_KEY": owner, "ANTHROPIC_BASE_URL": config.bridge_url,
-            "CLAUDE_CODE_USE_BEDROCK": "0", "CLAUDE_CODE_USE_VERTEX": "0",
-            "API_TIMEOUT_MS": str(config.api_timeout_ms),
-            "CLAUDE_STREAM_IDLE_TIMEOUT_MS": str(config.api_timeout_ms),
-            "CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS": str(min(config.api_timeout_ms, 1800000))}
+    # mini-swe-agent speaks OpenAI-compatible Chat Completions. The bridge
+    # remains the audited provider proxy and attributes each actor request.
+    return {"OPENAI_API_KEY": owner,
+            "OPENAI_BASE_URL": config.bridge_url.rstrip("/") + "/v1",
+            "API_TIMEOUT_MS": str(config.api_timeout_ms)}
 
 
 def select_plan(method: str, *, proposal: dict | None,
@@ -119,7 +117,7 @@ class BenchmarkRunner:
         self.client = ChatClient(timeout=1800)
 
     def args(self, task) -> SimpleNamespace:
-        return SimpleNamespace(slot="claude-code", model=self.config.model,
+        return SimpleNamespace(slot="mini-swe-agent", model=self.config.model,
                                runtime_bin=self.config.runtime_bin,
                                timeout=self.config.timeout or task.agent_timeout_s,
                                agent_network=None, verifier_network=None,
@@ -138,7 +136,7 @@ class BenchmarkRunner:
             result_resolved(result)
             return result
         instance = self.bench.instance(task)
-        instance.update(slot="claude-code", agent_network="deny")
+        instance.update(slot="mini-swe-agent", agent_network="deny")
         args = self.args(task)
         started = time.time()
         if journal.exists():
@@ -218,7 +216,7 @@ class BenchmarkRunner:
         return binding
 
     def run_project_branch_attempt(self, task, method: str, name: str, *,
-                                   binding_data: dict, prepared: dict,
+                                   binding_data: dict, native_reference: dict,
                                    origin: dict) -> dict:
         """Run and grade a sibling without restoring or creating a VM snapshot."""
         from harness.execution.session import SandboxSession
@@ -266,14 +264,19 @@ class BenchmarkRunner:
             os.environ.update(actor_environment(
                 self.config, "branchbench:%s/%s/%s" % (task.task_id, method, name)))
             spec = RunSpec(
-                prompt=CONTINUE, slot="claude-code", cwd=prepared["cwd"],
+                prompt=CONTINUE, slot="mini-swe-agent",
+                cwd=str(folder / "actor-workspaces" / name),
                 model=self.config.model, timeout_s=args.timeout, run_id=name,
                 journal_path=journal, transport="http", tools="shell_only",
                 backend=backend, runtime_bin=args.runtime_bin, session=session,
                 sandbox_id=session.sandbox_id, keep_sandbox=True,
                 snapshot_every_step=False,
-                resume_session_id=prepared["resume_session_id"], fork=True,
-                origin=origin, extra={"setting_sources": []},
+                resume_session_id=binding.conversation_session_id, fork=True,
+                origin=origin, extra={
+                    "native_home": str(folder / "state" / "mini-native"),
+                    "native_prefix": native_reference,
+                    "resume_without_hint": True,
+                },
             )
             outcome = ExistingSessionOrchestrator(out_dir=folder).run(spec)
             if outcome.status == "error":
@@ -313,6 +316,9 @@ class BenchmarkRunner:
                 raise ValueError("Shared parent model does not match comparison model")
             if not any(e.get("type") == "run.finished" for e in events):
                 raise ValueError("Shared parent has not finished")
+            slots = {e.get("slot") for e in events if e.get("type") == "run.started"}
+            if slots != {"mini-swe-agent"}:
+                raise ValueError("Shared parent must use mini-swe-agent")
             return record, journal
         record = self.run_attempt(task, "initial", "parent")
         return record, Path(record["journal"])
@@ -359,7 +365,7 @@ class BenchmarkRunner:
                 "selected": selected, "proposal": proposal,
                 "max_total_rollouts": self.config.max_rollouts,
                 "branch_index_semantics": "state after completed tool step",
-                "hint_delivery": "fixed-neutral", "created_at": time.time()}
+                "hint_delivery": "point-only", "created_at": time.time()}
         save(path, plan)
         return plan, points
 
@@ -368,30 +374,14 @@ class BenchmarkRunner:
         folder = self.root / method / task.task_id
         if (folder / (name + ".jsonl")).exists():
             return self.run_attempt(task, method, name)
-        restoration = self.ev.conversation_restore(journal, checkpoint.step, checkpoint.session_ckpt)
-        if restoration is None:
-            raise ValueError("Exact conversation restore is unavailable")
-        cut, source = restoration
-        source = source or self.ev.find_prefix_source(self.ev.CLAUDE_PROJECTS_DIR,
-                                                     checkpoint.session_ckpt, cut)
-        if source is None:
-            raise ValueError("Cannot materialize the exact original transcript prefix")
-        receipt = folder / "conversation-prefixes" / name
-        if receipt.exists():
-            # A prepared-but-not-launched branch may be resumed only while the
-            # saved native prefix remains byte-identical to its receipt.
-            prepared = load(receipt / "manifest.json")
-            if (prepared["cut"] != cut or prepared["source_sha256"] != source.sha256
-                    or hashlib.sha256(Path(prepared["native_path"]).read_bytes()).hexdigest()
-                    != prepared["prefix_sha256"]):
-                raise ValueError("Prepared prefix changed; refusing ambiguous recovery")
-            prepared["manifest_path"] = str(receipt / "manifest.json")
-        else:
-            prepared = self.ev.prepare_prefix(source, folder / "actor-workspaces" / name,
-                                               receipt, self.ev.CLAUDE_PROJECTS_DIR)
+        from runstore.mini_native import reference_at
+        reference = reference_at(journal, checkpoint.step, checkpoint.session_ckpt)
+        if reference is None:
+            raise ValueError("Selected mini checkpoint has no exact native history prefix")
+        cut = reference["cut"]
         binding = self.materialize_project_binding(task, checkpoint, folder)
         binding["conversation_cut"] = cut
-        binding["conversation_session_id"] = prepared["resume_session_id"]
+        binding["conversation_session_id"] = checkpoint.session_ckpt
         save(folder / "project-binding" / ("step-%d.json" % checkpoint.step), binding)
         origin = {"parent_run_id": "parent", "parent_journal": str(journal),
                   "branch_step": checkpoint.step,
@@ -400,12 +390,12 @@ class BenchmarkRunner:
                   "project_archive_sha256": binding["archive_sha256"],
                   "whole_sandbox_snapshot_restored": False,
                   "conversation_cut": cut, "conversation_restore": "original-prefix",
-                  "conversation_prefix_manifest": prepared["manifest_path"],
+                  "native_prefix_sha256": reference["sha256"],
                   "branch_policy": method, "selection": choice, "actor_hint": CONTINUE,
-                  "hint_delivery": "fixed-neutral"}
+                  "hint_delivery": "point-only"}
         return self.run_project_branch_attempt(task, method, name,
                                                binding_data=binding,
-                                               prepared=prepared, origin=origin)
+                                               native_reference=reference, origin=origin)
 
     def run_task(self, task) -> dict:
         initial, journal = self.initial(task)
@@ -468,7 +458,8 @@ class BenchmarkRunner:
                         "dataset_sha256": {t.task_id: dataset_hash(t) for t in tasks},
                         "images": {t.task_id: t.image for t in tasks},
                         "budget_includes_shared_initial": True, "stop_rule": "first verified success",
-                        "agentenv_release": "v0.1.2-ash.1", "training": False}
+                        "agent_slot": "mini-swe-agent", "mini_swe_agent_version": "2.4.6",
+                        "checkpoint_backend": "project-binding-tar-v1", "training": False}
             path = self.root / "benchmark-manifest.json"
             if path.exists() and load(path) != manifest:
                 raise ValueError("Run manifest changed; choose a new output directory")
