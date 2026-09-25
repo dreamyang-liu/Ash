@@ -258,9 +258,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Include the validated Claude SDK: exact-prefix restore tests exercise its
-      # native session path helper. Share the sampling requirements so CI checks
-      # the same SDK version as the documented benchmark setup.
+      # Share the sampling requirements so CI checks the same mini-swe-agent
+      # version as the documented benchmark setup.
       # Deliberately not litellm or datasets: those are
       # needed to call a model and to fetch the benchmark, and no test here does
       # either. Keeping them out means this job also proves the harness imports
@@ -279,8 +278,8 @@ jobs:
       - name: Test harness (agent loop, L2 pipeline, eval layer, tool panel)
         run: python3 -m pytest swebench/tests -q
 
-      - name: Test Shepherd sampling and exact-prefix restore
-        run: python3 -m pytest deepswe/tests/test_shepherd_sampling.py harness/tests/test_claude_history.py -q
+      - name: Test Shepherd sampling and mini exact-prefix restore
+        run: python3 -m pytest deepswe/tests/test_shepherd_sampling.py harness/tests/test_mini_swe.py harness/tests/test_assistant_turn.py -q
 
       # Asserted, not assumed. The declaration check skips without the binary;
       # require both named guards to pass, not merely to be collected or skipped.
