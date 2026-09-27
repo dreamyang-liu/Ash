@@ -225,4 +225,20 @@ def test_invalid_configured_directory_fails_before_model_or_agent_tool(tmp_path,
     assert "chdir /missing-workspace" in outcome.error
     assert requests == []
     assert not any(event["type"] == "tool.started" for event in read_journal(outcome.journal_path))
+
+
+def test_leaf_without_step_checkpoints_preserves_final_workspace_for_grading(tmp_path, monkeypatch):
+    memory = FilesystemSession(tmp_path / "sandbox")
+    monkeypatch.setattr(Orchestrator, "_wire_sandbox", lambda *args: owned_filesystem(memory))
+    with model_server([reply("echo fixed > answer")]) as (url, requests):
+        run_spec = spec(tmp_path, url)
+        run_spec.extra["rollout_contract"]["max_turns"] = 1
+        run_spec.checkpoint_enabled = False
+        run_spec.grading_snapshot = True
+        outcome = Orchestrator(out_dir=tmp_path).run(run_spec)
+    assert outcome.status == "timeout", outcome.error
+    captures = [r for r in read_journal(outcome.journal_path) if r["type"] == "checkpoint.captured"]
+    assert len(captures) == 1 and captures[0]["purpose"] == "grading_only"
+    assert memory.snapshots[captures[0]["snapshot_id"]]["answer"] == b"fixed\n"
+    assert not turn_branch_checkpoints(outcome.journal_path)
     assert memory.destroyed

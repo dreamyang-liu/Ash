@@ -186,6 +186,7 @@ def main(argv=None) -> int:
                                                 if args.reasoning_effort else {})}}}
             return super().run(replace(
                 spec, extra=extra, checkpoint_enabled=args.checkpoint_mode != "none",
+                grading_snapshot=args.checkpoint_mode == "none",
                 checkpoint_disk_only=args.checkpoint_mode == "disk_only"))
 
         def _wire_sandbox(self, spec, claim):

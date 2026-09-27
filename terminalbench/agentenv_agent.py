@@ -167,7 +167,7 @@ class AgentENVClaudeCode(BaseAgent):
             if spec.checkpoint_enabled and completed_calls - paired_calls:
                 raise RuntimeError(f"Executed tool calls lack snapshots: {sorted(completed_calls - paired_calls)}")
             snapshot = await asyncio.to_thread(
-                environment.session.snapshot, disk_only=environment.checkpoint_mode == "disk_only")
+                environment.session.snapshot, disk_only=environment.checkpoint_mode != "full")
             if snapshot is None:
                 raise RuntimeError("Final actor snapshot failed")
             context.metadata["final_snapshot_id"] = snapshot.id

@@ -244,7 +244,8 @@ class ControlledOrchestrator(Orchestrator):
                      "max_turns": self.max_turns,
                      "sampling_params": {"max_new_tokens": self.max_output_tokens,
                                          "reasoning_effort": "high"}}}
-        return super().run(replace(spec, extra=extra, checkpoint_enabled=False))
+        return super().run(replace(spec, extra=extra, checkpoint_enabled=False,
+                                   grading_snapshot=True))
 
 
 def deep_args(args, timeout: float):

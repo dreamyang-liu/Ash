@@ -34,7 +34,7 @@ def attempts(output: Path) -> list[dict]:
             raise ValueError("Expected one task per worker")
         body = body["instances"][0]
     rows = body.get("attempts", [])
-    if not rows or body.get("complete") is False:
+    if not rows or body.get("complete") is False or body.get("branch_schedule_complete") is False:
         raise ValueError("Incomplete evaluation")
     for row in rows:
         grade = row.get("grade") or {}

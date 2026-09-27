@@ -106,6 +106,8 @@ class RunSpec:
     #: process-independent agents while avoiding a Firecracker memory image per
     #: tool call.
     checkpoint_disk_only: bool = False
+    #: Preserve one final workspace for grading when per-step capture is off.
+    grading_snapshot: bool = False
 
     # --- resume / fork ---
     resume_session_id: Optional[str] = None
@@ -420,6 +422,20 @@ class Orchestrator:
                 if tail is not None:
                     tail.stop()
                 self._report_missing_checkpoints(spec, journal, bridge)
+                if spec.grading_snapshot and result and result.status in {"completed", "timeout"}:
+                    try:
+                        # No worker may mutate the filesystem during final capture.
+                        provisioned.stop_server()
+                        snapshot = provisioned.session.snapshot(disk_only=True)
+                        if snapshot is None:
+                            raise RuntimeError("Final grading snapshot failed")
+                        calls = journal.tool_calls()
+                        journal.emit("checkpoint.captured", snapshot_id=snapshot.id,
+                                     step=max((c["step"] for c in calls), default=0),
+                                     captured=True, reason="captured", purpose="grading_only")
+                    except Exception as exc:
+                        error = f"Final grading snapshot: {exc}"
+                        journal.emit("run.finished", status="error", error=error)
                 stopped = self._teardown(spec, gateway, provisioned, claim)
                 if stopped is False:
                     error = "tool execution/capture did not settle during shutdown; sandbox retained"
