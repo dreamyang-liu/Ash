@@ -42,7 +42,9 @@ def _read_grade(path: Path) -> HarborGrade:
     if not path.is_file():
         raise RuntimeError(f"Official Harbor trial has no result: {path}")
     body = json.loads(path.read_text())
-    if not body.get("finished_at") or body.get("exception_info"):
+    exception = body.get("exception_info")
+    actor_deadline = isinstance(exception, dict) and exception.get("exception_type") == "AgentTimeoutError"
+    if not body.get("finished_at") or (exception and not actor_deadline):
         raise RuntimeError(f"Official Harbor trial failed: {body.get('exception_info')}")
     reward = ((body.get("verifier_result") or {}).get("rewards") or {}).get("reward")
     if type(reward) not in (int, float) or not 0 <= reward <= 1:

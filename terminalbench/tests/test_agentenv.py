@@ -246,3 +246,38 @@ def test_actor_requires_a_snapshot_for_each_successful_sandbox_call(tmp_path, mo
             asyncio.run(agent.run("task", env, context))
     assert env.session is original_session
     assert (tmp_path / "agent/trajectory.json").exists()
+
+
+def test_harbor_deadline_finalizes_snapshot_and_usage_before_verification(tmp_path, monkeypatch):
+    import time
+    from harness.core.control import RunControl
+
+    env = environment(tmp_path)
+    env.session = SimpleNamespace(on_swap=[], snapshot=lambda **kwargs: Snapshot("final"), sandbox_id="sandbox")
+
+    def run(self, spec):
+        control = RunControl()
+        env.actor_control = control
+        while not control.reason:
+            time.sleep(0.002)
+        assert control.stop_reason == "timeout"
+        with JournalWriter(spec.journal_path) as journal:
+            journal.emit("run.started", slot="mini-swe-agent", task_prompt=spec.prompt)
+            journal.emit("run.finished", status="timeout", usage={"input_tokens": 7, "output_tokens": 3})
+        return RunOutcome(run_id="test", journal_path=spec.journal_path, status="timeout",
+                          usage={"input_tokens": 7, "output_tokens": 3})
+
+    monkeypatch.setattr(AgentENVOrchestrator, "run", run)
+    monkeypatch.setenv("EVAL_BRIDGE_KEY", "test-only")
+    agent = AgentENVMini(logs_dir=tmp_path / "agent", model_name="test",
+                        inference_endpoint="http://127.0.0.1:18252", api_key_env="EVAL_BRIDGE_KEY",
+                        actor_timeout_s=0.02)
+    context = AgentContext()
+    async def trial():
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(agent.run("task", env, context), timeout=0.05)
+    asyncio.run(trial())
+    assert context.n_input_tokens == 7 and context.n_output_tokens == 3
+    assert context.metadata["final_snapshot_id"] == "final"
+    assert json.loads((tmp_path / "agent/execution.json").read_text())["status"] == "timeout"
+    assert (tmp_path / "agent/snapshot.json").exists()

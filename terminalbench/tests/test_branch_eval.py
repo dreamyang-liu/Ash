@@ -36,6 +36,14 @@ def test_only_a_valid_official_harbor_grade_can_resolve_a_branch(tmp_path):
     _result(result, 1, error="verifier failed")
     with pytest.raises(RuntimeError, match="verifier failed"):
         branch_eval._read_grade(result)
+    _result(result, 0, error={"exception_type": "AgentTimeoutError"})
+    assert not branch_eval._read_grade(result).resolved
+    _result(result, None, error={"exception_type": "AgentTimeoutError"})
+    with pytest.raises(RuntimeError, match="missing or invalid"):
+        branch_eval._read_grade(result)
+    _result(result, 0, error={"exception_type": "VerifierTimeoutError"})
+    with pytest.raises(RuntimeError, match="VerifierTimeoutError"):
+        branch_eval._read_grade(result)
 
 
 def test_root_and_branch_trials_use_the_same_official_task(tmp_path):

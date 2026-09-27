@@ -7,6 +7,7 @@ from dataclasses import asdict
 import json
 import math
 import threading
+import time
 
 from harbor.agents.base import BaseAgent
 from harbor.models.agent.context import AgentContext
@@ -47,11 +48,15 @@ class AgentENVOrchestrator(Orchestrator):
         self.model_env = model_env
         self.policy = ShellContext(environment)
         self.cancelled = threading.Event()
+        self.cancel_stop_reason = None
 
-    def cancel(self) -> None:
+    def cancel(self, *, stop_reason=None) -> None:
+        if stop_reason is not None:
+            self.cancel_stop_reason = stop_reason
         self.cancelled.set()
         if self.environment.actor_control is not None:
-            self.environment.actor_control.request_stop("Harbor cancelled the actor")
+            self.environment.actor_control.request_stop(
+                "Harbor cancelled the actor", stop_reason=self.cancel_stop_reason)
 
     def _wire_sandbox(self, spec, claim):
         owned = OwnedSandbox(session=self.environment.session, keep=True,
@@ -112,6 +117,7 @@ class AgentENVClaudeCode(BaseAgent):
         )
 
     async def run(self, instruction: str, environment: AgentENVEnvironment, context: AgentContext) -> None:
+        actor_started = time.monotonic()
         journal = self.logs_dir / "trajectory.jsonl"
         if journal.exists():
             raise FileExistsError(f"Refusing to overwrite {journal}")
@@ -134,13 +140,19 @@ class AgentENVClaudeCode(BaseAgent):
                             "checkpoint_capture_enabled": spec.checkpoint_enabled,
                             "sandbox_id": environment.session.sandbox_id,
                             "journal": str(journal)}
+        harbor_deadline = False
         try:
             try:
                 result = await asyncio.shield(pending)
             except asyncio.CancelledError:
-                orchestrator.cancel()
-                await asyncio.shield(pending)
-                raise
+                # Harbor starts its timer immediately before entering run().
+                # Preserve ordinary cancellation, but finalize deadline-limited
+                # work before Harbor proceeds to its official verifier.
+                harbor_deadline = time.monotonic() - actor_started >= max(0, spec.timeout_s - 1)
+                orchestrator.cancel(stop_reason="timeout" if harbor_deadline else None)
+                result = await asyncio.shield(pending)
+                if not harbor_deadline:
+                    raise
             context.n_input_tokens = result.usage.get("input_tokens")
             context.n_cache_tokens = result.usage.get("cached_input_tokens")
             context.n_output_tokens = result.usage.get("output_tokens")
@@ -172,6 +184,8 @@ class AgentENVClaudeCode(BaseAgent):
                 raise RuntimeError("Final actor snapshot failed")
             context.metadata["final_snapshot_id"] = snapshot.id
             (self.logs_dir / "snapshot.json").write_text(json.dumps(context.metadata, indent=2))
+            if harbor_deadline:
+                raise asyncio.CancelledError
         finally:
             environment.actor_control = None
             environment.session.on_swap[:] = previous_listeners
