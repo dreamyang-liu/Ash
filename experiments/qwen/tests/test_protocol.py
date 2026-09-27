@@ -58,6 +58,26 @@ def test_unknown_cost_is_not_zero_and_cached_subset_preserved():
     assert u["cost_usd"] is None and u["cached_input_tokens"] == 75
 
 
+def test_deepswe_negative_exit_is_graded_but_infrastructure_error_is_not(tmp_path, monkeypatch):
+    import pytest
+    a = SimpleNamespace(dataset="deepswe", source_commit="pinned", server_url="http://localhost",
+                        api_key_file=None, max_rollouts=8)
+    monkeypatch.setattr(run, "command", lambda *args: ["fixture"])
+    output = tmp_path / "attempt"
+    def completed_negative(*args, **kwargs):
+        run.write(output / "summary.json", {"instances": [{"attempts": [{"status": "timeout", "resolved": False}]}]})
+        return 1
+    monkeypatch.setattr(run.subprocess, "call", completed_negative)
+    assert run.stage(a, "task", output, "baseline")[0]["resolved"] is False
+    output = tmp_path / "broken"
+    def broken(*args, **kwargs):
+        run.write(output / "summary.json", {"instances": [{"attempts": [{"status": "error", "resolved": False}]}]})
+        return 1
+    monkeypatch.setattr(run.subprocess, "call", broken)
+    with pytest.raises(ValueError, match="infrastructure"):
+        run.stage(a, "task", output, "baseline")
+
+
 def test_metrics_include_failed_calls_critic_and_no_inherited_steps(tmp_path):
     initial = tmp_path / "initial"
     extra = tmp_path / "extra"

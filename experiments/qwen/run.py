@@ -170,11 +170,16 @@ def stage(args, task: str, output: Path, method: str,
             code = subprocess.call(command(args, task, output, method, parent, checkpoint),
                                    cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
         receipt["exit_code"] = code
-        if code:
+        # fork_eval returns 1 for a fully graded, unresolved benchmark task.
+        # Its summary must still pass all infrastructure/verdict checks below.
+        allowed_codes = {0, 1} if args.dataset == "deepswe" and method in ("baseline", "sprout") else {0}
+        if code not in allowed_codes:
             raise RuntimeError(f"Stage exited {code}; see {output.name}.log")
         rows = attempts(output)
         if method == "baseline" and len(rows) != 1:
             raise ValueError("Baseline stage must grade exactly one independent rollout")
+        if method == "sprout" and not rows[0]["resolved"] and len(rows) < 2:
+            raise ValueError("SPROUT produced no graded continuation for a failed parent")
         count = len(rows) + (1 if method in ("bpo", "shepherd") else 0)
         if count > args.max_rollouts:
             raise ValueError("Method exceeded total rollout allowance")
