@@ -1,0 +1,75 @@
+{
+  "scope": "integration-smoke-only; not a full benchmark evaluation",
+  "task": "superjson-error-stack-serialization",
+  "model": "qwen3.8-27b",
+  "reasoning_effort": "high",
+  "agent": "mini-swe-agent==2.4.6",
+  "max_model_turns_per_rollout": 3,
+  "max_output_tokens": 4096,
+  "baseline_rollouts": 4,
+  "branch_budget_including_initial": 2,
+  "baseline_source_commit": "66b1e403a69b236128633791297b353d2ec9e071",
+  "branch_source_commit": "8faa6e42f26be19c31ab90252a0be9ba11fa27bd",
+  "comparison": {
+    "dataset": "deepswe",
+    "tasks": 1,
+    "complete": true,
+    "comparison": [
+      {
+        "method": "pass@1",
+        "Resolve Rate": 0.0,
+        "Recovery": 0.0,
+        "Steps": 4,
+        "Tokens (M)": 0.010205,
+        "complete": true,
+        "completed_tasks": 1,
+        "total_tasks": 1,
+        "tokens_complete": true
+      },
+      {
+        "method": "pass@4 (baseline)",
+        "Resolve Rate": 0.0,
+        "Recovery": 0.0,
+        "Steps": 22,
+        "Tokens (M)": 0.048758,
+        "complete": true,
+        "completed_tasks": 1,
+        "total_tasks": 1,
+        "tokens_complete": true
+      },
+      {
+        "method": "entropy-based (BPO)",
+        "Resolve Rate": 0.0,
+        "Recovery": 0.0,
+        "Steps": 10,
+        "Tokens (M)": 0.04627,
+        "complete": true,
+        "completed_tasks": 1,
+        "total_tasks": 1,
+        "tokens_complete": true
+      },
+      {
+        "method": "Shepherd",
+        "Resolve Rate": 0.0,
+        "Recovery": 0.0,
+        "Steps": 10,
+        "Tokens (M)": 0.061306,
+        "complete": true,
+        "completed_tasks": 1,
+        "total_tasks": 1,
+        "tokens_complete": true
+      },
+      {
+        "method": "SPROUT",
+        "Resolve Rate": 0.0,
+        "Recovery": 0.0,
+        "Steps": 13,
+        "Tokens (M)": 0.137962,
+        "complete": true,
+        "completed_tasks": 1,
+        "total_tasks": 1,
+        "tokens_complete": true
+      }
+    ]
+  }
+}
