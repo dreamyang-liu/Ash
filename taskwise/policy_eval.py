@@ -59,6 +59,7 @@ class ModelClient:
         max_attempts = 8
         retry_statuses = {408, 409, 425, 429, 500, 502, 503, 504}
         for attempt in range(1, max_attempts + 1):
+            record.pop("response", None)
             attempt_record = {"attempt": attempt, "started_at": time.time()}
             record["attempts"].append(attempt_record)
             try:
@@ -76,6 +77,8 @@ class ModelClient:
                         raise error
                     raise httpx.TransportError(str(error))
                 body = response.json()
+                record["response"] = body
+                attempt_record["usage"] = body.get("usage")
                 if body.get("error") or len(body.get("choices") or []) != 1:
                     raise httpx.TransportError(
                         "model endpoint returned no unique completion")

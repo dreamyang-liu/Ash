@@ -115,12 +115,14 @@ def command(args, task: str, output: Path, method: str,
         cmd = [sys.executable, "-u", "-m", "taskwise.policy_eval",
                "--benchmark", "terminalbench" if terminal else "deepswe",
                "--method", method, "--instance", task, "--parent-output", str(parent),
-               "--output", str(output), "--max-rollouts", str(args.max_rollouts), *common]
+               "--output", str(output), "--max-rollouts", str(args.max_rollouts),
+               "--meta-max-tokens", str(args.max_output_tokens), *common]
     else:
         widths = [min(4, args.max_rollouts - 1)]
         if args.max_rollouts > 5:
             widths.append(args.max_rollouts - 5)
-        schedule = ["--rounds", str(len(widths) if method == "sprout" else 0),
+        schedule = ["--review-output-tokens", str(args.max_output_tokens),
+                    "--rounds", str(len(widths) if method == "sprout" else 0),
                     "--branches", *map(str, widths), "--checkpoint-mode",
                     "disk_only" if checkpoint else "none"]
         if terminal:
