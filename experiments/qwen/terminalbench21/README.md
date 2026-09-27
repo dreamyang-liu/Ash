@@ -6,7 +6,7 @@ task files before executing. Use the identical cohort for all four runs.
 
 ```bash
 python -m experiments.qwen.run --dataset terminalbench21 --method all \
-  --tasks-dir /data/terminal-bench-2-1/tasks --task fix-git \
+  --tasks-dir /data/terminal-bench-2-1/tasks --task largest-eigenval \
   --runtime-bin runtime/ash-runtime --api-key-file /path/to/aenv-key \
   --workers 16 --output /data/runs/terminalbench21-all
 python -m experiments.qwen.report /data/runs/terminalbench21-all --method all \
