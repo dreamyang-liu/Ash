@@ -403,7 +403,7 @@ class Orchestrator:
                 result = slot.run(task, journal, mcp)
                 if control.reason is not None and not (
                         result is not None and result.status == "timeout"
-                        and control.stop_reason == "timeout"):
+                        and control.stop_reason in {"timeout", "max_turns_reached"}):
                     error = control.reason
                     journal.emit("run.finished", status="error", error=error)
             except Exception as exc:  # noqa: BLE001 - a run reports, it does not raise

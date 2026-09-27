@@ -207,6 +207,8 @@ def test_model_turn_limit_keeps_closed_history_without_an_extra_request(tmp_path
         run_spec.extra["rollout_contract"]["max_turns"] = 1
         outcome = Orchestrator(out_dir=tmp_path).run(run_spec)
     assert outcome.stop_reason == "max_turns_reached" and len(requests) == 1
+    assert outcome.status == "timeout", "A budget-limited workspace must remain gradable"
+    assert (memory.root / "answer").read_text().strip() == "fix"
     entries = read_entries((tmp_path / "native-home" / f"{outcome.native_session_id}.jsonl").read_bytes())
     messages = clean_messages(training_messages(entries))
     assert messages[-1]["role"] == "tool"

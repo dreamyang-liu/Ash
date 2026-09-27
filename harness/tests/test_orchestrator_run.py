@@ -1028,7 +1028,7 @@ def test_the_bridge_reads_the_same_tracker_the_pipeline_feeds(monkeypatch):
         def on_tool_boundary(self, index):
             pass
 
-    def fake_install(cls, journal, session, always=False, tracker=None, exact_mode=False):
+    def fake_install(cls, journal, session, always=False, tracker=None, exact_mode=False, disk_only=True):
         seen["tracker"] = tracker
         return FakeBridge()
 
@@ -1059,7 +1059,7 @@ def test_the_boundary_lands_on_the_server_after_the_bridge_exists(monkeypatch):
     bridge = FakeBridge()
     monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
                         classmethod(lambda cls, journal, session, always=False,
-                                    tracker=None, exact_mode=False: bridge))
+                                    tracker=None, exact_mode=False, disk_only=True: bridge))
 
     class FakeServer:
         boundary = None

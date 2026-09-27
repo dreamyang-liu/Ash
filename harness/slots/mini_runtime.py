@@ -478,7 +478,9 @@ def run(task: TaskSpec, journal: JournalWriter, mcp: McpWiring,
         status = "completed" if info.get("exit_status") == "Submitted" else "error"
         error = None if status == "completed" else info.get("exit_status", "mini did not submit")
     except RunAborted as exc:
-        status = "timeout" if control.stop_reason == "timeout" else "killed"
+        # Exhausting a sampling budget leaves a valid workspace to grade.
+        status = ("timeout" if control.stop_reason in {"timeout", "max_turns_reached"}
+                  else "killed")
         error = str(exc) or control.reason
     except (TimeoutError, KeyboardInterrupt) as exc:
         control.request_stop("mini wall-time budget exhausted", stop_reason="timeout")
