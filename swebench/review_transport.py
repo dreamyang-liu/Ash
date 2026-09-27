@@ -16,7 +16,7 @@ from swebench import structured_review
 class ReviewTransport:
     def __init__(self, directory: str | Path, *, model: str, model_endpoint: str,
                  api_key_env: str, max_output_tokens: int,
-                 timeout_s: float = 420, reasoning_effort: str | None = None):
+                 timeout_s: float = 1800, reasoning_effort: str | None = None):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.model = model

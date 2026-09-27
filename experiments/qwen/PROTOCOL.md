@@ -48,6 +48,8 @@ in physical expenditure. Copied journals are deduplicated by content hash.
 Infrastructure failures retain all output and usage; they are incomplete, not
 ordinary negative rewards. No automatic stage retry silently spends extra rollouts.
 HTTP retries remain visible, and unreported usage/billing stays unknown.
+Critic and selector requests allow up to 30 minutes for high reasoning. Actor
+and verifier wall-time limits still come from the official task definition.
 
 Stage wall time covers setup, actor, critic, snapshot, restore and verification.
 Critic/BPO probe usage contributes to additional
