@@ -246,11 +246,9 @@ def run_task(args, task: str) -> dict:
 
 
 def parse_args(argv=None):
-    defaults = ROOT / "experiments/qwen/run-config.json"
-    config = read(defaults) if defaults.exists() else {}
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--dataset", choices=("deepswe", "terminalbench21", "swebenchpro-v2-hard"), default=config.get("dataset"))
-    p.add_argument("--method", choices=(*METHODS, "all"), default=config.get("method", "all"))
+    p.add_argument("--dataset", choices=("deepswe", "terminalbench21", "swebenchpro-v2-hard"), required=True)
+    p.add_argument("--method", choices=(*METHODS, "all"), required=True)
     p.add_argument("--tasks-dir", type=Path, required=True)
     p.add_argument("--task", action="append", default=[])
     p.add_argument("--selection", type=Path)
