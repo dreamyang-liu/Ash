@@ -74,11 +74,12 @@ def phase_metrics(outputs: list[Path], excluded_hashes: set[str] | None = None) 
             for row in rows:
                 kind = row.get("type", "")
                 if kind == "raw.mini-swe-agent":
-                    calls.append({"role": "actor", "usage": usage((row.get("response") or {}).get("usage")),
+                    response = row.get("response")
+                    calls.append({"role": "actor", "usage": usage(response.get("usage") if isinstance(response, dict) else None),
                                   "source": str(path), "time": seconds(row.get("ts"))})
                 elif kind == "tool.started":
                     steps += 1
-                elif kind == "model.request.retry":
+                elif kind in ("model.request.retry", "model.request.failed"):
                     # A lost/failed response may have been billed. Preserve uncertainty.
                     calls.append({"role": "failed_request", "usage": usage(None), "source": str(path)})
                 if any(word in kind for word in ("snapshot", "checkpoint", "restore", "verif")):

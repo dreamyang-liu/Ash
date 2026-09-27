@@ -89,6 +89,7 @@ class ChatModel(LitellmModel):
             # budget instead of being mislabeled as an exhausted actor budget.
             except (httpx.TransportError, TimeoutError) as error:
                 if attempt == 12:
+                    self.journal.emit("model.request.failed", error_type=type(error).__name__)
                     raise
                 delay = min(float(2 ** min(attempt, 5)),
                             max(0.0, self.deadline - time.monotonic()))
@@ -100,6 +101,7 @@ class ChatModel(LitellmModel):
             except httpx.HTTPStatusError as error:
                 status = error.response.status_code
                 if status not in transient_statuses or attempt == 12:
+                    self.journal.emit("model.request.failed", status_code=status)
                     raise
                 delay = min(float(2 ** min(attempt, 5)),
                             max(0.0, self.deadline - time.monotonic()))
@@ -108,18 +110,19 @@ class ChatModel(LitellmModel):
                 time.sleep(delay)
                 self.control.raise_if_stopped()
         raw = response.json()
+        # A malformed completion can still consume tokens. Persist it before
+        # validating its terminal choice so failed attempts remain measurable.
+        self.journal.emit("raw.mini-swe-agent", response=raw)
+        usage = Usage()
+        _absorb_usage(raw.get("usage") if isinstance(raw, dict) else None, usage)
+        self.usage.add(usage)
+        self.journal.emit("usage.updated", usage=usage.as_dict())
         if (not isinstance(raw, dict) or len(raw.get("choices", [])) != 1
                 or raw["choices"][0].get("finish_reason") not in {"stop", "tool_calls", "length"}):
             raise ValueError("mini model response is missing a valid terminal choice")
         message = raw["choices"][0].get("message", {})
         if message.get("role") != "assistant" or not isinstance(message.get("content") or "", str):
             raise ValueError("mini requires a text assistant completion")
-        # Store the original provider response even if parsing fails.
-        self.journal.emit("raw.mini-swe-agent", response=raw)
-        usage = Usage()
-        _absorb_usage(raw.get("usage"), usage)
-        self.usage.add(usage)
-        self.journal.emit("usage.updated", usage=usage.as_dict())
         return litellm.ModelResponse(**raw)
 
     def _calculate_cost(self, response: litellm.ModelResponse) -> dict:
