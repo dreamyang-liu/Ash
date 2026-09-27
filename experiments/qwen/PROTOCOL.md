@@ -31,11 +31,18 @@ checkpoint manifest; their already captured snapshots remain on the backend unti
 the operator applies a separate retention policy. SPROUT intermediate checkpoints
 remain available after the experiment. No deletion script is included.
 
-Results record initial and additional phases separately. Success@1/@5/@8 uses all
-selected tasks as denominator; baseline @5/@8 stops at the observed four attempts.
-Reports show coverage, initial-failure recovery, successful/graded trajectory
-counts, positive rate, time when the first successful verifier completed, newly
-executed tool steps, input/cached-input/output tokens and source-reported cost.
+The primary comparison contains five rows: pass@1, pass@4 (baseline), entropy-based
+(BPO), Shepherd and SPROUT. Each row reports Resolve Rate, Recovery, Steps and
+Tokens (M). Resolve Rate divides solved tasks within the actual sampling budget by
+all selected tasks. Recovery divides initially failed tasks subsequently solved
+by all initially failed tasks (zero for pass@1 when that denominator is nonzero).
+Steps counts newly executed agent-environment interactions. Tokens (M) sums input
+and output tokens over every actual actor/critic/selector call, divided by 1e6;
+cached input is already part of input, and reasoning output is already part of
+output, so neither is added twice. Incomplete cohorts have null primary rates
+and explicit coverage. Steps/tokens on incomplete runs are consumption so far.
+Initial/additional breakdowns and former diagnostic fields remain in the detailed
+audit, so existing result files remain inspectable.
 Shared initial work is counted once in each method comparison, never four times
 in physical expenditure. Copied journals are deduplicated by content hash.
 Infrastructure failures retain all output and usage; they are incomplete, not

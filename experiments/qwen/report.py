@@ -127,7 +127,7 @@ def task_metrics(root: Path, manifest: dict, name: str, method: str) -> dict:
     base = base_root / "tasks" / name / "baseline"
     initial_output = base / "attempt-1"
     initial = graded_attempts(initial_output)
-    additional_outputs = ([base / f"attempt-{i}" for i in (2, 3, 4)] if method == "baseline"
+    additional_outputs = ([] if method == "pass@1" else [base / f"attempt-{i}" for i in (2, 3, 4)] if method == "baseline" or method == "pass@1"
                           else [task_root / method])
     extra = [a for out in additional_outputs for a in graded_attempts(out)]
     if method == "sprout" and extra:
@@ -146,7 +146,7 @@ def task_metrics(root: Path, manifest: dict, name: str, method: str) -> dict:
                       if positive and bucket["usage"]["cost_usd"] is not None else None)
     state = read(task_root / f"{manifest['method']}.task.json", {})
     method_state = state.get("methods", {}).get(method, {})
-    complete = (len(sequence) == 4 if method == "baseline" else
+    complete = (len(initial) == 1 if method == "pass@1" else len(sequence) == 4 if method == "baseline" else
                 method_state.get("status") in ("complete", "skipped_initial_success"))
     first_index = next((i for i, a in enumerate(sequence) if a["resolved"]), None)
     first = sequence[first_index] if first_index is not None else None
@@ -162,7 +162,7 @@ def task_metrics(root: Path, manifest: dict, name: str, method: str) -> dict:
     return {"task": name, "method": method, "complete": complete,
             "initial_resolved": initial[0]["resolved"] if initial else None,
             "success_at": {str(k): any(a["resolved"] for a in sequence[:k]) for k in (1, 5, 8)},
-            "attempt_budget": 4 if method == "baseline" else manifest["max_total_method_rollouts"],
+            "attempt_budget": 1 if method == "pass@1" else 4 if method == "baseline" else manifest["max_total_method_rollouts"],
             "graded_trajectories": len(sequence), "successful_trajectories": sum(a["resolved"] for a in sequence),
             "positive_rate": sum(a["resolved"] for a in sequence) / len(sequence) if sequence else None,
             "recovered_initial_failure": bool(initial and not initial[0]["resolved"] and any(a["resolved"] for a in extra)),
@@ -176,8 +176,8 @@ def task_metrics(root: Path, manifest: dict, name: str, method: str) -> dict:
 
 def build_report(root: Path, selected_method: str) -> dict:
     manifest = read(root / f"manifest-{selected_method}.json")
-    methods = ("baseline", "sprout", "bpo", "shepherd") if selected_method == "all" else (selected_method,)
-    result = {"schema_version": 1, "manifest": manifest, "methods": {},
+    methods = ("pass@1", "baseline", "bpo", "shepherd", "sprout") if selected_method == "all" else (("pass@1", "baseline") if selected_method == "baseline" else (selected_method,))
+    result = {"schema_version": 2, "manifest": manifest, "methods": {}, "comparison": [],
               "notes": ["Success@5/@8 for baseline are capped at its actual four attempts; no extrapolation.",
                         "Unknown billing/cached-token data remain null; known totals are lower bounds.",
                         "Initial phase is shared across methods; do not sum it four times.",
@@ -197,6 +197,21 @@ def build_report(root: Path, selected_method: str) -> dict:
             "initial_failures_graded": failures, "successful_trajectories": positives,
             "graded_trajectories": graded, "positive_rate": positives / graded if graded else None,
             "tasks": rows}
+        completed = all(r["complete"] for r in rows)
+        phases = [phase for row in rows for phase in row["phases"].values()]
+        inputs = [p["usage"]["input_tokens"] for p in phases]
+        outputs = [p["usage"]["output_tokens"] for p in phases]
+        tokens_known = all(v is not None for v in inputs + outputs)
+        result["comparison"].append({
+            "method": {"baseline": "pass@4 (baseline)", "bpo": "entropy-based (BPO)",
+                       "shepherd": "Shepherd", "sprout": "SPROUT"}.get(method, method),
+            "Resolve Rate": sum(r["status"] == "resolved" for r in rows) / n if completed else None,
+            "Recovery": sum(r["recovered_initial_failure"] for r in rows) / failures if completed and failures else None,
+            "Steps": sum(p["actual_new_steps"] for p in phases),
+            "Tokens (M)": (sum(inputs) + sum(outputs)) / 1_000_000 if tokens_known else None,
+            "complete": completed, "completed_tasks": sum(r["complete"] for r in rows),
+            "total_tasks": n, "tokens_complete": tokens_known,
+        })
     return result
 
 

@@ -69,11 +69,15 @@ def test_mini_rejects_a_container_backend_or_missing_bridge():
     {"task_env_config": EnvironmentConfig(docker_image="image", gpus=1)},
     {"network_policy": NetworkPolicy(network_mode=NetworkMode.ALLOWLIST, allowed_hosts=["example.com"])},
     {"task_env_config": EnvironmentConfig(docker_image="image", storage_mb=1536)},
-    {"phase_network_policies": [NetworkPolicy(network_mode=NetworkMode.NO_NETWORK)]},
 ])
 def test_unsupported_requirements_fail_before_start(tmp_path, change):
     with pytest.raises((ValueError, RuntimeError)):
         environment(tmp_path, **change)
+
+
+def test_public_offline_phase_transition_is_supported(tmp_path):
+    env = environment(tmp_path, phase_network_policies=[NetworkPolicy(network_mode=NetworkMode.NO_NETWORK)])
+    assert env.capabilities.dynamic_network_policy is True
 
 
 def test_compose_is_not_silently_reduced_to_one_service(tmp_path):

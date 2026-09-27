@@ -103,3 +103,34 @@ def test_commands_have_bounded_shared_parent_and_high(tmp_path):
             assert cmd[cmd.index("--max-rollouts") + 1] == "8"
         if method == "sprout":
             assert cmd[cmd.index("--branches") + 1:cmd.index("--branches") + 3] == ["4", "3"]
+
+
+def test_five_row_metrics_resolve_recovery_and_actual_tokens(tmp_path):
+    from experiments.qwen.report import build_report
+    run.write(tmp_path / "manifest-all.json", {"method": "all", "tasks": ["a", "b"],
+        "max_total_method_rollouts": 8})
+    for name in ("a", "b"):
+        root = tmp_path / "tasks" / name
+        for i in range(1, 5):
+            output = root / "baseline" / f"attempt-{i}"
+            run.write(output / "summary.json", {"attempts": [{"resolved": name == "a" or i == 3}]})
+            events = [{"type": "run.started", "identity": f"{name}-{i}"}, {"type": "tool.started"},
+                      {"type": "raw.mini-swe-agent", "response": {"usage": {
+                          "prompt_tokens": 100, "completion_tokens": 20,
+                          "prompt_tokens_details": {"cached_tokens": 50}}}}]
+            (output / "journal.jsonl").write_text("\n".join(json.dumps(e) for e in events))
+        methods = {}
+        for method in ("bpo", "shepherd", "sprout"):
+            methods[method] = {"status": "skipped_initial_success" if name == "a" else "complete"}
+            if name == "b":
+                rows = ([{"resolved": False}] if method == "sprout" else []) + [{"resolved": method != "bpo"}]
+                run.write(root / method / "summary.json", {"attempts": rows})
+        run.write(root / "all.task.json", {"methods": methods})
+    rows = build_report(tmp_path, "all")["comparison"]
+    assert len(rows) == 5
+    assert rows[0]["Resolve Rate"] == 0.5 and rows[0]["Recovery"] == 0
+    assert rows[0]["Steps"] == 2 and rows[0]["Tokens (M)"] == 240 / 1e6
+    assert rows[1]["Resolve Rate"] == 1 and rows[1]["Recovery"] == 1
+    assert rows[1]["Steps"] == 8 and rows[1]["Tokens (M)"] == 960 / 1e6
+    assert rows[2]["Resolve Rate"] == 0.5 and rows[2]["Recovery"] == 0
+    assert rows[3]["Resolve Rate"] == rows[4]["Resolve Rate"] == 1
