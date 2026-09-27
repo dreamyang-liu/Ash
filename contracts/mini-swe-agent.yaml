@@ -1,0 +1,16 @@
+slot: mini-swe-agent
+upstream:
+  package: mini-swe-agent
+  verified_versions:
+    sdk: "2.4.6"
+  exact_version: true
+normalizer_module: harness.slots.mini_history
+event_types: [mini.message, mini.turn]
+python_api:
+  module: minisweagent.agents.default
+  exports: [DefaultAgent, AgentConfig]
+  client:
+    module: minisweagent.agents.default
+    cls: DefaultAgent
+    init_kwargs: [model, env, config_class]
+    methods: [run, step, query, execute_actions, add_messages, save]

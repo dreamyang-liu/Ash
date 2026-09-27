@@ -71,7 +71,7 @@ TARGET_PORT_HEADER = "x-agentenv-target-port"
 #: hanging it.
 BUILD_POLL_SECONDS = 3.0
 BUILD_TIMEOUT_SECONDS = 1800.0
-COLD_START_TIMEOUT_SECONDS = 900
+COLD_START_TIMEOUT_SECONDS = 3600
 
 
 class TemplateError(RuntimeError):

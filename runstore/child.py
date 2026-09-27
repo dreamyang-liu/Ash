@@ -60,8 +60,11 @@ def execute(request: dict, directory: Path) -> dict:
         return grade(spec, directory,
                      session_factory=lambda **kwargs: TrackingSession(ledger=ledger, **kwargs))
     slot = spec.get("slot", "claude-code")
-    os.environ["CODEX_HOME" if slot == "codex" else "CLAUDE_CONFIG_DIR"] = str(native_home)
+    if slot != "mini-swe-agent":
+        os.environ["CODEX_HOME" if slot == "codex" else "CLAUDE_CONFIG_DIR"] = str(native_home)
     extra = dict(spec.get("extra", {}))
+    if slot == "mini-swe-agent":
+        extra["native_home"] = str(native_home)
     message_export = extra.get("rollout_contract", {}).get("message_export", False)
     completion = {}
     if request.get("recovery"):

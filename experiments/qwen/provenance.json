@@ -1,0 +1,10 @@
+{
+  "base_branch": "feat/harness-v1",
+  "base_commit": "c5a1d30795af974ad0c6fe1923e4e08878d08d45",
+  "sprout_dev_commit": "f3c51afafa267aea27d16a4359ebbb9c989aa446",
+  "integrated_three_bench_commit": "288afd4a151073f9c5433b6159912bc7f57eabeb",
+  "server_source_commit": "73767ca35ee43291b934da08d4d04fc17a804ddc",
+  "server_source_note": "Ported maintained mini runtime, taskwise selectors and adapters into a new branch; no active checkout edited.",
+  "bpo_source_branch": "feat/branchbench-bpo",
+  "shepherd_source_branch": "feat/branchbench-shepherd"
+}

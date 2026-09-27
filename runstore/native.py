@@ -70,6 +70,11 @@ def index_native(journal: Path, transcript: Path, slot: str, session_id: str,
         events = [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
     else:
         events = list(events)
+    if slot == "mini-swe-agent":
+        from runstore.mini_native import index_mini
+
+        return index_mini(journal, transcript, session_id, events=events,
+                          inherited_native=inherited_native)
     calls = [event["call_id"] for event in events if event.get("type") == "tool.started"]
     positions = {call_id: depth for depth, call_id in enumerate(calls, 1)}
     checkpoints = branch_checkpoints(journal, events=events)
@@ -167,7 +172,7 @@ def materialize(reference: dict, cwd: Path, destination: Path, native_home: Path
     destination.mkdir(parents=True, exist_ok=False)
     path = destination / "prefix.jsonl"
     path.write_bytes(data)
-    if reference["slot"] == "codex":
+    if reference["slot"] in {"codex", "mini-swe-agent"}:
         return {"resume_session_id": reference["session_id"], "fork": True,
                 "native_prefix": {"path": str(path.resolve()), "sha256": reference["sha256"]}}
     from harness.slots.claude_history import PrefixSource, prepare_prefix

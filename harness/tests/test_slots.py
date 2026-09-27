@@ -25,7 +25,7 @@ from harness.slots.opencode import OpenCodeSlot
 
 
 def test_registry_exposes_every_slot():
-    assert available() == ["claude-code", "codex", "opencode", "opencode-cli"]
+    assert available() == ["claude-code", "codex", "mini-swe-agent", "opencode", "opencode-cli"]
     for name in available():
         cls = load_slot(name)
         assert issubclass(cls, AgentSlot)

@@ -99,8 +99,8 @@ class MilesAdapter:
         self.catalog = (EnvironmentCatalog.from_dict(config["environment_catalog"])
                         if config.get("environment_catalog") else None)
         self.defaults = deepcopy(config.get("run_defaults", {}))
-        if self.defaults.get("slot", "codex") not in {"codex", "claude-code"}:
-            raise ValueError("Miles RunSpec adapter supports codex and claude-code")
+        if self.defaults.get("slot", "codex") not in {"codex", "claude-code", "mini-swe-agent"}:
+            raise ValueError("Miles RunSpec adapter supports codex, claude-code and mini-swe-agent")
         if "rollout_contract" in self.defaults.get("extra", {}):
             raise ValueError("rollout_contract is derived from each Miles request")
 
@@ -113,6 +113,8 @@ class MilesAdapter:
             from rl_driver.messages import MessageAdapter
 
             return MessageAdapter(self.driver, self.config).submit(body)
+        if self.defaults.get("slot") == "mini-swe-agent":
+            raise ValueError("mini-swe-agent training requires ash-rollout-v3 messages")
         request = RolloutGroupRequest.from_dict(body)
         normalized = request.to_dict()
         identifier = internal_id(request.rollout_job_id)

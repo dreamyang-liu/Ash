@@ -25,3 +25,11 @@ results/*
 
 # Run artefacts: journals, resource ledger, extracted answers.
 runs/
+
+# Local credentials and experiment environments
+.env
+.env.*
+!.env.example
+.venv*/
+*.pem
+*.key

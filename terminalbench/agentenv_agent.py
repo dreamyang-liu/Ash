@@ -72,6 +72,11 @@ class AgentENVOrchestrator(Orchestrator):
         return super()._wire_gateway(spec, journal, task, run_id)
 
     def _wire_checkpoints(self, spec, journal, owned=None):
+        # Some direct/test callers predate RunSpec and pass ``None`` here.
+        # Preserve their historical full-checkpoint behavior while allowing
+        # rollout specs to explicitly turn checkpoint capture off.
+        if spec is not None and not getattr(spec, "checkpoint_enabled", True):
+            return None
         bridge = SnapshotBridge.install(
             journal, self.environment.session, tracker=owned.tracker, exact_mode=True,
             disk_only=self.environment.checkpoint_mode == "disk_only")
@@ -96,6 +101,16 @@ class AgentENVClaudeCode(BaseAgent):
             raise ValueError("Task MCP service networking is not implemented for AgentENV")
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
+    def _make_spec(self, prompt: str, workspace, journal, environment: AgentENVEnvironment) -> RunSpec:
+        return RunSpec(
+            prompt=prompt, slot="claude-code", model=(self.model_name or "").removeprefix("anthropic/"),
+            cwd=str(workspace.resolve()), run_id=self.logs_dir.parent.name, journal_path=journal,
+            timeout_s=math.inf, session=environment.session, keep_sandbox=True,
+            transport="http", tools="shell_only", backend=environment.backend,
+            runtime_bin=environment.runtime_bin, sandbox_image=environment.image,
+            extra={"setting_sources": []},
+        )
+
     async def run(self, instruction: str, environment: AgentENVEnvironment, context: AgentContext) -> None:
         journal = self.logs_dir / "trajectory.jsonl"
         if journal.exists():
@@ -110,19 +125,15 @@ class AgentENVClaudeCode(BaseAgent):
         )
         if self.skills_dir:
             prompt += f"\nTask skills are available inside the sandbox at {self.skills_dir}."
-        spec = RunSpec(
-            prompt=prompt, slot="claude-code", model=(self.model_name or "").removeprefix("anthropic/"),
-            cwd=str(workspace.resolve()), run_id=self.logs_dir.parent.name, journal_path=journal,
-            timeout_s=math.inf, session=environment.session, keep_sandbox=True,
-            transport="http", tools="shell_only", backend=environment.backend,
-            runtime_bin=environment.runtime_bin, sandbox_image=environment.image,
-            extra={"setting_sources": []},
-        )
+        spec = self._make_spec(prompt, workspace, journal, environment)
         orchestrator = AgentENVOrchestrator(environment, self.extra_env, out_dir=self.logs_dir)
         previous_listeners = list(environment.session.on_swap)
         pending = asyncio.create_task(asyncio.to_thread(orchestrator.run, spec))
         context.metadata = {"environment_owner": "harbor", "backend": "agentenv",
-                            "checkpoint_mode": environment.checkpoint_mode, "journal": str(journal)}
+                            "checkpoint_mode": environment.checkpoint_mode,
+                            "checkpoint_capture_enabled": spec.checkpoint_enabled,
+                            "sandbox_id": environment.session.sandbox_id,
+                            "journal": str(journal)}
         try:
             try:
                 result = await asyncio.shield(pending)
@@ -137,7 +148,10 @@ class AgentENVClaudeCode(BaseAgent):
             context.metadata.update(actor_status=result.status, checkpoints=result.checkpoints,
                                     native_session_id=result.native_session_id)
             (self.logs_dir / "execution.json").write_text(json.dumps(asdict(result), default=str, indent=2))
-            if result.status != "completed":
+            # An actor deadline is a valid, judgeable failed rollout rather than
+            # an infrastructure failure. Preserve its final filesystem and let
+            # Harbor's verifier score it.
+            if result.status not in {"completed", "timeout"}:
                 raise RuntimeError(result.error or f"Actor {result.status}")
             records = read_journal(journal)
             native_errors = [row for row in records if row["type"] == "run.result"
@@ -150,7 +164,7 @@ class AgentENVClaudeCode(BaseAgent):
                                and row.get("status") == "ok"} & sandbox_calls
             paired_calls = {row.get("call_id") for row in records if row["type"] == "checkpoint.captured"
                             and row.get("snapshot_id")}
-            if completed_calls - paired_calls:
+            if spec.checkpoint_enabled and completed_calls - paired_calls:
                 raise RuntimeError(f"Executed tool calls lack snapshots: {sorted(completed_calls - paired_calls)}")
             snapshot = await asyncio.to_thread(
                 environment.session.snapshot, disk_only=environment.checkpoint_mode == "disk_only")

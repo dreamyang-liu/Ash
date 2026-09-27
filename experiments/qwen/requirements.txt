@@ -1,0 +1,6 @@
+-r ../../harness/requirements-mini-swe-agent.txt
+-r ../../terminalbench/requirements.txt
+httpx
+pytest
+datasets
+pyyaml

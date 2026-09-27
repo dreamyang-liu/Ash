@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import tarfile
 import tempfile
+import urllib.request
 from uuid import uuid4
 
 from harbor.environments.base import BaseEnvironment, ExecResult
@@ -62,7 +63,7 @@ class AgentENVEnvironment(BaseEnvironment):
 
     @property
     def capabilities(self) -> EnvironmentCapabilities:
-        return EnvironmentCapabilities(disable_internet=True)
+        return EnvironmentCapabilities(disable_internet=True, dynamic_network_policy=True)
 
     @classmethod
     def resource_capabilities(cls) -> EnvironmentResourceCapabilities:
@@ -71,8 +72,8 @@ class AgentENVEnvironment(BaseEnvironment):
     def _validate_definition(self) -> None:
         if not Path(self.runtime_bin).is_file():
             raise ValueError(f"Missing ash-runtime: {self.runtime_bin}")
-        if self.checkpoint_mode not in {"full", "disk_only"}:
-            raise ValueError("checkpoint_mode must be full or disk_only")
+        if self.checkpoint_mode not in {"full", "disk_only", "none"}:
+            raise ValueError("checkpoint_mode must be full, disk_only or none")
         if self.sandbox_ttl < 30000:
             raise ValueError("sandbox_ttl must cover TB4's 8-hour actor plus setup/collection")
         for name in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml"):
@@ -87,15 +88,31 @@ class AgentENVEnvironment(BaseEnvironment):
         disk = self.task_env_config.storage_mb
         if disk is not None and (disk < 1024 or disk % 1024):
             raise ValueError("AgentENV disk size must be at least 1024 MiB and divisible by 1024")
-        if disk is not None and disk < MIN_OCI_DISK_MB:
-            raise ValueError("Current AgentENV OCI layers have a 64 GiB floor; refusing to enlarge the task's disk budget")
-        for policy in self._phase_network_policies:
-            if policy != self._network_policy:
-                raise ValueError("AgentENV in-place network policy changes are not implemented")
         if self._mounts:
             for mount in self._mounts:
                 if mount.get("target") not in {"/logs/agent", "/logs/verifier", "/logs/artifacts", "/logs/user-agent"}:
                     raise ValueError(f"AgentENV cannot reproduce host mount {mount.get('target')}")
+
+    async def _apply_network_policy(self, network_policy) -> None:
+        if network_policy.network_mode not in {NetworkMode.PUBLIC, NetworkMode.NO_NETWORK}:
+            raise ValueError("AgentENV supports only public and no-network policies")
+        if self.session is None or not self.session.sandbox_id:
+            raise RuntimeError("Cannot update network policy before sandbox start")
+        key = (Path(self.api_key_file).read_text().strip() if self.api_key_file
+               else os.environ["AENV_API_KEY"])
+        payload = {"allow_internet_access": network_policy.network_mode == NetworkMode.PUBLIC,
+                   "allowOut": [], "denyOut": []}
+        request = urllib.request.Request(
+            f"{self.server_url.rstrip('/')}/sandboxes/{self.session.sandbox_id}/network",
+            data=json.dumps(payload).encode(), method="PUT",
+            headers={"X-API-KEY": key, "Content-Type": "application/json"})
+
+        def update() -> None:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                if response.status not in (200, 204):
+                    raise RuntimeError(f"AgentENV network update returned {response.status}")
+
+        await asyncio.to_thread(update)
 
     def _prepare_image(self, force_build: bool) -> tuple[str, dict]:
         image = self.task_env_config.docker_image
@@ -127,14 +144,13 @@ class AgentENVEnvironment(BaseEnvironment):
         section = {"server_url": self.server_url, "runtime_bin": self.runtime_bin,
                    "from_image": True, "image_env": True, "sandbox_ttl": self.sandbox_ttl,
                    "allow_internet": self._network_policy.network_mode == NetworkMode.PUBLIC,
-                   "request_timeout": 300}
+                   "request_timeout": 900}
         if self.api_key_file:
             section["api_key_file"] = self.api_key_file
         self.backend = {"backend": "microvm", "microvm": section}
         self.session = SandboxSession(backend=self.backend, quiet=True)
-        resources = {"cpu": self._effective_cpus or 2, "memory_mb": self._effective_memory_mb or 1024}
-        if self._effective_storage_mb is not None:
-            resources["disk_size_mb"] = self._effective_storage_mb
+        resources = {"cpu": self._effective_cpus or 2, "memory_mb": self._effective_memory_mb or 1024,
+                     "disk_size_mb": max(self._effective_storage_mb or MIN_OCI_DISK_MB, MIN_OCI_DISK_MB)}
         try:
             creation = asyncio.create_task(asyncio.to_thread(self.session.create, self.image, resources))
             try:
@@ -147,6 +163,7 @@ class AgentENVEnvironment(BaseEnvironment):
             await self._checked("mkdir -p /logs/agent /logs/user-agent /logs/verifier /logs/artifacts && "
                                 "chmod 777 /logs/agent /logs/user-agent /logs/verifier /logs/artifacts")
             record = {"sandbox_id": self.session.sandbox_id, "image": self.image,
+                      "requested_disk_size_mb": self._effective_storage_mb,
                       "resources": resources, "network": self._network_policy.model_dump(mode="json"),
                       "checkpoint_mode": self.checkpoint_mode}
             (self.trial_paths.trial_dir / f"{self.session_id}.agentenv.json").write_text(json.dumps(record, indent=2))

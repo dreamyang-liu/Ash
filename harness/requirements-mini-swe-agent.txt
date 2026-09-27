@@ -1,0 +1,2 @@
+# Install into the Python environment named by the Run Store mini profile.
+mini-swe-agent==2.4.6

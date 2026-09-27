@@ -99,6 +99,13 @@ class RunSpec:
     #: installed and every quiesce point records a rollback pair.
     session: Any = None
     snapshot_every_step: bool = False
+    #: Disable checkpoint creation for trajectories that can never be branched.
+    #: The sandbox still exists normally for grading and is destroyed at teardown.
+    checkpoint_enabled: bool = True
+    #: Capture filesystem-only snapshots. This keeps branching semantics for
+    #: process-independent agents while avoiding a Firecracker memory image per
+    #: tool call.
+    checkpoint_disk_only: bool = False
 
     # --- resume / fork ---
     resume_session_id: Optional[str] = None
@@ -303,7 +310,7 @@ class Orchestrator:
     def run(self, spec: RunSpec) -> RunOutcome:
         from harness.slots import load_slot
 
-        if spec.slot == "claude-code" and spec.tools in (None, "default") and not spec.mcp_url:
+        if spec.slot in {"claude-code", "mini-swe-agent"} and spec.tools in (None, "default") and not spec.mcp_url:
             spec = replace(spec, tools="shell_only")
         run_id = spec.run_id or new_run_id()
         journal_path = Path(spec.journal_path or self.out_dir / ("%s.jsonl" % run_id))
@@ -342,6 +349,15 @@ class Orchestrator:
                     rollout_controls = RolloutControls(extra["rollout_contract"], journal, control)
                     rollout_controls.start()
                 provisioned, mcp = self._wire_sandbox(spec, claim)
+                if spec.slot == "mini-swe-agent" and getattr(provisioned, "session", None) is not None:
+                    from harness.slots.mini_runtime_update import ensure_runtime
+                    from harness.slots.mini_workspace import resolve_workspace
+
+                    if spec.runtime_bin and getattr(provisioned.session, "runtime_bin", None):
+                        ensure_runtime(provisioned.session, spec.runtime_bin, journal, claim,
+                                       keep=getattr(provisioned, "keep", False))
+                        provisioned.sandbox_id = provisioned.session.sandbox_id
+                    extra = resolve_workspace(provisioned.session, extra, journal)
                 if rollout_controls is not None:
                     from harness.execution.pipeline import ToolPipeline
 
@@ -385,7 +401,9 @@ class Orchestrator:
                 if getattr(bridge, "exact_mode", False):
                     task.extra["checkpoint_identity"] = True
                 result = slot.run(task, journal, mcp)
-                if control.reason is not None:
+                if control.reason is not None and not (
+                        result is not None and result.status == "timeout"
+                        and control.stop_reason == "timeout"):
                     error = control.reason
                     journal.emit("run.finished", status="error", error=error)
             except Exception as exc:  # noqa: BLE001 - a run reports, it does not raise
@@ -543,7 +561,7 @@ class Orchestrator:
                     args += ["--backend", name]
                 if spec.tools:
                     args += ["--tools", spec.tools]
-                if session.supports_snapshot():
+                if spec.checkpoint_enabled and session.supports_snapshot():
                     # The tool boundary happens in the server subprocess, so the
                     # snapshot is taken there too -- the checkpoint machinery sits
                     # at the tool path, in whichever process serves the calls.
@@ -652,6 +670,8 @@ class Orchestrator:
         token = table.mint(spec.agent_id, run_id=run_id, budget_usd=spec.budget_usd)
         # Env, not config: this is the one wiring every agent understands.
         task.env.update(gateway.env_for(token))
+        if spec.slot == "mini-swe-agent":
+            task.env.update(OPENAI_BASE_URL=gateway.base_url + "/v1", OPENAI_API_KEY=token.token)
         if spec.slot == "codex":
             import json
 
@@ -683,18 +703,21 @@ class Orchestrator:
         # two kinds holds a session. A `Provisioned` sandbox lives on somebody
         # else's server, so there is no handle here to snapshot through -- which is
         # exactly the limitation owning the sandbox removes, and not an error.
+        if not spec.checkpoint_enabled:
+            return None
         session = spec.session or getattr(owned, "session", None)
         if session is None:
             return None
         from harness.checkpointing import SnapshotBridge
 
-        exact = (spec.slot == "claude-code" or
+        exact = (spec.slot in {"claude-code", "mini-swe-agent"} or
                  (spec.slot == "codex" and spec.extra.get("exact_capture"))) and bool(
             getattr(owned, "server", None) or getattr(owned, "checkpoint_log", None))
         bridge = SnapshotBridge.install(journal, session,
                                         always=spec.snapshot_every_step,
                                         tracker=getattr(owned, "tracker", None),
-                                        exact_mode=exact)
+                                        exact_mode=exact,
+                                        disk_only=spec.checkpoint_disk_only)
         # The in-process server now has something to fire at each tool boundary.
         # Attached here rather than at server construction because the bridge
         # cannot exist before the journal, and the journal opens after the

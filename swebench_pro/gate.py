@@ -55,6 +55,8 @@ def main() -> int:
     parser.add_argument("--pro-cpus", type=int, default=4)
     parser.add_argument("--pro-memory-mb", type=int, default=16384)
     parser.add_argument("--pro-verifier-timeout", type=int, default=3600)
+    parser.add_argument("--pro-runtime-port", type=int, default=None)
+    parser.add_argument("--pro-collector-runtime-port", type=int, default=None)
     parser.add_argument("--pro-block-network", action="store_true")
     parser.add_argument("--runtime-bin", default="runtime/ash-runtime")
     parser.add_argument("--instance", required=True, help="Comma-separated task IDs to check")

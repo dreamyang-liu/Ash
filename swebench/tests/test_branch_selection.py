@@ -13,7 +13,8 @@ def direction(step, name="lead", base="parent", hint="  Check the boundary.  "):
             "why": "Relevant work is present.", "hint": hint}
 
 
-def exercise(tmp_path, monkeypatch, plans, *, limits=None, alter_parent=None, count_mode="adaptive"):
+def exercise(tmp_path, monkeypatch, plans, *, limits=None, alter_parent=None, count_mode="adaptive",
+             reviewer_max_attempts=1):
     parent = write_journal(tmp_path / "source/task/parent.jsonl", steps=5)
     if alter_parent:
         records = [json.loads(line) for line in parent.read_text().splitlines()]
@@ -60,7 +61,8 @@ def exercise(tmp_path, monkeypatch, plans, *, limits=None, alter_parent=None, co
     args = SimpleNamespace(rounds=len(plans), slot="claude-code", model="model",
                            analyst_model="model", analyst_tokens=1000, timeout=1,
                            runtime_bin="runtime/ash-runtime", parent_from=str(tmp_path / "source"),
-                           fork_full_conversation=False, branch_count_mode=count_mode)
+                           fork_full_conversation=False, branch_count_mode=count_mode,
+                           reviewer_max_attempts=reviewer_max_attempts)
     attempts = fork_eval.run_one(None, args, "task", limits or [4], tmp_path / "out", Bench())
     return attempts, calls, analyst_inputs, reviewer_inputs
 
@@ -218,26 +220,30 @@ def test_fixed_count_does_not_bypass_checkpoint_validation(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("requested_mode", [None, "adaptive", "fixed"])
-def test_cli_mode_reaches_runner_and_summary(tmp_path, monkeypatch, requested_mode):
+@pytest.mark.parametrize("retry_limit", [None, 1])
+def test_cli_mode_reaches_runner_and_summary(tmp_path, monkeypatch, requested_mode, retry_limit):
     seen = {}
     bench = SimpleNamespace(name="fake", no_network=False, image_env=False, catalogue=lambda args: {"task": {}})
     monkeypatch.setattr(fork_eval, "select_benchmark", lambda args: bench)
     monkeypatch.setattr(fork_eval, "Orchestrator", lambda **kwargs: None)
 
     def run(orch, args, raw, schedule, out_dir, benchmark):
-        seen.update(mode=args.branch_count_mode, schedule=schedule)
+        seen.update(mode=args.branch_count_mode, schedule=schedule, retries=args.reviewer_max_attempts)
         return []
 
     monkeypatch.setattr(fork_eval, "run_one", run)
     argv = ["--instance", "task", "--branches", "4,3", "--out", str(tmp_path), "--volatile-ok"]
     if requested_mode:
         argv += ["--branch-count-mode", requested_mode]
+    if retry_limit is not None:
+        argv += ["--reviewer-max-attempts", str(retry_limit)]
     assert fork_eval.main(argv) == 1
     mode = requested_mode or "adaptive"
-    assert seen == {"mode": mode, "schedule": [4, 3]}
+    assert seen == {"mode": mode, "schedule": [4, 3], "retries": retry_limit or 3}
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert summary["sandbox_ttl"] == 2400  # default1800s actor budget +600s margin
     assert summary["branch_count_mode"] == mode
+    assert summary["reviewer_max_attempts"] == (retry_limit or 3)
     assert summary["branch_schedule_semantics"] == ("exact_counts" if mode == "fixed" else "upper_bounds")
 
 

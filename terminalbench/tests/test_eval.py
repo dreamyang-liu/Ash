@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import shutil
 import subprocess
 from types import SimpleNamespace
 
@@ -140,15 +141,19 @@ def test_missing_compose_stops_before_job_creation(monkeypatch: pytest.MonkeyPat
         preflight(parse_args(["--agent", "nop", "--env", "docker"]))
 
 
-def test_admission_reports_incompatible_tasks_without_starting_any_vm(tmp_path):
+@pytest.mark.parametrize("disk,supported", [(10240, True), (65536, True), (1536, False)])
+def test_admission_accepts_small_disks_but_rejects_unaligned_disks(tmp_path, disk, supported):
     pytest.importorskip("harbor")
-    source = Path(__file__).parent / "agentenv_fixtures" / "shell-task"
-    args = parse_args(["--agent", "nop", "--output", str(tmp_path)])
+    source = tmp_path / "task"
+    shutil.copytree(Path(__file__).parent / "agentenv_fixtures" / "shell-task", source)
+    definition = source / "task.toml"
+    definition.write_text(definition.read_text().replace("storage_mb = 65536", f"storage_mb = {disk}"))
+    runtime = tmp_path / "runtime"
+    runtime.touch()
+    args = parse_args(["--agent", "nop", "--output", str(tmp_path), "--runtime-bin", str(runtime)])
     config = build_config(args)
     job = SimpleNamespace(job_dir=tmp_path, _task_download_results={"task": SimpleNamespace(path=source)})
     report = audit_agentenv(job, config)
-    assert report[0]["supported"]
-    job._task_download_results = {"task": SimpleNamespace(path=Path(__file__).parent / "fixtures" / "shell-task")}
-    report = audit_agentenv(job, config)
-    assert not report[0]["supported"]
-    assert "64 GiB" in report[0]["errors"][0]
+    assert report[0]["supported"] is supported
+    if not supported:
+        assert "divisible by 1024" in report[0]["errors"][0]

@@ -9,7 +9,8 @@ import math
 
 
 def validate(value):
-    allowed = {"temperature", "top_p", "top_k", "max_tokens", "max_new_tokens", "max_output_tokens", "stop"}
+    allowed = {"temperature", "top_p", "top_k", "max_tokens", "max_new_tokens",
+               "max_output_tokens", "stop", "reasoning_effort"}
     if not isinstance(value, dict) or set(value) - allowed:
         raise ValueError("Unknown message sampling controls")
     for key in ("temperature", "top_p"):
@@ -20,6 +21,11 @@ def validate(value):
                 raise ValueError(f"Invalid {key}")
     if "top_k" in value and (type(value["top_k"]) is not int or value["top_k"] < -1):
         raise ValueError("top_k must be -1 or a nonnegative integer")
+    if ("reasoning_effort" in value
+            and value["reasoning_effort"] not in {
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+            }):
+        raise ValueError("Invalid reasoning_effort")
     limits = [value[k] for k in ("max_tokens", "max_new_tokens", "max_output_tokens") if k in value]
     if limits and any(type(n) is not int or n <= 0 or n != limits[0] for n in limits):
         raise ValueError("Output token limits must be positive and agree")
@@ -31,7 +37,7 @@ def validate(value):
 
 def parameters(value, shape):
     validate(value)
-    if shape not in {"responses", "messages"}:
+    if shape not in {"responses", "messages", "chat/completions"}:
         raise ValueError("Unsupported native API shape")
     result = deepcopy(value)
     limits = [result.pop(k) for k in ("max_tokens", "max_new_tokens", "max_output_tokens") if k in result]
