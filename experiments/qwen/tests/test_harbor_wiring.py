@@ -19,3 +19,6 @@ def test_high_reaches_harbor_actor_and_official_timeout(tmp_path):
     config = _trial_config(args, task, name="parent", branch_context=None)
     assert config.agent.kwargs["reasoning_effort"] == "high"
     assert config.agent_timeout_multiplier == 1
+    pro_task = SimpleNamespace(name="swebench-pro/example", config=task.config)
+    pro_config = _trial_config(args, pro_task, name="parent", branch_context=None)
+    assert pro_config.task.source == "scaleapi/SWE-bench_Pro-os/v2@sha256:test"

@@ -105,9 +105,11 @@ def _trial_config(args, task: Task, *, name: str, branch_context: Path | None) -
         agent_kwargs["branch_context"] = str(branch_context)
         env_kwargs["branch_context"] = str(branch_context)
     prefix = task.name.split("/")[-1][:36]
+    collection = ("scaleapi/SWE-bench_Pro-os/v2" if task.name.startswith("swebench-pro/")
+                  else "terminal-bench/terminal-bench-2-1")
     return TrialConfig.model_validate({
         "task": {"path": str(args.task_dir.resolve()),
-                 "source": "terminal-bench/terminal-bench-2-1@" + args.dataset_digest},
+                 "source": collection + "@" + args.dataset_digest},
         "trial_name": f"{prefix}-{name}", "trials_dir": str((args.output / "trials").resolve()),
         "agent_timeout_multiplier": 1.0,
         "agent": {"import_path": ("terminalbench.branching:BranchMini" if branch_context
