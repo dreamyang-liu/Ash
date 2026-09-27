@@ -110,6 +110,24 @@ def test_exact_selectors_reject_invalid_and_do_not_invent_entropy():
     assert len(selected) == 7 and {s["step"] for s in selected} == {1}
 
 
+def test_failed_selector_response_usage_survives_retry(tmp_path, monkeypatch):
+    from taskwise import policy_eval
+    responses = iter([
+        {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3}},
+        {"choices": [{"message": {"content": "ok"}}],
+         "usage": {"prompt_tokens": 11, "completion_tokens": 5}},
+    ])
+    monkeypatch.setattr(policy_eval.httpx, "post", lambda *args, **kwargs:
+                        SimpleNamespace(status_code=200, json=lambda: next(responses)))
+    monkeypatch.setattr(policy_eval.time, "sleep", lambda _: None)
+    policy_eval.ModelClient("http://localhost:9000", "test-only").complete(
+        {"model": "fixture"}, tmp_path / "entropy/step-1.request.json")
+    metrics = phase_metrics([tmp_path])
+    assert metrics["model_overhead_calls"] == 2
+    assert metrics["usage"]["input_tokens"] == 18
+    assert metrics["usage"]["output_tokens"] == 8
+
+
 def test_commands_have_bounded_shared_parent_and_high(tmp_path):
     a = SimpleNamespace(model="qwen3.8-27b", model_endpoint="http://localhost:9000",
         model_key_env="QWEN_API_KEY", runtime_bin=tmp_path / "runtime", max_turns=300,
