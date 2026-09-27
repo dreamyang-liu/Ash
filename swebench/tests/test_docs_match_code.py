@@ -203,7 +203,7 @@ def test_no_config_carries_a_literal_secret():
 #  `swebench/agent.py` that had become a package and then been deleted, and
 #  `ash_sandbox/` at the repository root two moves after it went into sdk/.
 
-TOP_README = REPO / "README.md"
+TOP_README = REPO / "docs" / "ASH_OVERVIEW.md"
 
 
 def test_top_readme_tool_table_matches_the_runtime():
