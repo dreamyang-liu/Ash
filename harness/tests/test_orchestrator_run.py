@@ -663,7 +663,7 @@ def test_owning_the_sandbox_gives_checkpoints_without_the_caller_asking(monkeypa
 
     monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
                         classmethod(lambda cls, journal, session, always=False,
-                                    tracker=None, exact_mode=False:
+                                    tracker=None, exact_mode=False, disk_only=True:
                                     installed.append(session) or FakeBridge()))
     session = _FakeSession()
     owned = OwnedSandbox(session=session, sandbox_id="sb-owned")
@@ -736,8 +736,9 @@ def test_the_bridge_reads_the_same_tracker_the_pipeline_feeds(monkeypatch):
         def on_tool_boundary(self, index):
             pass
 
-    def fake_install(cls, journal, session, always=False, tracker=None, exact_mode=False):
+    def fake_install(cls, journal, session, always=False, tracker=None, exact_mode=False, disk_only=True):
         seen["tracker"] = tracker
+        seen["disk_only"] = disk_only
         return FakeBridge()
 
     monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
@@ -747,6 +748,7 @@ def test_the_bridge_reads_the_same_tracker_the_pipeline_feeds(monkeypatch):
     Orchestrator()._wire_checkpoints(RunSpec(prompt="x"), object(), owned)
     assert seen["tracker"] is tracker, \
         "two trackers is the unfed-tracker bug in miniature"
+    assert seen["disk_only"] == RunSpec(prompt="x").checkpoint_disk_only
 
 
 def test_the_boundary_lands_on_the_server_after_the_bridge_exists(monkeypatch):
@@ -767,7 +769,7 @@ def test_the_boundary_lands_on_the_server_after_the_bridge_exists(monkeypatch):
     bridge = FakeBridge()
     monkeypatch.setattr("harness.checkpointing.SnapshotBridge.install",
                         classmethod(lambda cls, journal, session, always=False,
-                                    tracker=None, exact_mode=False: bridge))
+                                    tracker=None, exact_mode=False, disk_only=True: bridge))
 
     class FakeServer:
         boundary = None
